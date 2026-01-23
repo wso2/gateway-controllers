@@ -1,4 +1,4 @@
-module github.com/wso2/gateway-controllers/policies/mcp-authentication
+module github.com/wso2/gateway-controllers/policies/mcp-auth
 
 go 1.25.1
 
