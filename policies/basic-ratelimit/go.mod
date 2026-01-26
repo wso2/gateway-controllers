@@ -23,4 +23,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 )
 
-replace github.com/wso2/gateway-controllers/policies/advanced-ratelimit => ../advanced-ratelimit
