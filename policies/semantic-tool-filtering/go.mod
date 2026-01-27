@@ -1,4 +1,4 @@
-module github.com/policy-engine/policies/semantic-tool-filtering
+module github.com/NaveenSandaruwan/gateway-controllers/policies/semantic-tool-filtering
 
 go 1.25.1
 
