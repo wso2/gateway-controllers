@@ -80,16 +80,28 @@ func (e *CostExtractor) GetConfig() CostExtractionConfig {
 // When multiple sources succeed, their values are summed (with multipliers applied).
 func (e *CostExtractor) ExtractRequestCost(ctx *policy.RequestContext) (float64, bool) {
 	if !e.config.Enabled {
+		slog.Debug("Cost extraction disabled, returning default", "default", e.config.Default)
 		return e.config.Default, false
 	}
+
+	slog.Debug("Extracting request cost",
+		"sourceCount", len(e.config.Sources),
+		"default", e.config.Default)
 
 	var total float64
 	var found bool
 
 	for _, source := range e.config.Sources {
 		if !isRequestPhaseSource(source.Type) {
+			slog.Debug("Skipping non-request phase source",
+				"type", source.Type)
 			continue
 		}
+
+		slog.Debug("Attempting request cost extraction",
+			"type", source.Type,
+			"key", source.Key,
+			"jsonPath", source.JSONPath)
 
 		val, ok := e.extractFromRequestSource(ctx, source)
 		if ok {
@@ -102,6 +114,10 @@ func (e *CostExtractor) ExtractRequestCost(ctx *policy.RequestContext) (float64,
 				"rawValue", val,
 				"multiplier", source.Multiplier,
 				"contribution", val*source.Multiplier)
+		} else {
+			slog.Debug("Failed to extract cost from source",
+				"type", source.Type,
+				"key", source.Key)
 		}
 	}
 
@@ -125,16 +141,28 @@ func (e *CostExtractor) ExtractRequestCost(ctx *policy.RequestContext) (float64,
 // When multiple sources succeed, their values are summed (with multipliers applied).
 func (e *CostExtractor) ExtractResponseCost(ctx *policy.ResponseContext) (float64, bool) {
 	if !e.config.Enabled {
+		slog.Debug("Cost extraction disabled, returning default", "default", e.config.Default)
 		return e.config.Default, false
 	}
+
+	slog.Debug("Extracting response cost",
+		"sourceCount", len(e.config.Sources),
+		"default", e.config.Default)
 
 	var total float64
 	var found bool
 
 	for _, source := range e.config.Sources {
 		if !isResponsePhaseSource(source.Type) {
+			slog.Debug("Skipping non-response phase source",
+				"type", source.Type)
 			continue
 		}
+
+		slog.Debug("Attempting response cost extraction",
+			"type", source.Type,
+			"key", source.Key,
+			"jsonPath", source.JSONPath)
 
 		val, ok := e.extractFromResponseSource(ctx, source)
 		if ok {
@@ -147,6 +175,10 @@ func (e *CostExtractor) ExtractResponseCost(ctx *policy.ResponseContext) (float6
 				"rawValue", val,
 				"multiplier", source.Multiplier,
 				"contribution", val*source.Multiplier)
+		} else {
+			slog.Debug("Failed to extract cost from source",
+				"type", source.Type,
+				"key", source.Key)
 		}
 	}
 

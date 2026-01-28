@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package gcra
 
 import (
@@ -79,6 +79,31 @@ func (m *MultiLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 	}
 
 	return mostRestrictive, nil
+}
+
+// GetAvailable returns the minimum available tokens across all policies
+func (m *MultiLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
+	if len(m.limiters) == 0 {
+		return 0, fmt.Errorf("no limiters configured")
+	}
+
+	var minAvailable int64 = -1
+
+	for i, limiter := range m.limiters {
+		// Create policy-specific key to separate TAT tracking
+		policyKey := fmt.Sprintf("%s:p%d", key, i)
+
+		available, err := limiter.GetAvailable(ctx, policyKey)
+		if err != nil {
+			return 0, fmt.Errorf("limiter %d failed: %w", i, err)
+		}
+
+		if minAvailable == -1 || available < minAvailable {
+			minAvailable = available
+		}
+	}
+
+	return minAvailable, nil
 }
 
 // Close closes all limiters
