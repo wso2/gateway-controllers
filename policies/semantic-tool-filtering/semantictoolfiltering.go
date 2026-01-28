@@ -197,7 +197,7 @@ func parseParams(params map[string]interface{}, p *SemanticToolFilteringPolicy) 
 				p.queryJSONPath = "$.messages[-1].content" // default from policy-definition.yaml
 			}
 		} else {
-			return fmt.Errorf("'jsonPath' must be a string")
+			return fmt.Errorf("'queryJSONPath' must be a string")
 		}
 	} else {
 		p.queryJSONPath = "$.messages[-1].content" // default from policy-definition.yaml
@@ -212,7 +212,7 @@ func parseParams(params map[string]interface{}, p *SemanticToolFilteringPolicy) 
 				p.toolsJSONPath = "$.tools" // default from policy-definition.yaml
 			}
 		} else {
-			return fmt.Errorf("'toolsPath' must be a string")
+			return fmt.Errorf("'toolsJSONPath' must be a string")
 		}
 	} else {
 		p.toolsJSONPath = "$.tools" // default from policy-definition.yaml
@@ -510,7 +510,7 @@ func (p *SemanticToolFilteringPolicy) OnRequest(ctx *policy.RequestContext, para
 		slog.Debug("SemanticToolFiltering: Empty request body")
 		return policy.UpstreamRequestModifications{}
 	}
-	slog.Debug("Onrequest")
+
 	// Handle based on format type (JSON or Text)
 	if p.userQueryIsJson && p.toolsIsJson {
 		// Pure JSON mode
