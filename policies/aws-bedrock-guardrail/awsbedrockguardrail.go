@@ -279,18 +279,17 @@ func validateAWSConfigParams(params map[string]interface{}) error {
 		if !ok {
 			return fmt.Errorf("'awsRoleARN' must be a string")
 		}
-		if awsRoleARN == "" {
-			return fmt.Errorf("'awsRoleARN' cannot be empty")
-		}
 
 		// If role ARN is provided, validate role region
-		if awsRoleRegionRaw, ok := params["awsRoleRegion"]; ok {
-			awsRoleRegion, ok := awsRoleRegionRaw.(string)
-			if !ok {
-				return fmt.Errorf("'awsRoleRegion' must be a string")
-			}
-			if awsRoleRegion == "" {
-				return fmt.Errorf("'awsRoleRegion' cannot be empty")
+		if awsRoleARN != "" {
+			if awsRoleRegionRaw, ok := params["awsRoleRegion"]; ok {
+				awsRoleRegion, ok := awsRoleRegionRaw.(string)
+				if !ok {
+					return fmt.Errorf("'awsRoleRegion' must be a string")
+				}
+				if awsRoleRegion == "" {
+					return fmt.Errorf("'awsRoleRegion' cannot be empty when 'awsRoleARN' is specified")
+				}
 			}
 		}
 	}
