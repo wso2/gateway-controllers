@@ -185,18 +185,27 @@ func parseCapabilityConfig(params map[string]any, capabilityType string) (Capabi
 			case string:
 				trimmed := strings.TrimSpace(value)
 				if trimmed != "" {
-					var vAny any
-					if err := json.Unmarshal([]byte(trimmed), &vAny); err == nil {
-						response[k] = vAny
-						continue
+					first := trimmed[0]
+					if first == '{' || first == '[' {
+						var vAny any
+						if err := json.Unmarshal([]byte(trimmed), &vAny); err == nil {
+							response[k] = vAny
+							continue
+						}
 					}
 				}
 				response[k] = value
 			case []byte:
-				var vAny any
-				if err := json.Unmarshal(value, &vAny); err == nil {
-					response[k] = vAny
-					continue
+				trimmed := strings.TrimSpace(string(value))
+				if trimmed != "" {
+					first := trimmed[0]
+					if first == '{' || first == '[' {
+						var vAny any
+						if err := json.Unmarshal([]byte(trimmed), &vAny); err == nil {
+							response[k] = vAny
+							continue
+						}
+					}
 				}
 				response[k] = value
 			default:
