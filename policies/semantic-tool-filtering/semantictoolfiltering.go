@@ -68,6 +68,16 @@ type SemanticToolFilteringPolicy struct {
 	toolsIsJson       bool
 }
 
+// getCacheKey generates a cache key that includes the embedding provider and model
+// to avoid returning stale/incompatible embeddings if the provider or model changes.
+// The key format is: hash(provider:model:description)
+func (p *SemanticToolFilteringPolicy) getCacheKey(description string) string {
+	// Combine provider, model, and description to create a unique cache key
+	providerModel := fmt.Sprintf("%s:%s", p.embeddingConfig.EmbeddingProvider, p.embeddingConfig.EmbeddingModel)
+	combinedKey := fmt.Sprintf("%s:%s", providerModel, description)
+	return HashDescription(combinedKey)
+}
+
 // GetPolicy creates a new instance of the semantic tool filtering policy
 func GetPolicy(
 	metadata policy.PolicyMetadata,
@@ -602,8 +612,8 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(ctx *policy.RequestConte
 		// Get tool name for cache entry
 		toolName, _ := toolMap["name"].(string)
 
-		// Hash the tool description for cache lookup
-		descHash := HashDescription(toolDesc)
+		// Generate cache key including provider/model to avoid stale embeddings
+		descHash := p.getCacheKey(toolDesc)
 
 		// Try to get embedding from cache
 		var toolEmbedding []float32
@@ -722,8 +732,8 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 		// Use name + description for better semantic matching
 		toolText := fmt.Sprintf("%s: %s", tool.Name, tool.Description)
 
-		// Hash the tool text for cache lookup
-		textHash := HashDescription(toolText)
+		// Generate cache key including provider/model to avoid stale embeddings
+		textHash := p.getCacheKey(toolText)
 
 		// Try to get embedding from cache
 		var toolEmbedding []float32
@@ -894,8 +904,8 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx *policy.RequestCont
 			// Get tool name for cache entry
 			toolName, _ := toolMap["name"].(string)
 
-			// Hash the tool description for cache lookup
-			descHash := HashDescription(toolDesc)
+			// Generate cache key including provider/model to avoid stale embeddings
+			descHash := p.getCacheKey(toolDesc)
 
 			// Try to get embedding from cache
 			var toolEmbedding []float32
@@ -967,8 +977,8 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx *policy.RequestCont
 		for _, tool := range textTools {
 			toolText := fmt.Sprintf("%s: %s", tool.Name, tool.Description)
 
-			// Hash the tool text for cache lookup
-			textHash := HashDescription(toolText)
+			// Generate cache key including provider/model to avoid stale embeddings
+			textHash := p.getCacheKey(toolText)
 
 			// Try to get embedding from cache
 			var toolEmbedding []float32
