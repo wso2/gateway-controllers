@@ -386,14 +386,12 @@ func extractUserQueryFromText(content string) (string, error) {
 		return "", fmt.Errorf("user query start tag <userq> not found")
 	}
 
-	endIdx := strings.Index(content, endTag)
+	// Search for end tag only after the start tag to avoid matching stray earlier </userq>
+	endIdx := strings.Index(content[startIdx+len(startTag):], endTag)
 	if endIdx == -1 {
 		return "", fmt.Errorf("user query end tag </userq> not found")
 	}
-
-	if endIdx <= startIdx {
-		return "", fmt.Errorf("invalid user query tag positions")
-	}
+	endIdx += startIdx + len(startTag)
 
 	query := content[startIdx+len(startTag) : endIdx]
 	return strings.TrimSpace(query), nil
