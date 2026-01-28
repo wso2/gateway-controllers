@@ -1156,6 +1156,9 @@ func updateToolsInRequestBody(requestBody *map[string]interface{}, toolsPath str
 			if err != nil {
 				return fmt.Errorf("invalid array index in path: %s", part)
 			}
+			if index < 0 {
+				return fmt.Errorf("negative array index in path: %s", part)
+			}
 
 			// If this is the last part, set the value at the array index
 			if idx == len(parts)-1 {
