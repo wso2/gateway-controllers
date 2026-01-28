@@ -27,6 +27,8 @@ parameters:
         required:
         - name
         - value
+        resolve:
+        - value
     responseHeaders:
       type: array
       description: Array of headers that need to be added to the response during response phase. At
@@ -46,6 +48,8 @@ parameters:
             maxLength: 8192
         required:
         - name
+        - value
+        resolve:
         - value
   anyOf:
     - required: [requestHeaders]
