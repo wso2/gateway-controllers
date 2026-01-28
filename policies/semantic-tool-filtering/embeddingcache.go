@@ -20,14 +20,15 @@ package semantictoolfiltering
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"sync"
 	"time"
 )
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs         = 2  // Maximum number of APIs to store in cache
-	DefaultMaxToolsPerAPI  = 5 // Maximum number of tools per API
+	DefaultMaxAPIs        = 1 // Maximum number of APIs to store in cache
+	DefaultMaxToolsPerAPI = 5 // Maximum number of tools per API
 )
 
 // EmbeddingEntry stores the tool name, its embedding vector, and last access time
@@ -49,10 +50,10 @@ type APIEmbeddingCache map[string]*EmbeddingEntry
 
 // EmbeddingCacheStore is a global singleton for storing embeddings per API
 type EmbeddingCacheStore struct {
-	mu              sync.RWMutex
-	cache           map[string]*APICache // Key: API ID → Value: APICache
-	maxAPIs         int
-	maxToolsPerAPI  int
+	mu             sync.RWMutex
+	cache          map[string]*APICache // Key: API ID → Value: APICache
+	maxAPIs        int
+	maxToolsPerAPI int
 }
 
 // Singleton instance for EmbeddingCacheStore
@@ -130,7 +131,11 @@ func (ecs *EmbeddingCacheStore) evictLRUAPIIfNeeded() {
 	if len(ecs.cache) >= ecs.maxAPIs {
 		lruAPIId := ecs.findLRUAPI()
 		if lruAPIId != "" {
+			slog.Debug("Evicting LRU API", "apiId", lruAPIId, "currentSize", len(ecs.cache), "maxSize", ecs.maxAPIs)
 			delete(ecs.cache, lruAPIId)
+			slog.Debug("LRU API evicted", "evictedApiId", lruAPIId, "newSize", len(ecs.cache))
+		} else {
+			slog.Debug("No LRU API found to evict", "currentSize", len(ecs.cache), "maxSize", ecs.maxAPIs)
 		}
 	}
 }
@@ -140,6 +145,11 @@ func (ecs *EmbeddingCacheStore) evictLRUToolIfNeeded(apiCache *APICache) {
 	if len(apiCache.Tools) >= ecs.maxToolsPerAPI {
 		lruHashKey := ecs.findLRUTool(apiCache)
 		if lruHashKey != "" {
+			toolName := ""
+			if entry, exists := apiCache.Tools[lruHashKey]; exists {
+				toolName = entry.Name
+			}
+			slog.Debug("Evicting LRU tool", "toolName", toolName, "hash", lruHashKey[:16], "currentSize", len(apiCache.Tools), "maxSize", ecs.maxToolsPerAPI)
 			delete(apiCache.Tools, lruHashKey)
 		}
 	}
@@ -189,6 +199,7 @@ func (ecs *EmbeddingCacheStore) AddAPICache(apiId string) {
 	defer ecs.mu.Unlock()
 
 	if _, exists := ecs.cache[apiId]; !exists {
+		slog.Debug("Adding new API cache", "apiId", apiId, "currentCacheSize", len(ecs.cache), "maxAPIs", ecs.maxAPIs)
 		// Check if we need to evict an API before adding
 		ecs.evictLRUAPIIfNeeded()
 
@@ -196,6 +207,9 @@ func (ecs *EmbeddingCacheStore) AddAPICache(apiId string) {
 			Tools:        make(map[string]*EmbeddingEntry),
 			LastAccessed: time.Now(),
 		}
+		slog.Debug("API cache added successfully", "apiId", apiId, "newCacheSize", len(ecs.cache))
+	} else {
+		slog.Debug("API cache already exists", "apiId", apiId)
 	}
 }
 
