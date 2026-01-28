@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -218,6 +219,14 @@ func parseParams(params map[string]interface{}, p *SemanticToolFilteringPolicy) 
 		p.toolsJSONPath = "$.tools" // default from policy-definition.yaml
 	}
 
+	// Validate toolsJSONPath pattern - must be a simple dotted path with optional array indices
+	// Pattern: $.field1.field2[0].field3 or $.tools
+	// This restriction ensures compatibility with updateToolsInRequestBody which only supports
+	// simple dotted paths with optional single-level array indices
+	if err := validateSimpleJSONPath(p.toolsJSONPath); err != nil {
+		return fmt.Errorf("'toolsJSONPath' validation failed: %w", err)
+	}
+
 	// Optional: userQueryIsJson (default true - JSON format)
 	if userQueryIsJsonRaw, ok := params["userQueryIsJson"]; ok {
 		userQueryIsJson, err := extractBool(userQueryIsJsonRaw)
@@ -309,6 +318,31 @@ func extractBool(value interface{}) (bool, error) {
 	default:
 		return false, fmt.Errorf("cannot convert %T to bool", value)
 	}
+}
+
+// simpleJSONPathPattern validates that a JSONPath is a simple dotted path with optional array indices
+// Supports patterns like: $.tools, $.data.items, $.results[0].tools, $.a.b[1].c[2].d
+// Does NOT support: complex JSONPath expressions like $..[*], $..book[?(@.price<10)], etc.
+var simpleJSONPathPattern = regexp.MustCompile(`^\$\.([a-zA-Z_][a-zA-Z0-9_]*(\[\d+\])?\.)*[a-zA-Z_][a-zA-Z0-9_]*(\[\d+\])?$`)
+
+// validateSimpleJSONPath validates that the given JSONPath is a simple dotted path
+// that can be handled by updateToolsInRequestBody
+func validateSimpleJSONPath(path string) error {
+	if path == "" {
+		return fmt.Errorf("path cannot be empty")
+	}
+
+	// Must start with "$."
+	if !strings.HasPrefix(path, "$.") {
+		return fmt.Errorf("path must start with '$.' prefix, got: %s", path)
+	}
+
+	// Validate against the simple pattern
+	if !simpleJSONPathPattern.MatchString(path) {
+		return fmt.Errorf("path contains unsupported JSONPath syntax; only simple dotted paths with optional array indices are supported (e.g., '$.tools', '$.data.items', '$.results[0].tools'); got: %s", path)
+	}
+
+	return nil
 }
 
 // createEmbeddingProvider creates a new embedding provider based on the config
