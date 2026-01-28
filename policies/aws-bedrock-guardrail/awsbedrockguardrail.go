@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package awsbedrockguardrail
 
 import (
@@ -279,18 +279,22 @@ func validateAWSConfigParams(params map[string]interface{}) error {
 		if !ok {
 			return fmt.Errorf("'awsRoleARN' must be a string")
 		}
-		if awsRoleARN == "" {
-			return fmt.Errorf("'awsRoleARN' cannot be empty")
-		}
 
 		// If role ARN is provided, validate role region
-		if awsRoleRegionRaw, ok := params["awsRoleRegion"]; ok {
+		if awsRoleARN != "" {
+			// If role ARN is provided and not empty, validate role region
+			awsRoleRegionRaw, ok := params["awsRoleRegion"]
+			if !ok {
+				return fmt.Errorf("'awsRoleRegion' is required when 'awsRoleARN' is specified")
+			}
+
 			awsRoleRegion, ok := awsRoleRegionRaw.(string)
 			if !ok {
 				return fmt.Errorf("'awsRoleRegion' must be a string")
 			}
+
 			if awsRoleRegion == "" {
-				return fmt.Errorf("'awsRoleRegion' cannot be empty")
+				return fmt.Errorf("'awsRoleRegion' cannot be empty when 'awsRoleARN' is specified")
 			}
 		}
 	}
