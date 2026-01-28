@@ -548,11 +548,10 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(ctx *policy.RequestConte
 	}
 
 	// Get embedding cache instance
-	embeddingCache := policy.GetEmbeddingCacheStoreInstance()
+	embeddingCache := GetEmbeddingCacheStoreInstance()
 	apiId := ctx.APIId
 
 	embeddingCache.AddAPICache(apiId)
-
 
 	// Calculate similarity scores for each tool
 	toolsWithScores := make([]ToolWithScore, 0, len(tools))
@@ -575,7 +574,7 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(ctx *policy.RequestConte
 		toolName, _ := toolMap["name"].(string)
 
 		// Hash the tool description for cache lookup
-		descHash := policy.HashDescription(toolDesc)
+		descHash := HashDescription(toolDesc)
 
 		// Try to get embedding from cache
 		var toolEmbedding []float32
@@ -678,12 +677,10 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 	}
 
 	// Get embedding cache instance
-	embeddingCache := policy.GetEmbeddingCacheStoreInstance()
+	embeddingCache := GetEmbeddingCacheStoreInstance()
 	apiId := ctx.APIId
 
-
 	embeddingCache.AddAPICache(apiId)
-	
 
 	// Calculate similarity scores for each tool
 	type TextToolWithScore struct {
@@ -697,7 +694,7 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 		toolText := fmt.Sprintf("%s: %s", tool.Name, tool.Description)
 
 		// Hash the tool text for cache lookup
-		textHash := policy.HashDescription(toolText)
+		textHash := HashDescription(toolText)
 
 		// Try to get embedding from cache
 		var toolEmbedding []float32
@@ -813,11 +810,10 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx *policy.RequestCont
 	}
 
 	// Get embedding cache instance
-	embeddingCache := policy.GetEmbeddingCacheStoreInstance()
+	embeddingCache := GetEmbeddingCacheStoreInstance()
 	apiId := ctx.APIId
 
 	embeddingCache.AddAPICache(apiId)
-
 
 	// Handle tools based on format
 	if p.toolsIsJson {
@@ -870,7 +866,7 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx *policy.RequestCont
 			toolName, _ := toolMap["name"].(string)
 
 			// Hash the tool description for cache lookup
-			descHash := policy.HashDescription(toolDesc)
+			descHash := HashDescription(toolDesc)
 
 			// Try to get embedding from cache
 			var toolEmbedding []float32
@@ -943,7 +939,7 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx *policy.RequestCont
 			toolText := fmt.Sprintf("%s: %s", tool.Name, tool.Description)
 
 			// Hash the tool text for cache lookup
-			textHash := policy.HashDescription(toolText)
+			textHash := HashDescription(toolText)
 
 			// Try to get embedding from cache
 			var toolEmbedding []float32
