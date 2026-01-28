@@ -480,23 +480,21 @@ func rebuildTextWithFilteredTools(originalContent string, allTools []TextTool, f
 		}
 	}
 
-	// Clean up any extra whitespace/newlines left after removal
+	// Clean up any extra blank lines left after removal
 	result = cleanupWhitespace(result)
 
 	return result
 }
 
-// cleanupWhitespace removes excessive whitespace while preserving structure
+// cleanupWhitespace removes excessive blank lines while preserving original spacing and indentation.
+// Only collapses multiple consecutive blank lines (3+ newlines) to a double newline.
+// Does NOT modify spaces or trim content to preserve user prompts exactly.
 func cleanupWhitespace(content string) string {
-	// Replace multiple consecutive newlines with double newline
+	// Replace multiple consecutive newlines (3+) with double newline only
 	for strings.Contains(content, "\n\n\n") {
 		content = strings.ReplaceAll(content, "\n\n\n", "\n\n")
 	}
-	// Replace multiple consecutive spaces with single space
-	for strings.Contains(content, "  ") {
-		content = strings.ReplaceAll(content, "  ", " ")
-	}
-	return strings.TrimSpace(content)
+	return content
 }
 
 // OnRequest handles request body processing for semantic tool filtering
