@@ -802,6 +802,7 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 			}
 		}
 	}
+	slog.Debug("xxxxxxxxxxxxxxxxxxxxxxx")
 
 	slog.Debug("SemanticToolFiltering: Filtered tools (text mode)",
 		"originalCount", len(textTools),
