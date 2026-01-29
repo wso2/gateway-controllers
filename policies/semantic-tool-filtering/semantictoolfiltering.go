@@ -94,8 +94,9 @@ type toolEmbeddingResult struct {
 }
 
 // processToolEmbeddingsWithCache processes tool embeddings with proper cache management.
-// It first checks which tools are already cached, then only generates embeddings for
-// new tools that will fit within the cache limit, avoiding wasteful evictions.
+// It first checks which tools are already cached, then generates embeddings for ALL
+// uncached tools (so they can be used in similarity calculations), but only CACHES
+// the ones that fit within the cache limit, avoiding wasteful evictions.
 //
 // Returns a map of hashKey -> embedding for all successfully processed tools
 func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
@@ -113,7 +114,6 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 	_, maxToolsPerAPI := embeddingCache.GetCacheLimits()
 
 	// First pass: Check which tools are already cached
-	var cachedRequests []toolEmbeddingRequest
 	var uncachedRequests []toolEmbeddingRequest
 
 	for _, req := range requests {
@@ -126,7 +126,6 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 				Embedding: cachedEntry.Embedding,
 				FromCache: true,
 			}
-			cachedRequests = append(cachedRequests, req)
 			slog.Debug("SemanticToolFiltering: Cache hit for tool embedding", "toolName", req.Name)
 		} else {
 			uncachedRequests = append(uncachedRequests, req)
@@ -135,11 +134,10 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 
 	slog.Debug("SemanticToolFiltering: Cache check complete",
 		"totalTools", len(requests),
-		"cachedTools", len(cachedRequests),
+		"cachedTools", len(results),
 		"uncachedTools", len(uncachedRequests))
 
-	// Calculate available slots for new tools
-	// We need to account for currently cached tools count in this API
+	// Calculate available slots for caching new tools
 	apiCache := embeddingCache.GetAPICache(apiId)
 	currentCachedCount := 0
 	if apiCache != nil {
@@ -150,25 +148,17 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 		availableSlots = 0
 	}
 
-	slog.Debug("SemanticToolFiltering: Available slots for new tools",
+	slog.Debug("SemanticToolFiltering: Available cache slots",
 		"currentCached", currentCachedCount,
 		"maxToolsPerAPI", maxToolsPerAPI,
 		"availableSlots", availableSlots)
 
-	// Determine how many new tools we can process
-	toolsToProcess := uncachedRequests
-	if len(uncachedRequests) > availableSlots {
-		// Only process tools that will fit in cache
-		toolsToProcess = uncachedRequests[:availableSlots]
-		skippedCount := len(uncachedRequests) - availableSlots
-		slog.Debug("SemanticToolFiltering: Skipping tools due to cache limit",
-			"skippedCount", skippedCount,
-			"processingCount", availableSlots)
-	}
+	// Generate embeddings for ALL uncached tools (for similarity calculation)
+	// but only cache the ones that fit
+	var toolEntriesToCache []ToolEntry
+	toolsCached := 0
 
-	// Generate embeddings for tools that will fit
-	var toolEntries []ToolEntry
-	for _, req := range toolsToProcess {
+	for i, req := range uncachedRequests {
 		embedding, err := p.embeddingProvider.GetEmbedding(req.Description)
 		if err != nil {
 			slog.Warn("SemanticToolFiltering: Error generating tool embedding, skipping",
@@ -176,6 +166,7 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 			continue
 		}
 
+		// Add to results so this tool can be used in similarity calculations
 		results[req.HashKey] = toolEmbeddingResult{
 			Name:      req.Name,
 			HashKey:   req.HashKey,
@@ -183,20 +174,33 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 			FromCache: false,
 		}
 
-		toolEntries = append(toolEntries, ToolEntry{
-			HashKey:   req.HashKey,
-			Name:      req.Name,
-			Embedding: embedding,
-		})
+		// Only cache if we have available slots
+		if i < availableSlots {
+			toolEntriesToCache = append(toolEntriesToCache, ToolEntry{
+				HashKey:   req.HashKey,
+				Name:      req.Name,
+				Embedding: embedding,
+			})
+			toolsCached++
+		} else {
+			slog.Debug("SemanticToolFiltering: Tool processed but not cached (limit reached)",
+				"toolName", req.Name)
+		}
 	}
 
-	// Bulk add all new embeddings to cache
-	if len(toolEntries) > 0 {
-		bulkResult := embeddingCache.BulkAddTools(apiId, toolEntries)
-		slog.Debug("SemanticToolFiltering: Bulk added tool embeddings",
+	slog.Debug("SemanticToolFiltering: Embedding generation complete",
+		"totalProcessed", len(results),
+		"newlyGenerated", len(uncachedRequests),
+		"willCache", toolsCached,
+		"notCached", len(uncachedRequests)-toolsCached)
+
+	// Bulk add embeddings that fit in cache
+	if len(toolEntriesToCache) > 0 {
+		bulkResult := embeddingCache.BulkAddTools(apiId, toolEntriesToCache)
+		slog.Debug("SemanticToolFiltering: Bulk added tool embeddings to cache",
 			"added", len(bulkResult.Added),
 			"skipped", len(bulkResult.Skipped),
-			"cached", len(bulkResult.Cached))
+			"alreadyCached", len(bulkResult.Cached))
 	}
 
 	return results
@@ -718,7 +722,7 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(ctx *policy.RequestConte
 
 	// Prepare embedding requests for all valid tools
 	var embeddingRequests []toolEmbeddingRequest
-	toolDescMap := make(map[string]string)    // hashKey -> toolDesc for similarity calculation
+	toolDescMap := make(map[string]string)                   // hashKey -> toolDesc for similarity calculation
 	toolMapByHash := make(map[string]map[string]interface{}) // hashKey -> toolMap
 
 	for _, toolRaw := range tools {
