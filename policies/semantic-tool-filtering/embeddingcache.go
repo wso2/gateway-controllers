@@ -27,7 +27,7 @@ import (
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs        = 1 // Maximum number of APIs to store in cache
+	DefaultMaxAPIs        = 1  // Maximum number of APIs to store in cache
 	DefaultMaxToolsPerAPI = 10 // Maximum number of tools per API
 )
 
@@ -183,7 +183,6 @@ func (ecs *EmbeddingCacheStore) GetAPICache(apiId string) APIEmbeddingCache {
 
 		copyCache := make(APIEmbeddingCache, len(apiCache.Tools))
 		for k, v := range apiCache.Tools {
-
 			copyCache[k] = v
 		}
 		return copyCache
@@ -296,6 +295,138 @@ func (ecs *EmbeddingCacheStore) AddEntry(apiId, hashKey, name string, embedding 
 func (ecs *EmbeddingCacheStore) AddEntryByDescription(apiId, description, name string, embedding []float32) {
 	hashKey := HashDescription(description)
 	ecs.AddEntry(apiId, hashKey, name, embedding)
+}
+
+// ToolEntry represents a tool to be added to the cache
+type ToolEntry struct {
+	HashKey   string
+	Name      string
+	Embedding []float32
+}
+
+// BulkAddResult contains the result of a bulk add operation
+type BulkAddResult struct {
+	Added   []string // Names of tools that were added to the cache
+	Skipped []string // Names of tools that were skipped due to cache limit
+	Cached  []string // Names of tools that were already in cache (updated)
+}
+
+// BulkAddTools adds multiple tools to the cache for a specific API in an optimized way.
+// It first checks which tools are already cached, then only adds new tools up to the cache limit.
+// This prevents wasteful evictions where a tool is evicted only for the next tool to also need eviction.
+//
+// Logic:
+// 1. Separate tools into already-cached and new tools
+// 2. Update timestamps for already-cached tools
+// 3. Calculate available slots for new tools
+// 4. Only add new tools that fit within the limit, skip the rest
+//
+// Returns BulkAddResult with lists of added, skipped, and already-cached tools
+func (ecs *EmbeddingCacheStore) BulkAddTools(apiId string, tools []ToolEntry) BulkAddResult {
+	ecs.mu.Lock()
+	defer ecs.mu.Unlock()
+
+	result := BulkAddResult{
+		Added:   make([]string, 0),
+		Skipped: make([]string, 0),
+		Cached:  make([]string, 0),
+	}
+
+	if len(tools) == 0 {
+		return result
+	}
+
+	slog.Debug("BulkAddTools called", "apiId", apiId, "toolCount", len(tools), "maxToolsPerAPI", ecs.maxToolsPerAPI)
+
+	// Check if API cache exists, if not, create it
+	if _, exists := ecs.cache[apiId]; !exists {
+		slog.Debug("BulkAddTools creating new API cache", "apiId", apiId)
+		ecs.evictLRUAPIIfNeeded()
+		ecs.cache[apiId] = &APICache{
+			Tools:        make(map[string]*EmbeddingEntry),
+			LastAccessed: time.Now(),
+		}
+	}
+
+	apiCache := ecs.cache[apiId]
+	apiCache.LastAccessed = time.Now()
+
+	// Separate tools into already-cached and new tools
+	var newTools []ToolEntry
+
+	for _, tool := range tools {
+		if entry, exists := apiCache.Tools[tool.HashKey]; exists {
+			// Tool already exists in cache - update timestamp and embedding
+			entry.LastAccessed = time.Now()
+			entry.Embedding = tool.Embedding
+			result.Cached = append(result.Cached, tool.Name)
+			slog.Debug("BulkAddTools tool already cached", "toolName", tool.Name)
+		} else {
+			// Check if there's an existing entry with the same name (different hash)
+			for key, entry := range apiCache.Tools {
+				if entry.Name == tool.Name {
+					// Remove old entry with different hash, will be re-added with new hash
+					delete(apiCache.Tools, key)
+					break
+				}
+			}
+			newTools = append(newTools, tool)
+		}
+	}
+
+	slog.Debug("BulkAddTools categorized tools", "cached", len(result.Cached), "new", len(newTools))
+
+	// Calculate available slots for new tools
+	availableSlots := ecs.maxToolsPerAPI - len(apiCache.Tools)
+	if availableSlots < 0 {
+		availableSlots = 0
+	}
+
+	slog.Debug("BulkAddTools available slots", "currentTools", len(apiCache.Tools), "maxTools", ecs.maxToolsPerAPI, "availableSlots", availableSlots)
+
+	// Determine how many new tools we can add
+	toolsToAddCount := len(newTools)
+	if toolsToAddCount > availableSlots {
+		// Mark tools that won't fit as skipped
+		for _, tool := range newTools[availableSlots:] {
+			result.Skipped = append(result.Skipped, tool.Name)
+			slog.Debug("BulkAddTools skipping tool due to cache limit", "toolName", tool.Name)
+		}
+		toolsToAddCount = availableSlots
+	}
+
+	// Add the new tools that fit
+	for i := 0; i < toolsToAddCount; i++ {
+		tool := newTools[i]
+		apiCache.Tools[tool.HashKey] = &EmbeddingEntry{
+			Name:         tool.Name,
+			Embedding:    tool.Embedding,
+			LastAccessed: time.Now(),
+		}
+		result.Added = append(result.Added, tool.Name)
+		slog.Debug("BulkAddTools added new tool", "toolName", tool.Name)
+	}
+
+	slog.Debug("BulkAddTools completed", "apiId", apiId, "added", len(result.Added), "skipped", len(result.Skipped), "cached", len(result.Cached), "totalToolsInCache", len(apiCache.Tools))
+
+	return result
+}
+
+// BulkAddToolsByDescription adds multiple tools using descriptions to generate hash keys
+func (ecs *EmbeddingCacheStore) BulkAddToolsByDescription(apiId string, tools []struct {
+	Description string
+	Name        string
+	Embedding   []float32
+}) BulkAddResult {
+	toolEntries := make([]ToolEntry, len(tools))
+	for i, tool := range tools {
+		toolEntries[i] = ToolEntry{
+			HashKey:   HashDescription(tool.Description),
+			Name:      tool.Name,
+			Embedding: tool.Embedding,
+		}
+	}
+	return ecs.BulkAddTools(apiId, toolEntries)
 }
 
 // RemoveAPI removes all cached embeddings for a specific API
