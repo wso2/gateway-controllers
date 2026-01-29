@@ -296,7 +296,7 @@ func (ecs *EmbeddingCacheStore) AddEntry(apiId, hashKey, name string, embedding 
 	// Add new entry with current timestamp
 	apiCache.Tools[hashKey] = &EmbeddingEntry{
 		Name:         name,
-		Embedding:    embedding,
+		Embedding:    append([]float32(nil), embedding...),
 		LastAccessed: time.Now(),
 	}
 	slog.Debug("AddEntry tool added", "apiId", apiId, "toolName", name, "toolsInAPI", len(apiCache.Tools))
