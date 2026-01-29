@@ -710,7 +710,7 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 
 	// Generate embedding for user query
 	queryEmbedding, err := p.embeddingProvider.GetEmbedding(userQuery)
-	slog.Debug("yyyyyyyyyyyyyy")
+	slog.Debug("zzzz")
 	if err != nil {
 		slog.Error("SemanticToolFiltering: Error generating query embedding", "error", err)
 		return p.buildErrorResponse("Error generating query embedding", err)
@@ -802,7 +802,7 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 			}
 		}
 	}
-	slog.Debug("yyyyyyyyyyyyyy")
+	slog.Debug("zzzz")
 
 	slog.Debug("SemanticToolFiltering: Filtered tools (text mode)",
 		"originalCount", len(textTools),
