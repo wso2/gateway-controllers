@@ -96,6 +96,7 @@ func GetPolicy(
 	return ins, nil
 }
 
+// parseAclConfig parses ACL configuration for a capability type.
 func parseAclConfig(params map[string]any, capabilityType string) (AclConfig, error) {
 	config := AclConfig{
 		Exceptions: make(map[string]struct{}),
@@ -341,6 +342,7 @@ func (p *McpAclListPolicy) OnResponse(ctx *policy.ResponseContext, params map[st
 	}
 }
 
+// getAclConfig returns the ACL config for a capability type.
 func (p *McpAclListPolicy) getAclConfig(capabilityType string) AclConfig {
 	switch capabilityType {
 	case "tools":
@@ -354,6 +356,7 @@ func (p *McpAclListPolicy) getAclConfig(capabilityType string) AclConfig {
 	}
 }
 
+// isAllowedByAcl checks whether a capability identifier is allowed by ACL.
 func isAllowedByAcl(config AclConfig, key string) bool {
 	_, isException := config.Exceptions[key]
 	if config.Mode == "allow" {
@@ -364,6 +367,7 @@ func isAllowedByAcl(config AclConfig, key string) bool {
 	return isException
 }
 
+// filterListItems filters list items according to ACL mode and exceptions.
 func filterListItems(items []any, capabilityType string, config AclConfig) ([]any, bool) {
 	keyField := getParamKey(capabilityType)
 	filtered := make([]any, 0, len(items))
@@ -405,6 +409,7 @@ func filterListItems(items []any, capabilityType string, config AclConfig) ([]an
 	return filtered, changed
 }
 
+// parseMcpMethod splits an MCP method into capability type and action.
 func parseMcpMethod(method string) (string, string, bool) {
 	parts := strings.Split(method, "/")
 	if len(parts) != 2 {
@@ -421,6 +426,7 @@ func parseMcpMethod(method string) (string, string, bool) {
 	}
 }
 
+// getParamKey returns the parameter name used for the capability identifier.
 func getParamKey(capabilityType string) string {
 	if capabilityType == "resources" {
 		return "uri"
@@ -428,6 +434,7 @@ func getParamKey(capabilityType string) string {
 	return "name"
 }
 
+// isEventStream reports whether headers indicate an SSE payload.
 func isEventStream(headers *policy.Headers) bool {
 	if headers == nil {
 		return false
@@ -444,6 +451,7 @@ func isEventStream(headers *policy.Headers) bool {
 	return false
 }
 
+// parseEventStream splits an SSE payload into events.
 func parseEventStream(body []byte) []sseEvent {
 	lines := strings.Split(string(body), "\n")
 	events := make([]sseEvent, 0)
@@ -481,6 +489,7 @@ func parseEventStream(body []byte) []sseEvent {
 	return events
 }
 
+// buildEventStream builds a raw SSE payload from events.
 func buildEventStream(events []sseEvent) []byte {
 	var builder strings.Builder
 	for _, event := range events {
@@ -500,6 +509,7 @@ func buildEventStream(events []sseEvent) []byte {
 	return []byte(builder.String())
 }
 
+// parseRequestPayload extracts the JSON-RPC payload, handling SSE bodies.
 func parseRequestPayload(body []byte, isSse bool) (map[string]any, []sseEvent, int, error) {
 	if !isSse {
 		var payload map[string]any
@@ -523,6 +533,7 @@ func parseRequestPayload(body []byte, isSse bool) (map[string]any, []sseEvent, i
 	return nil, events, -1, fmt.Errorf("no JSON payload found in event stream")
 }
 
+// isApplicableOnRequest reports whether request ACL checks apply.
 func isApplicableOnRequest(capabilityType, action string) bool {
 	switch capabilityType {
 	case "tools":
@@ -536,6 +547,7 @@ func isApplicableOnRequest(capabilityType, action string) bool {
 	}
 }
 
+// buildRequestErrorResponse builds an error response for a request.
 func (p *McpAclListPolicy) buildRequestErrorResponse(ctx *policy.RequestContext, statusCode int, jsonRpcCode int, reason string, requestID any) policy.RequestAction {
 	sessionID := getSessionID(ctx.Headers)
 	if isEventStream(ctx.Headers) {
@@ -544,6 +556,7 @@ func (p *McpAclListPolicy) buildRequestErrorResponse(ctx *policy.RequestContext,
 	return p.buildErrorResponse(statusCode, jsonRpcCode, reason, requestID, sessionID)
 }
 
+// buildEventStreamErrorResponse builds an SSE error response.
 func (p *McpAclListPolicy) buildEventStreamErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.RequestAction {
 	responseBody := map[string]any{
 		"jsonrpc": "2.0",
@@ -580,10 +593,12 @@ func (p *McpAclListPolicy) buildEventStreamErrorResponse(statusCode int, jsonRpc
 	}
 }
 
+// isMcpPostRequest reports whether the request targets the MCP endpoint.
 func isMcpPostRequest(method, path string) bool {
 	return strings.EqualFold(method, "POST") && strings.Contains(path, mcpPathSegment)
 }
 
+// buildErrorResponse builds a JSON error response.
 func (p *McpAclListPolicy) buildErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.RequestAction {
 	responseBody := map[string]any{
 		"jsonrpc": "2.0",
@@ -617,6 +632,7 @@ func (p *McpAclListPolicy) buildErrorResponse(statusCode int, jsonRpcCode int, r
 	}
 }
 
+// getSessionID extracts the MCP session ID from headers.
 func getSessionID(headers *policy.Headers) string {
 	if headers == nil {
 		return ""

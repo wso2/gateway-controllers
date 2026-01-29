@@ -100,6 +100,7 @@ func GetPolicy(
 	return ins, nil
 }
 
+// parseCapabilityConfig parses capability-specific configuration entries.
 func parseCapabilityConfig(params map[string]any, capabilityType string) (CapabilityConfig, error) {
 	config := CapabilityConfig{
 		Lookup:       make(map[string]CapabilityEntry),
@@ -449,6 +450,7 @@ func (p *McpRewritePolicy) OnResponse(ctx *policy.ResponseContext, params map[st
 	}
 }
 
+// rewriteListItems filters and rewrites list items based on configured entries.
 func rewriteListItems(items []any, capabilityType string, config CapabilityConfig) ([]any, bool) {
 	keyField := getParamKey(capabilityType)
 	filtered := make([]any, 0, len(items))
@@ -489,32 +491,15 @@ func rewriteListItems(items []any, capabilityType string, config CapabilityConfi
 	return filtered, changed
 }
 
+// buildResponseFromConfig builds the list item payload from a configured entry.
 func buildResponseFromConfig(entry CapabilityEntry, keyField string) map[string]any {
 	if entry.Response == nil {
 		return map[string]any{keyField: entry.Key}
 	}
-
-	// response := cloneMap(entry.Response)
-	// if keyValue, ok := response[keyField].(string); !ok || strings.TrimSpace(keyValue) == "" {
-	// 	if strings.TrimSpace(entry.Key) != "" {
-	// 		response[keyField] = entry.Key
-	// 	}
-	// }
 	return entry.Response
 }
 
-// func cloneMap(src map[string]any) map[string]any {
-// 	if src == nil {
-// 		return nil
-// 	}
-
-// 	dst := make(map[string]any, len(src))
-// 	for k, v := range src {
-// 		dst[k] = v
-// 	}
-// 	return dst
-// }
-
+// getCapabilityConfig returns the config for a capability type.
 func (p *McpRewritePolicy) getCapabilityConfig(capabilityType string) CapabilityConfig {
 	switch capabilityType {
 	case "tools":
@@ -528,6 +513,7 @@ func (p *McpRewritePolicy) getCapabilityConfig(capabilityType string) Capability
 	}
 }
 
+// parseMcpMethod splits an MCP method into capability type and action.
 func parseMcpMethod(method string) (string, string, bool) {
 	parts := strings.Split(method, "/")
 	if len(parts) != 2 {
@@ -544,6 +530,7 @@ func parseMcpMethod(method string) (string, string, bool) {
 	}
 }
 
+// rewriteApplicable reports whether request rewriting applies for a method.
 func rewriteApplicable(capabilityType, action string) bool {
 	switch capabilityType {
 	case "tools":
@@ -557,6 +544,7 @@ func rewriteApplicable(capabilityType, action string) bool {
 	}
 }
 
+// getParamKey returns the parameter name used for the capability identifier.
 func getParamKey(capabilityType string) string {
 	if capabilityType == "resources" {
 		return "uri"
@@ -564,6 +552,7 @@ func getParamKey(capabilityType string) string {
 	return "name"
 }
 
+// isEventStream reports whether headers indicate an SSE payload.
 func isEventStream(headers *policy.Headers) bool {
 	if headers == nil {
 		return false
@@ -580,6 +569,7 @@ func isEventStream(headers *policy.Headers) bool {
 	return false
 }
 
+// parseEventStream splits an SSE payload into events.
 func parseEventStream(body []byte) []sseEvent {
 	lines := strings.Split(string(body), "\n")
 	events := make([]sseEvent, 0)
@@ -617,6 +607,7 @@ func parseEventStream(body []byte) []sseEvent {
 	return events
 }
 
+// buildEventStream builds a raw SSE payload from events.
 func buildEventStream(events []sseEvent) []byte {
 	var builder strings.Builder
 	for _, event := range events {
@@ -636,6 +627,7 @@ func buildEventStream(events []sseEvent) []byte {
 	return []byte(builder.String())
 }
 
+// parseRequestPayload extracts the JSON-RPC payload, handling SSE bodies.
 func parseRequestPayload(body []byte, isSse bool) (map[string]any, []sseEvent, int, error) {
 	if !isSse {
 		var payload map[string]any
@@ -659,6 +651,7 @@ func parseRequestPayload(body []byte, isSse bool) (map[string]any, []sseEvent, i
 	return nil, events, -1, fmt.Errorf("no JSON payload found in event stream")
 }
 
+// buildRequestErrorResponse builds an error response for a request.
 func (p *McpRewritePolicy) buildRequestErrorResponse(ctx *policy.RequestContext, statusCode int, jsonRpcCode int, reason string, requestID any) policy.RequestAction {
 	sessionID := getSessionID(ctx.Headers)
 	if isEventStream(ctx.Headers) {
@@ -667,6 +660,7 @@ func (p *McpRewritePolicy) buildRequestErrorResponse(ctx *policy.RequestContext,
 	return p.buildErrorResponse(statusCode, jsonRpcCode, reason, requestID, sessionID)
 }
 
+// buildEventStreamErrorResponse builds an SSE error response.
 func (p *McpRewritePolicy) buildEventStreamErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.RequestAction {
 	responseBody := map[string]any{
 		"jsonrpc": "2.0",
@@ -703,10 +697,12 @@ func (p *McpRewritePolicy) buildEventStreamErrorResponse(statusCode int, jsonRpc
 	}
 }
 
+// isMcpPostRequest reports whether the request targets the MCP endpoint.
 func isMcpPostRequest(method, path string) bool {
 	return strings.EqualFold(method, "POST") && strings.Contains(path, mcpPathSegment)
 }
 
+// buildErrorResponse builds a JSON error response.
 func (p *McpRewritePolicy) buildErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.RequestAction {
 	responseBody := map[string]any{
 		"jsonrpc": "2.0",
@@ -740,6 +736,7 @@ func (p *McpRewritePolicy) buildErrorResponse(statusCode int, jsonRpcCode int, r
 	}
 }
 
+// getSessionID extracts the MCP session ID from headers.
 func getSessionID(headers *policy.Headers) string {
 	if headers == nil {
 		return ""
