@@ -236,14 +236,6 @@ func (ecs *EmbeddingCacheStore) GetEntry(apiId, hashKey string) *EmbeddingEntry 
 	return nil
 }
 
-// GetEntryByDescription retrieves an embedding entry by API ID and tool description
-// Automatically hashes the description to find the entry
-// Updates both API and tool last accessed timestamps
-func (ecs *EmbeddingCacheStore) GetEntryByDescription(apiId, description string) *EmbeddingEntry {
-	hashKey := HashDescription(description)
-	return ecs.GetEntry(apiId, hashKey)
-}
-
 // AddEntry adds or updates an embedding entry for a specific API
 // If an entry with the same name exists in this API's cache, it removes the old one first
 // The hashKey should be SHA-256 hash of the tool description
@@ -289,12 +281,6 @@ func (ecs *EmbeddingCacheStore) AddEntry(apiId, hashKey, name string, embedding 
 		LastAccessed: time.Now(),
 	}
 	slog.Debug("AddEntry tool added", "apiId", apiId, "toolName", name, "toolsInAPI", len(apiCache.Tools))
-}
-
-// AddEntryByDescription adds or updates an embedding entry using the description to generate the hash key
-func (ecs *EmbeddingCacheStore) AddEntryByDescription(apiId, description, name string, embedding []float32) {
-	hashKey := HashDescription(description)
-	ecs.AddEntry(apiId, hashKey, name, embedding)
 }
 
 // ToolEntry represents a tool to be added to the cache
@@ -410,23 +396,6 @@ func (ecs *EmbeddingCacheStore) BulkAddTools(apiId string, tools []ToolEntry) Bu
 	slog.Debug("BulkAddTools completed", "apiId", apiId, "added", len(result.Added), "skipped", len(result.Skipped), "cached", len(result.Cached), "totalToolsInCache", len(apiCache.Tools))
 
 	return result
-}
-
-// BulkAddToolsByDescription adds multiple tools using descriptions to generate hash keys
-func (ecs *EmbeddingCacheStore) BulkAddToolsByDescription(apiId string, tools []struct {
-	Description string
-	Name        string
-	Embedding   []float32
-}) BulkAddResult {
-	toolEntries := make([]ToolEntry, len(tools))
-	for i, tool := range tools {
-		toolEntries[i] = ToolEntry{
-			HashKey:   HashDescription(tool.Description),
-			Name:      tool.Name,
-			Embedding: tool.Embedding,
-		}
-	}
-	return ecs.BulkAddTools(apiId, toolEntries)
 }
 
 // RemoveAPI removes all cached embeddings for a specific API
