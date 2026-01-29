@@ -27,7 +27,7 @@ import (
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs        = 100  // Maximum number of APIs to store in cache
+	DefaultMaxAPIs        = 100 // Maximum number of APIs to store in cache
 	DefaultMaxToolsPerAPI = 200 // Maximum number of tools per API
 )
 
@@ -193,9 +193,12 @@ func (ecs *EmbeddingCacheStore) GetAPICache(apiId string) APIEmbeddingCache {
 		// Update API last accessed time
 		apiCache.LastAccessed = time.Now()
 
+		// Create deep copy of the cache
 		copyCache := make(APIEmbeddingCache, len(apiCache.Tools))
 		for k, v := range apiCache.Tools {
-			copyCache[k] = v
+			entryCopy := *v
+			entryCopy.Embedding = append([]float32(nil), v.Embedding...)
+			copyCache[k] = &entryCopy
 		}
 		return copyCache
 	}
@@ -239,7 +242,11 @@ func (ecs *EmbeddingCacheStore) GetEntry(apiId, hashKey string) *EmbeddingEntry 
 			apiCache.LastAccessed = time.Now()
 			entry.LastAccessed = time.Now()
 			slog.Debug("GetEntry cache hit", "apiId", apiId, "toolName", entry.Name)
-			return entry
+
+			// Return deep copy to prevent external mutations
+			entryCopy := *entry
+			entryCopy.Embedding = append([]float32(nil), entry.Embedding...)
+			return &entryCopy
 		}
 		slog.Debug("GetEntry tool not found in API cache", "apiId", apiId)
 	} else {
