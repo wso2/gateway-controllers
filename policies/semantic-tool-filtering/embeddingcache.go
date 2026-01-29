@@ -149,10 +149,22 @@ func (ecs *EmbeddingCacheStore) evictLRUToolIfNeeded(apiCache *APICache) {
 			if entry, exists := apiCache.Tools[lruHashKey]; exists {
 				toolName = entry.Name
 			}
-			slog.Debug("Evicting LRU tool", "toolName", toolName, "hash", lruHashKey[:16], "currentSize", len(apiCache.Tools), "maxSize", ecs.maxToolsPerAPI)
+			slog.Debug("Evicting LRU tool", "toolName", toolName, "hash", safeHashPrefix(lruHashKey), "currentSize", len(apiCache.Tools), "maxSize", ecs.maxToolsPerAPI)
 			delete(apiCache.Tools, lruHashKey)
 		}
 	}
+}
+
+// safeHashPrefix returns a safe prefix of the hash string for logging
+// Returns the first 16 characters if available, otherwise the full string or "<empty>"
+func safeHashPrefix(hash string) string {
+	if len(hash) == 0 {
+		return "<empty>"
+	}
+	if len(hash) < 16 {
+		return hash
+	}
+	return hash[:16]
 }
 
 // HashDescription computes SHA-256 hash of the tool description
@@ -219,7 +231,7 @@ func (ecs *EmbeddingCacheStore) GetEntry(apiId, hashKey string) *EmbeddingEntry 
 	ecs.mu.Lock()
 	defer ecs.mu.Unlock()
 
-	slog.Debug("GetEntry called", "apiId", apiId, "hashKey", hashKey[:16], "cachedAPIs", ecs.getCachedAPIIds())
+	slog.Debug("GetEntry called", "apiId", apiId, "hashKey", safeHashPrefix(hashKey), "cachedAPIs", ecs.getCachedAPIIds())
 
 	if apiCache, exists := ecs.cache[apiId]; exists {
 		if entry, found := apiCache.Tools[hashKey]; found {
