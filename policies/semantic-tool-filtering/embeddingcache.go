@@ -27,7 +27,7 @@ import (
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs        = 2 // Maximum number of APIs to store in cache
+	DefaultMaxAPIs        = 1 // Maximum number of APIs to store in cache
 	DefaultMaxToolsPerAPI = 5 // Maximum number of tools per API
 )
 
@@ -220,13 +220,19 @@ func (ecs *EmbeddingCacheStore) GetEntry(apiId, hashKey string) *EmbeddingEntry 
 	ecs.mu.Lock()
 	defer ecs.mu.Unlock()
 
+	slog.Debug("GetEntry called", "apiId", apiId, "hashKey", hashKey[:16], "cachedAPIs", ecs.getCachedAPIIds())
+
 	if apiCache, exists := ecs.cache[apiId]; exists {
 		if entry, found := apiCache.Tools[hashKey]; found {
 			// Update timestamps on read
 			apiCache.LastAccessed = time.Now()
 			entry.LastAccessed = time.Now()
+			slog.Debug("GetEntry cache hit", "apiId", apiId, "toolName", entry.Name)
 			return entry
 		}
+		slog.Debug("GetEntry tool not found in API cache", "apiId", apiId)
+	} else {
+		slog.Debug("GetEntry API not found in cache", "apiId", apiId)
 	}
 	return nil
 }
@@ -247,13 +253,17 @@ func (ecs *EmbeddingCacheStore) AddEntry(apiId, hashKey, name string, embedding 
 	ecs.mu.Lock()
 	defer ecs.mu.Unlock()
 
+	slog.Debug("AddEntry called", "apiId", apiId, "toolName", name, "cachedAPIs", ecs.getCachedAPIIds())
+
 	// Check if API cache exists, if not, check limits and possibly evict
 	if _, exists := ecs.cache[apiId]; !exists {
+		slog.Debug("AddEntry creating new API cache", "apiId", apiId, "currentSize", len(ecs.cache), "maxAPIs", ecs.maxAPIs)
 		ecs.evictLRUAPIIfNeeded()
 		ecs.cache[apiId] = &APICache{
 			Tools:        make(map[string]*EmbeddingEntry),
 			LastAccessed: time.Now(),
 		}
+		slog.Debug("AddEntry new API cache created", "apiId", apiId, "newSize", len(ecs.cache))
 	}
 
 	apiCache := ecs.cache[apiId]
@@ -279,6 +289,7 @@ func (ecs *EmbeddingCacheStore) AddEntry(apiId, hashKey, name string, embedding 
 		Embedding:    embedding,
 		LastAccessed: time.Now(),
 	}
+	slog.Debug("AddEntry tool added", "apiId", apiId, "toolName", name, "toolsInAPI", len(apiCache.Tools))
 }
 
 // AddEntryByDescription adds or updates an embedding entry using the description to generate the hash key
@@ -313,4 +324,13 @@ func (ecs *EmbeddingCacheStore) GetCacheStats() (apiCount int, totalEntries int)
 		totalEntries += len(apiCache.Tools)
 	}
 	return
+}
+
+// getCachedAPIIds returns a list of currently cached API IDs (must be called with lock held)
+func (ecs *EmbeddingCacheStore) getCachedAPIIds() []string {
+	ids := make([]string, 0, len(ecs.cache))
+	for id := range ecs.cache {
+		ids = append(ids, id)
+	}
+	return ids
 }
