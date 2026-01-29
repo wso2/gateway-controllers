@@ -28,7 +28,7 @@ import (
 // Cache limits configuration
 const (
 	DefaultMaxAPIs        = 1 // Maximum number of APIs to store in cache
-	DefaultMaxToolsPerAPI = 5 // Maximum number of tools per API
+	DefaultMaxToolsPerAPI = 10 // Maximum number of tools per API
 )
 
 // EmbeddingEntry stores the tool name, its embedding vector, and last access time
