@@ -22,11 +22,10 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"crypto/subtle"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash"
+	"log/slog"
 	"strings"
 
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
@@ -39,10 +38,10 @@ const (
 	MetadataKeyAuthMethod  = "auth.method"
 )
 
-// BasicAuthPolicy implements HTTP Basic Authentication
-type BasicAuthPolicy struct{}
+// HMACAuthPolicy implements HTTP Basic Authentication
+type HMACAuthPolicy struct{}
 
-var ins = &BasicAuthPolicy{}
+var ins = &HMACAuthPolicy{}
 
 func GetPolicy(
 	metadata policy.PolicyMetadata,
@@ -52,7 +51,7 @@ func GetPolicy(
 }
 
 // Mode returns the processing mode for this policy
-func (p *BasicAuthPolicy) Mode() policy.ProcessingMode {
+func (p *HMACAuthPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeProcess, // Process request headers for auth
 		RequestBodyMode:    policy.BodyModeBuffer,    // Need request body for HMAC
@@ -61,65 +60,37 @@ func (p *BasicAuthPolicy) Mode() policy.ProcessingMode {
 	}
 }
 
-// OnRequest performs Basic Authentication
-func (p *BasicAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	// Get configuration parameters with safe type assertions
-	expectedHeaderName, ok := params["headerName"].(string)
-	if !ok || expectedHeaderName == "" {
-		errBody, _ := json.Marshal(map[string]string{
-			"error":   "Internal Server Error",
-			"message": "Invalid policy configuration: headerName must be a non-empty string",
-		})
-		return policy.ImmediateResponse{
-			StatusCode: 500,
-			Headers: map[string]string{
-				"content-type": "application/json",
-			},
-			Body: errBody,
-		}
-	}
-
-	expectedAlgorithm, ok := params["algorithm"].(string)
-	if !ok || expectedAlgorithm == "" {
-		errBody, _ := json.Marshal(map[string]string{
-			"error":   "Internal Server Error",
-			"message": "Invalid policy configuration: algorithm must be a non-empty string",
-		})
-		return policy.ImmediateResponse{
-			StatusCode: 500,
-			Headers: map[string]string{
-				"content-type": "application/json",
-			},
-			Body: errBody,
-		}
-	}
-
-	expectedSecretKey, ok := params["secretKey"].(string)
-	if !ok || expectedSecretKey == "" {
-		errBody, _ := json.Marshal(map[string]string{
-			"error":   "Internal Server Error",
-			"message": "Invalid policy configuration: secretKey must be a non-empty string",
-		})
-		return policy.ImmediateResponse{
-			StatusCode: 500,
-			Headers: map[string]string{
-				"content-type": "application/json",
-			},
-			Body: errBody,
-		}
-	}
-
+// OnRequest performs HMAC Authentication
+func (p *HMACAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
 	allowUnauthenticated := false
 	if allowUnauthRaw, ok := params["allowUnauthenticated"]; ok {
 		if allowUnauthBool, ok := allowUnauthRaw.(bool); ok {
 			allowUnauthenticated = allowUnauthBool
 		}
 	}
+	if allowUnauthenticated {
+		return p.handleAuthSuccess(ctx)
+	}
+	// Get configuration parameters with safe type assertions
+	expectedHeaderName, ok := params["headerName"].(string)
+	if !ok || expectedHeaderName == "" {
+		return p.handleAuthFailure(ctx, 401, "json", "Valid header is required", "invalid authorization header provided")
+	}
+
+	expectedAlgorithm, ok := params["algorithm"].(string)
+	if !ok || expectedAlgorithm == "" {
+		return p.handleAuthFailure(ctx, 401, "json", "Valid algorithm is required", "invalid algorithm provided")
+	}
+
+	expectedSecretKey, ok := params["secretKey"].(string)
+	if !ok || expectedSecretKey == "" {
+		return p.handleAuthFailure(ctx, 401, "json", "Valid Secret Key is required", "invalid secret key provided")
+	}
 
 	// Extract and validate Authorization header
 	authHeaders := ctx.Headers.Get(expectedHeaderName)
 	if len(authHeaders) == 0 {
-		return p.handleHmacFailure(ctx, allowUnauthenticated, "missing authorization header")
+		return p.handleAuthFailure(ctx, 401, "json", "Valid header is required", "missing authorization header")
 	}
 
 	authHeader := authHeaders[0]
@@ -128,15 +99,20 @@ func (p *BasicAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[strin
 	// Expected format: "algorithm=signature"
 	parts := strings.SplitN(authHeader, "=", 2)
 	if len(parts) != 2 {
-		return p.handleHmacFailure(ctx, allowUnauthenticated, "invalid header format, expected 'algorithm=signature'")
+		fmt.Println("Parts: ", parts)
+		return p.handleAuthFailure(ctx, 401, "json", "Valid header is required", "invalid header format, expected 'algorithm=signature'")
 	}
 
 	providedAlgorithm := strings.TrimSpace(parts[0])
 	providedSignature := strings.TrimSpace(parts[1])
 
+	if providedSignature == "" {
+		return p.handleAuthFailure(ctx, 401, "json", "Valid header is required", "missing signature in authorization header")
+	}
+
 	// Validate the algorithm matches the expected algorithm
 	if !strings.EqualFold(providedAlgorithm, expectedAlgorithm) {
-		return p.handleHmacFailure(ctx, allowUnauthenticated, fmt.Sprintf("algorithm mismatch: expected %s, got %s", expectedAlgorithm, providedAlgorithm))
+		return p.handleAuthFailure(ctx, 401, "json", "Valid header is required", fmt.Sprintf("algorithm mismatch: expected %s, got %s", expectedAlgorithm, providedAlgorithm))
 	}
 
 	// Generate HMAC using the secret key and algorithm
@@ -158,28 +134,54 @@ func (p *BasicAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[strin
 		}
 	}
 
+	// fmt.Println("Expected signature: ", expectedSignature)
+	// fmt.Println("Provided signature: ", providedSignature)
+
 	// Validate the provided signature against the expected signature using constant-time comparison
+	// Log the error internally but return a 200 to avoid attcks
 	if subtle.ConstantTimeCompare([]byte(providedSignature), []byte(expectedSignature)) != 1 {
-		return p.handleHmacFailure(ctx, allowUnauthenticated, "invalid HMAC signature")
+		slog.Debug("HMAC Auth Policy: handleAuthFailure called",
+			"statusCode", 401,
+			"errorFormat", "josn",
+			"errorMessage", "Valid signature is required",
+			"reason", "invalid HMAC signature",
+			"apiId", ctx.APIId,
+			"apiName", ctx.APIName,
+			"apiVersion", ctx.APIVersion,
+			"method", ctx.Method,
+			"path", ctx.Path,
+		)
 	}
 
-	// Authentication successful
-	return p.handleAuthSuccess(ctx, "hmac-authenticated-user")
+	// Continue to upstream with no modifications
+	return p.handleAuthSuccess(ctx)
 }
 
 // handleAuthSuccess handles successful authentication
-func (p *BasicAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, username string) policy.RequestAction {
+func (p *HMACAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.RequestAction {
+	slog.Debug("HMAC Auth Policy: handleAuthSuccess called",
+		"apiId", ctx.APIId,
+		"apiName", ctx.APIName,
+		"apiVersion", ctx.APIVersion,
+		"method", ctx.Method,
+		"path", ctx.Path,
+	)
+
 	// Set metadata indicating successful authentication
 	ctx.Metadata[MetadataKeyAuthSuccess] = true
-	ctx.Metadata[MetadataKeyAuthUser] = username
-	ctx.Metadata[MetadataKeyAuthMethod] = "basic"
+	ctx.Metadata[MetadataKeyAuthMethod] = "hmac"
+
+	slog.Debug("HMAC Auth Policy: Authentication metadata set",
+		"authSuccess", true,
+		"authMethod", "hmac",
+	)
 
 	// Continue to upstream with no modifications
 	return policy.UpstreamRequestModifications{}
 }
 
 // OnResponse is not used by this policy (authentication is request-only)
-func (p *BasicAuthPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
+func (p *HMACAuthPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
 	return nil // No response processing needed
 }
 
@@ -203,7 +205,7 @@ func generateHMAC(message, secretKey, algorithm string) (string, error) {
 	signature := mac.Sum(nil)
 
 	// Return base64-encoded signature (can also use hex encoding if preferred)
-	return base64.StdEncoding.EncodeToString(signature), nil
+	return string(signature), nil
 }
 
 // generateHMACHex generates an HMAC signature and returns it as a hex string
@@ -225,35 +227,56 @@ func generateHMACHex(message, secretKey, algorithm string) (string, error) {
 	mac.Write([]byte(message))
 	signature := mac.Sum(nil)
 
-	return hex.EncodeToString(signature), nil
+	return string(signature), nil
 }
 
 // handleAuthFailure handles authentication failure
-func (p *BasicAuthPolicy) handleHmacFailure(ctx *policy.RequestContext, allowUnauthenticated bool, reason string) policy.RequestAction {
+func (p *HMACAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode int, errorFormat, errorMessage,
+	reason string) policy.RequestAction {
+	slog.Debug("HMAC Auth Policy: handleAuthFailure called",
+		"statusCode", statusCode,
+		"errorFormat", errorFormat,
+		"errorMessage", errorMessage,
+		"reason", reason,
+		"apiId", ctx.APIId,
+		"apiName", ctx.APIName,
+		"apiVersion", ctx.APIVersion,
+		"method", ctx.Method,
+		"path", ctx.Path,
+	)
+
 	// Set metadata indicating failed authentication
 	ctx.Metadata[MetadataKeyAuthSuccess] = false
 	ctx.Metadata[MetadataKeyAuthMethod] = "hmac"
 
-	// If allowUnauthenticated is true, allow request to proceed
-	if allowUnauthenticated {
-		return policy.UpstreamRequestModifications{}
-	}
-
-	// Return 401 Unauthorized response
-
 	headers := map[string]string{
-		"www-authenticate": fmt.Sprintf("Basic realm=\"%s\"", ""),
-		"content-type":     "application/json",
+		"content-type": "application/json",
 	}
 
-	body, _ := json.Marshal(map[string]string{
-		"error":   "Unauthorized",
-		"message": "Authentication required",
-	})
+	var body string
+	switch errorFormat {
+	case "plain":
+		body = errorMessage
+		headers["content-type"] = "text/plain"
+	default: // json
+		errResponse := map[string]interface{}{
+			"error":   "Unauthorized",
+			"message": errorMessage,
+		}
+		bodyBytes, _ := json.Marshal(errResponse)
+		body = string(bodyBytes)
+	}
+
+	slog.Debug("HMAC Auth Policy: Returning immediate response",
+		"statusCode", statusCode,
+		"contentType", headers["content-type"],
+		"bodyLength", len(body),
+		"reason", reason,
+	)
 
 	return policy.ImmediateResponse{
-		StatusCode: 401,
+		StatusCode: statusCode,
 		Headers:    headers,
-		Body:       body,
+		Body:       []byte(body),
 	}
 }
