@@ -472,6 +472,7 @@ func parseEventStream(body []byte) []sseEvent {
 	}
 
 	for _, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			flush()
 			continue

@@ -457,7 +457,7 @@ func rewriteListItems(items []any, capabilityType string, config CapabilityConfi
 	changed := false
 
 	if len(config.Entries) == 0 {
-		return []any{}, len(items) != 0
+		return items, false
 	}
 
 	for _, item := range items {
@@ -590,6 +590,7 @@ func parseEventStream(body []byte) []sseEvent {
 	}
 
 	for _, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
 		if line == "" {
 			flush()
 			continue
