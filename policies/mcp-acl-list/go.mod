@@ -1,4 +1,4 @@
-module github.com/policy-engine/policies/mcp-acl-list
+module github.com/wso2/gateway-controllers/policies/mcp-acl-list
 
 go 1.25.1
 
