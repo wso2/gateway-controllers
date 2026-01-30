@@ -27,7 +27,7 @@ import (
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs        = 100 // Maximum number of APIs to store in cache
+	DefaultMaxAPIs        = 25 // Maximum number of APIs to store in cache
 	DefaultMaxToolsPerAPI = 200 // Maximum number of tools per API
 )
 
