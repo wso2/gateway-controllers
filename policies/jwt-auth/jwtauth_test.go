@@ -1070,8 +1070,9 @@ func createJWKSServer(t *testing.T, publicKey *rsa.PublicKey, kid string) *httpt
 func createMockRequestContext(headers map[string][]string) *policy.RequestContext {
 	return &policy.RequestContext{
 		SharedContext: &policy.SharedContext{
-			RequestID: "test-request-id",
-			Metadata:  make(map[string]interface{}),
+			RequestID:   "test-request-id",
+			Metadata:    make(map[string]interface{}),
+			AuthContext: make(map[string]string), // Initialize AuthContext map
 		},
 		Headers: policy.NewHeaders(headers),
 		Body:    nil,
@@ -1394,4 +1395,407 @@ func writeCertificateToFile(t *testing.T, publicKey *rsa.PublicKey) string {
 	}
 
 	return tmpFile.Name()
+}
+
+// TestJWTAuthPolicy_UserIdClaim_DefaultSub tests that user ID is extracted from 'sub' claim by default
+func TestJWTAuthPolicy_UserIdClaim_DefaultSub(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-12345",
+		"iss": "https://issuer.example.com",
+		"aud": "api-audience",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+		// userIdClaim not specified, should default to "sub"
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// Verify user ID was extracted from 'sub' claim
+	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "user-12345" {
+		t.Errorf("Expected x-wso2-user-id='user-12345', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	}
+
+	_, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
+// TestJWTAuthPolicy_UserIdClaim_CustomClaim tests extracting user ID from a custom claim
+func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":     "user-sub-value",
+		"email":   "testuser@example.com",
+		"user_id": "custom-user-9999",
+		"iss":     "https://issuer.example.com",
+		"aud":     "api-audience",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"userIdClaim":       "user_id", // Extract from custom claim
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// Verify user ID was extracted from 'user_id' claim, not 'sub'
+	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "custom-user-9999" {
+		t.Errorf("Expected x-wso2-user-id='custom-user-9999', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	}
+
+	_, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
+// TestJWTAuthPolicy_UserIdClaim_EmailClaim tests extracting user ID from email claim
+func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "subject-value",
+		"email": "alice@example.com",
+		"iss":   "https://issuer.example.com",
+		"aud":   "api-audience",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"userIdClaim":       "email", // Extract from email claim
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// Verify user ID was extracted from 'email' claim
+	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "alice@example.com" {
+		t.Errorf("Expected x-wso2-user-id='alice@example.com', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	}
+
+	_, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
+// TestJWTAuthPolicy_UserIdClaim_MissingClaim tests behavior when specified claim doesn't exist
+func TestJWTAuthPolicy_UserIdClaim_MissingClaim(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-12345",
+		"iss": "https://issuer.example.com",
+		"aud": "api-audience",
+		// Note: no 'preferred_username' claim
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"userIdClaim":       "preferred_username", // This claim doesn't exist in token
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	// Authentication should still succeed even if userIdClaim is missing
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// Verify user ID was NOT set (or is empty) when claim is missing
+	userId, exists := ctx.SharedContext.AuthContext["x-wso2-user-id"]
+	if exists && userId != "" {
+		t.Errorf("Expected x-wso2-user-id to be empty or not set when claim is missing, got '%v'", userId)
+	}
+
+	_, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
+// TestJWTAuthPolicy_UserIdClaim_NumericValue tests extracting user ID from a numeric claim
+func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":        "user-12345",
+		"account_id": float64(987654321), // Numeric user ID
+		"iss":        "https://issuer.example.com",
+		"aud":        "api-audience",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"userIdClaim":       "account_id", // Extract from numeric claim
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// Verify numeric user ID was converted to string
+	userId := ctx.SharedContext.AuthContext["x-wso2-user-id"]
+	if userId != "987654321" {
+		t.Errorf("Expected x-wso2-user-id='987654321', got '%v'", userId)
+	}
+
+	_, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
+// TestJWTAuthPolicy_UserIdClaim_EmptyString tests behavior when userIdClaim parameter is empty
+func TestJWTAuthPolicy_UserIdClaim_EmptyString(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-12345",
+		"iss": "https://issuer.example.com",
+		"aud": "api-audience",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"userIdClaim":       "", // Empty string - should skip extraction
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// When userIdClaim is empty string, should NOT extract user ID
+	userId, exists := ctx.SharedContext.AuthContext["x-wso2-user-id"]
+	if exists && userId != "" {
+		t.Errorf("Expected x-wso2-user-id to be empty when userIdClaim is empty string, got '%v'", userId)
+	}
+
+	_, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
+// TestJWTAuthPolicy_UserIdClaim_WithClaimMappings tests that userIdClaim works alongside claimMappings
+func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub":      "user-12345",
+		"username": "johndoe",
+		"email":    "john@example.com",
+		"role":     "admin",
+		"iss":      "https://issuer.example.com",
+		"aud":      "api-audience",
+	})
+
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+
+	params := map[string]interface{}{
+		"headerName":        "Authorization",
+		"authHeaderScheme":  "Bearer",
+		"allowedAlgorithms": []interface{}{"RS256"},
+		"audiences":         []interface{}{"api-audience"},
+		"userIdClaim":       "username", // Extract user ID from username claim
+		"claimMappings": map[string]interface{}{
+			"email": "X-User-Email",
+			"role":  "X-User-Role",
+		},
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-issuer",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServer.URL + "/jwks.json"},
+				},
+			},
+		},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	if ctx.Metadata["auth.success"] != true {
+		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	}
+
+	// Verify user ID was extracted from 'username' claim
+	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "johndoe" {
+		t.Errorf("Expected x-wso2-user-id='johndoe', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	}
+
+	// Verify claim mappings were also applied
+	modifications, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("Expected UpstreamRequestModifications, got %T", action)
+	}
+
+	if modifications.SetHeaders["X-User-Email"] != "john@example.com" {
+		t.Errorf("Expected X-User-Email='john@example.com', got '%v'", modifications.SetHeaders["X-User-Email"])
+	}
+
+	if modifications.SetHeaders["X-User-Role"] != "admin" {
+		t.Errorf("Expected X-User-Role='admin', got '%v'", modifications.SetHeaders["X-User-Role"])
+	}
 }
