@@ -1,0 +1,11 @@
+{
+  "name": "analytics-header-filter",
+  "displayName": "Analytics Header Filter",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Logging",
+    "Analytics & Monitoring"
+  ],
+  "description": "The Analytics Header Filter policy allows you to control which request and response headers \nare included in analytics data using allow or deny modes. This policy is intended to prevent sensitive, \nnoisy, or irrelevant headers from being sent to analytics backends while preserving the rest of the request \nand response context.\n\nThe policy only affects analytics data collection. It does not remove or modify headers sent to upstream \nservices or returned to clients."
+}

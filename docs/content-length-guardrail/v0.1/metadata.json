@@ -1,0 +1,11 @@
+{
+  "name": "content-length-guardrail",
+  "displayName": "Content Length Guardrail",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates the byte length of request or response body content.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nCan be configured with min/max byte length constraints and inverted logic.\nSupports separate configuration for request and response phases."
+}

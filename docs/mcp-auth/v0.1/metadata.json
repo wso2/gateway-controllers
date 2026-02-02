@@ -1,0 +1,12 @@
+{
+  "name": "mcp-auth",
+  "displayName": "MCP Auth",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "AI",
+    "Security"
+  ],
+  "description": "This policy is used to secure traffic to Model Context Protocol server as defined in the specification \n(https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization). The Gateway acts as the \nresource server and protects the MCP resources by validating the access tokens presented in the requests.\nThis uses the JwtAuthentication policy underneath to validate the access tokens."
+}

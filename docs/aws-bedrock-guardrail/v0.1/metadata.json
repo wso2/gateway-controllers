@@ -1,0 +1,11 @@
+{
+  "name": "aws-bedrock-guardrail",
+  "displayName": "AWS Bedrock Guardrail",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request or response body content against AWS Bedrock Guardrails.\nSupports content filtering, topic detection, word filtering, and PII detection/masking.\nSupports three authentication modes: role-based (AssumeRole), static credentials, or default credential chain.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nSupports separate configuration for request and response phases."
+}

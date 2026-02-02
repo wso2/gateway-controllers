@@ -1,0 +1,11 @@
+{
+  "name": "log-message",
+  "displayName": "Log Message",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Logging",
+    "Analytics & Monitoring"
+  ],
+  "description": "This policy provides the capability to log the payload and headers of a request/response.\nIt supports separate configuration for request and response flows."
+}

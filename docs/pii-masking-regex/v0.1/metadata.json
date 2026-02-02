@@ -1,0 +1,11 @@
+{
+  "name": "pii-masking-regex",
+  "displayName": "PII Masking Regex",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Masks or redacts Personally Identifiable Information (PII) from request/response bodies using regex patterns.\nSupports two modes: masking (replaces with placeholders that can be restored in responses) and redaction (replaces with *****).\nWhen masking mode is used, PII is masked in requests and automatically restored in responses.\nSupports separate configuration for request and response phases."
+}

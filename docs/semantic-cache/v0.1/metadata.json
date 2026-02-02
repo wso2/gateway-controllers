@@ -1,0 +1,10 @@
+{
+  "name": "semantic-cache",
+  "displayName": "Semantic Cache",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Implements semantic caching for LLM responses using vector similarity search.\nGenerates embeddings from request bodies and checks for semantically similar cached responses.\nIf a cache hit is found, returns the cached response immediately without calling the upstream.\nStores successful responses in the cache for future lookups.\n\nNote: This policy requires embedding providers (OpenAI, Mistral, Azure OpenAI) and vector database providers (Redis, Milvus) to be configured."
+}

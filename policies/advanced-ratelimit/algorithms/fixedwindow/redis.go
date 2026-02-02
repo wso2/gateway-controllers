@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package fixedwindow
 
 import (
@@ -75,6 +75,13 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 	// e.g., "ratelimit:v1:user123:1704067200000000000"
 	redisKey := fmt.Sprintf("%s%s:%d", r.keyPrefix, key, windowStart.UnixNano())
 
+	slog.Debug("FixedWindow(Redis): checking rate limit",
+		"key", key,
+		"redisKey", redisKey,
+		"cost", n,
+		"windowStart", windowStart,
+		"windowEnd", windowEnd)
+
 	var newCount int64
 	var err error
 
@@ -124,6 +131,14 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 		remaining = 0
 	}
 
+	slog.Debug("FixedWindow(Redis): rate limit check result",
+		"key", key,
+		"redisKey", redisKey,
+		"allowed", allowed,
+		"newCount", newCount,
+		"limit", r.policy.Limit,
+		"remaining", remaining)
+
 	// Build result
 	result := &limiter.Result{
 		Allowed:   allowed,
@@ -143,6 +158,31 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 	}
 
 	return result, nil
+}
+
+// GetAvailable returns the available tokens for the given key without consuming
+func (r *RedisLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
+	now := r.clock.Now()
+	windowStart := r.policy.WindowStart(now)
+
+	// Use Redis key with window start
+	redisKey := fmt.Sprintf("%s%s:%d", r.keyPrefix, key, windowStart.UnixNano())
+
+	// Get current count from Redis
+	count, err := r.client.Get(ctx, redisKey).Int64()
+	if err == redis.Nil {
+		count = 0
+	} else if err != nil {
+		return 0, fmt.Errorf("redis get failed: %w", err)
+	}
+
+	// Calculate remaining
+	remaining := r.policy.Limit - count
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	return remaining, nil
 }
 
 // Close releases resources (no-op for Redis as connections are managed externally)

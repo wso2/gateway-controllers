@@ -1,0 +1,11 @@
+{
+  "name": "json-schema-guardrail",
+  "displayName": "JSON Schema Guardrail",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request or response body content against a JSON Schema.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nCan be configured with inverted logic to pass when schema validation fails.\nSupports separate configuration for request and response phases."
+}

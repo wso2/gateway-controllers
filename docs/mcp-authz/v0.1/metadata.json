@@ -1,0 +1,12 @@
+{
+  "name": "mcp-authz",
+  "displayName": "MCP Authz",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "AI",
+    "Security"
+  ],
+  "description": "MCP Authorization policy validates access to MCP resources (tools, resources, prompts) \nand methods based on JWT claims or OAuth scopes provided by the mcp-auth policy.\n\nThis policy enforces fine-grained authorization by checking that incoming JWT claims \nor scopes satisfy the access requirements for specific MCP attributes. The mcp-auth \npolicy must be applied before this policy to validate and extract claims from the token."
+}

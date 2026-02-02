@@ -1,0 +1,10 @@
+{
+  "name": "model-weighted-round-robin",
+  "displayName": "Model Weighted Round Robin",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Implements weighted round-robin load balancing for AI models. Distributes requests\nbased on predefined weight values assigned to each model, enabling probabilistic\ncontrol over request distribution and giving higher priority to models with greater\nprocessing power or availability."
+}

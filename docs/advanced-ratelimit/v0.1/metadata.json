@@ -1,0 +1,11 @@
+{
+  "name": "advanced-ratelimit",
+  "displayName": "Advanced Ratelimit",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Rate limiting policy supporting multiple algorithms (GCRA, Fixed Window), multi-dimensional quotas,\nweighted rate limiting, flexible key extraction, and both in-memory and Redis backends. Supports\nfail-open behavior for Redis failures and provides comprehensive rate limit headers (X-RateLimit-*,\nIETF RateLimit, and Retry-After).\n\nKey features:\n- Multi-dimensional quotas: Each quota can have its own key extraction and cost extraction\n- Multiple algorithms: GCRA (smooth rate limiting) or Fixed Window (simple counter)\n- Dynamic cost extraction: Extract costs from request/response headers, metadata, or JSON body\n- Weighted multipliers: Apply multipliers to extracted costs (e.g., prompt tokens @ 0.1, completion tokens @ 0.3)\n- Multiple concurrent limits (e.g., 10/second AND 1000/hour)\n- Array-based key extraction with sensible defaults (route name)\n- Dual backends: in-memory (single instance) or Redis (distributed)\n- Graceful degradation: missing key components log warnings but don't fail requests\n- Atomic operations via Lua scripts (GCRA+Redis) or native Redis commands (Fixed Window)"
+}
