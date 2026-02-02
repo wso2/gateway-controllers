@@ -26,6 +26,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 	ratelimit "github.com/wso2/gateway-controllers/policies/advanced-ratelimit"
 )
@@ -42,6 +44,7 @@ type TokenBasedRateLimitPolicy struct {
 	metadata          policy.PolicyMetadata
 	delegates         sync.Map // map[string]policy.Policy (providerName -> advanced-ratelimit instance)
 	delegateCacheKeys sync.Map // map[string]string (providerName -> cacheKey for template change detection)
+	sf                singleflight.Group // prevents duplicate delegate creation
 }
 
 // GetPolicy creates and initializes the token-based rate limit policy.
@@ -93,6 +96,13 @@ func (p *TokenBasedRateLimitPolicy) OnRequest(
 		return nil
 	}
 
+	if delegate == nil {
+		slog.Warn("OnRequest: delegate is nil for provider",
+			"route", p.metadata.RouteName,
+			"provider", providerName)
+		return nil
+	}
+
 	slog.Debug("OnRequest: delegating to advanced-ratelimit",
 		"route", p.metadata.RouteName,
 		"provider", providerName)
@@ -134,10 +144,11 @@ func (p *TokenBasedRateLimitPolicy) OnResponse(
 }
 
 // resolveDelegate ensures an advanced-ratelimit instance exists for the given provider.
-// This method is thread-safe and uses LoadOrStore to prevent race conditions when
-// multiple goroutines attempt to create a delegate for the same provider simultaneously.
-// The delegate is cached with a key that includes a hash of the template, so when
-// the template changes, a new delegate is created automatically.
+// This method is thread-safe and uses singleflight to prevent duplicate delegate creation
+// when multiple goroutines attempt to create a delegate for the same provider/template
+// simultaneously. Only one goroutine performs the expensive creation, and others wait
+// for the result. The delegate is cached with a key that includes a hash of the template,
+// so when the template changes, a new delegate is created automatically.
 func (p *TokenBasedRateLimitPolicy) resolveDelegate(providerName string, params map[string]interface{}) (policy.Policy, error) {
 	slog.Debug("resolveDelegate: checking for existing delegate",
 		"route", p.metadata.RouteName,
@@ -223,33 +234,54 @@ func (p *TokenBasedRateLimitPolicy) resolveDelegate(providerName string, params 
 		}
 	}
 
-	slog.Debug("resolveDelegate: creating new delegate (slow path)",
-		"route", p.metadata.RouteName,
-		"provider", providerName,
-		"templateHash", templateHash[:8])
+	// Slow path: use singleflight to prevent duplicate delegate creation
+	// Only one goroutine will execute the creation for a given cacheKey
+	result, err, _ := p.sf.Do(cacheKey, func() (interface{}, error) {
+		// Double-check: another goroutine may have created it while we were waiting
+		if existingDelegate, ok := p.delegates.Load(providerName); ok {
+			if storedCacheKey, hasKey := p.delegateCacheKeys.Load(providerName); hasKey {
+				if storedCacheKey.(string) == cacheKey {
+					slog.Debug("resolveDelegate: delegate created by another goroutine",
+						"route", p.metadata.RouteName,
+						"provider", providerName,
+						"templateHash", templateHash[:8])
+					return existingDelegate.(policy.Policy), nil
+				}
+			}
+		}
 
-	// Slow path: create the delegate (expensive operation)
-	// Pass the already-fetched template to avoid double-fetching
-	delegate, err := p.createDelegateWithTemplate(providerName, params, templateResource.Resource)
-	if err != nil {
-		slog.Error("resolveDelegate: failed to create delegate",
+		slog.Debug("resolveDelegate: creating new delegate (singleflight)",
 			"route", p.metadata.RouteName,
 			"provider", providerName,
-			"error", err)
+			"templateHash", templateHash[:8])
+
+		// Create the delegate (expensive operation)
+		delegate, err := p.createDelegateWithTemplate(providerName, params, templateResource.Resource)
+		if err != nil {
+			slog.Error("resolveDelegate: failed to create delegate",
+				"route", p.metadata.RouteName,
+				"provider", providerName,
+				"error", err)
+			return nil, err
+		}
+
+		// Store the delegate with providerName as key (for OnResponse lookup)
+		// and store the cacheKey separately for template change detection
+		p.delegates.Store(providerName, delegate)
+		p.delegateCacheKeys.Store(providerName, cacheKey)
+
+		slog.Debug("resolveDelegate: successfully created and stored new delegate",
+			"route", p.metadata.RouteName,
+			"provider", providerName,
+			"templateHash", templateHash[:8])
+
+		return delegate, nil
+	})
+
+	if err != nil {
 		return nil, err
 	}
-
-	// Store the delegate with providerName as key (for OnResponse lookup)
-	// and store the cacheKey separately for template change detection
-	p.delegates.Store(providerName, delegate)
-	p.delegateCacheKeys.Store(providerName, cacheKey)
-
-	slog.Debug("resolveDelegate: successfully created and stored new delegate",
-		"route", p.metadata.RouteName,
-		"provider", providerName,
-		"templateHash", templateHash[:8])
-
-	return delegate, nil
+	return result.(policy.Policy), nil
 }
 
 // createDelegate creates a new advanced-ratelimit delegate for the given provider.

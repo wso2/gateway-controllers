@@ -52,6 +52,11 @@ var memoryLimiterCache sync.Map // map[string]limiter.Limiter
 // Structure: map[string]map[string]bool (baseKey -> set of quotaKeys)
 var baseKeyQuotaIndex sync.Map
 
+// quotaKeyRefCount tracks how many baseKeys reference each quotaKey.
+// This prevents deletion of shared API-scoped limiters still in use by other routes.
+// Structure: map[string]int (quotaKey -> reference count)
+var quotaKeyRefCount sync.Map
+
 // baseKeyMutexes provides per-baseKey locking to prevent race conditions during cleanup.
 // Structure: map[string]*sync.Mutex
 var baseKeyMutexes sync.Map
@@ -285,6 +290,8 @@ func GetPolicy(
 			// Try to get cached limiter
 			if cached, ok := memoryLimiterCache.Load(quotaCacheKey); ok {
 				q.Limiter = cached.(limiter.Limiter)
+				// Increment ref count for this shared quota
+				incrementQuotaRefCount(quotaCacheKey)
 				slog.Debug("Reusing cached memory limiter",
 					"route", routeName, "apiName", apiName,
 					"quota", q.Name, "cacheKey", quotaCacheKey[:16])
@@ -304,8 +311,9 @@ func GetPolicy(
 					return nil, fmt.Errorf("failed to create memory limiter for quota %q: %w", quotaName, err)
 				}
 
-				// Store in cache
+				// Store in cache and initialize ref count to 1
 				memoryLimiterCache.Store(quotaCacheKey, rlLimiter)
+				quotaKeyRefCount.Store(quotaCacheKey, 1)
 				q.Limiter = rlLimiter
 				slog.Debug("Created and cached new memory limiter",
 					"route", routeName, "apiName", apiName,
@@ -317,11 +325,18 @@ func GetPolicy(
 		if previousQuotaKeys, ok := baseKeyQuotaIndex.Load(baseCacheKey); ok {
 			for oldQuotaKey := range previousQuotaKeys.(map[string]bool) {
 				if !usedQuotaKeys[oldQuotaKey] {
-					// This quota was removed or its configuration changed
-					memoryLimiterCache.Delete(oldQuotaKey)
-					slog.Debug("Cleaned up stale memory limiter",
-						"route", routeName, "apiName", apiName,
-						"cacheKey", oldQuotaKey[:16])
+					// Decrement ref count and only delete when no more references exist
+					if decrementQuotaRefCount(oldQuotaKey) == 0 {
+						memoryLimiterCache.Delete(oldQuotaKey)
+						quotaKeyRefCount.Delete(oldQuotaKey)
+						slog.Debug("Cleaned up stale memory limiter",
+							"route", routeName, "apiName", apiName,
+							"cacheKey", oldQuotaKey[:16])
+					} else {
+						slog.Debug("Decremented ref count for shared memory limiter",
+							"route", routeName, "apiName", apiName,
+							"cacheKey", oldQuotaKey[:16])
+					}
 				}
 			}
 		}
@@ -1369,6 +1384,31 @@ func getDurationParam(params map[string]interface{}, key string, defaultVal time
 func getLimitFromQuota(q *QuotaRuntime) int64 {
 	if len(q.Limits) > 0 {
 		return q.Limits[0].Limit
+	}
+	return 0
+}
+
+// incrementQuotaRefCount increments the reference count for a quota key and returns the new count.
+func incrementQuotaRefCount(quotaKey string) int {
+	if count, ok := quotaKeyRefCount.Load(quotaKey); ok {
+		newCount := count.(int) + 1
+		quotaKeyRefCount.Store(quotaKey, newCount)
+		return newCount
+	}
+	quotaKeyRefCount.Store(quotaKey, 1)
+	return 1
+}
+
+// decrementQuotaRefCount decrements the reference count for a quota key and returns the new count.
+// Returns 0 if the key doesn't exist (already deleted or never existed).
+func decrementQuotaRefCount(quotaKey string) int {
+	if count, ok := quotaKeyRefCount.Load(quotaKey); ok {
+		newCount := count.(int) - 1
+		if newCount < 0 {
+			newCount = 0
+		}
+		quotaKeyRefCount.Store(quotaKey, newCount)
+		return newCount
 	}
 	return 0
 }

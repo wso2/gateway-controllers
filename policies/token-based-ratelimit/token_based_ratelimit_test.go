@@ -69,17 +69,15 @@ func setupMockResourceStore() *mockResourceStore {
 		ID:           "openai-template",
 		ResourceType: ResourceTypeLlmProviderTemplate,
 		Resource: map[string]interface{}{
-			"configuration": map[string]interface{}{
-				"spec": map[string]interface{}{
-					"promptTokens": map[string]interface{}{
-						"identifier": "$.usage.prompt_tokens",
-					},
-					"completionTokens": map[string]interface{}{
-						"identifier": "$.usage.completion_tokens",
-					},
-					"totalTokens": map[string]interface{}{
-						"identifier": "$.usage.total_tokens",
-					},
+			"spec": map[string]interface{}{
+				"promptTokens": map[string]interface{}{
+					"identifier": "$.usage.prompt_tokens",
+				},
+				"completionTokens": map[string]interface{}{
+					"identifier": "$.usage.completion_tokens",
+				},
+				"totalTokens": map[string]interface{}{
+					"identifier": "$.usage.total_tokens",
 				},
 			},
 		},
@@ -432,17 +430,15 @@ func TestTransformToRatelimitParams(t *testing.T) {
 	}
 
 	template := map[string]interface{}{
-		"configuration": map[string]interface{}{
-			"spec": map[string]interface{}{
-				"promptTokens": map[string]interface{}{
-					"identifier": "$.usage.prompt_tokens",
-				},
-				"completionTokens": map[string]interface{}{
-					"identifier": "$.usage.completion_tokens",
-				},
-				"totalTokens": map[string]interface{}{
-					"identifier": "$.usage.total_tokens",
-				},
+		"spec": map[string]interface{}{
+			"promptTokens": map[string]interface{}{
+				"identifier": "$.usage.prompt_tokens",
+			},
+			"completionTokens": map[string]interface{}{
+				"identifier": "$.usage.completion_tokens",
+			},
+			"totalTokens": map[string]interface{}{
+				"identifier": "$.usage.total_tokens",
 			},
 		},
 	}
@@ -610,17 +606,15 @@ func setupGlobalResourceStore(t *testing.T) func() {
 		ID:           "openai-template",
 		ResourceType: ResourceTypeLlmProviderTemplate,
 		Resource: map[string]interface{}{
-			"configuration": map[string]interface{}{
-				"spec": map[string]interface{}{
-					"promptTokens": map[string]interface{}{
-						"identifier": "$.usage.prompt_tokens",
-					},
-					"completionTokens": map[string]interface{}{
-						"identifier": "$.usage.completion_tokens",
-					},
-					"totalTokens": map[string]interface{}{
-						"identifier": "$.usage.total_tokens",
-					},
+			"spec": map[string]interface{}{
+				"promptTokens": map[string]interface{}{
+					"identifier": "$.usage.prompt_tokens",
+				},
+				"completionTokens": map[string]interface{}{
+					"identifier": "$.usage.completion_tokens",
+				},
+				"totalTokens": map[string]interface{}{
+					"identifier": "$.usage.total_tokens",
 				},
 			},
 		},
