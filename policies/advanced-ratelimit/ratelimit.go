@@ -519,10 +519,13 @@ func (p *RateLimitPolicy) OnRequest(
 				slog.Debug("Cost extraction mode: quota exhausted, blocking request",
 					"key", key, "available", available, "quota", quotaName)
 				// Build a result for the exhausted quota
+				duration := getDurationFromQuota(q)
 				result := &limiter.Result{
 					Allowed:   false,
 					Limit:     getLimitFromQuota(q),
 					Remaining: 0,
+					Reset:     time.Now().Add(duration),
+					Duration:  duration,
 				}
 				return p.buildRateLimitResponse(result, quotaName, quotaResults)
 			}
@@ -648,15 +651,18 @@ func (p *RateLimitPolicy) OnResponse(
 					// Use GetAvailable to check remaining without consuming
 					available, err := q.Limiter.GetAvailable(context.Background(), key)
 					if err == nil {
+						duration := getDurationFromQuota(q)
 						allQuotaResults = append(allQuotaResults, quotaResult{
 							QuotaName: quotaName,
 							Result: &limiter.Result{
 								Allowed:   available > 0,
 								Limit:     getLimitFromQuota(q),
 								Remaining: available,
+								Reset:     time.Now().Add(duration),
+								Duration:  duration,
 							},
 							Key:      key,
-							Duration: getDurationFromQuota(q),
+							Duration: duration,
 						})
 					}
 				}
