@@ -17,7 +17,6 @@
 package ratelimit
 
 import (
-	"sync"
 	"testing"
 
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
@@ -396,59 +395,38 @@ func TestRouteScopedQuotaCleanup(t *testing.T) {
 
 // clearCaches resets all global caches for test isolation
 func clearCaches() {
-	memoryLimiterCache = sync.Map{}
-	baseKeyQuotaIndex = sync.Map{}
-	quotaKeyRefCount = sync.Map{}
-	baseKeyMutexes = sync.Map{}
+	globalLimiterCache.mu.Lock()
+	defer globalLimiterCache.mu.Unlock()
+	globalLimiterCache.byQuotaKey = make(map[string]*limiterEntry)
+	globalLimiterCache.quotaKeysByBaseKey = make(map[string]map[string]struct{})
 }
 
-// getSharedQuotaRefCount retrieves the reference count for an API-scoped quota.
-// For API-scoped quotas, we need to find the quota cache key that uses apiScope prefix.
-// This iterates through all ref counts to find the one matching the quota name.
+// getSharedQuotaRefCount retrieves the total reference count across all cached limiters.
+// This is useful for verifying that shared limiters are correctly reference-counted.
 func getSharedQuotaRefCount(apiName, quotaName string, limit int64, duration string) int {
-	// For API-scoped quotas, the quotaCacheKey is computed based on:
-	// - apiScope prefix with apiName
-	// - quota name
-	// - limits configuration
-	// We need to iterate through all ref counts to find matching entries
-	
+	globalLimiterCache.mu.Lock()
+	defer globalLimiterCache.mu.Unlock()
+
 	var totalRefCount int
-	quotaKeyRefCount.Range(func(key, value interface{}) bool {
-		// The quotaKey is a hex-encoded hash, but we can check if there's
-		// still a reference by looking at the count value
-		count := value.(int)
-		if count > 0 {
-			totalRefCount += count
+	for _, entry := range globalLimiterCache.byQuotaKey {
+		if entry.refCount > 0 {
+			totalRefCount += entry.refCount
 		}
-		return true
-	})
-	
-	// For more precise checking in tests, we iterate through baseKeyQuotaIndex
-	// to find all quota keys and sum their ref counts
-	totalRefCount = 0
-	baseKeyQuotaIndex.Range(func(baseKey, quotaKeys interface{}) bool {
-		for quotaKey := range quotaKeys.(map[string]bool) {
-			if count, ok := quotaKeyRefCount.Load(quotaKey); ok {
-				totalRefCount += count.(int)
-			}
-		}
-		return true
-	})
-	
+	}
 	return totalRefCount
 }
 
 // getLimiterRefCountByInstance checks how many routes are referencing a specific limiter instance.
 // This verifies that the same limiter pointer is being shared correctly.
 func getLimiterRefCountByInstance(targetLimiter interface{}) int {
+	globalLimiterCache.mu.Lock()
+	defer globalLimiterCache.mu.Unlock()
+
 	count := 0
-	memoryLimiterCache.Range(func(key, value interface{}) bool {
-		if value.(interface{}) == targetLimiter {
-			if refCount, ok := quotaKeyRefCount.Load(key); ok {
-				count += refCount.(int)
-			}
+	for _, entry := range globalLimiterCache.byQuotaKey {
+		if entry.lim == targetLimiter {
+			count += entry.refCount
 		}
-		return true
-	})
+	}
 	return count
 }

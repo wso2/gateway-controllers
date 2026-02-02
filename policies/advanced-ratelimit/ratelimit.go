@@ -43,23 +43,28 @@ const (
 	requestIDKey contextKey = "request_id"
 )
 
-// memoryLimiterCache caches memory-backed limiters to preserve state across xDS rebuilds.
+// limiterEntry holds a limiter instance with its reference count.
+type limiterEntry struct {
+	lim      limiter.Limiter
+	refCount int
+}
+
+// limiterCache provides thread-safe caching of memory-backed limiters.
 // Only memory backend limiters are cached; Redis-backed limiters maintain state externally.
-var memoryLimiterCache sync.Map // map[string]limiter.Limiter
+type limiterCache struct {
+	mu sync.Mutex
+	// byQuotaKey maps quota cache keys to limiter entries with reference counts
+	byQuotaKey map[string]*limiterEntry
+	// quotaKeysByBaseKey tracks which quota keys exist for each base cache key
+	// This enables automatic cleanup of stale limiters when quota configurations change
+	quotaKeysByBaseKey map[string]map[string]struct{}
+}
 
-// baseKeyQuotaIndex tracks which quota keys exist for each base cache key.
-// This enables automatic cleanup of stale limiters when quota configurations change.
-// Structure: map[string]map[string]bool (baseKey -> set of quotaKeys)
-var baseKeyQuotaIndex sync.Map
-
-// quotaKeyRefCount tracks how many baseKeys reference each quotaKey.
-// This prevents deletion of shared API-scoped limiters still in use by other routes.
-// Structure: map[string]int (quotaKey -> reference count)
-var quotaKeyRefCount sync.Map
-
-// baseKeyMutexes provides per-baseKey locking to prevent race conditions during cleanup.
-// Structure: map[string]*sync.Mutex
-var baseKeyMutexes sync.Map
+// globalLimiterCache is the singleton cache for memory-backed limiters.
+var globalLimiterCache = &limiterCache{
+	byQuotaKey:         make(map[string]*limiterEntry),
+	quotaKeysByBaseKey: make(map[string]map[string]struct{}),
+}
 
 // KeyComponent represents a single component for building rate limit keys
 type KeyComponent struct {
@@ -263,14 +268,14 @@ func GetPolicy(
 		cleanupInterval := getDurationParam(params, "memory.cleanupInterval", 5*time.Minute)
 		baseCacheKey = getBaseCacheKey(routeName, apiName, algorithm, params)
 
-		// Get or create mutex for this baseKey to prevent race conditions
-		muIface, _ := baseKeyMutexes.LoadOrStore(baseCacheKey, &sync.Mutex{})
-		mu := muIface.(*sync.Mutex)
-		mu.Lock()
-		defer mu.Unlock()
-
-		// Track which quota keys are being used in this policy configuration
-		usedQuotaKeys := make(map[string]bool)
+		// Compute desired quota keys before acquiring lock
+		type quotaInfo struct {
+			index         int
+			cacheKey      string
+			limiterLimits []limiter.LimitConfig
+		}
+		quotaInfos := make([]quotaInfo, len(quotas))
+		desiredQuotaKeys := make(map[string]struct{}, len(quotas))
 
 		for i := range quotas {
 			q := &quotas[i]
@@ -282,67 +287,88 @@ func GetPolicy(
 					Burst:    lim.Burst,
 				}
 			}
-
-			// Get the quota-specific cache key (includes quota name, limits, keyExtraction)
 			quotaCacheKey := getQuotaCacheKey(baseCacheKey, apiName, q, i)
-			usedQuotaKeys[quotaCacheKey] = true
+			quotaInfos[i] = quotaInfo{index: i, cacheKey: quotaCacheKey, limiterLimits: limiterLimits}
+			desiredQuotaKeys[quotaCacheKey] = struct{}{}
+		}
 
-			// Try to get cached limiter
-			if cached, ok := memoryLimiterCache.Load(quotaCacheKey); ok {
-				q.Limiter = cached.(limiter.Limiter)
-				// Increment ref count for this shared quota
-				incrementQuotaRefCount(quotaCacheKey)
+		// Single lock for all cache operations - ensures atomicity
+		globalLimiterCache.mu.Lock()
+		defer globalLimiterCache.mu.Unlock()
+
+		// Get previous quota keys for this baseKey (may be nil)
+		oldQuotaKeys := globalLimiterCache.quotaKeysByBaseKey[baseCacheKey]
+
+		// Reconcile: process each quota
+		for _, info := range quotaInfos {
+			q := &quotas[info.index]
+
+			if entry, exists := globalLimiterCache.byQuotaKey[info.cacheKey]; exists {
+				// Reuse cached limiter
+				q.Limiter = entry.lim
+				// Only increment refCount if this is a new reference (not already tracked for this baseKey)
+				if _, wasTracked := oldQuotaKeys[info.cacheKey]; !wasTracked {
+					entry.refCount++
+				}
 				slog.Debug("Reusing cached memory limiter",
 					"route", routeName, "apiName", apiName,
-					"quota", q.Name, "cacheKey", quotaCacheKey[:16])
+					"quota", q.Name, "cacheKey", info.cacheKey[:16],
+					"refCount", entry.refCount)
 			} else {
 				// Create new limiter
 				rlLimiter, err := limiter.CreateLimiter(limiter.Config{
 					Algorithm:       algorithm,
-					Limits:          limiterLimits,
+					Limits:          info.limiterLimits,
 					Backend:         backend,
 					CleanupInterval: cleanupInterval,
 				})
 				if err != nil {
 					quotaName := q.Name
 					if quotaName == "" {
-						quotaName = fmt.Sprintf("quota-%d", i)
+						quotaName = fmt.Sprintf("quota-%d", info.index)
 					}
 					return nil, fmt.Errorf("failed to create memory limiter for quota %q: %w", quotaName, err)
 				}
 
-				// Store in cache and initialize ref count to 1
-				memoryLimiterCache.Store(quotaCacheKey, rlLimiter)
-				quotaKeyRefCount.Store(quotaCacheKey, 1)
+				// Store in cache with ref count = 1
+				globalLimiterCache.byQuotaKey[info.cacheKey] = &limiterEntry{
+					lim:      rlLimiter,
+					refCount: 1,
+				}
 				q.Limiter = rlLimiter
 				slog.Debug("Created and cached new memory limiter",
 					"route", routeName, "apiName", apiName,
-					"quota", q.Name, "cacheKey", quotaCacheKey[:16])
+					"quota", q.Name, "cacheKey", info.cacheKey[:16])
 			}
 		}
 
-		// Clean up stale limiters: quota keys that were previously used but are no longer in config
-		if previousQuotaKeys, ok := baseKeyQuotaIndex.Load(baseCacheKey); ok {
-			for oldQuotaKey := range previousQuotaKeys.(map[string]bool) {
-				if !usedQuotaKeys[oldQuotaKey] {
-					// Decrement ref count and only delete when no more references exist
-					if decrementQuotaRefCount(oldQuotaKey) == 0 {
-						memoryLimiterCache.Delete(oldQuotaKey)
-						quotaKeyRefCount.Delete(oldQuotaKey)
+		// Clean up stale limiters: quota keys that were previously used but are no longer needed
+		for oldQuotaKey := range oldQuotaKeys {
+			if _, stillUsed := desiredQuotaKeys[oldQuotaKey]; !stillUsed {
+				if entry, exists := globalLimiterCache.byQuotaKey[oldQuotaKey]; exists {
+					entry.refCount--
+					if entry.refCount <= 0 {
+						// Close the limiter and remove from cache
+						if err := entry.lim.Close(); err != nil {
+							slog.Warn("Failed to close stale limiter",
+								"cacheKey", oldQuotaKey[:16], "error", err)
+						}
+						delete(globalLimiterCache.byQuotaKey, oldQuotaKey)
 						slog.Debug("Cleaned up stale memory limiter",
 							"route", routeName, "apiName", apiName,
 							"cacheKey", oldQuotaKey[:16])
 					} else {
 						slog.Debug("Decremented ref count for shared memory limiter",
 							"route", routeName, "apiName", apiName,
-							"cacheKey", oldQuotaKey[:16])
+							"cacheKey", oldQuotaKey[:16],
+							"refCount", entry.refCount)
 					}
 				}
 			}
 		}
 
 		// Update the index with current quota keys for this baseKey
-		baseKeyQuotaIndex.Store(baseCacheKey, usedQuotaKeys)
+		globalLimiterCache.quotaKeysByBaseKey[baseCacheKey] = desiredQuotaKeys
 	}
 
 	// Log quota details including cost extraction status
@@ -1384,31 +1410,6 @@ func getDurationParam(params map[string]interface{}, key string, defaultVal time
 func getLimitFromQuota(q *QuotaRuntime) int64 {
 	if len(q.Limits) > 0 {
 		return q.Limits[0].Limit
-	}
-	return 0
-}
-
-// incrementQuotaRefCount increments the reference count for a quota key and returns the new count.
-func incrementQuotaRefCount(quotaKey string) int {
-	if count, ok := quotaKeyRefCount.Load(quotaKey); ok {
-		newCount := count.(int) + 1
-		quotaKeyRefCount.Store(quotaKey, newCount)
-		return newCount
-	}
-	quotaKeyRefCount.Store(quotaKey, 1)
-	return 1
-}
-
-// decrementQuotaRefCount decrements the reference count for a quota key and returns the new count.
-// Returns 0 if the key doesn't exist (already deleted or never existed).
-func decrementQuotaRefCount(quotaKey string) int {
-	if count, ok := quotaKeyRefCount.Load(quotaKey); ok {
-		newCount := count.(int) - 1
-		if newCount < 0 {
-			newCount = 0
-		}
-		quotaKeyRefCount.Store(quotaKey, newCount)
-		return newCount
 	}
 	return 0
 }
