@@ -1,0 +1,319 @@
+name: Publish Policy
+
+on:
+  workflow_dispatch:
+    inputs:
+      policy_name:
+        description: 'Name of the policy to publish'
+        required: true
+        type: string
+      minor_version:
+        description: 'Minor version (e.g., 0.1, 0.2)'
+        required: true
+        type: string
+
+env:
+  # Predefined policy categories - Add new categories here
+  PREDEFINED_CATEGORIES: |
+    Security
+    Analytics & Monitoring
+    Transformation
+    Logging
+    AI
+    MCP
+    Guardrails
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Validate inputs and policy existence
+      run: |
+        POLICY_NAME="${{ github.event.inputs.policy_name }}"
+        MINOR_VERSION="${{ github.event.inputs.minor_version }}"
+        
+        # Validate policy name
+        if [[ -z "$POLICY_NAME" ]]; then
+          echo "❌ Policy name is required"
+          exit 1
+        fi
+        
+        # Validate minor version format
+        if [[ ! "$MINOR_VERSION" =~ ^[0-9]+\.[0-9]+$ ]]; then
+          echo "❌ Minor version must be in format X.Y (e.g., 0.1, 1.2)"
+          exit 1
+        fi
+        
+        # Check if policy directory exists in docs/
+        DOCS_POLICY_DIR="docs/$POLICY_NAME"
+        if [[ ! -d "$DOCS_POLICY_DIR" ]]; then
+          echo "❌ Policy directory not found in docs/: $DOCS_POLICY_DIR"
+          echo "Available policies:"
+          ls -1 docs/
+          exit 1
+        fi
+        
+        # Check if version directory exists
+        VERSION_DIR="$DOCS_POLICY_DIR/v$MINOR_VERSION"
+        if [[ ! -d "$VERSION_DIR" ]]; then
+          echo "❌ Version directory not found: $VERSION_DIR"
+          echo "Available versions for $POLICY_NAME:"
+          ls -1 "$DOCS_POLICY_DIR/" 2>/dev/null || echo "No versions found"
+          exit 1
+        fi
+        
+        # Check if policies directory exists
+        POLICIES_DIR="policies/$POLICY_NAME"
+        if [[ ! -d "$POLICIES_DIR" ]]; then
+          echo "❌ Policy directory not found in policies/: $POLICIES_DIR"
+          exit 1
+        fi
+        
+        echo "✅ Policy validation passed"
+        echo "POLICY_NAME=$POLICY_NAME" >> $GITHUB_ENV
+        echo "MINOR_VERSION=$MINOR_VERSION" >> $GITHUB_ENV
+        echo "VERSION_DIR=$VERSION_DIR" >> $GITHUB_ENV
+        echo "POLICIES_DIR=$POLICIES_DIR" >> $GITHUB_ENV
+      
+    - name: Setup Node.js for JSON validation
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        
+    - name: Install jq for JSON processing
+      run: sudo apt-get update && sudo apt-get install -y jq
+      
+    - name: Validate API configuration
+      id: api-config
+      env:
+        POLICY_HUB_URL: ${{ vars.POLICY_HUB_URL }}
+      run: |
+        if [[ -z "${POLICY_HUB_URL:-}" ]]; then
+          echo "❌ Missing POLICY_HUB_URL environment variable"
+          echo "Please configure POLICY_HUB_URL in repository environment variables"
+          echo "Go to: Settings → Environments → [environment] → Environment variables"
+          exit 1
+        fi
+        
+        echo "✅ API configuration validated"
+        echo "API_URL=$POLICY_HUB_URL" >> $GITHUB_ENV
+        
+    - name: Parse and validate metadata.json
+      run: |
+        METADATA_FILE="$VERSION_DIR/metadata.json"
+        
+        # Check if metadata.json exists
+        if [[ ! -f "$METADATA_FILE" ]]; then
+          echo "❌ metadata.json not found: $METADATA_FILE"
+          exit 1
+        fi
+        
+        # Validate JSON syntax
+        if ! jq empty "$METADATA_FILE" 2>/dev/null; then
+          echo "❌ Invalid JSON in metadata.json"
+          cat "$METADATA_FILE"
+          exit 1
+        fi
+        
+        # Extract and validate required fields
+        name=$(jq -r '.name // empty' "$METADATA_FILE")
+        version=$(jq -r '.version // empty' "$METADATA_FILE")
+        displayName=$(jq -r '.displayName // empty' "$METADATA_FILE")
+        provider=$(jq -r '.provider // empty' "$METADATA_FILE")
+        categories=$(jq -r '.categories // empty' "$METADATA_FILE")
+        description=$(jq -r '.description // empty' "$METADATA_FILE")
+        
+        # Check required fields
+        if [[ -z "$name" ]]; then
+          echo "❌ Missing 'name' field in metadata.json"
+          exit 1
+        fi
+        
+        if [[ -z "$version" ]]; then
+          echo "❌ Missing 'version' field in metadata.json"
+          exit 1
+        fi
+        
+        if [[ -z "$displayName" ]]; then
+          echo "❌ Missing 'displayName' field in metadata.json"
+          exit 1
+        fi
+        
+        if [[ -z "$provider" ]]; then
+          echo "❌ Missing 'provider' field in metadata.json"
+          exit 1
+        fi
+        
+        if [[ -z "$categories" || "$categories" == "null" ]]; then
+          echo "❌ Missing 'categories' field in metadata.json"
+          exit 1
+        fi
+        
+        if [[ -z "$description" ]]; then
+          echo "❌ Missing 'description' field in metadata.json"
+          exit 1
+        fi
+        
+        # Validate that name matches input
+        if [[ "$name" != "$POLICY_NAME" ]]; then
+          echo "❌ Policy name mismatch: metadata.json has '$name', but input is '$POLICY_NAME'"
+          exit 1
+        fi
+        
+        # Validate that version matches input (remove 'v' prefix if present)
+        metadata_version=${version#v}
+        if [[ "$metadata_version" != "$MINOR_VERSION" ]]; then
+          echo "❌ Version mismatch: metadata.json has '$version', but input is '$MINOR_VERSION'"
+          exit 1
+        fi
+        
+        # Validate categories against predefined list
+        # Convert multi-line categories to array
+        readarray -t PREDEFINED_CATS <<< "$PREDEFINED_CATEGORIES"
+        
+        # Remove empty lines and trim whitespace
+        declare -a CLEAN_CATS
+        for cat in "${PREDEFINED_CATS[@]}"; do
+          cat=$(echo "$cat" | xargs)
+          if [[ -n "$cat" ]]; then
+            CLEAN_CATS+=("$cat")
+          fi
+        done
+        
+        # Check each category in metadata
+        while IFS= read -r category; do
+          category=$(echo "$category" | tr -d '"' | xargs) # Remove quotes and whitespace
+          
+          # Check if category is in predefined list
+          category_found=false
+          for predefined_cat in "${CLEAN_CATS[@]}"; do
+            if [[ "$category" == "$predefined_cat" ]]; then
+              category_found=true
+              break
+            fi
+          done
+          
+          if [[ "$category_found" == false ]]; then
+            echo "❌ Invalid category '$category' in metadata.json"
+            echo "Valid categories are:"
+            printf '  - %s\n' "${CLEAN_CATS[@]}"
+            exit 1
+          fi
+        done < <(jq -r '.categories[]' "$METADATA_FILE")
+        
+        echo "✅ Metadata validation passed"
+        echo "METADATA_NAME=$name" >> $GITHUB_ENV
+        echo "METADATA_VERSION=$metadata_version" >> $GITHUB_ENV
+        
+    - name: Create policy package
+      run: |
+        # Create temporary directory for packaging
+        TEMP_DIR=$(mktemp -d)
+        PACKAGE_DIR="$TEMP_DIR/package"
+        mkdir -p "$PACKAGE_DIR"
+        
+        # Copy docs folder if it exists
+        DOCS_SOURCE="$VERSION_DIR/docs"
+        if [[ -d "$DOCS_SOURCE" ]]; then
+          cp -r "$DOCS_SOURCE" "$PACKAGE_DIR/"
+          echo "✅ Copied docs folder"
+        else
+          echo "❌ docs folder not found: $DOCS_SOURCE"
+          exit 1
+        fi
+        
+        # Copy assets folder if it exists
+        ASSETS_SOURCE="$VERSION_DIR/assets"
+        if [[ -d "$ASSETS_SOURCE" ]]; then
+          cp -r "$ASSETS_SOURCE" "$PACKAGE_DIR/"
+          echo "✅ Copied assets folder"
+        else
+          echo "ℹ️  No assets folder found (optional)"
+        fi
+        
+        # Create zip file
+        ZIP_NAME="${METADATA_NAME}-${METADATA_VERSION}.zip"
+        ZIP_PATH="$GITHUB_WORKSPACE/$ZIP_NAME"
+        
+        cd "$PACKAGE_DIR"
+        zip -r "$ZIP_PATH" . -x "*.DS_Store"
+        cd "$GITHUB_WORKSPACE"
+        
+        # Verify zip was created
+        if [[ ! -f "$ZIP_PATH" ]]; then
+          echo "❌ Failed to create zip file: $ZIP_PATH"
+          exit 1
+        fi
+        
+        echo "✅ Created policy package: $ZIP_PATH"
+        echo "ZIP_NAME=$ZIP_NAME" >> $GITHUB_ENV
+        echo "TEMP_DIR=$TEMP_DIR" >> $GITHUB_ENV
+        
+    - name: Publish policy
+      env:
+        POLICY_HUB_TOKEN: ${{ secrets.POLICY_HUB_TOKEN }}
+      run: |
+        METADATA_CONTENT=$(cat "$VERSION_DIR/metadata.json")
+        
+        # Prepare curl command with optional authentication
+        CURL_CMD="curl -w '%{http_code}' -s -o response.txt -X POST --max-time 30 --connect-timeout 10 --insecure"
+        CURL_CMD="$CURL_CMD '$API_URL/policies/$METADATA_NAME/versions/$METADATA_VERSION'"
+        
+        # Add authentication header if token is provided
+        if [[ -n "${POLICY_HUB_TOKEN:-}" ]]; then
+          CURL_CMD="$CURL_CMD -H 'api-key: $POLICY_HUB_TOKEN'"
+        fi
+        
+        CURL_CMD="$CURL_CMD -F 'metadata=$METADATA_CONTENT'"
+        CURL_CMD="$CURL_CMD -F 'docs=@$GITHUB_WORKSPACE/$ZIP_NAME'"
+        
+        # Execute the curl command
+        HTTP_STATUS=$(eval "$CURL_CMD")
+        
+        echo "HTTP Status: $HTTP_STATUS"
+        
+        # Show response
+        echo "📨 API Response:"
+        if [[ -f response.txt ]]; then
+          cat response.txt
+        else
+          echo "No response file found"
+        fi
+        echo
+        
+        # Check if request was successful
+        if [[ "$HTTP_STATUS" -ge 200 && "$HTTP_STATUS" -lt 300 ]]; then
+          echo "✅ Policy published successfully!"
+        else
+          echo "❌ Policy publishing failed with HTTP status: $HTTP_STATUS"
+          exit 1
+        fi
+        
+    - name: Cleanup
+      if: always()
+      run: |
+        # Clean up temporary files
+        if [[ -n "$ZIP_NAME" && -f "$ZIP_NAME" ]]; then
+          rm -f "$ZIP_NAME"
+        fi
+        if [[ -n "$TEMP_DIR" && -d "$TEMP_DIR" ]]; then
+          rm -rf "$TEMP_DIR"
+        fi
+        if [[ -f "response.txt" ]]; then
+          rm -f response.txt
+        fi
+        echo "🧹 Cleanup completed"
+        
+    - name: Summary
+      if: success()
+      run: |
+        echo "🎉 Policy Publishing Summary"
+        echo "=========================="
+        echo "Policy Name: $METADATA_NAME"
+        echo "Version: $METADATA_VERSION"
+        echo "Status: ✅ Successfully Published"
+        echo "API Endpoint: $API_URL/policies/$METADATA_NAME/versions/$METADATA_VERSION"
