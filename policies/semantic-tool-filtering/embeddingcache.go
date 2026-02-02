@@ -27,7 +27,7 @@ import (
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs        = 25 // Maximum number of APIs to store in cache
+	DefaultMaxAPIs        = 25  // Maximum number of APIs to store in cache
 	DefaultMaxToolsPerAPI = 200 // Maximum number of tools per API
 )
 
@@ -363,7 +363,7 @@ func (ecs *EmbeddingCacheStore) BulkAddTools(apiId string, tools []ToolEntry) Bu
 		if entry, exists := apiCache.Tools[tool.HashKey]; exists {
 			// Tool already exists in cache - update timestamp and embedding
 			entry.LastAccessed = time.Now()
-			entry.Embedding = tool.Embedding
+			entry.Embedding = append([]float32(nil), tool.Embedding...)
 			result.Cached = append(result.Cached, tool.Name)
 			slog.Debug("BulkAddTools tool already cached", "toolName", tool.Name)
 		} else {
@@ -405,7 +405,7 @@ func (ecs *EmbeddingCacheStore) BulkAddTools(apiId string, tools []ToolEntry) Bu
 		tool := newTools[i]
 		apiCache.Tools[tool.HashKey] = &EmbeddingEntry{
 			Name:         tool.Name,
-			Embedding:    tool.Embedding,
+			Embedding:    append([]float32(nil), tool.Embedding...),
 			LastAccessed: time.Now(),
 		}
 		result.Added = append(result.Added, tool.Name)
