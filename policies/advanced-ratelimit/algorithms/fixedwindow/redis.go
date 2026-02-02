@@ -162,11 +162,11 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 
 // GetAvailable returns the available tokens for the given key without consuming
 func (r *RedisLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
-	now := time.Now()
+	now := r.clock.Now()
 	windowStart := r.policy.WindowStart(now)
 
 	// Use Redis key with window start
-	redisKey := fmt.Sprintf("%s%s:%d", r.keyPrefix, key, windowStart.Unix())
+	redisKey := fmt.Sprintf("%s%s:%d", r.keyPrefix, key, windowStart.UnixNano())
 
 	// Get current count from Redis
 	count, err := r.client.Get(ctx, redisKey).Int64()

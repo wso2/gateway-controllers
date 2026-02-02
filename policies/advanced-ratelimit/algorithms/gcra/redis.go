@@ -162,12 +162,14 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 // GetAvailable returns the available tokens for the given key without consuming
 // For GCRA, we use a Lua script to compute remaining without updating state
 func (r *RedisLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
-	now := time.Now()
+	now := r.clock.Now()
 	emissionInterval := r.policy.EmissionInterval()
 	burstAllowance := r.policy.BurstAllowance()
 
+	fullKey := r.keyPrefix + key
+
 	// Get current TAT from Redis
-	tatBytes, err := r.client.Get(ctx, key).Bytes()
+	tatBytes, err := r.client.Get(ctx, fullKey).Bytes()
 	if err == redis.Nil {
 		// No previous request - full burst capacity available
 		return r.policy.Burst, nil

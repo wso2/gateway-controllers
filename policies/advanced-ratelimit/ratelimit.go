@@ -256,7 +256,7 @@ func GetPolicy(
 	} else {
 		// Memory backend - create limiter per quota with caching and automatic cleanup
 		cleanupInterval := getDurationParam(params, "memory.cleanupInterval", 5*time.Minute)
-		baseCacheKey := getBaseCacheKey(routeName, apiName, algorithm, params)
+		baseCacheKey = getBaseCacheKey(routeName, apiName, algorithm, params)
 
 		// Get or create mutex for this baseKey to prevent race conditions
 		muIface, _ := baseKeyMutexes.LoadOrStore(baseCacheKey, &sync.Mutex{})
