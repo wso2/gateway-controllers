@@ -1,0 +1,11 @@
+{
+  "name": "word-count-guardrail",
+  "displayName": "Word Count Guardrail",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates the word count of request or response body content.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nCan be configured with min/max word count constraints and inverted logic.\nSupports separate configuration for request and response phases."
+}

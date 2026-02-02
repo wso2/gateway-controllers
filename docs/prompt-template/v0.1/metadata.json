@@ -1,0 +1,10 @@
+{
+  "name": "prompt-template",
+  "displayName": "Prompt Template",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Dynamically modifies the prompt by applying custom templates using a configured strategy.\nOnly processes request body."
+}
