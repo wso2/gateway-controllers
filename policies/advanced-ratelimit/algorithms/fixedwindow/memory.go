@@ -14,11 +14,12 @@
  *  limitations under the License.
  *
  */
- 
+
 package fixedwindow
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -86,6 +87,12 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	windowStart := m.policy.WindowStart(now)
 	windowEnd := m.policy.WindowEnd(now)
 
+	slog.Debug("FixedWindow: checking rate limit",
+		"key", key,
+		"cost", n,
+		"windowStart", windowStart,
+		"windowEnd", windowEnd)
+
 	// Get current entry or initialize new one
 	entry, exists := m.data[key]
 
@@ -121,6 +128,14 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 		}
 	}
 
+	slog.Debug("FixedWindow: rate limit check result",
+		"key", key,
+		"allowed", allowed,
+		"currentCount", currentCount,
+		"newCount", newCount,
+		"limit", m.policy.Limit,
+		"remaining", remaining)
+
 	// Build result
 	result := &limiter.Result{
 		Allowed:   allowed,
@@ -140,6 +155,34 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	}
 
 	return result, nil
+}
+
+// GetAvailable returns the available tokens for the given key without consuming
+func (m *MemoryLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := m.clock.Now()
+	windowStart := m.policy.WindowStart(now)
+
+	// Get current entry or initialize new one
+	entry, exists := m.data[key]
+
+	// Reset count if we're in a new window or entry expired
+	var currentCount int64
+	if !exists || entry.windowStart != windowStart || now.After(entry.expiration) {
+		currentCount = 0
+	} else {
+		currentCount = entry.count
+	}
+
+	// Calculate remaining capacity
+	remaining := m.policy.Limit - currentCount
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	return remaining, nil
 }
 
 // cleanupLoop removes expired entries periodically
