@@ -1,5 +1,5 @@
 /*
- *  Copyright (c) 2026, WSO2 LLC. (http://www.wso2.org) All Rights Reserved.
+ *  Copyright (c) 2025, WSO2 LLC. (http://www.wso2.org) All Rights Reserved.
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import (
 
 // Cache limits configuration
 const (
-	DefaultMaxAPIs        = 25 // Maximum number of APIs to store in cache
+	DefaultMaxAPIs        = 100  // Maximum number of APIs to store in cache
 	DefaultMaxToolsPerAPI = 200 // Maximum number of tools per API
 )
 
@@ -149,22 +149,10 @@ func (ecs *EmbeddingCacheStore) evictLRUToolIfNeeded(apiCache *APICache) {
 			if entry, exists := apiCache.Tools[lruHashKey]; exists {
 				toolName = entry.Name
 			}
-			slog.Debug("Evicting LRU tool", "toolName", toolName, "hash", safeHashPrefix(lruHashKey), "currentSize", len(apiCache.Tools), "maxSize", ecs.maxToolsPerAPI)
+			slog.Debug("Evicting LRU tool", "toolName", toolName, "hash", lruHashKey[:16], "currentSize", len(apiCache.Tools), "maxSize", ecs.maxToolsPerAPI)
 			delete(apiCache.Tools, lruHashKey)
 		}
 	}
-}
-
-// safeHashPrefix returns a safe prefix of the hash string for logging
-// Returns the first 16 characters if available, otherwise the full string or "<empty>"
-func safeHashPrefix(hash string) string {
-	if len(hash) == 0 {
-		return "<empty>"
-	}
-	if len(hash) < 16 {
-		return hash
-	}
-	return hash[:16]
 }
 
 // HashDescription computes SHA-256 hash of the tool description
@@ -193,12 +181,9 @@ func (ecs *EmbeddingCacheStore) GetAPICache(apiId string) APIEmbeddingCache {
 		// Update API last accessed time
 		apiCache.LastAccessed = time.Now()
 
-		// Create deep copy of the cache
 		copyCache := make(APIEmbeddingCache, len(apiCache.Tools))
 		for k, v := range apiCache.Tools {
-			entryCopy := *v
-			entryCopy.Embedding = append([]float32(nil), v.Embedding...)
-			copyCache[k] = &entryCopy
+			copyCache[k] = v
 		}
 		return copyCache
 	}
@@ -234,7 +219,7 @@ func (ecs *EmbeddingCacheStore) GetEntry(apiId, hashKey string) *EmbeddingEntry 
 	ecs.mu.Lock()
 	defer ecs.mu.Unlock()
 
-	slog.Debug("GetEntry called", "apiId", apiId, "hashKey", safeHashPrefix(hashKey), "cachedAPIs", ecs.getCachedAPIIds())
+	slog.Debug("GetEntry called", "apiId", apiId, "hashKey", hashKey[:16], "cachedAPIs", ecs.getCachedAPIIds())
 
 	if apiCache, exists := ecs.cache[apiId]; exists {
 		if entry, found := apiCache.Tools[hashKey]; found {
@@ -242,17 +227,21 @@ func (ecs *EmbeddingCacheStore) GetEntry(apiId, hashKey string) *EmbeddingEntry 
 			apiCache.LastAccessed = time.Now()
 			entry.LastAccessed = time.Now()
 			slog.Debug("GetEntry cache hit", "apiId", apiId, "toolName", entry.Name)
-
-			// Return deep copy to prevent external mutations
-			entryCopy := *entry
-			entryCopy.Embedding = append([]float32(nil), entry.Embedding...)
-			return &entryCopy
+			return entry
 		}
 		slog.Debug("GetEntry tool not found in API cache", "apiId", apiId)
 	} else {
 		slog.Debug("GetEntry API not found in cache", "apiId", apiId)
 	}
 	return nil
+}
+
+// GetEntryByDescription retrieves an embedding entry by API ID and tool description
+// Automatically hashes the description to find the entry
+// Updates both API and tool last accessed timestamps
+func (ecs *EmbeddingCacheStore) GetEntryByDescription(apiId, description string) *EmbeddingEntry {
+	hashKey := HashDescription(description)
+	return ecs.GetEntry(apiId, hashKey)
 }
 
 // AddEntry adds or updates an embedding entry for a specific API
@@ -296,10 +285,16 @@ func (ecs *EmbeddingCacheStore) AddEntry(apiId, hashKey, name string, embedding 
 	// Add new entry with current timestamp
 	apiCache.Tools[hashKey] = &EmbeddingEntry{
 		Name:         name,
-		Embedding:    append([]float32(nil), embedding...),
+		Embedding:    embedding,
 		LastAccessed: time.Now(),
 	}
 	slog.Debug("AddEntry tool added", "apiId", apiId, "toolName", name, "toolsInAPI", len(apiCache.Tools))
+}
+
+// AddEntryByDescription adds or updates an embedding entry using the description to generate the hash key
+func (ecs *EmbeddingCacheStore) AddEntryByDescription(apiId, description, name string, embedding []float32) {
+	hashKey := HashDescription(description)
+	ecs.AddEntry(apiId, hashKey, name, embedding)
 }
 
 // ToolEntry represents a tool to be added to the cache
@@ -415,6 +410,23 @@ func (ecs *EmbeddingCacheStore) BulkAddTools(apiId string, tools []ToolEntry) Bu
 	slog.Debug("BulkAddTools completed", "apiId", apiId, "added", len(result.Added), "skipped", len(result.Skipped), "cached", len(result.Cached), "totalToolsInCache", len(apiCache.Tools))
 
 	return result
+}
+
+// BulkAddToolsByDescription adds multiple tools using descriptions to generate hash keys
+func (ecs *EmbeddingCacheStore) BulkAddToolsByDescription(apiId string, tools []struct {
+	Description string
+	Name        string
+	Embedding   []float32
+}) BulkAddResult {
+	toolEntries := make([]ToolEntry, len(tools))
+	for i, tool := range tools {
+		toolEntries[i] = ToolEntry{
+			HashKey:   HashDescription(tool.Description),
+			Name:      tool.Name,
+			Embedding: tool.Embedding,
+		}
+	}
+	return ecs.BulkAddTools(apiId, toolEntries)
 }
 
 // RemoveAPI removes all cached embeddings for a specific API
