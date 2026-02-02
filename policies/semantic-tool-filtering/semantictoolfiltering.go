@@ -158,7 +158,7 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 	var toolEntriesToCache []ToolEntry
 	toolsCached := 0
 
-	for i, req := range uncachedRequests {
+	for _, req := range uncachedRequests {
 		embedding, err := p.embeddingProvider.GetEmbedding(req.Description)
 		if err != nil {
 			slog.Warn("SemanticToolFiltering: Error generating tool embedding, skipping",
@@ -175,7 +175,7 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 		}
 
 		// Only cache if we have available slots
-		if i < availableSlots {
+		if toolsCached < availableSlots {
 			toolEntriesToCache = append(toolEntriesToCache, ToolEntry{
 				HashKey:   req.HashKey,
 				Name:      req.Name,
@@ -914,7 +914,6 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 			}
 		}
 	}
-
 
 	slog.Debug("SemanticToolFiltering: Filtered tools (text mode)",
 		"originalCount", len(textTools),
