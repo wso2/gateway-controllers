@@ -188,11 +188,11 @@ jobs:
       # Register Policy in Policy Hub (MANDATORY, multipart)
       # ------------------------------------------------------------
       - name: Register policy in Policy Hub
-        if: false  # Temporarily disabled
+        # if: false  # Temporarily disabled
         id: policy-hub
         shell: bash
         env:
-          POLICY_HUB_URL: ${{ secrets.POLICY_HUB_URL }}
+          POLICY_HUB_URL: ${{ vars.POLICY_HUB_URL }}
           POLICY_HUB_TOKEN: ${{ secrets.POLICY_HUB_TOKEN }}
         run: |
           set -euo pipefail
@@ -206,13 +206,9 @@ jobs:
           DIR="${{ steps.meta.outputs.target_dir }}"
 
           RESPONSE=$(curl -sSL -w "HTTPSTATUS:%{http_code}" \
-            -X POST "$POLICY_HUB_URL/policies/register" \
-            -H "Authorization: Bearer $POLICY_HUB_TOKEN" \
-            -F "policy=${{ github.event.inputs.policy }}" \
-            -F "version=${{ github.event.inputs.version }}" \
-            -F "module_path=${{ steps.meta.outputs.module_path }}" \
-            -F "repository=${{ github.repository }}" \
-            -F "policy_definition=@$DIR/policy-definition.yaml;type=application/yaml")
+            -X POST "$POLICY_HUB_URL/policies/${{ github.event.inputs.policy }}/versions/${{ github.event.inputs.version }}/release" \
+            -H "api-key: $POLICY_HUB_TOKEN" \
+            -F "definition=@$DIR/policy-definition.yaml;type=application/yaml")
 
           STATUS=$(echo "$RESPONSE" | sed -E 's/.*HTTPSTATUS:([0-9]{3})$/\1/')
           BODY=$(echo "$RESPONSE" | sed -E 's/HTTPSTATUS:[0-9]{3}$//')
