@@ -710,8 +710,8 @@ func (p *RateLimitPolicy) OnResponse(
 				continue
 			}
 
-			// Consume tokens now
-			result, err := q.Limiter.AllowN(context.Background(), key, int64(actualCost))
+			// Consume tokens now (use ConsumeN to always consume even on overage)
+			result, err := q.Limiter.ConsumeN(context.Background(), key, int64(actualCost))
 			if err != nil {
 				if p.backend == "redis" && p.redisFailOpen {
 					slog.Warn("Post-response rate limit check failed (fail-open)",
