@@ -36,6 +36,13 @@ type Limiter interface {
 	// and returns a denied result with overflow details in Result.
 	ConsumeOrClampN(ctx context.Context, key string, n int64) (*Result, error)
 
+	// ConsumeN always consumes N tokens for the given key, regardless of whether
+	// it would exceed the limit. This is used for post-response cost extraction
+	// where the upstream has already processed the request and we need to track
+	// the actual consumption even if it causes an overage.
+	// Returns a Result indicating whether the limit was exceeded.
+	ConsumeN(ctx context.Context, key string, n int64) (*Result, error)
+
 	// GetAvailable returns the available tokens for the given key without consuming
 	// This is useful for checking remaining capacity before making a request
 	GetAvailable(ctx context.Context, key string) (int64, error)
