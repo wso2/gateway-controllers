@@ -15,7 +15,7 @@
  *
  */
 
-package requesttransformation
+package requestrewrite
 
 import (
 	"encoding/json"
@@ -46,14 +46,14 @@ const (
 	dynamicMetadataNamespace = "api_platform.policy_engine.envoy.filters.http.ext_proc"
 )
 
-var ins = &RequestTransformationPolicy{}
+var ins = &RequestRewritePolicy{}
 
-// RequestTransformationPolicy implements request transformation (path, query, method)
-type RequestTransformationPolicy struct{}
+// RequestRewritePolicy implements request rewriting (path, query, method)
+type RequestRewritePolicy struct{}
 
 // GetPolicy returns the policy instance
 func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
-	slog.Debug("[Request Transformation]: GetPolicy called",
+	slog.Debug("[Request Rewrite]: GetPolicy called",
 		"route", metadata.RouteName,
 		"api", metadata.APIName,
 		"version", metadata.APIVersion,
@@ -62,7 +62,7 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 }
 
 // Mode returns the processing mode for this policy
-func (p *RequestTransformationPolicy) Mode() policy.ProcessingMode {
+func (p *RequestRewritePolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeProcess, // Needs request headers for matching and rewriting
 		RequestBodyMode:    policy.BodyModeSkip,
@@ -121,19 +121,19 @@ type queryRule struct {
 }
 
 // OnRequest applies request transformations based on policy configuration
-func (p *RequestTransformationPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
+func (p *RequestRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
 	cfg, err := parseConfig(params)
 	if err != nil {
-		return configErrorResponse("Invalid request-transformation configuration", err)
+		return configErrorResponse("Invalid request-rewrite configuration", err)
 	}
 
 	if cfg == nil {
-		slog.Debug("[Request Transformation]: No configuration provided, passing through")
+		slog.Debug("[Request Rewrite]: No configuration provided, passing through")
 		return policy.UpstreamRequestModifications{}
 	}
 
 	if !matchesRequest(ctx, cfg.Match) {
-		slog.Debug("[Request Transformation]: Match conditions not met, skipping transformations")
+		slog.Debug("[Request Rewrite]: Match conditions not met, skipping transformations")
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -163,7 +163,7 @@ func (p *RequestTransformationPolicy) OnRequest(ctx *policy.RequestContext, para
 
 	mods := policy.UpstreamRequestModifications{}
 	if finalPath != originalPath {
-		slog.Info("[Request Transformation]: Rewriting path", "from", originalPath, "to", finalPath)
+		slog.Info("[Request Rewrite]: Rewriting path", "from", originalPath, "to", finalPath)
 		mods.SetHeaders = map[string]string{":path": finalPath}
 	}
 
@@ -178,14 +178,14 @@ func (p *RequestTransformationPolicy) OnRequest(ctx *policy.RequestContext, para
 				"request_transformation.target_method": method,
 			},
 		}
-		slog.Info("[Request Transformation]: Scheduling method rewrite", "method", method)
+		slog.Info("[Request Rewrite]: Scheduling method rewrite", "method", method)
 	}
 
 	return mods
 }
 
 // OnResponse is not used for this policy
-func (p *RequestTransformationPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
+func (p *RequestRewritePolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
 	return nil
 }
 
@@ -205,7 +205,7 @@ func parseConfig(params map[string]interface{}) (*policyConfig, error) {
 }
 
 func configErrorResponse(message string, err error) policy.RequestAction {
-	slog.Error("[Request Transformation]: Configuration error", "error", err)
+	slog.Error("[Request Rewrite]: Configuration error", "error", err)
 	body, _ := json.Marshal(map[string]string{
 		"error":   "Configuration Error",
 		"message": fmt.Sprintf("%s: %s", message, err.Error()),
@@ -268,7 +268,7 @@ func matchHeader(ctx *policy.RequestContext, matcher headerMatcher) bool {
 	case matchTypeRegex:
 		regex, err := regexp.Compile(matcher.Value)
 		if err != nil {
-			slog.Warn("[Request Transformation]: Invalid header regex", "name", name, "pattern", matcher.Value, "error", err)
+			slog.Warn("[Request Rewrite]: Invalid header regex", "name", name, "pattern", matcher.Value, "error", err)
 			return false
 		}
 		for _, v := range values {
@@ -278,7 +278,7 @@ func matchHeader(ctx *policy.RequestContext, matcher headerMatcher) bool {
 		}
 		return false
 	default:
-		slog.Warn("[Request Transformation]: Unsupported header match type", "type", matcher.Type)
+		slog.Warn("[Request Rewrite]: Unsupported header match type", "type", matcher.Type)
 		return false
 	}
 }
@@ -304,7 +304,7 @@ func matchQueryParam(values url.Values, matcher queryParamMatch) bool {
 	case matchTypeRegex:
 		regex, err := regexp.Compile(matcher.Value)
 		if err != nil {
-			slog.Warn("[Request Transformation]: Invalid query regex", "name", name, "pattern", matcher.Value, "error", err)
+			slog.Warn("[Request Rewrite]: Invalid query regex", "name", name, "pattern", matcher.Value, "error", err)
 			return false
 		}
 		for _, v := range vals {
@@ -314,7 +314,7 @@ func matchQueryParam(values url.Values, matcher queryParamMatch) bool {
 		}
 		return false
 	default:
-		slog.Warn("[Request Transformation]: Unsupported query match type", "type", matcher.Type)
+		slog.Warn("[Request Rewrite]: Unsupported query match type", "type", matcher.Type)
 		return false
 	}
 }
@@ -326,7 +326,7 @@ func applyPathRewrite(ctx *policy.RequestContext, currentPath string, cfg *pathR
 	case pathReplacePrefix:
 		operationPath := strings.TrimSpace(ctx.OperationPath)
 		if operationPath == "" {
-			slog.Warn("[Request Transformation]: Operation path is empty, skipping prefix rewrite")
+			slog.Warn("[Request Rewrite]: Operation path is empty, skipping prefix rewrite")
 			return currentPath
 		}
 		if strings.HasSuffix(operationPath, "/*") {
@@ -348,13 +348,13 @@ func applyPathRewrite(ctx *policy.RequestContext, currentPath string, cfg *pathR
 		}
 		regex, err := regexp.Compile(cfg.ReplaceRegexMatch.Pattern)
 		if err != nil {
-			slog.Warn("[Request Transformation]: Invalid path regex", "pattern", cfg.ReplaceRegexMatch.Pattern, "error", err)
+			slog.Warn("[Request Rewrite]: Invalid path regex", "pattern", cfg.ReplaceRegexMatch.Pattern, "error", err)
 			return currentPath
 		}
 		substitution := normalizeRegexSubstitution(cfg.ReplaceRegexMatch.Substitution)
 		return regex.ReplaceAllString(currentPath, substitution)
 	default:
-		slog.Warn("[Request Transformation]: Unsupported path rewrite type", "type", cfg.Type)
+		slog.Warn("[Request Rewrite]: Unsupported path rewrite type", "type", cfg.Type)
 		return currentPath
 	}
 }

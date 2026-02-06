@@ -1,4 +1,4 @@
-module github.com/wso2/gateway-controllers/policies/request-transformation
+module github.com/wso2/gateway-controllers/policies/request-rewrite
 
 go 1.25.1
 

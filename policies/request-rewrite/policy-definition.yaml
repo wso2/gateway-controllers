@@ -1,7 +1,7 @@
-name: request-transformation
+name: request-rewrite
 version: v0.1.0
 description: |
-  Transforms incoming requests by rewriting paths, query parameters, and/or HTTP methods before forwarding to upstream services.
+  Rewrites incoming requests by updating paths, query parameters, and/or HTTP methods before forwarding to upstream services.
   Supports multiple path rewrite types: prefix replacement, full path replacement, and regex-based substitution.
   Supports query parameter rewrite rules (replace, remove, add, append, and regex-based substitution).
   Method rewriting changes the HTTP method of the request.
