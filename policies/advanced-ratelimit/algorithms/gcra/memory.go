@@ -210,6 +210,89 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	}, nil
 }
 
+// ConsumeN always consumes N tokens for the given key, regardless of whether
+// it would exceed the limit. This is used for post-response cost extraction
+// where the upstream has already processed the request.
+func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := m.clock.Now()
+
+	slog.Debug("GCRA: force consuming tokens",
+		"key", key,
+		"cost", n,
+		"now", now,
+		"limit", m.policy.Limit,
+		"burst", m.policy.Burst)
+
+	// Get current TAT (Theoretical Arrival Time) from map
+	var tat time.Time
+	entry, exists := m.data[key]
+	if exists && now.Before(entry.expiration) {
+		tat = entry.tat
+	} else {
+		tat = now
+	}
+
+	// GCRA Algorithm: TAT = max(TAT, now)
+	if tat.Before(now) {
+		tat = now
+	}
+
+	emissionInterval := m.policy.EmissionInterval()
+	burstAllowance := m.policy.BurstAllowance()
+
+	// Calculate new TAT (always advance, regardless of limits)
+	newTAT := tat.Add(emissionInterval * time.Duration(n))
+
+	// Always store new TAT (unlike AllowN which only updates when allowed)
+	if n > 0 {
+		expiration := m.policy.Duration + burstAllowance
+		m.data[key] = &tatEntry{
+			tat:        newTAT,
+			expiration: now.Add(expiration),
+		}
+	}
+
+	// Calculate remaining and check if allowed
+	remaining := m.calculateRemaining(newTAT, now, emissionInterval, burstAllowance)
+	allowAt := tat.Add(-burstAllowance)
+	allowed := !now.Before(allowAt) && n <= m.policy.Burst
+
+	slog.Debug("GCRA: tokens consumed",
+		"key", key,
+		"cost", n,
+		"allowed", allowed,
+		"newTAT", newTAT,
+		"remaining", remaining)
+
+	// Full quota available when newTAT <= now
+	fullQuotaAt := newTAT
+	if newTAT.Before(now) {
+		fullQuotaAt = now
+	}
+
+	result := &limiter.Result{
+		Allowed:     allowed,
+		Limit:       m.policy.Limit,
+		Remaining:   remaining,
+		Reset:       newTAT,
+		FullQuotaAt: fullQuotaAt,
+		Duration:    m.policy.Duration,
+		Policy:      m.policy,
+	}
+
+	if !allowed {
+		result.RetryAfter = allowAt.Sub(now)
+		if result.RetryAfter < 0 {
+			result.RetryAfter = 0
+		}
+	}
+
+	return result, nil
+}
+
 // GetAvailable returns the available tokens for the given key without consuming
 func (m *MemoryLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
 	m.mu.RLock()

@@ -157,6 +157,82 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	return result, nil
 }
 
+// ConsumeN always consumes N tokens for the given key, regardless of whether
+// it would exceed the limit. This is used for post-response cost extraction
+// where the upstream has already processed the request.
+func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := m.clock.Now()
+	windowStart := m.policy.WindowStart(now)
+	windowEnd := m.policy.WindowEnd(now)
+
+	slog.Debug("FixedWindow: force consuming tokens",
+		"key", key,
+		"cost", n,
+		"windowStart", windowStart,
+		"windowEnd", windowEnd)
+
+	// Get current entry or initialize new one
+	entry, exists := m.data[key]
+
+	// Reset count if we're in a new window or entry expired
+	var currentCount int64
+	if !exists || entry.windowStart != windowStart || now.After(entry.expiration) {
+		currentCount = 0
+	} else {
+		currentCount = entry.count
+	}
+
+	// Calculate new count (always consume, even if it exceeds limit)
+	newCount := currentCount + n
+	allowed := newCount <= m.policy.Limit
+
+	// Calculate remaining capacity (can be negative for overage tracking)
+	remaining := m.policy.Limit - newCount
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	// Always update entry (unlike AllowN which only updates when allowed)
+	if n > 0 {
+		m.data[key] = &windowEntry{
+			count:       newCount,
+			windowStart: windowStart,
+			expiration:  windowEnd.Add(time.Minute), // Keep for 1 minute after window ends
+		}
+	}
+
+	slog.Debug("FixedWindow: tokens consumed",
+		"key", key,
+		"allowed", allowed,
+		"currentCount", currentCount,
+		"newCount", newCount,
+		"limit", m.policy.Limit,
+		"remaining", remaining)
+
+	// Build result
+	result := &limiter.Result{
+		Allowed:   allowed,
+		Limit:     m.policy.Limit,
+		Remaining: remaining,
+		Reset:     windowEnd,
+		Duration:  m.policy.Duration,
+		Policy:    m.policy,
+	}
+
+	// Set retry-after if denied
+	if !allowed {
+		result.RetryAfter = time.Until(windowEnd)
+		if result.RetryAfter < 0 {
+			result.RetryAfter = 0
+		}
+	}
+
+	return result, nil
+}
+
 // GetAvailable returns the available tokens for the given key without consuming
 func (m *MemoryLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
 	m.mu.RLock()

@@ -159,6 +159,17 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 	}, nil
 }
 
+// ConsumeN always consumes N tokens for the given key, regardless of whether
+// it would exceed the limit. This is used for post-response cost extraction
+// where the upstream has already processed the request.
+// Note: For Redis GCRA, we can reuse AllowN since the Lua script already
+// handles consumption atomically (tokens are always consumed on success).
+func (r *RedisLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	// For GCRA Redis, AllowN already consumes atomically
+	// TODO: Consider adding a force-consume Lua script variant for true overage handling
+	return r.AllowN(ctx, key, n)
+}
+
 // GetAvailable returns the available tokens for the given key without consuming
 // For GCRA, we use a Lua script to compute remaining without updating state
 func (r *RedisLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {

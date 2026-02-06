@@ -160,6 +160,17 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 	return result, nil
 }
 
+// ConsumeN always consumes N tokens for the given key, regardless of whether
+// it would exceed the limit. This is used for post-response cost extraction
+// where the upstream has already processed the request.
+// Note: For Redis, INCRBY already atomically increments unconditionally,
+// so this is the same as AllowN in terms of consumption behavior.
+func (r *RedisLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	// Redis INCRBY already always increments, so we can reuse AllowN
+	// The only difference is semantic: we're explicitly consuming even on overage
+	return r.AllowN(ctx, key, n)
+}
+
 // GetAvailable returns the available tokens for the given key without consuming
 func (r *RedisLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
 	now := r.clock.Now()
