@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"strings"
 
+	store "github.com/wso2/api-platform/common/apikey"
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
@@ -280,7 +281,7 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 
 // validateAPIKey validates the provided API key against external store/service
 func (p *APIKeyPolicy) validateAPIKey(apiId, apiOperation, operationMethod, apiKey string) (bool, error) {
-	apiKeyStore := policy.GetAPIkeyStoreInstance()
+	apiKeyStore := store.GetAPIkeyStoreInstance()
 	isValid, err := apiKeyStore.ValidateAPIKey(apiId, apiOperation, operationMethod, apiKey)
 	if err != nil {
 		return false, fmt.Errorf("failed to validate API key via the policy engine")
