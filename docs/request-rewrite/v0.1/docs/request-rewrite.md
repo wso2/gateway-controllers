@@ -97,7 +97,7 @@ spec:
       path: /products/*
       policies:
         - name: request-rewrite
-          version: v0.1.0
+          version: v0
           params:
             pathRewrite:
               type: ReplacePrefixMatch
@@ -122,7 +122,7 @@ spec:
       url: http://sample-backend:5000
   policies:
     - name: request-rewrite
-      version: v0.1.0
+      version: v0
       params:
         queryRewrite:
           rules:
@@ -161,7 +161,7 @@ spec:
       path: /submit
       policies:
         - name: request-rewrite
-          version: v0.1.0
+          version: v0
           params:
             match:
               headers:
