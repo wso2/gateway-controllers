@@ -63,9 +63,9 @@ parameters:
               type: string
               minLength: 1
               maxLength: 256
-          anyOf:
-            - required:
-                - requiredClaims
-            - required:
-                - requiredScopes
+        anyOf:
+          - required:
+              - requiredClaims
+          - required:
+              - requiredScopes
       minItems: 1
