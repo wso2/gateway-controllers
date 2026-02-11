@@ -22,7 +22,6 @@ parameters:
             type: string
             description: Name/type of the PII entity
             minLength: 1
-            pattern: "^[A-Z_]+$"
           piiRegex:
             type: string
             description: Regular expression pattern to match the PII entity
