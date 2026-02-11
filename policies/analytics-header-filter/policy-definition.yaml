@@ -41,7 +41,6 @@ parameters:
           default: []
       required:
         - operation
-        - headers
     responseHeadersToFilter:
       type: object
       description: Configuration for filtering response headers
@@ -65,10 +64,8 @@ parameters:
           default: []
       required:
         - operation
-        - headers
   required: []
 
 systemParameters:
   type: object
   properties: {}
-

@@ -36,6 +36,14 @@ parameters:
         - name
         resolve:
         - value
+        allOf:
+        - if:
+            properties:
+              action:
+                const: SET
+          then:
+            required:
+            - value
     responseHeaders:
       type: array
       description: Array of header modifications to apply during response phase. At
@@ -64,6 +72,17 @@ parameters:
         - name
         resolve:
         - value
+        allOf:
+        - if:
+            properties:
+              action:
+                const: SET
+          then:
+            required:
+            - value
+  anyOf:
+    - required: [requestHeaders]
+    - required: [responseHeaders]
 
 systemParameters:
   type: object

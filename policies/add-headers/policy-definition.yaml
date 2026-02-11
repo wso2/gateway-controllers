@@ -11,6 +11,7 @@ parameters:
       type: array
       description: Array of headers that need to be added to the request during request phase. At least
         one of requestHeaders or responseHeaders must be specified.
+      minItems: 1
       items:
         type: object
         properties:
@@ -33,6 +34,7 @@ parameters:
       type: array
       description: Array of headers that need to be added to the response during response phase. At
         least one of requestHeaders or responseHeaders must be specified.
+      minItems: 1
       items:
         type: object
         properties:

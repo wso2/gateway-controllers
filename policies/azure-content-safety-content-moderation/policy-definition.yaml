@@ -12,6 +12,7 @@ parameters:
     request:
       type: object
       description: Configuration for request phase validation
+      additionalProperties: false
       properties:
         jsonPath:
           type: string
@@ -68,9 +69,19 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
+      anyOf:
+        - required:
+            - hateCategory
+        - required:
+            - sexualCategory
+        - required:
+            - selfHarmCategory
+        - required:
+            - violenceCategory
     response:
       type: object
       description: Configuration for response phase validation
+      additionalProperties: false
       properties:
         jsonPath:
           type: string
@@ -127,6 +138,15 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
+      anyOf:
+        - required:
+            - hateCategory
+        - required:
+            - sexualCategory
+        - required:
+            - selfHarmCategory
+        - required:
+            - violenceCategory
 
 systemParameters:
   type: object

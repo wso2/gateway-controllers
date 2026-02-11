@@ -76,6 +76,7 @@ parameters:
                   Examples for method: "tools/call", "resources/list", "prompts/get", "*"
                 minLength: 1
                 maxLength: 256
+                default: "*"
 
           requiredClaims:
             type: object
@@ -115,4 +116,9 @@ parameters:
               type: string
               minLength: 1
               maxLength: 256
+          anyOf:
+            - required:
+                - requiredClaims
+            - required:
+                - requiredScopes
       minItems: 1

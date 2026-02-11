@@ -62,6 +62,11 @@ parameters:
             If true, includes detailed assessment information from AWS Bedrock Guardrail in error responses.
             If false, returns minimal error information.
           default: false
+  anyOf:
+    - required:
+        - request
+    - required:
+        - response
 
 systemParameters:
   type: object

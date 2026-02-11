@@ -15,9 +15,8 @@ parameters:
         The name of the header or query parameter that contains the API key.
         For headers: case-insensitive matching is used (e.g., "X-API-Key", "Authorization")
         For query parameters: exact name matching is used (e.g., "api_key", "token")
-      validation:
-        minLength: 1
-        maxLength: 128
+      minLength: 1
+      maxLength: 128
 
     in:
       type: string
@@ -34,9 +33,8 @@ parameters:
         Optional prefix that should be stripped from the API key value before validation.
         Case-insensitive matching and removal. Common use case is "Bearer " for Authorization headers.
         If specified, the prefix will be removed from the extracted value.
-      validation:
-        minLength: 1
-        maxLength: 64
+      minLength: 1
+      maxLength: 64
 
   required:
     - key

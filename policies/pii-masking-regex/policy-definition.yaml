@@ -15,15 +15,19 @@ parameters:
         Array of PII entity configurations, each containing:
         - piiEntity: Name/type of the PII entity (e.g., "EMAIL", "PHONE", "SSN")
         - piiRegex: Regular expression pattern to match the PII entity
+      minItems: 1
       items:
         type: object
         properties:
           piiEntity:
             type: string
             description: Name/type of the PII entity
+            minLength: 1
+            pattern: "^[A-Z_]+$"
           piiRegex:
             type: string
             description: Regular expression pattern to match the PII entity
+            minLength: 1
         required:
         - piiEntity
         - piiRegex

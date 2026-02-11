@@ -71,6 +71,11 @@ parameters:
           default: false
       required:
       - schema
+  anyOf:
+  - required:
+    - request
+  - required:
+    - response
 
 systemParameters:         
   type: object

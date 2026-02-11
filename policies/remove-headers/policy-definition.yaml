@@ -11,6 +11,7 @@ parameters:
       type: array
       description: Array of header names to remove from the request during request phase. At least
         one of requestHeaders or responseHeaders must be specified.
+      minItems: 1
       items:
         type: object
         properties:
@@ -26,6 +27,7 @@ parameters:
       type: array
       description: Array of header names to remove from the response during response phase. At
         least one of requestHeaders or responseHeaders must be specified.
+      minItems: 1
       items:
         type: object
         properties:

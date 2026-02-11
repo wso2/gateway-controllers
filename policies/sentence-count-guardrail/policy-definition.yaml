@@ -77,6 +77,11 @@ parameters:
       required:
       - min
       - max
+  anyOf:
+  - required:
+    - request
+  - required:
+    - response
 
 systemParameters:
   type: object

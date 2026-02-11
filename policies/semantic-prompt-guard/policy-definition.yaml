@@ -57,6 +57,11 @@ parameters:
         If true, includes detailed assessment information in error responses.
         If false, returns minimal error information.
       default: false
+  anyOf:
+    - required:
+        - allowedPhrases
+    - required:
+        - deniedPhrases
 
 systemParameters:
   type: object

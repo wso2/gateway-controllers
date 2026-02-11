@@ -67,6 +67,11 @@ parameters:
           default: false
       required:
       - regex
+  anyOf:
+  - required:
+    - request
+  - required:
+    - response
 
 systemParameters:
   type: object

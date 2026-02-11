@@ -54,6 +54,7 @@ parameters:
         type: string
         minLength: 1
         maxLength: 256
+      default: []
     exposedHeaders:
       type: array
       description:
@@ -68,7 +69,8 @@ parameters:
       type: boolean
       description: Indicates whether the response can be shared when credentials
         (cookies, authorization headers, TLS certificates) are included. When true,
-        allowedOrigins cannot contain "*".
+        wildcard "*" is not allowed in allowedOrigins, allowedHeaders, allowedMethods,
+        or exposedHeaders.
       default: false
     maxAge:
       type: integer
@@ -85,6 +87,29 @@ parameters:
 
   required:
     - allowedOrigins
+  allOf:
+    - if:
+        properties:
+          allowCredentials:
+            const: true
+      then:
+        properties:
+          allowedOrigins:
+            not:
+              contains:
+                const: "*"
+          allowedHeaders:
+            not:
+              contains:
+                const: "*"
+          allowedMethods:
+            not:
+              contains:
+                const: "*"
+          exposedHeaders:
+            not:
+              contains:
+                const: "*"
 
 systemParameters:
   type: object

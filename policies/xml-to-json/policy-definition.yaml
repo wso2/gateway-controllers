@@ -11,14 +11,14 @@ parameters:
   properties:
     onRequestFlow:
       type: boolean
-      default: false
+      default: true
       description: |
         Enables XML to JSON transformation for incoming request payloads (client to upstream).
         When set to true, XML request bodies will be converted to JSON format before forwarding to upstream services.
         When set to false, request bodies will be passed through unchanged.
     onResponseFlow:
       type: boolean
-      default: false
+      default: true
       description: |
         Enables XML to JSON transformation for outgoing response payloads (upstream to client).
         When set to true, XML response bodies will be converted to JSON format before returning to clients.

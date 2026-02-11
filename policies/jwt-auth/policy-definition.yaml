@@ -32,7 +32,7 @@ parameters:
 
     requiredClaims:
       type: object
-      description: Map of claimName -> expectedValue. Runtime may support equality or regex-based matching.
+      description: Map of claimName -> expectedValue with exact string equality matching.
       additionalProperties:
         type: string
 

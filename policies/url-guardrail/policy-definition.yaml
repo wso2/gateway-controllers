@@ -31,6 +31,7 @@ parameters:
           description: |
             Timeout in milliseconds for DNS lookup or HTTP HEAD request.
             Default is 3000ms (3 seconds).
+          minimum: 0
           default: 3000
         showAssessment:
           type: boolean
@@ -60,6 +61,7 @@ parameters:
           description: |
             Timeout in milliseconds for DNS lookup or HTTP HEAD request.
             Default is 3000ms (3 seconds).
+          minimum: 0
           default: 3000
         showAssessment:
           type: boolean
@@ -67,6 +69,11 @@ parameters:
             If true, includes detailed assessment information including invalid URLs in error responses.
             If false, returns minimal error information.
           default: false
+  anyOf:
+  - required:
+    - request
+  - required:
+    - response
 
 systemParameters:
   type: object

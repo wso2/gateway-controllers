@@ -12,6 +12,7 @@ parameters:
     promptTokenLimits:
       type: array
       description: Rate limits for prompt (input) tokens.
+      minItems: 1
       items:
         type: object
         required: ["count", "duration"]
@@ -27,6 +28,7 @@ parameters:
     completionTokenLimits:
       type: array
       description: Rate limits for completion (output) tokens.
+      minItems: 1
       items:
         type: object
         required: ["count", "duration"]
@@ -42,6 +44,7 @@ parameters:
     totalTokenLimits:
       type: array
       description: Rate limits for total (prompt + completion) tokens.
+      minItems: 1
       items:
         type: object
         required: ["count", "duration"]
@@ -54,6 +57,13 @@ parameters:
             type: string
             description: Time window for the limit (e.g., "1m", "1h", "24h").
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+  anyOf:
+    - required:
+        - promptTokenLimits
+    - required:
+        - completionTokenLimits
+    - required:
+        - totalTokenLimits
 
 systemParameters:
   type: object

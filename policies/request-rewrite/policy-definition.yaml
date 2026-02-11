@@ -40,6 +40,24 @@ parameters:
             required:
               - name
               - type
+            allOf:
+              - if:
+                  properties:
+                    type:
+                      enum:
+                        - Exact
+                        - Regex
+                then:
+                  required:
+                    - value
+              - if:
+                  properties:
+                    type:
+                      const: Present
+                then:
+                  not:
+                    required:
+                      - value
         queryParams:
           type: array
           description: All query param matchers must succeed for the policy to apply
@@ -66,6 +84,24 @@ parameters:
             required:
               - name
               - type
+            allOf:
+              - if:
+                  properties:
+                    type:
+                      enum:
+                        - Exact
+                        - Regex
+                then:
+                  required:
+                    - value
+              - if:
+                  properties:
+                    type:
+                      const: Present
+                then:
+                  not:
+                    required:
+                      - value
       minProperties: 1
     pathRewrite:
       type: object
@@ -115,6 +151,28 @@ parameters:
             - substitution
       required:
         - type
+      allOf:
+        - if:
+            properties:
+              type:
+                const: ReplacePrefixMatch
+          then:
+            required:
+              - replacePrefixMatch
+        - if:
+            properties:
+              type:
+                const: ReplaceFullPath
+          then:
+            required:
+              - replaceFullPath
+        - if:
+            properties:
+              type:
+                const: ReplaceRegexMatch
+          then:
+            required:
+              - replaceRegexMatch
     queryRewrite:
       type: object
       description: Configuration for rewriting query parameters
@@ -159,6 +217,25 @@ parameters:
             required:
               - action
               - name
+            allOf:
+              - if:
+                  properties:
+                    action:
+                      enum:
+                        - Replace
+                        - Add
+                        - Append
+                then:
+                  required:
+                    - value
+              - if:
+                  properties:
+                    action:
+                      const: ReplaceRegexMatch
+                then:
+                  required:
+                    - pattern
+                    - substitution
       required:
         - rules
     methodRewrite:
