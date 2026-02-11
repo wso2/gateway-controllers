@@ -1,0 +1,140 @@
+name: Gateway Integration Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  integration-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout gateway-controllers
+        uses: actions/checkout@v4
+        with:
+          path: gateway-controllers
+
+      - name: Checkout api-platform
+        uses: actions/checkout@v4
+        with:
+          repository: wso2/api-platform
+          ref: main
+          path: api-platform
+
+      - name: Prepare dev policies in api-platform
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          POLICY_SRC="gateway-controllers/policies"
+          DEV_POLICY_DIR="api-platform/gateway/dev-policies"
+          DEFAULT_POLICIES_DIR="api-platform/gateway/gateway-controller/default-policies"
+          BUILD_FILE="api-platform/gateway/build.yaml"
+
+          if [[ ! -d "$POLICY_SRC" ]]; then
+            echo "Missing policies directory: $POLICY_SRC"
+            exit 1
+          fi
+
+          mkdir -p "$DEV_POLICY_DIR"
+          rsync -a --delete "$POLICY_SRC/" "$DEV_POLICY_DIR/"
+          mkdir -p "$DEFAULT_POLICIES_DIR"
+
+          while IFS= read -r policy_name; do
+            src_def="$POLICY_SRC/$policy_name/policy-definition.yaml"
+            dst_def="$DEFAULT_POLICIES_DIR/$policy_name.yaml"
+
+            if [[ ! -f "$src_def" ]]; then
+              echo "Missing policy definition: $src_def"
+              exit 1
+            fi
+
+            cp -f "$src_def" "$dst_def"
+          done < <(find "$POLICY_SRC" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+
+          tmp_file="$(mktemp)"
+          awk '
+            /^policies:[[:space:]]*$/ {print; found=1; exit}
+            {print}
+            END {if (!found) exit 1}
+          ' "$BUILD_FILE" > "$tmp_file"
+
+          while IFS= read -r policy_name; do
+            echo "  - name: $policy_name" >> "$tmp_file"
+            echo "    filePath: ./dev-policies/$policy_name" >> "$tmp_file"
+          done < <(find "$POLICY_SRC" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+
+          mv "$tmp_file" "$BUILD_FILE"
+
+          echo "=== Prepared api-platform/gateway/build.yaml ==="
+          cat "$BUILD_FILE"
+          echo "=== End of prepared build.yaml ==="
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build coverage-instrumented images
+        working-directory: api-platform/gateway
+        run: make build-coverage
+
+      - name: Build mock server images
+        working-directory: api-platform
+        run: |
+          for mock in mock-jwks mock-azure-content-safety mock-aws-bedrock-guardrail mock-embedding-provider mock-analytics-collector; do
+            echo "Building $mock..."
+            docker build -t ghcr.io/wso2/api-platform/$mock:latest tests/mock-servers/$mock
+          done
+
+      - name: Run integration tests
+        working-directory: api-platform/gateway
+        run: make test-integration
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: api-platform/gateway/it/coverage/output
+          retention-days: 7
+
+      - name: Upload test reports
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: api-platform/gateway/it/reports/
+          retention-days: 7
+
+      - name: Debug on failure - Dump logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== Docker Containers ==="
+          docker ps -a
+
+          echo ""
+          echo "=== api-platform/gateway/it/logs Directory Contents ==="
+          if [[ -d api-platform/gateway/it/logs ]]; then
+            if [[ "$(ls -A api-platform/gateway/it/logs)" ]]; then
+              for f in api-platform/gateway/it/logs/*; do
+                echo ""
+                echo "--- Contents of $f ---"
+                cat "$f"
+              done
+            else
+              echo "No log files found in api-platform/gateway/it/logs."
+            fi
+          else
+            echo "Directory api-platform/gateway/it/logs does not exist."
+          fi
