@@ -51,6 +51,7 @@ parameters:
             description: |
               JWT claims that must match using exact string equality.
               If both `requiredClaims` and `requiredScopes` are set, both must pass.
+            minProperties: 1
             additionalProperties:
               type: string
 
@@ -59,6 +60,7 @@ parameters:
             description: |
               OAuth scopes that must exist in the token (`scope` or `scp`).
               If both `requiredScopes` and `requiredClaims` are set, both must pass.
+            minItems: 1
             items:
               type: string
               minLength: 1
