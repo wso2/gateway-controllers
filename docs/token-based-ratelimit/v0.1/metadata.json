@@ -1,0 +1,11 @@
+{
+  "name": "token-based-ratelimit",
+  "displayName": "Token Based Ratelimit",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Rate-limits LLM traffic by token usage (prompt, completion, and total tokens).\nResolves token extraction paths from provider templates and delegates enforcement\nto the advanced rate-limit engine."
+}
