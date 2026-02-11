@@ -1,9 +1,8 @@
 name: basic-auth
 version: v0.1.0
 description: |
-  Implements HTTP Basic Authentication to protect APIs with username and password credentials.
-  Validates the Authorization header against configured credentials and sets authentication
-  metadata in the request context for downstream policies to use.
+  Protects APIs with HTTP Basic Authentication.
+  Validates the Authorization header against configured credentials and sets authentication metadata in the request context.
 
 parameters:
   type: object

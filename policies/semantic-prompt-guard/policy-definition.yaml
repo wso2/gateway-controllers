@@ -1,11 +1,8 @@
 name: semantic-prompt-guard
 version: v0.1.0
 description: |
-  Blocks or allows prompts based on semantic similarity to configured allow/deny
-  phrase embeddings. The incoming prompt is embedded via the configured embedding provider
-  and compared using cosine similarity against pre-computed vectors.
-  Supports JSONPath extraction to validate specific fields within JSON payloads.
-  Validates prompts in the request phase before they are sent to the LLM.
+  Allows or blocks prompts based on semantic similarity to configured allow/deny phrase lists.
+  Prompts are embedded and compared using cosine similarity before being sent to the LLM.
 
 parameters:
   type: object
@@ -14,7 +11,7 @@ parameters:
       type: string
       description: |
         JSONPath expression to extract the prompt from JSON payload.
-        If empty, validates the entire payload as a string.
+        If empty, validates the entire payload.
         Examples: "$.message", "$.data.prompt", "$.items[0].text"
       default: ""
     allowSimilarityThreshold:
@@ -53,9 +50,7 @@ parameters:
         description: Phrase text to deny
     showAssessment:
       type: boolean
-      description: |
-        If true, includes detailed assessment information in error responses.
-        If false, returns minimal error information.
+      description: Controls assessment detail level in error responses.
       default: false
   anyOf:
     - required:

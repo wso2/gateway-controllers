@@ -1,17 +1,16 @@
 name: json-schema-guardrail
 version: v0.1.0
 description: |
-  Validates request or response body content against a JSON Schema.
-  Supports JSONPath extraction to validate specific fields within JSON payloads.
-  Can be configured with inverted logic to pass when schema validation fails.
-  Supports separate configuration for request and response phases.
+  Validates request and response content against JSON Schema definitions.
+  Supports JSONPath extraction and optional inverted matching.
+  Request and response phases are configured independently.
 
 parameters:
   type: object
   properties:
     request:
       type: object
-      description: Configuration for request phase validation
+      description: Request-phase configuration.
       properties:
         schema:
           type: string
@@ -36,13 +35,13 @@ parameters:
           type: boolean
           description: |
             If true, includes detailed validation error information in error responses.
-            If false, returns minimal error information.
+            If false, returns minimal error details.
           default: false
       required:
       - schema
     response:
       type: object
-      description: Configuration for response phase validation
+      description: Response-phase configuration.
       properties:
         schema:
           type: string
@@ -67,7 +66,7 @@ parameters:
           type: boolean
           description: |
             If true, includes detailed validation error information in error responses.
-            If false, returns minimal error information.
+            If false, returns minimal error details.
           default: false
       required:
       - schema

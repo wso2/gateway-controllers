@@ -1,21 +1,9 @@
 name: advanced-ratelimit
 version: v0.1.4
 description: |
-  Rate limiting policy supporting multiple algorithms (GCRA, Fixed Window), multi-dimensional quotas,
-  weighted rate limiting, flexible key extraction, and both in-memory and Redis backends. Supports
-  fail-open behavior for Redis failures and provides comprehensive rate limit headers (X-RateLimit-*,
-  IETF RateLimit, and Retry-After).
-
-  Key features:
-  - Multi-dimensional quotas: Each quota can have its own key extraction and cost extraction
-  - Multiple algorithms: GCRA (smooth rate limiting) or Fixed Window (simple counter)
-  - Dynamic cost extraction: Extract costs from request/response headers, metadata, or JSON body
-  - Weighted multipliers: Apply multipliers to extracted costs (e.g., prompt tokens @ 0.1, completion tokens @ 0.3)
-  - Multiple concurrent limits (e.g., 10/second AND 1000/hour)
-  - Array-based key extraction with sensible defaults (route name)
-  - Dual backends: in-memory (single instance) or Redis (distributed)
-  - Graceful degradation: missing key components log warnings but don't fail requests
-  - Atomic operations via Lua scripts (GCRA+Redis) or native Redis commands (Fixed Window)
+  Advanced rate limiting with multiple quotas, flexible key extraction, and optional cost extraction.
+  Supports GCRA and fixed-window algorithms with in-memory or Redis backends.
+  Adds standard rate-limit headers, including X-RateLimit-*, IETF RateLimit, and Retry-After.
 
 parameters:
   type: object
@@ -25,9 +13,8 @@ parameters:
     quotas:
       type: array
       description: |
-        Array of self-contained quota definitions. Each quota is an independent rate limit
-        dimension with its own limits, keyExtraction, and costExtraction. This enables
-        multi-dimensional rate limiting (e.g., per-user request limit + per-org token limit).
+        Quota definitions for multi-dimensional rate limiting.
+        Each quota has its own limits, key extraction, and optional cost extraction.
       minItems: 1
       maxItems: 10
       items:
@@ -38,18 +25,15 @@ parameters:
           name:
             type: string
             description: |
-              Optional name for this quota. Used for logging and in the X-RateLimit-Quota
-              header when rate limit is exceeded. Makes debugging easier when multiple
-              quotas are configured.
+              Optional quota name used for logging and `X-RateLimit-Quota` responses.
             minLength: 1
             maxLength: 128
 
           limits:
             type: array
             description: |
-              Array of rate limits for this quota. Multiple limits can be specified to enforce
-              different time windows (e.g., 500/hour AND 10000/day). All limits are evaluated,
-              and the most restrictive limit is enforced.
+              Rate limits for this quota.
+              Multiple windows are supported; the most restrictive active limit is enforced.
             minItems: 1
             maxItems: 10
             items:
@@ -65,23 +49,21 @@ parameters:
                 duration:
                   type: string
                   description: |
-                    Time window for the limit (Go duration string format).
-                    Examples: "1s" (1 second), "1m" (1 minute), "1h" (1 hour), "24h" (1 day),
-                    "1h30m" (1 hour 30 minutes), "1.5h" (1.5 hours)
+                    Time window in Go duration format (for example `1s`, `1m`, `1h`, `24h`).
                   pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
                 burst:
                   type: integer
                   description: |
-                    Maximum burst capacity (number of requests that can accumulate).
-                    If omitted, defaults to the limit value (no burst beyond normal rate).
+                    Burst capacity for this limit.
+                    If omitted, defaults to the `limit` value.
                   minimum: 1
                   maximum: 1000000000
 
           keyExtraction:
             type: array
             description: |
-              Per-quota key extraction. If omitted, inherits from global keyExtraction
-              or defaults to route name.
+              Per-quota key extraction.
+              If omitted, inherits global `keyExtraction` or defaults to route name.
             minItems: 0
             maxItems: 5
             items:
@@ -92,15 +74,8 @@ parameters:
                 type:
                   type: string
                   description: |
-                    Type of component to extract:
-                    - header: Extract from HTTP header (requires 'key' field)
-                    - metadata: Extract from SharedContext.Metadata (requires 'key' field)
-                    - ip: Extract client IP from X-Forwarded-For/X-Real-IP
-                    - apiname: Use API name from context
-                    - apiversion: Use API version from context
-                    - routename: Use route name from metadata (default)
-                    - constant: Use a static string value (requires 'key' field)
-                    - cel: Use CEL expression to extract key (requires 'expression' field)
+                    Key component source.
+                    `header`, `metadata`, and `constant` use `key`; `cel` uses `expression`.
                   enum: ["header", "metadata", "ip", "apiname", "apiversion", "routename", "cel", "constant"]
                 key:
                   type: string
@@ -110,31 +85,16 @@ parameters:
                 expression:
                   type: string
                   description: |
-                    CEL expression for key extraction (required for cel type).
-                    The expression must return a string value.
-                    Available variables:
-                    - request.Headers: map[string][]string of request headers
-                    - request.Path: string, the request path
-                    - request.Method: string, the HTTP method
-                    - request.Metadata: map[string]any, shared metadata
-                    - api.Name: string, API name
-                    - api.Version: string, API version
-                    - api.Context: string, API context path
-                    Example: 'request.Headers["x-user-id"][0] + ":" + api.Name'
+                    CEL expression used when `type=cel`.
+                    Must evaluate to a string key.
                   minLength: 1
                   maxLength: 1024
 
           costExtraction:
             type: object
             description: |
-              Per-quota dynamic cost extraction configuration. When enabled, costs are
-              extracted from request or response data, allowing for token-based rate limiting
-              (e.g., LLM API token usage).
-              
-              Multiple sources can be configured. When multiple sources succeed, their values
-              are SUMMED (with multipliers applied). This enables weighted token counting:
-              
-              Example: prompt_tokens * 0.1 + completion_tokens * 0.3 = total weighted cost
+              Dynamic cost extraction for token/usage-based rate limiting.
+              When multiple sources succeed, their values are summed after applying multipliers.
             additionalProperties: false
             properties:
               enabled:
@@ -145,8 +105,8 @@ parameters:
               sources:
                 type: array
                 description: |
-                  List of sources to extract cost from. All successful extractions are
-                  summed together (with multipliers). If all fail, the default value is used.
+                  Sources used to extract dynamic cost.
+                  Successful values are summed; if all fail, `default` is used.
                 minItems: 1
                 maxItems: 10
                 items:
@@ -157,15 +117,8 @@ parameters:
                     type:
                       type: string
                       description: |
-                        Type of source to extract cost from:
-                        - request_header: Extract from request header (pre-request)
-                        - request_metadata: Extract from request metadata (pre-request)
-                        - request_body: Extract from JSON request body using jsonPath (pre-request)
-                        - response_header: Extract from response header (post-response)
-                        - response_metadata: Extract from response metadata (post-response)
-                        - response_body: Extract from JSON response body using jsonPath (post-response)
-                        - request_cel: Use CEL expression to extract cost from request context (pre-request)
-                        - response_cel: Use CEL expression to extract cost from response context (post-response)
+                        Cost source type.
+                        Header/metadata types use `key`, body types use `jsonPath`, CEL types use `expression`.
                       enum: ["request_header", "request_metadata", "request_body",
                              "response_header", "response_metadata", "response_body",
                              "request_cel", "response_cel"]
@@ -173,50 +126,29 @@ parameters:
                     key:
                       type: string
                       description: |
-                        Header name (for *_header types) or metadata key (for *_metadata types).
-                        Required for header and metadata source types.
+                        Header name (`*_header`) or metadata key (`*_metadata`).
                       minLength: 1
                       maxLength: 256
 
                     jsonPath:
                       type: string
                       description: |
-                        JSON path expression for extracting cost from body.
-                        Required for *_body types.
-                        Example: "$.usage.total_tokens" or "$.usage.prompt_tokens"
+                        JSONPath for body-based extraction (`*_body` types).
                       minLength: 1
                       maxLength: 512
 
                     expression:
                       type: string
                       description: |
-                        CEL expression for cost extraction (required for request_cel/response_cel types).
-                        The expression must return a numeric value (int or double).
-                        Available variables for request_cel:
-                        - request.Headers: map[string][]string of request headers
-                        - request.Body: request body bytes (if buffered)
-                        - request.Path: string, the request path
-                        - request.Method: string, the HTTP method
-                        - request.Metadata: map[string]any, shared metadata
-                        Available variables for response_cel:
-                        - response.Headers: map[string][]string of response headers
-                        - response.Body: response body bytes (if buffered)
-                        - response.Status: int, response status code
-                        - request.Headers: map[string][]string of original request headers
-                        - request.Path: string, the original request path
-                        - request.Method: string, the original HTTP method
-                        - request.Metadata: map[string]any, shared metadata
-                        Example: 'int(request.Headers["x-token-count"][0])'
+                        CEL expression for `request_cel` and `response_cel` sources.
+                        Must evaluate to a numeric value.
                       minLength: 1
                       maxLength: 1024
 
                     multiplier:
                       type: number
                       description: |
-                        Multiplier applied to the extracted value. Default is 1.0.
-                        Use this for weighted token counting:
-                        - Prompt tokens: multiplier 0.1 (cheaper)
-                        - Completion tokens: multiplier 0.3 (more expensive)
+                        Multiplier applied to extracted values.
                       minimum: 0
                       default: 1.0
 
@@ -238,11 +170,8 @@ parameters:
     keyExtraction:
       type: array
       description: |
-        Global key extraction configuration. Used as a default for quotas that don't specify
-        their own keyExtraction.
-        
-        If omitted or empty, defaults to route name.
-        Multiple components are joined with ':' separator for composite keys.
+        Global key extraction default for quotas without their own `keyExtraction`.
+        If omitted or empty, route name is used.
       minItems: 0
       maxItems: 5
       items:
@@ -253,15 +182,8 @@ parameters:
           type:
             type: string
             description: |
-              Type of component to extract:
-              - header: Extract from HTTP header (requires 'key' field)
-              - metadata: Extract from SharedContext.Metadata (requires 'key' field)
-              - ip: Extract client IP from X-Forwarded-For/X-Real-IP
-              - apiname: Use API name from context
-              - apiversion: Use API version from context
-              - routename: Use route name from metadata (default)
-              - constant: Use a static string value (requires 'key' field)
-              - cel: Use CEL expression to extract key (requires 'expression' field)
+              Key component source.
+              `header`, `metadata`, and `constant` use `key`; `cel` uses `expression`.
             enum: ["header", "metadata", "ip", "apiname", "apiversion", "routename", "cel", "constant"]
           key:
             type: string
@@ -271,17 +193,8 @@ parameters:
           expression:
             type: string
             description: |
-              CEL expression for key extraction (required for cel type).
-              The expression must return a string value.
-              Available variables:
-              - request.Headers: map[string][]string of request headers
-              - request.Path: string, the request path
-              - request.Method: string, the HTTP method
-              - request.Metadata: map[string]any, shared metadata
-              - api.Name: string, API name
-              - api.Version: string, API version
-              - api.Context: string, API context path
-              Example: 'request.Headers["x-user-id"][0] + ":" + api.Name'
+              CEL expression used when `type=cel`.
+              Must evaluate to a string key.
             minLength: 1
             maxLength: 1024
 

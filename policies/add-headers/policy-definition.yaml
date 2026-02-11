@@ -1,15 +1,15 @@
 name: add-headers
 version: v0.1.1
 description: |
-  This policy provides the capability to add arbitrary headers to either the request or the response.
-  Adding the same header multiple times will not overwrite the existing header values and it will be appended to the list of values if the header already exists.
+  Adds headers to the request and/or response.
+  If a header already exists, new values are appended instead of overwritten.
 
 parameters:
   type: object
   properties:
     requestHeaders:
       type: array
-      description: Array of headers that need to be added to the request during request phase. At least
+      description: Request headers to add during the request phase. At least
         one of requestHeaders or responseHeaders must be specified.
       minItems: 1
       items:
@@ -32,7 +32,7 @@ parameters:
         - value
     responseHeaders:
       type: array
-      description: Array of headers that need to be added to the response during response phase. At
+      description: Response headers to add during the response phase. At
         least one of requestHeaders or responseHeaders must be specified.
       minItems: 1
       items:

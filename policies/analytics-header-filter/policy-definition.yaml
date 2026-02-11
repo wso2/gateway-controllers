@@ -1,39 +1,27 @@
 name: analytics-header-filter
 version: v0.1.0
 description: |
-  The Analytics Header Filter policy allows you to control which request and response headers 
-  are included in analytics data using allow or deny modes. This policy is intended to prevent sensitive, 
-  noisy, or irrelevant headers from being sent to analytics backends while preserving the rest of the request 
-  and response context.
-  
-  The policy only affects analytics data collection. It does not remove or modify headers sent to upstream 
-  services or returned to clients.
-  
-  Operation modes:
-  - "allow": Only the specified headers will be included in analytics (whitelist mode)
-  - "deny": All headers except the specified ones will be included in analytics (blacklist mode)
-  
-  Request and response headers can have different operation modes, allowing for flexible filtering strategies.
+  Controls which request and response headers are sent to analytics using allow or deny modes.
+  Only analytics data is affected; request and response headers themselves are not modified.
+  Request and response can be configured independently.
 
 parameters:
   type: object
   properties:
     requestHeadersToFilter:
       type: object
-      description: Configuration for filtering request headers
+      description: Request header filter configuration.
       properties:
         operation:
           type: string
           description: |
-            Operation mode for request header filtering.
-            - "allow": Only the specified headers will be included in analytics (whitelist)
-            - "deny": All headers except the specified ones will be included in analytics (blacklist)
+            Request filter mode: `allow` includes only listed headers; `deny` excludes listed headers.
           enum:
             - allow
             - deny
         headers:
           type: array
-          description: List of request header names to filter. Behavior depends on the operation mode.
+          description: Request header names used by the selected `operation`.
           items:
             type: string
             minLength: 1
@@ -43,20 +31,18 @@ parameters:
         - operation
     responseHeadersToFilter:
       type: object
-      description: Configuration for filtering response headers
+      description: Response header filter configuration.
       properties:
         operation:
           type: string
           description: |
-            Operation mode for response header filtering.
-            - "allow": Only the specified headers will be included in analytics (whitelist)
-            - "deny": All headers except the specified ones will be included in analytics (blacklist)
+            Response filter mode: `allow` includes only listed headers; `deny` excludes listed headers.
           enum:
             - allow
             - deny
         headers:
           type: array
-          description: List of response header names to filter. Behavior depends on the operation mode.
+          description: Response header names used by the selected `operation`.
           items:
             type: string
             minLength: 1

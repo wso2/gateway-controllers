@@ -1,10 +1,8 @@
 name: mcp-auth
 version: v0.1.2
 description: |
-  This policy is used to secure traffic to Model Context Protocol server as defined in the specification 
-  (https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization). The Gateway acts as the 
-  resource server and protects the MCP resources by validating the access tokens presented in the requests.
-  This uses the JwtAuthentication policy underneath to validate the access tokens.
+  Secures Model Context Protocol (MCP) traffic by validating access tokens on incoming requests.
+  Uses the underlying JWT authentication flow to protect MCP resources.
 
 parameters:
   type: object

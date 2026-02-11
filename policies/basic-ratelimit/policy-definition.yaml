@@ -1,9 +1,8 @@
 name: basic-ratelimit
 version: v0.1.3
 description: |
-  Simple request rate limiting policy that limits the number of requests per time window.
-  Uses route name as the rate limit key. For advanced rate limiting with multi-dimensional
-  quotas, weighted costs, and custom key extraction, use the full 'ratelimit' policy.
+  Applies request rate limits per route using one or more time windows.
+  Uses route name as the rate-limit key.
 
 parameters:
   type: object

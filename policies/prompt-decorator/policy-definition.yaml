@@ -1,8 +1,7 @@
 name: prompt-decorator
 version: v0.1.0
 description: |
-  Dynamically modifies the prompt by applying custom decorations using a configured strategy.
-  Only processes request body.
+  Modifies prompts by applying configured decorations to request payloads.
 
 parameters:
   type: object
@@ -13,16 +12,14 @@ parameters:
           minLength: 1
         - type: object
       description: |
-        The configuration for decorating the prompt. Can decorate completions or chat/completions definitions.
-        JSON string with decoration array containing role and content.
-        Example: {"decoration": [{"role": "system", "content": "You are a helpful assistant."}]}
+        Prompt decoration configuration as a JSON string or object.
     jsonPath:
       type: string
-      description: The JSONPath expression to extract the portion of the prompt that should be modified.
+      description: JSONPath selecting the prompt section to modify.
       minLength: 1
     append:
       type: boolean
-      description: If true, the decorated content will be appended to the prompt. Otherwise, it will be prepended.
+      description: If true, appends decorated content; otherwise prepends it.
       default: false
   required:
     - promptDecoratorConfig

@@ -1,9 +1,9 @@
 name: xml-to-json
 version: v0.1.0
 description: |
-  This policy provides the capability to transform a request/response with an XML payload to a request/response with a JSON payload.
-  This policy assumes that the request/response payload is XML. Attempting to use it on a request/response with a non-XML payload will result in premature termination of the mediation flow.
-  For the same reason, this policy cannot be attached multiple times to a resource since once it is used, the payload will be a JSON value.
+  Transforms XML payloads to JSON in request and response mediation flows.
+  Requires valid XML input; non-XML payloads fail policy execution.
+  Do not attach this policy multiple times to the same resource flow.
 
 parameters:
   type: object
@@ -13,16 +13,12 @@ parameters:
       type: boolean
       default: true
       description: |
-        Enables XML to JSON transformation for incoming request payloads (client to upstream).
-        When set to true, XML request bodies will be converted to JSON format before forwarding to upstream services.
-        When set to false, request bodies will be passed through unchanged.
+        Converts incoming XML request payloads to JSON before forwarding upstream.
     onResponseFlow:
       type: boolean
       default: true
       description: |
-        Enables XML to JSON transformation for outgoing response payloads (upstream to client).
-        When set to true, XML response bodies will be converted to JSON format before returning to clients.
-        When set to false, response bodies will be passed through unchanged.
+        Converts outgoing XML response payloads to JSON before returning to clients.
 
 systemParameters:
   type: object

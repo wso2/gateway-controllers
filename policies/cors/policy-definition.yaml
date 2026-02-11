@@ -1,9 +1,8 @@
 name: cors
 version: v0.1.0
 description: |
-  Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds
-  appropriate CORS headers to responses. Enables controlled access to resources from different
-  origins by configuring allowed origins, methods, headers, and credentials.
+  Handles CORS preflight requests and adds CORS headers to responses.
+  Controls cross-origin access using allowed origins, methods, headers, and credentials.
 
 parameters:
   type: object

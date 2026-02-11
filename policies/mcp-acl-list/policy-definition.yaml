@@ -1,14 +1,9 @@
 name: mcp-acl-list
 version: v0.1.0
 description: |
-  MCP ACL List policy controls access to tools, resources, and prompts using
-  mode and exceptions. It filters list responses based on the configured mode
-  and enforces the same allow/deny rules on request paths. This policy does not
-  rewrite capability fields (tools, resources, or prompts) or modify list entry contents.
-
-  - Missing capability config: Allow all capabilities of that type
-  - mode: allow, exceptions: [..] => allow all except listed exceptions
-  - mode: deny, exceptions: [..] => deny all except listed exceptions
+  Controls access to MCP tools, resources, and prompts using allow/deny mode with exceptions.
+  Applies the same rules to list responses and request paths.
+  Does not rewrite capability fields or modify list entry content.
 
 parameters:
   type: object

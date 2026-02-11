@@ -1,15 +1,9 @@
 name: mcp-rewrite
 version: v0.1.0
 description: |
-  MCP Rewrite policy defines user-facing tools, resources, and prompts and maps
-  them to backend capability names using optional "target" fields. Request payloads
-  are rewritten to the backend capability name when configured, and list responses
-  rewrite capability names in-place to return user-facing values. When a list is
-  provided, only the configured capabilities are included in list responses.
-
-  - Null or omitted: Allow all capabilities of that type without rewriting
-  - Empty array []: Deny all capabilities of that type
-  - Non-empty array: Allow only the specified capabilities and apply rewrites
+  Rewrites MCP tools, resources, and prompts between client-facing names and backend targets.
+  Can filter list responses and rewrite request payloads based on configured entries.
+  Omitted lists allow all, empty lists deny all, and non-empty lists allow only configured items.
 
 parameters:
   type: object
@@ -18,9 +12,8 @@ parameters:
     tools:
       type: array
       description: |
-        List of tools to rewrite. When provided (non-empty), only these tools are
-        included in tools/list responses. Each entry must include "name" and may
-        include "target" plus any additional fields to be returned in tools/list.
+        Tool rewrite entries.
+        When non-empty, only listed tools are exposed in `tools/list`.
       items:
         type: object
         additionalProperties: true
@@ -54,9 +47,8 @@ parameters:
     resources:
       type: array
       description: |
-        List of resources to rewrite. When provided (non-empty), only these resources are
-        included in resources/list responses. Each entry must include "name" and may
-        include "target" plus any additional fields to be returned in resources/list.
+        Resource rewrite entries.
+        When non-empty, only listed resources are exposed in `resources/list`.
       items:
         type: object
         additionalProperties: true
@@ -86,9 +78,8 @@ parameters:
     prompts:
       type: array
       description: |
-        List of prompts to rewrite. When provided (non-empty), only these prompts are
-        included in prompts/list responses. Each entry must include "name" and may
-        include "target" plus any additional fields to be returned in prompts/list.
+        Prompt rewrite entries.
+        When non-empty, only listed prompts are exposed in `prompts/list`.
       items:
         type: object
         additionalProperties: true

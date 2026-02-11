@@ -1,9 +1,8 @@
 name: model-round-robin
 version: v0.1.0
 description: |
-  Implements round-robin load balancing for AI models. Distributes requests evenly
-  across multiple configured AI models in a cyclic manner, ensuring equal request
-  allocation over time and preventing overloading of any single model.
+  Distributes requests across configured AI models using round-robin scheduling.
+  Each model is selected in turn for even traffic distribution over time.
 
 parameters:
   type: object

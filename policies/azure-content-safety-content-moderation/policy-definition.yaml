@@ -1,24 +1,23 @@
 name: azure-content-safety-content-moderation
 version: v0.1.0
 description: |
-  Validates request or response body content against Azure Content Safety API for content moderation.
-  Supports detection of hate speech, sexual content, self-harm, and violence with configurable severity thresholds.
-  Supports JSONPath extraction to validate specific fields within JSON payloads.
-  Supports separate configuration for request and response phases.
+  Validates request and response content with Azure Content Safety content moderation.
+  Supports configurable severity thresholds for hate, sexual, self-harm, and violence categories.
+  Supports separate request and response phase configuration.
 
 parameters:
   type: object
   properties:
     request:
       type: object
-      description: Configuration for request phase validation
+      description: Request-phase configuration.
       additionalProperties: false
       properties:
         jsonPath:
           type: string
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            If empty, validates the entire payload as a string.
+            JSONPath to extract a specific value from the JSON payload.
+            If empty, validates the entire payload.
             Examples: "$.message", "$.data.content", "$.items[0].text"
           default: ""
         passthroughOnError:
@@ -29,9 +28,7 @@ parameters:
           default: false
         showAssessment:
           type: boolean
-          description: |
-            If true, includes detailed assessment information in error responses.
-            If false, returns minimal error information.
+          description: Controls assessment detail level in error responses.
           default: false
         hateCategory:
           type: integer
@@ -80,14 +77,14 @@ parameters:
             - violenceCategory
     response:
       type: object
-      description: Configuration for response phase validation
+      description: Response-phase configuration.
       additionalProperties: false
       properties:
         jsonPath:
           type: string
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            If empty, validates the entire payload as a string.
+            JSONPath to extract a specific value from the JSON payload.
+            If empty, validates the entire payload.
             Examples: "$.message", "$.data.content", "$.items[0].text"
           default: ""
         passthroughOnError:
@@ -98,9 +95,7 @@ parameters:
           default: false
         showAssessment:
           type: boolean
-          description: |
-            If true, includes detailed assessment information in error responses.
-            If false, returns minimal error information.
+          description: Controls assessment detail level in error responses.
           default: false
         hateCategory:
           type: integer

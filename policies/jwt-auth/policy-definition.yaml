@@ -2,8 +2,7 @@ name: jwt-auth
 version: v0.1.3
 description: |
   Validates JWT access tokens using one or more JWKS providers (key managers).
-  System-level configuration holds key manager endpoints and fetch behavior.
-  User-level configuration holds per-route assertions (selected issuers, audiences, scopes, claims and mappings).
+  System parameters define key manager and JWKS behavior; user parameters define route-level claims and scope checks.
 
 parameters:
   type: object

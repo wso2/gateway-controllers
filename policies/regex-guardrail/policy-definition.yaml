@@ -1,17 +1,16 @@
 name: regex-guardrail
 version: v0.1.0
 description: |
-  Validates request or response body content against a regular expression pattern.
-  Supports JSONPath extraction to validate specific fields within JSON payloads.
-  Can be configured to match or invert the regex pattern.
-  Supports separate configuration for request and response phases.
+  Validates request and response content against regular expression patterns.
+  Supports JSONPath extraction and optional inverted matching.
+  Request and response phases are configured independently.
 
 parameters:
   type: object
   properties:
     request:
       type: object
-      description: Configuration for request phase validation
+      description: Request-phase configuration.
       properties:
         regex:
           type: string
@@ -20,8 +19,8 @@ parameters:
         jsonPath:
           type: string
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            If empty, validates the entire payload as a string.
+            JSONPath to extract a specific value from the JSON payload.
+            If empty, validates the entire payload.
             Examples: "$.message", "$.data.content", "$.items[0].text"
           default: ""
         invert:
@@ -32,15 +31,13 @@ parameters:
           default: false
         showAssessment:
           type: boolean
-          description: |
-            If true, includes detailed assessment information in error responses.
-            If false, returns minimal error information.
+          description: Controls assessment detail level in error responses.
           default: false
       required:
       - regex
     response:
       type: object
-      description: Configuration for response phase validation
+      description: Response-phase configuration.
       properties:
         regex:
           type: string
@@ -49,8 +46,8 @@ parameters:
         jsonPath:
           type: string
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            If empty, validates the entire payload as a string.
+            JSONPath to extract a specific value from the JSON payload.
+            If empty, validates the entire payload.
             Examples: "$.message", "$.data.content", "$.items[0].text"
           default: ""
         invert:
@@ -61,9 +58,7 @@ parameters:
           default: false
         showAssessment:
           type: boolean
-          description: |
-            If true, includes detailed assessment information in error responses.
-            If false, returns minimal error information.
+          description: Controls assessment detail level in error responses.
           default: false
       required:
       - regex

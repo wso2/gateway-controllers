@@ -1,12 +1,9 @@
 name: semantic-cache
 version: v0.1.0
 description: |
-  Implements semantic caching for LLM responses using vector similarity search.
-  Generates embeddings from request bodies and checks for semantically similar cached responses.
-  If a cache hit is found, returns the cached response immediately without calling the upstream.
-  Stores successful responses in the cache for future lookups.
-  
-  Note: This policy requires embedding providers (OpenAI, Mistral, Azure OpenAI) and vector database providers (Redis, Milvus) to be configured.
+  Caches LLM responses using vector similarity search.
+  Generates embeddings from requests, serves semantically similar cached responses on hits, and stores successful responses on misses.
+  Requires configured embedding and vector-store providers.
 
 parameters:
   type: object

@@ -1,9 +1,8 @@
 name: respond
 version: v0.1.1
 description: |
-  Returns an immediate response to the client without forwarding the request to the upstream backend.
-  This policy terminates the request processing chain and is useful for mocking APIs, returning
-  error responses, or implementing custom short-circuit logic.
+  Returns an immediate response without forwarding the request upstream.
+  Useful for API mocking, controlled error responses, and short-circuit behavior.
 
 parameters:
   type: object

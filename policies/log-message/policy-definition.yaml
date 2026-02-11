@@ -1,8 +1,8 @@
 name: log-message
 version: v0.1.0
 description: |
-  This policy provides the capability to log the payload and headers of a request/response.
-  It supports separate configuration for request and response flows.
+  Logs request and response payloads and headers.
+  Request and response logging can be configured independently.
 
 parameters:
   type: object
@@ -12,42 +12,32 @@ parameters:
       type: boolean
       default: false
       description: |
-        Enables logging of request payloads.
-        When set to true, the request bodies will be logged.
-        When set to false, request payloads will not be logged.
+        Enables request payload logging.
     logRequestHeaders:
       type: boolean
       default: false
       description: |
-        Enables logging of request headers.
-        When set to true, the request headers will be logged.
-        When set to false, request headers will not be logged.
+        Enables request header logging.
     excludedRequestHeaders:
       type: string
       description: |
-        A comma-separated list of header names to exclude from request logging when logRequestHeaders is enabled.
-        Example: "Authorization,X-API-Key" will exclude these headers from being logged.
-        This parameter is optional and only applies when logRequestHeaders is true.
+        Comma-separated header names to exclude from request header logging.
+        Used only when `logRequestHeaders` is enabled.
     logResponsePayload:
       type: boolean
       default: false
       description: |
-        Enables logging of response payloads.
-        When set to true, the response bodies will be logged.
-        When set to false, response payloads will not be logged.
+        Enables response payload logging.
     logResponseHeaders:
       type: boolean
       default: false
       description: |
-        Enables logging of response headers.
-        When set to true, the response headers will be logged.
-        When set to false, response headers will not be logged.
+        Enables response header logging.
     excludedResponseHeaders:
       type: string
       description: |
-        A comma-separated list of header names to exclude from response logging when logResponseHeaders is enabled.
-        Example: "Authorization,X-API-Key" will exclude these headers from being logged.
-        This parameter is optional and only applies when logResponseHeaders is true.
+        Comma-separated header names to exclude from response header logging.
+        Used only when `logResponseHeaders` is enabled.
 
   required: []
 

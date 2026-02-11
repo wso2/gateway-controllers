@@ -1,11 +1,8 @@
 name: request-rewrite
 version: v0.1.0
 description: |
-  Rewrites incoming requests by updating paths, query parameters, and/or HTTP methods before forwarding to upstream services.
-  Supports multiple path rewrite types: prefix replacement, full path replacement, and regex-based substitution.
-  Supports query parameter rewrite rules (replace, remove, add, append, and regex-based substitution).
-  Method rewriting changes the HTTP method of the request.
-  Optional match conditions allow rewrites to apply only when headers and/or query parameters match.
+  Rewrites incoming requests before they are sent upstream.
+  Supports path, query parameter, and HTTP method rewrites, with optional header/query match conditions.
 
 parameters:
   type: object
