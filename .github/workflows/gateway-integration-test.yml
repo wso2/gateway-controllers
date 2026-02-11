@@ -5,6 +5,8 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - 'policies/**'
 
 permissions:
   contents: read
@@ -46,6 +48,9 @@ jobs:
           rsync -a --delete "$POLICY_SRC/" "$DEV_POLICY_DIR/"
           mkdir -p "$DEFAULT_POLICIES_DIR"
 
+          policy_names_file="$(mktemp)"
+          find "$POLICY_SRC" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort > "$policy_names_file"
+
           while IFS= read -r policy_name; do
             src_def="$POLICY_SRC/$policy_name/policy-definition.yaml"
             dst_def="$DEFAULT_POLICIES_DIR/$policy_name.yaml"
@@ -56,19 +61,45 @@ jobs:
             fi
 
             cp -f "$src_def" "$dst_def"
-          done < <(find "$POLICY_SRC" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+          done < "$policy_names_file"
 
           tmp_file="$(mktemp)"
-          awk '
-            /^policies:[[:space:]]*$/ {print; found=1; exit}
-            {print}
-            END {if (!found) exit 1}
-          ' "$BUILD_FILE" > "$tmp_file"
-
+          policy_entries_file="$(mktemp)"
           while IFS= read -r policy_name; do
-            echo "  - name: $policy_name" >> "$tmp_file"
-            echo "    filePath: ./dev-policies/$policy_name" >> "$tmp_file"
-          done < <(find "$POLICY_SRC" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; | sort)
+            echo "  - name: $policy_name" >> "$policy_entries_file"
+            echo "    filePath: ./dev-policies/$policy_name" >> "$policy_entries_file"
+          done < "$policy_names_file"
+
+          awk -v policy_entries_file="$policy_entries_file" '
+            function print_policy_entries(line) {
+              while ((getline line < policy_entries_file) > 0) {
+                print line
+              }
+              close(policy_entries_file)
+            }
+
+            /^policies:[[:space:]]*$/ {
+              print
+              print_policy_entries()
+              found = 1
+              in_policies = 1
+              next
+            }
+
+            in_policies {
+              if ($0 ~ /^[^[:space:]][^:]*:[[:space:]]*($|#)/) {
+                in_policies = 0
+                print
+              }
+              next
+            }
+
+            { print }
+
+            END {
+              if (!found) exit 1
+            }
+          ' "$BUILD_FILE" > "$tmp_file"
 
           mv "$tmp_file" "$BUILD_FILE"
 
