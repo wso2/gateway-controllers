@@ -86,7 +86,7 @@ jobs:
 
       - name: Build coverage-instrumented images
         working-directory: api-platform/gateway
-        run: make build-coverage
+        run: make build-coverage VERSION=test
 
       - name: Build mock server images
         working-directory: api-platform
