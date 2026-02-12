@@ -88,6 +88,8 @@ parameters:
     - allowedOrigins
   allOf:
     - if:
+        required:
+          - allowCredentials
         properties:
           allowCredentials:
             const: true
