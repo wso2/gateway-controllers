@@ -592,13 +592,7 @@ All generated API keys follow a consistent format:
 The platform implements comprehensive security measures for API key management:
 
 #### Secure Hashing
-API keys are securely hashed before being stored in the database using configurable cryptographic algorithms:
-
-- **SHA-256**: Fast and secure hashing with salt
-- **bcrypt**: Adaptive hashing with configurable cost factor  
-- **Argon2id**: Memory-hard hashing algorithm resistant to GPU attacks
-
-The hashing algorithm can be configured by administrators. If no algorithm is specified, SHA-256 is used by default.
+API keys are securely hashed before being stored in the database using the SHA-256 cryptographic algorithm. If the hashing algorithm is not specified, SHA-256 is used by default.
 
 #### Masked Display
 For security reasons, API keys are masked when displayed in list operations:
@@ -609,7 +603,6 @@ For security reasons, API keys are masked when displayed in list operations:
 #### Secure Storage
 - API keys are never stored in plain text
 - Only hashed values are persisted to the database
-- The system supports migration between different hashing algorithms
 - Keys are validated using constant-time comparison to prevent timing attacks
 
 #### Access Control
@@ -657,7 +650,7 @@ API keys used with this policy are managed by the platform's key management syst
 ## Security Considerations
 
 1. **HTTPS Only**: Always use API key authentication over HTTPS to prevent key interception during transmission
-2. **Cryptographic Hashing**: API keys are automatically hashed using secure algorithms (SHA-256, bcrypt, or Argon2id) before storage
+2. **Cryptographic Hashing**: API keys are automatically hashed using SHA-256 before storage
 3. **Key Masking**: API keys are masked in list operations showing only the first 10 characters to prevent accidental exposure
 4. **Secure Storage**: Keys are never stored in plain text - only cryptographic hashes are persisted
 5. **Regular Regeneration**: Use the regenerate endpoint to regenerate API keys regularly without affecting your quota
