@@ -214,6 +214,16 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 	ctx.Metadata[MetadataKeyAuthSuccess] = true
 	ctx.Metadata[MetadataKeyAuthMethod] = "api-key"
 
+	// Populate AuthContext struct (AppID/UserID left empty until store supports returning them)
+	if ctx.SharedContext != nil {
+		if ctx.SharedContext.AuthContext == nil {
+			ctx.SharedContext.AuthContext = &policy.AuthContext{}
+		}
+		ac := ctx.SharedContext.AuthContext
+		ac.Authenticated = true
+		ac.AuthType = "apikey"
+	}
+
 	slog.Debug("API Key Auth Policy: Authentication metadata set",
 		"authSuccess", true,
 		"authMethod", "api-key",

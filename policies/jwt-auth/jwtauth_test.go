@@ -1072,7 +1072,7 @@ func createMockRequestContext(headers map[string][]string) *policy.RequestContex
 		SharedContext: &policy.SharedContext{
 			RequestID:   "test-request-id",
 			Metadata:    make(map[string]interface{}),
-			AuthContext: make(map[string]string), // Initialize AuthContext map
+			AuthContext: &policy.AuthContext{},
 		},
 		Headers: policy.NewHeaders(headers),
 		Body:    nil,
@@ -1441,8 +1441,8 @@ func TestJWTAuthPolicy_UserIdClaim_DefaultSub(t *testing.T) {
 	}
 
 	// Verify user ID was extracted from 'sub' claim
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "user-12345" {
-		t.Errorf("Expected x-wso2-user-id='user-12345', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	if ctx.SharedContext.AuthContext.UserID != "user-12345" {
+		t.Errorf("Expected AuthContext.UserID='user-12345', got '%v'", ctx.SharedContext.AuthContext.UserID)
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1497,8 +1497,8 @@ func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 	}
 
 	// Verify user ID was extracted from 'user_id' claim, not 'sub'
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "custom-user-9999" {
-		t.Errorf("Expected x-wso2-user-id='custom-user-9999', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	if ctx.SharedContext.AuthContext.UserID != "custom-user-9999" {
+		t.Errorf("Expected AuthContext.UserID='custom-user-9999', got '%v'", ctx.SharedContext.AuthContext.UserID)
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1552,8 +1552,8 @@ func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
 	}
 
 	// Verify user ID was extracted from 'email' claim
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "alice@example.com" {
-		t.Errorf("Expected x-wso2-user-id='alice@example.com', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	if ctx.SharedContext.AuthContext.UserID != "alice@example.com" {
+		t.Errorf("Expected AuthContext.UserID='alice@example.com', got '%v'", ctx.SharedContext.AuthContext.UserID)
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1608,8 +1608,8 @@ func TestJWTAuthPolicy_UserIdClaim_MissingClaim(t *testing.T) {
 	}
 
 	// Verify user ID was NOT set (or is empty) when claim is missing
-	userId, exists := ctx.SharedContext.AuthContext["x-wso2-user-id"]
-	if exists && userId != "" {
+	userId := ctx.SharedContext.AuthContext.UserID
+	if userId != "" {
 		t.Errorf("Expected x-wso2-user-id to be empty or not set when claim is missing, got '%v'", userId)
 	}
 
@@ -1664,7 +1664,7 @@ func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
 	}
 
 	// Verify numeric user ID was converted to string
-	userId := ctx.SharedContext.AuthContext["x-wso2-user-id"]
+	userId := ctx.SharedContext.AuthContext.UserID
 	if userId != "987654321" {
 		t.Errorf("Expected x-wso2-user-id='987654321', got '%v'", userId)
 	}
@@ -1719,8 +1719,8 @@ func TestJWTAuthPolicy_UserIdClaim_EmptyString(t *testing.T) {
 	}
 
 	// When userIdClaim is empty string, should NOT extract user ID
-	userId, exists := ctx.SharedContext.AuthContext["x-wso2-user-id"]
-	if exists && userId != "" {
+	userId := ctx.SharedContext.AuthContext.UserID
+	if userId != "" {
 		t.Errorf("Expected x-wso2-user-id to be empty when userIdClaim is empty string, got '%v'", userId)
 	}
 
@@ -1781,8 +1781,8 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 	}
 
 	// Verify user ID was extracted from 'username' claim
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "johndoe" {
-		t.Errorf("Expected x-wso2-user-id='johndoe', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	if ctx.SharedContext.AuthContext.UserID != "johndoe" {
+		t.Errorf("Expected AuthContext.UserID='johndoe', got '%v'", ctx.SharedContext.AuthContext.UserID)
 	}
 
 	// Verify claim mappings were also applied

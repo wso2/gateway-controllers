@@ -47,9 +47,6 @@ const (
 	MetadataKeySubject      = "auth.subject"
 	MetadataValidatedClaims = "auth.validatedClaims"
 
-	// AuthContext key for user ID (used for analytics)
-	AuthContextKeyUserID = "x-wso2-user-id"
-
 	// Default claim to extract user ID from
 	DefaultUserIdClaim = "sub"
 )
@@ -1272,6 +1269,71 @@ func parseScopes(scopeClaim, scpClaim interface{}) []string {
 	return scopes
 }
 
+// standardJWTClaimNames are claim names that are mapped to AuthContext fields or are standard and not copied to Properties
+var standardJWTClaimNames = map[string]bool{
+	"sub": true, "iss": true, "aud": true, "exp": true, "nbf": true, "iat": true,
+	"scope": true, "scp": true, "jti": true,
+}
+
+// populateAuthContext fills the SDK AuthContext struct from validated JWT claims
+func (p *JwtAuthPolicy) populateAuthContext(ctx *policy.RequestContext, claims jwt.MapClaims, userIdClaim string) {
+	if ctx.SharedContext == nil {
+		return
+	}
+	// Ensure AuthContext is initialized when it is a pointer (SDK may pass nil)
+	if ctx.SharedContext.AuthContext == nil {
+		ctx.SharedContext.AuthContext = &policy.AuthContext{}
+	}
+	ac := ctx.SharedContext.AuthContext
+	ac.Authenticated = true
+	ac.AuthType = "jwt"
+	ac.Subject = getString(claims["sub"])
+	ac.Issuer = getString(claims["iss"])
+	ac.Audience = audienceToString(claims["aud"])
+	ac.UserID = ""
+	if userIdClaim != "" {
+		if claimValue, exists := claims[userIdClaim]; exists {
+			ac.UserID = claimValueToString(claimValue)
+			slog.Debug("JWT Auth Policy: Set user ID in AuthContext",
+				"claim", userIdClaim,
+				"userId", ac.UserID,
+			)
+		}
+	}
+	scopeStrs := parseScopes(claims["scope"], claims["scp"])
+	if len(scopeStrs) > 0 {
+		if ac.Scopes == nil {
+			ac.Scopes = make(map[string]bool)
+		}
+		for _, s := range scopeStrs {
+			ac.Scopes[s] = true
+		}
+	}
+	// Copy non-standard claims to Properties
+	if ac.Properties == nil {
+		ac.Properties = make(map[string]string)
+	}
+	for k, v := range claims {
+		if standardJWTClaimNames[k] {
+			continue
+		}
+		ac.Properties[k] = claimValueToString(v)
+	}
+}
+
+// audienceToString returns a single string for the aud claim (first element if array)
+func audienceToString(audClaim interface{}) string {
+	if audStr, ok := audClaim.(string); ok {
+		return audStr
+	}
+	if audArr, ok := audClaim.([]interface{}); ok && len(audArr) > 0 {
+		if aStr, ok := audArr[0].(string); ok {
+			return aStr
+		}
+	}
+	return ""
+}
+
 // handleAuthSuccess handles successful authentication
 func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string, userIdClaim string) policy.RequestAction {
 	slog.Debug("JWT Auth Policy: handleAuthSuccess called",
@@ -1298,23 +1360,8 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 		)
 	}
 
-	// Extract user ID from the specified claim and set it in AuthContext for analytics
-	if userIdClaim != "" {
-		if claimValue, exists := claims[userIdClaim]; exists {
-			userId := claimValueToString(claimValue)
-			if userId != "" {
-				ctx.SharedContext.AuthContext[AuthContextKeyUserID] = userId
-				slog.Debug("JWT Auth Policy: Set user ID in AuthContext",
-					"claim", userIdClaim,
-					"userId", userId,
-				)
-			}
-		} else {
-			slog.Debug("JWT Auth Policy: User ID claim not found or empty",
-				"claim", userIdClaim,
-			)
-		}
-	}
+	// Populate AuthContext struct for analytics and downstream policies
+	p.populateAuthContext(ctx, claims, userIdClaim)
 
 	// Apply claim mappings as headers
 	modifications := policy.UpstreamRequestModifications{
