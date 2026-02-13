@@ -592,7 +592,7 @@ All generated API keys follow a consistent format:
 The platform implements comprehensive security measures for API key management:
 
 #### Secure Hashing
-API keys are securely hashed before being stored in the database using the SHA-256 cryptographic algorithm. If the hashing algorithm is not specified, SHA-256 is used by default.
+API keys are securely hashed before being stored in the database using the SHA-256 cryptographic algorithm.
 
 #### Masked Display
 For security reasons, API keys are masked when displayed in list operations:
