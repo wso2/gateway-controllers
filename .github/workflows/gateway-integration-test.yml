@@ -126,6 +126,12 @@ jobs:
             echo "Building $mock..."
             docker build -t ghcr.io/wso2/api-platform/$mock:latest tests/mock-servers/$mock
           done
+          
+      - name: Build sample-service
+        working-directory: api-platform
+        run: |
+          cd samples/sample-service
+          make build
 
       - name: Run integration tests
         working-directory: api-platform/gateway
