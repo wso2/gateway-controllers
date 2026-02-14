@@ -12,32 +12,30 @@ The JSON Schema Guardrail validates request or response body content against a J
 - Validates content against JSON Schema Draft 7
 - Supports JSONPath extraction to validate specific fields within JSON payloads
 - Configurable inverted logic to pass when schema validation fails
-- Separate configuration for request and response phases
+- Supports independent request and response phase configuration
 - Detailed validation error information in error responses
 
 ## Configuration
 
-### Parameters
+This policy uses a single-level configuration model where all parameters are configured per-API in the API definition YAML. This policy does not require system-level configuration.
 
-#### Request Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `schema` | string | Yes | - | JSON Schema as a string (must be valid JSON). Supports all JSON Schema draft 7 features. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload for validation. If empty, validates the entire payload against the schema. |
-| `invert` | boolean | No | `false` | If `true`, validation passes when schema validation FAILS. If `false`, validation passes when schema validation succeeds. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed validation error information in error responses. |
-
-#### Response Phase
+### User Parameters (API Definition)
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `schema` | string | Yes | - | JSON Schema as a string (must be valid JSON). Supports all JSON Schema draft 7 features. |
+| `request` | `JSONSchemaGuardRailConfig` object | No | - | Configuration for request-phase schema validation. Supports `schema`, `jsonPath`, `invert`, and `showAssessment`. |
+| `response` | `JSONSchemaGuardRailConfig` object | No | - | Configuration for response-phase schema validation. Supports `schema`, `jsonPath`, `invert`, and `showAssessment`. |
+
+#### JSONSchemaGuardRailConfig Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `schema` | string | Yes | - | JSON Schema as a string (must be valid JSON). Supports JSON Schema Draft 7 features. |
 | `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload for validation. If empty, validates the entire payload against the schema. |
-| `invert` | boolean | No | `false` | If `true`, validation passes when schema validation FAILS. If `false`, validation passes when schema validation succeeds. |
+| `invert` | boolean | No | `false` | If `true`, validation passes when schema validation fails. If `false`, validation passes when schema validation succeeds. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed validation error information in error responses. |
 
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -48,28 +46,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is validated against the schema.
 
-## JSON Schema Features
+**Note:**
 
-The guardrail supports JSON Schema Draft 7, including:
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
-- **Types**: `string`, `number`, `integer`, `boolean`, `object`, `array`, `null`
-- **Properties**: Define object properties and their schemas
-- **Required Fields**: Specify which properties are mandatory
-- **Constraints**: `minLength`, `maxLength`, `minimum`, `maximum`, `pattern`, `enum`
-- **Nested Structures**: Complex nested objects and arrays
-- **Conditional Logic**: `if`, `then`, `else`, `allOf`, `anyOf`, `oneOf`, `not`
+```yaml
+- name: json-schema-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/json-schema-guardrail@v0
+```
 
-## Examples
+## Reference Scenarios
 
 ### Example 1: Basic Object Validation
 
 Deploy an LLM provider that validates that request contains a user object with required fields:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -96,7 +88,7 @@ spec:
         methods: [GET]
   policies:
     - name: json-schema-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -112,7 +104,6 @@ spec:
                   },
                   "required": ["name", "email"]
                 }
-EOF
 ```
 
 **Test the guardrail:**
@@ -152,31 +143,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Additional Configuration Options
-
-You can customize the guardrail behavior by modifying the `policies` section:
-
-- **Request and Response Validation**: Configure both `request` and `response` parameters to validate JSON schemas in both directions. Use `showAssessment: true` to include detailed validation error information in error responses.
-
-- **Inverted Logic**: Set `invert: true` to allow only content that does *not* match the schema. This is useful for blocking requests that match specific schema patterns.
-
-- **Full Payload Validation**: Omit the `jsonPath` parameter to validate the entire request body against the schema.
-
-- **Field-Specific Validation**: Use `jsonPath` to extract and validate specific fields within JSON payloads (e.g., `"$.messages[0]"` for message objects or `"$.results"` for response arrays).
-
-## Use Cases
-
-1. **API Contract Enforcement**: Ensure requests and responses conform to API specifications.
-
-2. **Data Quality**: Validate data structure and types before processing.
-
-3. **Security**: Enforce required fields and prevent injection of unexpected data structures.
-
-4. **Integration**: Ensure compatibility with downstream systems that expect specific formats.
-
-5. **Compliance**: Enforce data formats required by regulatory standards.
-
-## Error Response
+**Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -213,10 +180,44 @@ If `showAssessment` is enabled, detailed validation errors are included:
 }
 ```
 
+## How It Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Schema Validation**: Validates the extracted JSON content against the configured `schema`.
+3. **Invert Handling**: Uses `invert` to decide whether valid or invalid schema results should pass.
+4. **Decision Enforcement**: Blocks with HTTP `422` when validation fails per configured mode; otherwise, request proceeds upstream.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Schema Validation**: Validates the extracted JSON content against the configured `schema`.
+3. **Invert Handling**: Uses `invert` to decide whether valid or invalid schema results should pass.
+4. **Decision Enforcement**: Blocks with HTTP `422` when validation fails per configured mode; otherwise, response is returned to the client.
+
+#### Validation Behavior
+
+- **Normal Mode (`invert: false`)**: Validation passes when schema validation succeeds.
+- **Inverted Mode (`invert: true`)**: Validation passes when schema validation fails.
+- **Assessment Details**: When `showAssessment` is enabled, failure responses include detailed schema validation errors.
+
+#### JSON Schema Features
+
+The guardrail supports JSON Schema Draft 7, including:
+
+- **Types**: `string`, `number`, `integer`, `boolean`, `object`, `array`, `null`
+- **Properties**: Define object properties and their schemas
+- **Required Fields**: Specify which properties are mandatory
+- **Constraints**: `minLength`, `maxLength`, `minimum`, `maximum`, `pattern`, `enum`
+- **Nested Structures**: Complex nested objects and arrays
+- **Conditional Logic**: `if`, `then`, `else`, `allOf`, `anyOf`, `oneOf`, `not`
+
 ## Notes
 
 - The schema must be valid JSON. Use proper escaping when embedding in YAML.
 - JSON Schema Draft 7 is supported with all standard features.
+- Use `request` and `response` independently to validate one or both directions.
 - When using JSONPath, if the path does not exist or the extracted value is not valid JSON, validation will fail.
 - Inverted logic is useful for blocking content that matches specific schema patterns.
 - Complex schemas may impact performance; test thoroughly with expected content volumes.

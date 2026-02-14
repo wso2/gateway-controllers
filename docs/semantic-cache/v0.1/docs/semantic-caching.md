@@ -20,37 +20,16 @@ The policy uses embedding models to convert request text into high-dimensional v
 - **Immediate response on cache hit**: Returns cached response with `X-Cache-Status: HIT` header without upstream call
 - **TTL support**: Configurable time-to-live for cache entries
 
-## How It Works
-
-### Request Phase
-
-1. **Text Extraction**: Extracts text from the request body using JSONPath (if configured) or uses the entire request body
-2. **Embedding Generation**: Generates a vector embedding from the extracted text using the configured embedding provider
-3. **Cache Lookup**: Searches the vector database for semantically similar cached responses using cosine similarity
-4. **Threshold Check**: If a similar embedding is found with similarity >= similarityThreshold, returns the cached response immediately
-5. **Cache Miss**: If no similar response is found, the request proceeds to the upstream service
-
-### Response Phase
-
-1. **Success Check**: Only processes responses with 200 status codes
-2. **Embedding Retrieval**: Retrieves the embedding generated during the request phase from metadata
-3. **Response Storage**: Stores the response payload along with its embedding in the vector database
-4. **TTL Application**: Applies the configured TTL to the cache entry
 
 ## Configuration
 
-### Policy Parameters
+The Rate Limiting policy uses a two-level configuration
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `similarityThreshold` | number | Yes | - | Similarity threshold for cache hits (0.0 to 1.0). Higher values require more similarity. For example, 0.9 means 90% similarity required. Recommended: 0.85-0.95 for strict matching, 0.70-0.85 for more flexible matching. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract text from request body for embedding generation. If empty, uses the entire request body. Example: `"$.messages[0].content"` to extract the first message's content. |
+### System Parameters (From config.toml)
 
-### System Parameters (Required)
+These parameters are usually set at the gateway level and automatically applied, but they can also be overridden in the params section of an API artifact definition. System-wide defaults can be configured in the gateway’s `config.toml` file, and while these defaults apply to all Semantic Cache policy instances, they can be customized for individual policies within the API configuration when necessary.
 
-These parameters are typically configured at the gateway level and automatically injected, or you can override those values from the params section in the api artifact definition file as well:
-
-#### Embedding Provider Configuration
+##### Embedding Provider Configuration
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -60,7 +39,7 @@ These parameters are typically configured at the gateway level and automatically
 | `embeddingDimension` | integer | Yes | Dimension of embedding vectors. Common values: 1536 (OpenAI ada-002), 1024 (Mistral). Must match the model's output dimension. |
 | `apiKey` | string | Yes | API key for the embedding service authentication. The authentication header is automatically set to `api-key` for Azure OpenAI and `Authorization` for other providers. |
 
-#### Vector Database Configuration
+##### Vector Database Configuration
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -73,13 +52,9 @@ These parameters are typically configured at the gateway level and automatically
 | `ttl` | integer | No | Time-to-live for cache entries in seconds. Default is 3600 (1 hour). Set to 0 for no expiration. |
 
 
-### Configuring System Parameters in config.toml
+#### Sample System Configuration
 
-System parameters can be configured globally in the gateway's `config.toml` file. These values serve as defaults for all Semantic Cache policy instances and can be overridden per-policy in the API configuration if needed.
-
-#### Location in config.toml
-
-Add the following configuration section to your `config.toml` file:
+Add the following configuration section under the root level in your `config.toml` file:
 
 ```toml
 embedding_provider = "MISTRAL" # Supported: MISTRAL, OPENAI, AZURE_OPENAI
@@ -97,14 +72,21 @@ vector_db_provider_password = "default"
 vector_db_provider_ttl = 3600
 ```
 
-## JSONPath Support
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `similarityThreshold` | number | Yes | - | Similarity threshold for cache hits (0.0 to 1.0). Higher values require more similarity. For example, 0.9 means 90% similarity required. Recommended: 0.85-0.95 for strict matching, 0.70-0.85 for more flexible matching. |
+| `jsonPath` | string | No | `""` | JSONPath expression to extract text from request body for embedding generation. If empty, uses the entire request body. Example: `"$.messages[0].content"` to extract the first message's content. |
+
+#### JSONPath Support
 
 The policy supports JSONPath expressions to extract specific text from request bodies before generating embeddings. This is useful for:
 - Extracting message content from chat completion requests
 - Focusing on specific prompt fields while ignoring metadata
 - Handling structured JSON payloads
 
-### Common JSONPath Examples
+**Common JSONPath Examples**
 
 - `$.messages[0].content` - First message's content in chat completions
 - `$.messages[-1].content` - Last message's content
@@ -112,17 +94,22 @@ The policy supports JSONPath expressions to extract specific text from request b
 - `$.input` - Extract input field from embeddings API
 - `$` - Entire request body (default if jsonPath is not specified)
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: semantic-cache
+  gomodule: github.com/wso2/gateway-controllers/policies/semantic-cache@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: OpenAI Embeddings with Redis
 
 Deploy an LLM provider with semantic caching using OpenAI embeddings and Redis vector store:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -145,14 +132,14 @@ spec:
         methods: [POST]
   policies:
     - name: semantic-cache
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
           params:
             similarityThreshold: 0.85
             jsonPath: "$.messages[0].content"
-EOF
+
 ```
 
 **Test the semantic cache:**
@@ -190,25 +177,25 @@ curl -X POST http://openai:8080/chat/completions \
 # Response will include: X-Cache-Status: HIT
 ```
 
-## Use Cases
+## How It Works
 
-1. **Cost Reduction**: Reduce API costs by serving cached responses for similar queries, especially valuable for expensive LLM API calls.
+#### Request Phase
 
-2. **Latency Improvement**: Return cached responses in milliseconds instead of waiting for LLM processing (typically 1-5 seconds), significantly improving user experience.
+1. **Text Extraction**: Extracts text from the request body using JSONPath (if configured) or uses the entire request body
+2. **Embedding Generation**: Generates a vector embedding from the extracted text using the configured embedding provider
+3. **Cache Lookup**: Searches the vector database for semantically similar cached responses using cosine similarity
+4. **Threshold Check**: If a similar embedding is found with similarity >= similarityThreshold, returns the cached response immediately
+5. **Cache Miss**: If no similar response is found, the request proceeds to the upstream service
 
-3. **Rate Limit Management**: Reduce the number of upstream API calls, helping stay within rate limits and avoiding throttling.
+#### Response Phase
 
-4. **Consistency**: Ensure users receive consistent responses for semantically equivalent queries, improving predictability.
+1. **Success Check**: Only processes responses with 200 status codes
+2. **Embedding Retrieval**: Retrieves the embedding generated during the request phase from metadata
+3. **Response Storage**: Stores the response payload along with its embedding in the vector database
+4. **TTL Application**: Applies the configured TTL to the cache entry
 
-5. **Offline Resilience**: Serve cached responses even when upstream services experience temporary outages.
 
-6. **A/B Testing**: Compare cached vs. fresh responses to evaluate prompt engineering improvements.
-
-7. **Development/Testing**: Speed up development cycles by reusing cached responses during testing.
-
-8. **High-Traffic Applications**: Handle high volumes of similar queries efficiently without overwhelming upstream services.
-
-## Similarity Threshold Guidelines
+#### Similarity Thresholds
 
 The `similarityThreshold` parameter controls how similar requests must be to trigger a cache hit:
 
@@ -220,56 +207,31 @@ The `similarityThreshold` parameter controls how similar requests must be to tri
 
 **Recommendation**: Start with 0.85 and adjust based on your use case. Monitor cache hit rates and response relevance to fine-tune.
 
-## Cache Behavior
+#### Cache Behavior
 
-### Cache Hit
+- **Cache Hit**: When a similar request is found, the policy immediately returns the cached response with a `200` status, adds the `X-Cache-Status: HIT` header, and avoids any upstream call, typically responding in under 50 ms.
 
-When a similar request is found:
-- Returns cached response immediately (no upstream call)
-- Adds `X-Cache-Status: HIT` header to response
-- Status code: 200 (from cached response)
-- Response time: Typically < 50ms (vs. 1-5 seconds for LLM APIs)
+- **Cache Miss**: When no similar request exists, the request is forwarded to the upstream service, and upon a successful `200` response, the result is stored so that subsequent similar requests can be served from the cache.
 
-### Cache Miss
+- **Cache Storage**: Only successful responses are cached along with their embeddings in the vector database, with a TTL applied to each entry and isolated cache namespaces maintained per route or API to prevent cross-contamination.
 
-When no similar request is found:
-- Request proceeds to upstream service normally
-- Response is cached after successful upstream call (200 status)
-- Subsequent similar requests may hit the cache
 
-### Cache Storage
+#### Operational Resilience
+- **Graceful degradation**: If embedding generation, vector database access, cache storage, or JSONPath extraction fails, the request proceeds directly to the upstream service without blocking the client response.
 
-- Only successful responses (200 status code) are cached
-- Responses are stored with their embeddings in the vector database
-- TTL is applied to all cache entries
-- Each route/API maintains a separate cache namespace to avoid cross-contamination
+- **Non-blocking resilience**: Caching operations are best-effort and never interfere with normal request handling, ensuring uninterrupted service even when caching components are unavailable.
 
-## Error Handling
 
-The policy is designed to be resilient:
+- **Latency and efficiency trade-offs**: Embedding generation adds processing overhead, and vector database performance, embedding dimensions, and index creation time directly affect latency, storage, and search efficiency.
 
-- **Embedding Generation Failure**: If embedding generation fails, the request proceeds to upstream (cache is skipped)
-- **Vector Database Unavailable**: If the vector database is unreachable, requests proceed to upstream
-- **Cache Storage Failure**: If storing a response fails, the response is still returned to the client (cache operation is non-blocking)
-- **Invalid JSONPath**: If JSONPath extraction fails, the entire request body is used for embedding generation
+- **Cache effectiveness**: Overall performance gains depend on achieving a healthy cache hit rate, with moderate hit ratios delivering meaningful cost and latency benefits that justify the added processing overhead.
 
-These behaviors ensure that caching failures do not block legitimate requests. The system gracefully degrades to direct upstream calls when caching is unavailable.
 
-## Performance Considerations
 
-1. **Embedding Generation Latency**: Generating embeddings adds ~100-500ms to request processing. This is offset by cache hits that save 1-5 seconds.
-
-2. **Vector Database Performance**: 
-   - Redis with RedisSearch: Fast queries, good for smaller datasets (< 1M vectors)
-   - Milvus: Optimized for large-scale vector search, better for > 1M vectors
-
-3. **Cache Hit Rate**: Aim for 20-40% cache hit rate for cost-effective caching. Below 10% may not justify the overhead.
-
-4. **Embedding Dimension**: Higher dimensions (e.g., 1536) provide better accuracy but increase storage and search time. Choose based on your quality requirements.
-
-5. **Index Creation**: Vector database indexes are created automatically on first use. This may take a few seconds for large datasets.
 
 ## Notes
+
+- This capability reduces cost and latency by serving cached responses, helps manage rate limits and high traffic, ensures consistent results, improves resilience during upstream outages, and supports faster development, testing, and experimentation such as A/B testing.
 
 - The policy requires both request and response phases to function properly (generates embeddings in request phase, stores responses in response phase).
 

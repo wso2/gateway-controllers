@@ -12,14 +12,21 @@ The Word Count Guardrail validates the word count of request or response body co
 - Validates word count against minimum and maximum thresholds
 - Supports JSONPath extraction to validate specific fields within JSON payloads
 - Configurable inverted logic to pass when word count is outside the range
-- Separate configuration for request and response phases
+- Supports independent request and response phase configuration
 - Optional detailed assessment information in error responses
 
 ## Configuration
 
-### Parameters
+This policy requires only a single-level configuration where all parameters are configured in the API definition YAML.
 
-#### Request Phase
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | `WordCountGuardRailConfig` object | No | - | Configuration for request-phase word count validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+| `response` | `WordCountGuardRailConfig` object | No | - | Configuration for response-phase word count validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+
+#### WordCountGuardRailConfig Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -29,17 +36,7 @@ The Word Count Guardrail validates the word count of request or response body co
 | `invert` | boolean | No | `false` | If `true`, validation passes when word count is NOT within the min-max range. If `false`, validation passes when word count is within the range. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `min` | integer | Yes | - | Minimum allowed word count (inclusive). Must be >= 0. |
-| `max` | integer | Yes | - | Maximum allowed word count (inclusive). Must be >= 1. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `invert` | boolean | No | `false` | If `true`, validation passes when word count is NOT within the min-max range. If `false`, validation passes when word count is within the range. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -50,17 +47,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: word-count-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/word-count-guardrail@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic Word Count Validation
 
 Deploy an LLM provider that validates request messages contain between 10 and 500 words:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -87,7 +89,7 @@ spec:
         methods: [GET]
   policies:
     - name: word-count-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -96,7 +98,6 @@ spec:
               min: 5
               max: 500
               jsonPath: "$.messages[0].content"
-EOF
 ```
 
 **Test the guardrail:**
@@ -133,30 +134,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Additional Configuration Options
-
-You can customize the guardrail behavior by modifying the `policies` section:
-
-- **Request and Response Validation**: Configure both `request` and `response` parameters to validate word counts in both directions. Use `showAssessment: true` to include detailed assessment information in error responses.
-
-- **Inverted Logic**: Set `invert: true` to allow only content *outside* the specified word range. This is useful for blocking content that falls within a prohibited range.
-
-- **Full Payload Validation**: Omit the `jsonPath` parameter to validate the entire request body without JSONPath extraction.
-
-- **Field-Specific Validation**: Use `jsonPath` to extract and validate specific fields within JSON payloads (e.g., `"$.messages[0].content"` for message content or `"$.choices[0].message.content"` for response content).
-
-
-## Use Cases
-
-1. **Input Length Control**: Prevent users from submitting extremely long prompts that could impact system performance or costs.
-
-2. **Response Quality Assurance**: Ensure AI-generated responses meet minimum length requirements for completeness.
-
-3. **Cost Management**: Limit response lengths to control token usage and associated costs.
-
-4. **Content Filtering**: Use inverted logic to block content that falls outside acceptable word count ranges.
-
-## Error Response
+**In Case of Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -187,9 +165,33 @@ If `showAssessment` is enabled, additional details are included:
 }
 ```
 
+## How it Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Word Counting**: Counts words in the extracted content after trimming whitespace.
+3. **Range Evaluation**: Validates whether the word count is within `min` and `max` bounds.
+4. **Invert Handling**: Applies `invert` logic when configured to validate outside-range behavior.
+5. **Intervention on Violation**: If validation fails, returns HTTP `422` and blocks further processing.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Word Counting**: Counts words in the extracted content after trimming whitespace.
+3. **Range Evaluation**: Validates whether the word count is within `min` and `max` bounds.
+4. **Invert Handling**: Applies `invert` logic when configured to validate outside-range behavior.
+5. **Intervention on Violation**: If validation fails, returns HTTP `422` to the client.
+
+#### Validation Behavior
+
+- **Normal Mode (`invert: false`)**: Validation passes only when the word count is within the configured `[min, max]` range.
+- **Inverted Mode (`invert: true`)**: Validation passes only when the word count is outside the configured `[min, max]` range.
+
 ## Notes
 
 - Word counting is performed on the extracted or full content after trimming whitespace.
 - The validation is case-sensitive and counts all words separated by whitespace.
+- Use `request` and `response` independently to validate one or both directions.
 - When using JSONPath, if the path does not exist or the extracted value is not a string, validation will fail.
 - Inverted logic is useful for blocking content that falls outside acceptable ranges rather than within them.

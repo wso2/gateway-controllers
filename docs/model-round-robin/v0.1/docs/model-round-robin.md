@@ -17,11 +17,13 @@ The Model Round Robin policy implements round-robin load balancing for AI models
 
 ## Configuration
 
-### Parameters
+This policy requires configuration in both the API definition YAML and the LLM provider template.
+
+### User Parameters (API Definition)
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `models` | array | Yes | - | List of models for round-robin distribution. Each model must have a `model` name. |
+| `models` | ```Model``` array | Yes | - | List of models for round-robin distribution. Each model must have a `model` name. |
 | `suspendDuration` | integer | No | `0` | Suspend duration in seconds for failed models. If set to 0, failed model knowledge is not persisted. Must be >= 0. |
 
 ### Model Configuration
@@ -32,34 +34,37 @@ Each model in the `models` array is an object with the following properties:
 |----------|------|----------|-------------|
 | `model` | string | Yes | The AI model name to use for load balancing. |
 
-### LLM provider template
 
-The policy requires `requestModel` configuration from the LLM provider template to extract the model identifier from the request. This configuration is mandatory and must be provided by the LLM provider template.
+#### LLM provider template
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `requestModel.location` | string | Yes | Location of the model identifier: `payload`, `header`, `queryParam`, or `pathParam` |
-| `requestModel.identifier` | string | Yes | JSONPath (for payload), header name (for header), query param name (for queryParam), or regex pattern (for pathParam) to extract model |
+This policy depends on the `requestModel` configuration defined in the LLM provider template to identify and extract the model from incoming requests.
 
-## How It Works
+> **Required:** The `requestModel` configuration must be provided; the policy will not function without it.
 
-1. **Model Selection**: On each request, the policy selects the next available model in the configured list using a round-robin algorithm.
-2. **Model Extraction**: The policy extracts the original model from the request (if configured) and stores it for reference.
-3. **Model Modification**: The policy modifies the request to use the selected model based on the `requestModel` configuration.
-4. **Failure Handling**: If a model returns a 5xx or 429 response, and `suspendDuration` is configured, the model is suspended for the specified duration.
-5. **Availability Check**: Suspended models are skipped during selection until their suspension period expires.
+### `requestModel` Parameters
 
-## Examples
+| Parameter                 | Type   | Required | Description                                                                                                                                                                                              |
+| ------------------------- | ------ | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `requestModel.location`   | string | Yes      | Specifies where the model identifier is located in the request. Supported values: `payload`, `header`, `queryParam`, `pathParam`.                                                                        |
+| `requestModel.identifier` | string | Yes      | Extraction key used to identify the model. This can be a JSONPath expression (for `payload`), header name (for `header`), query parameter name (for `queryParam`), or a regex pattern (for `pathParam`). |
+
+
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: model-round-robin
+  gomodule: github.com/wso2/gateway-controllers/policies/model-round-robin@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic Round Robin with Payload-based Model
 
 Deploy an LLM provider with round-robin load balancing across multiple models:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -92,7 +97,6 @@ spec:
               - model: gpt-3.5-turbo
               - model: gpt-4-turbo
             suspendDuration: 60
-EOF
 ```
 
 **Test the round-robin distribution:**
@@ -143,7 +147,37 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-## Model Suspension
+## How It Works
+
+#### Model Selection
+On each request, the policy selects the next available model in the configured list using a round-robin algorithm.
+- **Model Extraction**: The policy extracts the original model from the request (if configured) and stores it for reference.
+- **Model Modification**: The policy modifies the request to use the selected model based on the `requestModel` configuration.
+
+#### Request Model Locations
+
+The policy supports extracting the model identifier from different locations in the request:
+
+**Payload (JSONPath)**: Extract model from JSON payload using JSONPath:
+
+- **Location**: `payload`
+- **Identifier**: JSONPath expression (e.g., `$.model`, `$.messages[0].model`)
+
+**Header**: Extract model from HTTP header:
+- **Location**: `header`
+- **Identifier**: Header name (e.g., `X-Model-Name`, `X-LLM-Model`)
+
+**Query Parameter**: Extract model from URL query parameter:
+
+- **Location**: `queryParam`
+- **Identifier**: Query parameter name (e.g., `model`, `llm_model`)
+
+**Path Parameter**: Extract model from URL path using regex:
+
+- **Location**: `pathParam`
+- **Identifier**: Regex pattern to match model in path (e.g., `models/([a-zA-Z0-9.\-]+)`)
+
+#### Model Suspension
 
 When a model returns a 5xx or 429 response, the policy can automatically suspend that model for a configurable duration:
 
@@ -151,60 +185,16 @@ When a model returns a 5xx or 429 response, the policy can automatically suspend
 - **Automatic Recovery**: Suspended models are automatically re-enabled after the suspension period expires
 - **Availability Check**: Suspended models are skipped during round-robin selection until they recover
 
-### Suspension Behavior
+#### Suspension Behavior
 
 - Suspension is tracked per model across all requests
 - If all models are suspended, the policy returns HTTP 503 with error: "All models are currently unavailable"
 - Suspension period starts from the time of failure
 
-## Use Cases
-
-1. **Load Distribution**: Distribute requests evenly across multiple models to prevent overloading any single model.
-
-2. **High Availability**: Automatically route requests to available models when some models are experiencing issues.
-
-3. **Cost Optimization**: Distribute requests across different model tiers (e.g., expensive and cheaper models) to balance cost and performance.
-
-4. **A/B Testing**: Test different models with equal traffic distribution to compare performance and quality.
-
-5. **Multi-Provider Support**: Distribute requests across models from different providers while maintaining equal distribution.
-
-## Request Model Locations
-
-The policy supports extracting the model identifier from different locations in the request:
-
-### Payload (JSONPath)
-
-Extract model from JSON payload using JSONPath:
-
-- **Location**: `payload`
-- **Identifier**: JSONPath expression (e.g., `$.model`, `$.messages[0].model`)
-
-### Header
-
-Extract model from HTTP header:
-
-- **Location**: `header`
-- **Identifier**: Header name (e.g., `X-Model-Name`, `X-LLM-Model`)
-
-### Query Parameter
-
-Extract model from URL query parameter:
-
-- **Location**: `queryParam`
-- **Identifier**: Query parameter name (e.g., `model`, `llm_model`)
-
-### Path Parameter
-
-Extract model from URL path using regex:
-
-- **Location**: `pathParam`
-- **Identifier**: Regex pattern to match model in path (e.g., `models/([a-zA-Z0-9.\-]+)`)
-
-**Note**: For path parameters, the regex pattern should include a capturing group to extract the model name. The policy uses the first capturing group as the model identifier.
 
 ## Notes
-
+- For path parameters, the regex pattern should include a capturing group to extract the model name. The policy uses the first capturing group as the model identifier.
+- This capability evenly distributes requests across multiple models to improve availability, balance load and cost, support A/B testing, and enable seamless traffic sharing across models from different providers.
 - The round-robin index is maintained per policy instance and increments for each request.
 - Model selection is deterministic and follows a strict cyclic pattern.
 - The original model from the request is stored in metadata but is replaced with the selected model for routing.

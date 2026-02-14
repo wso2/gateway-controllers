@@ -27,41 +27,61 @@ Request and response headers can have different operation modes, allowing for fl
 
 ## Configuration
 
-### Parameters
+Analytics Header Filter requires two levels of configuration.
+
+### System Parameters (From config.toml)
+
+| Parameter                                  | Type     | Default | Description                                                                      |
+| -------------------- | -------- | ------- | -------------------------------------------------------------------------------- |
+| `analytics.enabled`                          | boolean  | false   | Enables or disables analytics processing.                                        |
+| `analytics.allow_payloads`                  | boolean  | false   | Determines whether request and response payloads are included in analytics data. |
+| `analytics.enabled_publishers`               | string[] | []      | List of analytics publishers to enable.                                          |
+| `analytics.publishers.moesif.application_id` | string   | —       | Application ID used to authenticate with the Moesif analytics service.           |
+
+
+#### Sample System Configuration
+
+```toml
+
+[analytics]
+enabled = true
+allow_payloads = false
+enabled_publishers = ["moesif"]
+
+[analytics.publishers.moesif]
+application_id = "<MOESIF_APPLICATION_ID>"
+
+```
+
+### User Parameters (API Definition)
 
 | Parameter                 | Type   | Required | Default | Description                                                                                                |
 | ------------------------- | ------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------- |
-| `requestHeadersToFilter`  | object | No       | -       | Configuration for filtering request headers. Contains `operation` and `headers` properties.              |
-| `responseHeadersToFilter` | object | No       | -       | Configuration for filtering response headers. Contains `operation` and `headers` properties.              |
+| `requestHeadersToFilter`  | ```HeaderFilter``` object | No       | -       | Configuration for filtering request headers. Contains `operation` and `headers` properties.              |
+| `responseHeadersToFilter` | ```HeaderFilter``` object | No       | -       | Configuration for filtering response headers. Contains `operation` and `headers` properties.              |
 
-### Parameter Structure
-
-Each filter parameter (`requestHeadersToFilter` and `responseHeadersToFilter`) is an object with the following properties:
+### HeaderFilter Structure
 
 | Property    | Type   | Required | Description                                                                                                |
 | ----------- | ------ | -------- | ---------------------------------------------------------------------------------------------------------- |
 | `operation` | string | Yes      | Operation mode: `"allow"` (whitelist) or `"deny"` (blacklist). Header names are matched case-insensitively. |
 | `headers`   | array  | Yes      | List of header names to filter. Behavior depends on the operation mode. Each header name must be 1-256 characters. |
 
-> **Note**: This policy only affects analytics data collection. It does not remove or modify headers sent to upstream services or returned to clients.
+**Note**: 
+This policy only affects analytics data collection. It does not remove or modify headers sent to upstream services or returned to clients.
 
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
-## System Requirements
+```yaml
+- name: analytics-header-filter
+  gomodule: github.com/wso2/gateway-controllers/policies/analytics-header-filter@v0
+```
 
-* Analytics must be enabled globally via `config.yaml` (`analytics.enabled: true`)
-* The policy must be explicitly applied to the API policy chain
-* If analytics is disabled at the system level, this policy has no effect
+## Reference Scenarios
 
+### Example 1: Analytics Header Filter policy to a LlmProvider:
 
-## API Definition Example
-
-The following example demonstrates how to apply the Analytics Header Filter policy to a LlmProvider:
-
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic <base64-credentials>" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -83,7 +103,7 @@ spec:
         methods: [POST]
         policies:
           - name: analytics-header-filter
-            version: v0.1.0
+            version: v0
             params:
               requestHeadersToFilter:
                 operation: deny
@@ -98,18 +118,8 @@ spec:
         methods: [GET]
       - path: /models/{modelId}
         methods: [GET]
-EOF
+
 ```
-
-## Use Cases
-
--  **Sensitive Data Protection**: Prevent authentication tokens, internal identifiers, or security-related headers from being sent to analytics systems.
-
-- **Noise Reduction**: Exclude verbose or low-value headers to improve the clarity and usefulness of analytics data.
-
-- **Compliance and Governance**: Support compliance requirements by ensuring certain headers are never exported outside the platform.
-
-- **Cost and Storage Optimization**: Reduce analytics payload size by removing unnecessary headers from published events.
 
 
 ## Notes

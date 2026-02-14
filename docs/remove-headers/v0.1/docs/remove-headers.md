@@ -30,18 +30,19 @@ These parameters are configured per-API/route by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `requestHeaders` | array | No | - | Array of header objects to remove from requests before forwarding to upstream. Each object must contain a `name` field specifying the header name. At least one of `requestHeaders` or `responseHeaders` must be specified. |
-| `responseHeaders` | array | No | - | Array of header objects to remove from responses before returning to clients. Each object must contain a `name` field specifying the header name. At least one of `requestHeaders` or `responseHeaders` must be specified. |
+| `requestHeaders` | string array | No | - | Array of header names to remove from requests before forwarding to upstream. At least one of `requestHeaders` or `responseHeaders` must be specified. |
+| `responseHeaders` | string array | No | - | Array of header names to remove from responses before returning to clients. At least one of `requestHeaders` or `responseHeaders` must be specified. |
 
-### Header Object Structure
+**Note:**
 
-Each header object in the `requestHeaders` and `responseHeaders` arrays must contain:
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `name` | string | Yes | The name of the HTTP header to remove. Header names are matched case-insensitively. Cannot be empty or whitespace-only. |
+```yaml
+- name: remove-headers
+  gomodule: github.com/wso2/gateway-controllers/policies/remove-headers@v0
+```
 
-## API Definition Examples
+## Reference Scenarios:
 
 ### Example 1: Removing Sensitive Request Headers
 
@@ -74,6 +75,26 @@ spec:
       path: /alerts/active
     - method: POST
       path: /alerts/active
+```
+
+**Request transformation:**
+
+Original client request:
+```
+GET /weather/v1.0/US/NewYork HTTP/1.1
+Host: api-gateway.company.com
+Accept: application/json
+Authorization: Bearer secret-token
+X-API-Key: client-secret-key
+User-Agent: WeatherApp/1.0
+```
+
+Resulting upstream request:
+```
+GET /api/v2/US/NewYork HTTP/1.1
+Host: sample-backend:5000
+Accept: application/json
+User-Agent: WeatherApp/1.0
 ```
 
 ### Example 2: Removing Server Information from Responses
@@ -109,6 +130,29 @@ spec:
       path: /alerts/active
 ```
 
+**Response transformation:**
+
+Original upstream response:
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+Server: Apache/2.4.41
+X-Powered-By: PHP/7.4.0
+X-AspNet-Version: 4.0.30319
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+Resulting client response:
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
 ### Example 3: Removing Headers from Both Request and Response
 
 Remove sensitive headers from both directions:
@@ -142,6 +186,44 @@ spec:
       path: /alerts/active
     - method: POST
       path: /alerts/active
+```
+
+**Request and response transformation:**
+
+Original client request:
+```
+GET /weather/v1.0/US/NewYork HTTP/1.1
+Host: api-gateway.company.com
+Accept: application/json
+X-Internal-Token: internal-secret
+X-Debug-Mode: enabled
+```
+
+Resulting upstream request:
+```
+GET /api/v2/US/NewYork HTTP/1.1
+Host: sample-backend:5000
+Accept: application/json
+```
+
+Original upstream response:
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Internal-Server-ID: server-123
+X-Debug-Info: processed-in-45ms
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+Resulting client response:
+```
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
 ```
 
 ### Example 4: Route-Specific Header Removal
@@ -243,177 +325,35 @@ spec:
       path: /alerts/active
 ```
 
-## Request/Response Transformation Examples
+## How it Works
 
-### Request Headers Removal (Example 1)
+* The policy reads `requestHeaders` and `responseHeaders` independently and removes matching headers in request and response flows.
+* Header name matching is case-insensitive, and configured names are normalized for consistent processing.
+* Removing a header that is not present is a no-op and does not produce runtime errors.
+* For multi-value headers, removal deletes all values for the matched header name.
+* Request flow removes headers before forwarding to upstream; response flow removes headers before returning to clients.
+* If a flow has no configured header list, that flow passes through unchanged.
 
-**Original client request:**
-```
-GET /weather/v1.0/US/NewYork HTTP/1.1
-Host: api-gateway.company.com
-Accept: application/json
-Authorization: Bearer secret-token
-X-API-Key: client-secret-key
-User-Agent: WeatherApp/1.0
-```
 
-**Resulting upstream request:**
-```
-GET /api/v2/US/NewYork HTTP/1.1
-Host: sample-backend:5000
-Accept: application/json
-User-Agent: WeatherApp/1.0
-```
+## Limitations
 
-### Response Headers Removal (Example 2)
+1. **Remove-Only Behavior**: This policy removes headers only and does not set or append new values.
+2. **No Conditional Logic**: Header removal is static per policy configuration and cannot be conditional on payload or context.
+3. **Configuration Dependency**: At least one of `requestHeaders` or `responseHeaders` must be configured.
+4. **Ordering Sensitivity**: Policy order can affect final header output when used with other header manipulation policies.
+5. **Header Constraints Apply**: Header names must comply with configured schema constraints.
 
-**Original upstream response:**
-```
-HTTP/1.1 200 OK
-Content-Type: application/json
-Server: Apache/2.4.41
-X-Powered-By: PHP/7.4.0
-X-AspNet-Version: 4.0.30319
-Content-Length: 256
 
-{"temperature": 22, "humidity": 65}
-```
+## Notes
 
-**Resulting client response:**
-```
-HTTP/1.1 200 OK
-Content-Type: application/json
-Content-Length: 256
+**Security and Data Handling**
 
-{"temperature": 22, "humidity": 65}
-```
+Use header removal to strip sensitive or internal headers before requests leave trust boundaries and before responses reach clients. Prioritize removal of server-identification, debug, and internal tracing headers where they are not required. Ensure removed headers are not needed by downstream security controls or application behavior.
 
-### Both Request and Response Headers (Example 3)
+**Performance and Operational Impact**
 
-**Original client request:**
-```
-GET /weather/v1.0/US/NewYork HTTP/1.1
-Host: api-gateway.company.com
-Accept: application/json
-X-Internal-Token: internal-secret
-X-Debug-Mode: enabled
-```
+Header removal is lightweight and local, with minimal processing overhead. Even so, validate changes in environments with strict intermediary rules to ensure removed headers do not affect caching, routing, or observability unexpectedly. Monitor for client or backend dependency on headers that are being removed.
 
-**Resulting upstream request:**
-```
-GET /api/v2/US/NewYork HTTP/1.1
-Host: sample-backend:5000
-Accept: application/json
-```
+**Operational Best Practices**
 
-**Original upstream response:**
-```
-HTTP/1.1 200 OK
-Content-Type: application/json
-X-Internal-Server-ID: server-123
-X-Debug-Info: processed-in-45ms
-Content-Length: 256
-
-{"temperature": 22, "humidity": 65}
-```
-
-**Resulting client response:**
-```
-HTTP/1.1 200 OK
-Content-Type: application/json
-Content-Length: 256
-
-{"temperature": 22, "humidity": 65}
-```
-
-## Policy Behavior
-
-### Header Removal Behavior
-
-The policy uses **safe removal semantics**:
-
-- **Existing Headers Only**: Only removes headers that actually exist; no error if header is not present
-- **Case-Insensitive Matching**: Header names are matched case-insensitively (e.g., "authorization" matches "Authorization")
-- **Complete Removal**: All values for multi-value headers are removed
-- **Order Preservation**: Removal operations don't affect the order of remaining headers
-- **No Side Effects**: Removing non-existent headers doesn't cause errors or warnings
-
-### Header Name Normalization
-
-The policy automatically normalizes header names for consistent matching:
-
-- **Case Conversion**: All header names are converted to lowercase for processing
-- **Whitespace Trimming**: Leading and trailing whitespace is removed from header names
-- **Pattern Validation**: Only valid header name characters are accepted (letters, numbers, hyphens, underscores)
-- **Matching**: Normalized names are used for header matching during removal
-
-### Error Handling
-
-The policy includes robust error handling and validation:
-
-1. **Missing Configuration**: If neither `requestHeaders` nor `responseHeaders` is specified, validation fails at configuration time
-2. **Invalid Arrays**: If header arrays are not properly formatted, validation fails at configuration time
-3. **Invalid Names**: If header names are not strings or are empty, validation fails at configuration time
-4. **Runtime Safety**: Missing headers during execution don't cause errors (graceful handling)
-5. **Graceful Degradation**: Policy execution errors don't affect request processing
-
-### Performance Considerations
-
-- **Minimal Overhead**: Lightweight header removal with minimal memory allocation
-- **Header Processing**: Efficient header removal using Go's standard HTTP header handling
-- **No Network Calls**: All processing is done locally without external dependencies
-- **Dual Phase**: Separate request and response processing for optimal performance
-
-## Common Use Cases
-
-1. **Security Enhancement**: Remove server identification headers like `Server`, `X-Powered-By` to reduce information disclosure.
-
-2. **Authentication Cleanup**: Remove authentication headers like `Authorization`, `X-API-Key` before forwarding to internal services.
-
-3. **Debug Information Removal**: Remove debug headers like `X-Debug-Mode`, `X-Trace-ID` from production responses.
-
-4. **Cache Control**: Remove caching headers like `ETag`, `Last-Modified` to disable caching for specific endpoints.
-
-5. **Privacy Protection**: Remove tracking headers or cookies before forwarding requests to upstream services.
-
-6. **API Standardization**: Remove vendor-specific headers to present a consistent API interface.
-
-7. **Compliance**: Remove headers containing sensitive information to meet regulatory requirements.
-
-8. **Performance Optimization**: Remove unnecessary headers to reduce message size and improve performance.
-
-## Best Practices
-
-1. **Security Focus**: Always remove server identification headers in production environments to reduce attack surface.
-
-2. **Sensitive Data**: Remove headers containing sensitive information like internal tokens, debug data, or system identifiers.
-
-3. **Documentation**: Document removed headers so client developers and upstream services are aware of the changes.
-
-4. **Testing**: Test header removal in development environments to ensure applications work correctly without removed headers.
-
-5. **Monitoring**: Monitor for applications that break when expected headers are removed.
-
-6. **Minimal Impact**: Only remove headers that are truly unnecessary or pose security risks.
-
-7. **Upstream Coordination**: Coordinate with upstream services to ensure they don't depend on headers you plan to remove.
-
-8. **Client Communication**: Inform client developers about headers that will be removed from responses.
-
-## Security Considerations
-
-1. **Information Disclosure**: Remove headers that reveal internal system information, versions, or architecture details.
-
-2. **Authentication Tokens**: Remove authentication headers when forwarding to internal services that don't need them.
-
-3. **Debug Information**: Never expose debug headers, trace IDs, or internal processing information in production.
-
-4. **Compliance**: Use header removal to meet data protection and privacy compliance requirements.
-
-5. **Attack Surface Reduction**: Remove headers that could be used by attackers for reconnaissance or exploitation.
-
-6. **Session Management**: Consider removing session-related headers when they're not needed by upstream services.
-
-7. **Logging**: Be aware that removed headers won't appear in upstream service logs, which may affect debugging.
-
-8. **Validation**: Ensure that removing headers doesn't break authentication, authorization, or other security mechanisms.
+Apply route-specific rules when only selected operations require header removal, rather than enforcing broad removal globally. Document removed headers for client and backend teams to keep integration contracts clear. Test policy interactions with `add-headers`, `set-headers`, and `modify-headers` to confirm final header outcomes.

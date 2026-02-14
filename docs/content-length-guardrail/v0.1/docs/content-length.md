@@ -12,14 +12,21 @@ The Content Length Guardrail validates the byte length of request or response bo
 - Validates byte length against minimum and maximum thresholds
 - Supports JSONPath extraction to validate specific fields within JSON payloads
 - Configurable inverted logic to pass when content length is outside the range
-- Separate configuration for request and response phases
+- Supports independent request and response phase configuration
 - Optional detailed assessment information in error responses
 
 ## Configuration
 
-### Parameters
+The Basic Auth policy uses a single-level configuration where all parameters are configured in the API definition YAML.
 
-#### Request Phase
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | `ContentLengthGuardRailConfig` object | No | - | Configuration for request-phase content length validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+| `response` | `ContentLengthGuardRailConfig` object | No | - | Configuration for response-phase content length validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+
+#### ContentLengthGuardRailConfig Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -29,17 +36,7 @@ The Content Length Guardrail validates the byte length of request or response bo
 | `invert` | boolean | No | `false` | If `true`, validation passes when content length is NOT within the min-max range. If `false`, validation passes when content length is within the range. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `min` | integer | Yes | - | Minimum allowed byte length (inclusive). Must be >= 0. |
-| `max` | integer | Yes | - | Maximum allowed byte length (inclusive). Must be >= 1. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `invert` | boolean | No | `false` | If `true`, validation passes when content length is NOT within the min-max range. If `false`, validation passes when content length is within the range. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -50,17 +47,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: content-length-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/content-length-guardrail@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic Content Length Validation
 
 Deploy an LLM provider that limits request payloads to between 100 bytes and 1MB:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -87,7 +89,7 @@ spec:
         methods: [GET]
   policies:
     - name: content-length-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -95,7 +97,6 @@ spec:
             request:
               min: 100
               max: 1048576
-EOF
 ```
 
 **Test the guardrail:**
@@ -132,31 +133,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Additional Configuration Options
-
-You can customize the guardrail behavior by modifying the `policies` section:
-
-- **Request and Response Validation**: Configure both `request` and `response` parameters to validate byte lengths in both directions. Use `showAssessment: true` to include detailed assessment information in error responses.
-
-- **Inverted Logic**: Set `invert: true` to allow only content *outside* the specified byte range. This is useful for blocking content that falls within a prohibited size range.
-
-- **Full Payload Validation**: Omit the `jsonPath` parameter to validate the entire request body without JSONPath extraction.
-
-- **Field-Specific Validation**: Use `jsonPath` to extract and validate specific fields within JSON payloads (e.g., `"$.messages[0].content"` for message content or `"$.choices[0].message.content"` for response content).
-
-## Use Cases
-
-1. **Resource Protection**: Prevent excessively large payloads that could exhaust system resources or cause performance degradation.
-
-2. **Network Optimization**: Control payload sizes to optimize network transfer times and reduce bandwidth costs.
-
-3. **Storage Management**: Limit content sizes to manage storage requirements effectively.
-
-4. **API Rate Limiting**: Enforce size constraints as part of rate limiting strategies.
-
-5. **Quality Assurance**: Ensure responses meet minimum size requirements for completeness.
-
-## Error Response
+**In Case of Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -187,9 +164,34 @@ If `showAssessment` is enabled, additional details are included:
 }
 ```
 
+## How it Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Byte Length Calculation**: Calculates the byte length of the extracted content using UTF-8 encoding.
+3. **Range Evaluation**: Validates whether the content length is within `min` and `max` bounds.
+4. **Invert Handling**: Applies `invert` logic when configured to validate outside-range behavior.
+5. **Intervention on Violation**: If validation fails, returns HTTP `422` and blocks further processing.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Byte Length Calculation**: Calculates the byte length of the extracted content using UTF-8 encoding.
+3. **Range Evaluation**: Validates whether the content length is within `min` and `max` bounds.
+4. **Invert Handling**: Applies `invert` logic when configured to validate outside-range behavior.
+5. **Intervention on Violation**: If validation fails, returns HTTP `422` to the client.
+
+#### Validation Behavior
+
+- **Length Measurement Rules**: Byte length is calculated on the UTF-8 encoded representation of the content.
+- **Normal Mode (`invert: false`)**: Validation passes only when the content length is within the configured `[min, max]` range.
+- **Inverted Mode (`invert: true`)**: Validation passes only when the content length is outside the configured `[min, max]` range.
+
 ## Notes
 
 - Byte length is calculated on the UTF-8 encoded representation of the content.
+- Use `request` and `response` independently to validate one or both directions.
 - When using JSONPath, if the path does not exist or the extracted value is not a string, validation will fail.
 - Inverted logic is useful for blocking content that falls outside acceptable size ranges.
 - Consider network and storage constraints when setting maximum values.

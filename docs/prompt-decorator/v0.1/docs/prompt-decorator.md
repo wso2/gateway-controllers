@@ -17,57 +17,30 @@ The Prompt Decorator policy dynamically modifies prompts by prepending or append
 
 ## Configuration
 
-### Parameters
+This policy requires only a single-level configuration where all parameters are configured in the API definition YAML.
+
+### User Parameters (API Definition)
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `promptDecoratorConfig` | string | Yes | - | JSON string containing decoration configuration. For text decoration: `{"decoration": "string"}`. For chat decoration: `{"decoration": [{"role": "system", "content": "..."}]}` |
+| `promptDecoratorConfig` | `PromptDecoratorConfig` (JSON string) | Yes | - | JSON string containing decoration configuration. Supports text decoration (`decoration` as a string) or chat decoration (`decoration` as an array of message objects). |
 | `jsonPath` | string | Yes | - | JSONPath expression to locate the field to decorate. Use `$.messages[0].content` for text decoration, or `$.messages` for chat decoration. |
 | `append` | boolean | No | `false` | If `true`, decoration is appended to the content. If `false`, decoration is prepended (default). |
 
-## Decoration Modes
+### PromptDecoratorConfig Configuration
 
-### Mode 1: Text Prompt Decoration
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `decoration` | string or `PromptMessage` array | Yes | Decoration content. Use a string for text decoration, or an array of `PromptMessage` objects for chat decoration. |
 
-Text decoration is used when the JSONPath targets a string field (e.g., `$.messages[0].content`). The decoration can be:
-- A simple string that gets prepended or appended to the content
-- An array of decoration objects (their content fields are concatenated with newlines)
+### PromptMessage Configuration
 
-**Configuration Example:**
-```json
-{
-  "decoration": "Summarize the following content in a concise, neutral, and professional tone. Structure the summary using bullet points if appropriate.
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `role` | string | Yes | Role for chat decoration message (e.g., `system`, `user`, `assistant`). |
+| `content` | string | Yes | Message content to prepend or append in chat decoration mode. |
 
-"
-}
-```
-
-**Behavior:**
-- Decoration string is prepended or appended to the target content field
-- A space is automatically added between the decoration and original content
-
-### Mode 2: Chat Prompt Decoration
-
-Chat decoration is used when the JSONPath targets an array field (e.g., `$.messages`). The decoration must be an array of message objects:
-
-**Configuration Example:**
-```json
-{
-  "decoration": [
-    {
-      "role": "system",
-      "content": "You are a helpful hotel booking receptionist for the imaginary hotel 'Azure Horizon Resort'. Your job is to collect all the necessary booking details from guests."
-    }
-  ]
-}
-```
-
-**Behavior:**
-- Decoration messages are prepended or appended to the messages array
-- Each decoration object must have `role` and `content` fields
-- Multiple decoration messages can be added
-
-## JSONPath Support
+#### JSONPath Support
 
 The decorator supports JSONPath expressions to target specific fields. Common examples:
 
@@ -80,17 +53,22 @@ The decorator supports JSONPath expressions to target specific fields. Common ex
 - Use `[0]` for first element, `[1]` for second, etc.
 - Use `[-1]` for last element, `[-2]` for second-to-last, etc.
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: prompt-decorator
+  gomodule: github.com/wso2/gateway-controllers/policies/prompt-decorator@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Text Prompt Decoration - Summarization Directive
 
 Add a summarization instruction to user prompts:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -113,7 +91,7 @@ spec:
         methods: [POST]
   policies:
     - name: prompt-decorator
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -121,7 +99,6 @@ spec:
             promptDecoratorConfig: '{"decoration": "Summarize the following content in a concise, neutral, and professional tone. Structure the summary using bullet points if appropriate.\n\n"}'
             jsonPath: "$.messages[0].content"
             append: false
-EOF
 ```
 
 **Test the decorator:**
@@ -157,15 +134,22 @@ curl -X POST http://openai:8080/chat/completions \
 # }
 ```
 
+**Error Response:**
+
+When the policy encounters an error (e.g., invalid JSONPath, invalid decoration config, or missing required fields), it returns an HTTP 500 status code with the following structure:
+
+```json
+{
+  "type": "PROMPT_DECORATOR_ERROR",
+  "message": "Error description here"
+}
+```
+
 ### Example 2: Chat Prompt Decoration - System Persona
 
 Add a system message to define AI behavior:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -188,7 +172,7 @@ spec:
         methods: [POST]
   policies:
     - name: prompt-decorator
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -196,7 +180,6 @@ spec:
             promptDecoratorConfig: '{"decoration": [{"role": "system", "content": "You are a helpful hotel booking receptionist for Azure Horizon Resort. Collect booking details: name, NIC, check-in time, staying duration (nights), and room type (single, double, suite). Ask one detail at a time in a friendly tone."}]}'
             jsonPath: "$.messages"
             append: false
-EOF
 ```
 
 **Test the decorator:**
@@ -239,7 +222,7 @@ Append instructions to the end of user messages:
 ```yaml
 policies:
   - name: prompt-decorator
-    version: v0.1.0
+    version: v0
     paths:
       - path: /chat/completions
         methods: [POST]
@@ -249,65 +232,62 @@ policies:
           append: true
 ```
 
-## Use Cases
+## How It Works
 
-1. **Consistent Instructions**: Prepend standardized instructions or guidelines to all prompts to ensure consistent AI behavior.
+#### Request Phase
 
-2. **System Personas**: Inject system messages to define AI personality, role, or behavior before user interactions.
+1. **Target Extraction**: Resolves the target field using `jsonPath` from the request payload.
+2. **Mode Detection**: Determines decoration mode based on target type and `promptDecoratorConfig.decoration` shape (string vs message array).
+3. **Decoration Application**: Prepends or appends decoration based on `append` configuration.
+4. **Payload Update**: Writes the decorated value back to the request payload and forwards it upstream.
 
-3. **Quality Enhancement**: Add formatting instructions (e.g., "respond in bullet points", "use professional tone") to improve response quality.
+#### Decoration Modes
 
-4. **Context Addition**: Prepend contextual information or background details to enrich prompts.
 
-5. **Multi-turn Conversations**: Add system messages at the beginning of chat conversations to set conversation rules.
+**Mode 1: Text Prompt Decoration**
 
-6. **Compliance**: Append compliance-related instructions or disclaimers to prompts.
+Text decoration is used when the JSONPath targets a string field (e.g., `$.messages[0].content`). The decoration can be:
+- A simple string that gets prepended or appended to the content
+- An array of decoration objects (their content fields are concatenated with newlines)
 
-7. **Output Formatting**: Add instructions for specific output formats (JSON, markdown, structured text) to prompts.
-
-## Configuration Reference
-
-### Text Decoration Configuration
-
+*Configuration Example:*
 ```json
 {
-  "decoration": "Your decoration string here"
+  "decoration": "Summarize the following content in a concise, neutral, and professional tone. Structure the summary using bullet points if appropriate.
+
+"
 }
 ```
 
-- Simple string that will be prepended or appended to the target content
-- A space is automatically added between decoration and original content
+*Behavior:*
+- Decoration string is prepended or appended to the target content field
+- A space is automatically added between the decoration and original content
 
-### Chat Decoration Configuration
 
+**Mode 2: Chat Prompt Decoration**
+
+Chat decoration is used when the JSONPath targets an array field (e.g., `$.messages`). The decoration must be an array of message objects:
+
+*Configuration Example:*
 ```json
 {
   "decoration": [
     {
       "role": "system",
-      "content": "Your system message content"
+      "content": "You are a helpful hotel booking receptionist for the imaginary hotel 'Azure Horizon Resort'. Your job is to collect all the necessary booking details from guests."
     }
   ]
 }
 ```
 
-- Array of message objects
-- Each object must have `role` (e.g., "system", "user", "assistant") and `content` fields
-- Messages are prepended or appended to the messages array in the order specified
-
-## Error Response
-
-When the policy encounters an error (e.g., invalid JSONPath, missing fields), it returns an HTTP 500 status code with the following structure:
-
-```json
-{
-  "type": "PROMPT_DECORATOR_ERROR",
-  "message": "Error description here"
-}
-```
+*Behavior:*
+- Decoration messages are prepended or appended to the messages array
+- Each decoration object must have `role` and `content` fields
+- Multiple decoration messages can be added
 
 ## Notes
 
+- Common use cases include prompt standardization, persona injection, output-format enforcement, and contextual prompt enrichment.
 - The policy only processes request bodies.
 - For text decoration, a space is automatically added between the decoration and original content.
 - JSONPath expressions must correctly identify the target field. Invalid paths will result in errors.

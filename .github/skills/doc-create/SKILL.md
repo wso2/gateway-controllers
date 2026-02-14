@@ -15,11 +15,9 @@ For a policy named `<policy-name>` and version folder `v0.1`, documentation MUST
 
 - `docs/<policy-name>/v0.1/metadata.json`
 - `docs/<policy-name>/v0.1/docs/<policy-name>.md`
-- `docs/<policy-name>/v0.1/docs/<policy-name>.html` (generated from the markdown, only when explicitly requested)
 
 Notes:
 - Keep the existing folder naming conventions (kebab-case policy names, `v0.1/` version folder).
-- When HTML generation is requested, the HTML file must be saved **alongside** the markdown file (same directory, matching base name).
 
 ### metadata.json (Must Match Existing Structure)
 
@@ -53,6 +51,10 @@ Section inclusion rules:
 Use these headings (recommended canonical form):
 
 ```markdown
+---
+title: "Overview"
+---
+
 # <Policy Display Name>
 
 ## Overview
@@ -103,28 +105,6 @@ Example:
   gomodule: github.com/wso2/gateway-controllers/policies/add-headers@v0
 ```
 
-## When to Generate Diagrams (Opt-In Only)
-
-Use the `excalidraw-diagram-generator` skill ONLY when the user explicitly asks to:
-- “generate a diagram”, “create a diagram”, “draw a flow”, “visualize internals”, etc.
-
-Diagram inclusion is also opt-in:
-- Only embed/link the diagram from the markdown if the user explicitly asks to include it in the doc.
-
-If not explicitly requested, do not generate diagrams.
-
-## Markdown → HTML (Opt-In Only)
-
-Generate HTML ONLY when the user explicitly asks for HTML generation.
-
-If explicitly requested:
-- Use the `markdown-to-html` skill to generate HTML.
-- Preserve markdown table structure in HTML output (for example, configuration tables must render as `<table>` elements).
-- Save the HTML file next to the markdown as: `docs/<policy-name>/v0.1/docs/<policy-name>.html`.
-
-If not explicitly requested:
-- Do not create or update the HTML file.
-
 ## Workflow: Create New Documentation
 
 Follow these steps when the user asks to create docs for a policy that does not yet have documentation in the new structure.
@@ -150,8 +130,6 @@ Follow these steps when the user asks to create docs for a policy that does not 
 	  - Use tables where appropriate (common format below).
 	- In `Reference Scenarios`, include realistic, working examples.
 	- Add optional sections only if the user explicitly requested them (and only those sections requested).
-6. Convert the markdown to HTML using the `markdown-to-html` skill and save it alongside the markdown only if the user explicitly requested HTML generation.
-7. (Only if explicitly requested) Generate an Excalidraw diagram using the `excalidraw-diagram-generator` skill.
 
 ### Configuration Tables (Recommended Standard)
 
@@ -190,8 +168,6 @@ Follow these steps when the user asks to update older docs so they adhere to the
 	- If an optional section is absent in the source and no mapping requires it, do not add it.
 7. Ensure `Configuration` includes the mandatory `build.yaml` policy entry snippet under `policies:`.
 8. Remove/merge old sections as needed so the final result only has the template headings.
-9. Convert the updated markdown to HTML using the `markdown-to-html` skill and save it alongside the markdown only if the user explicitly requested HTML generation.
-10. (Only if explicitly requested) Generate an Excalidraw diagram using the `excalidraw-diagram-generator` skill.
 
 ### Migration Mapping (From DOC_STRUCTURE.md)
 
@@ -221,6 +197,4 @@ Before finishing:
 - `Configuration` includes the mandatory `build.yaml` policy entry snippet under `policies:`.
 - `System Parameters (From/Comes from config.toml)` is included only when system-level parameters exist.
 - For migrations, `## Notes` preserves all useful guidance merged from best-practice/security/performance/troubleshooting sections.
-- If HTML was explicitly requested, `docs/<policy-name>/v0.1/docs/<policy-name>.html` exists, matches the markdown content, and preserves markdown table structure as HTML tables.
-- A diagram file is created and embedded/linked only if the user explicitly requested it.
 

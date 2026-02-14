@@ -18,34 +18,15 @@ The policy uses embedding models (OpenAI, Mistral, or Azure OpenAI) to convert p
 - **JSONPath extraction**: Extract specific fields from request body for validation
 - **Detailed assessment information**: Optional detailed violation information in error responses
 
-## How It Works
-
-1. **Text Extraction**: Extracts prompt text from the request body using JSONPath (if configured) or uses the entire request body
-2. **Embedding Generation**: Generates a vector embedding from the extracted prompt using the configured embedding provider
-3. **Validation Strategy**: The validation logic depends on which lists are configured:
-   - **Deny list only**: Compares prompt embedding against all denied phrases. If any denied phrase has similarity >= `denySimilarityThreshold`, the request is blocked. Otherwise, it proceeds.
-   - **Allow list only**: Compares prompt embedding against all allowed phrases. If no allowed phrase has similarity >= `allowSimilarityThreshold`, the request is blocked. Otherwise, it proceeds.
-   - **Both lists**: First checks the deny list (blocks if similarity >= `denySimilarityThreshold`), then checks the allow list (blocks if similarity < `allowSimilarityThreshold`). Request proceeds only if it passes both checks.
-4. **Validation Result**: Request proceeds if validation passes, or is blocked with HTTP 422 if validation fails
-
 ## Configuration
 
-### Parameters
+The Semantic Prompt Guardrail policy uses a two-level configuration
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract the prompt from JSON payload. If empty, validates the entire payload as a string. Examples: `"$.messages[0].content"`, `"$.prompt"` |
-| `allowSimilarityThreshold` | number | No | `0.65` | Minimum similarity threshold (0.0 to 1.0) for a prompt to be considered similar to an allowed phrase. Higher values mean stricter matching. If set, the prompt must match at least one allowed phrase within this threshold. |
-| `denySimilarityThreshold` | number | No | `0.65` | Maximum similarity threshold (0.0 to 1.0) for a prompt to be considered similar to a denied phrase. If any denied phrase has similarity >= this threshold, the request is blocked. Higher values mean stricter blocking. |
-| `allowedPhrases` | array | No* | `[]` | List of phrases that are considered safe. The prompt must match one of these within `allowSimilarityThreshold` if the threshold is configured. Embeddings are automatically generated during policy initialization. |
-| `deniedPhrases` | array | No* | `[]` | List of phrases that should block the prompt when similar within the `denySimilarityThreshold`. Embeddings are automatically generated during policy initialization. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. If `false`, returns minimal error information. |
+### System Parameters (From config.toml)
 
-\* At least one of `allowedPhrases` or `deniedPhrases` must be provided.
+These parameters are usually set at the gateway level and automatically applied, but they can also be overridden in the params section of an API artifact definition. System-wide defaults can be configured in the gateway’s `config.toml` file, and while these defaults apply to all Semantic Prompt Guardrail policy instances, they can be customized for individual policies within the API configuration when necessary.
 
-### System Parameters (Required)
-
-These parameters are typically configured at the gateway level and automatically injected, or you can override those values from the params section in the api artifact definition file as well:
+##### Embedding Provider Configuration
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -54,13 +35,9 @@ These parameters are typically configured at the gateway level and automatically
 | `embeddingModel` | string | Conditional | - | Embedding model name. **Required for OPENAI and MISTRAL**, not required for AZURE_OPENAI (deployment name is in endpoint URL). Examples: OpenAI: `text-embedding-ada-002` or `text-embedding-3-small`, Mistral: `mistral-embed` |
 | `apiKey` | string | Yes | API key for the embedding service authentication |
 
-### Configuring System Parameters in config.toml
+#### Sample System Configuration
 
-System parameters can be configured globally in the gateway's `config.toml` file. These values serve as defaults for all Semantic Prompt Guard policy instances and can be overridden per-policy in the API configuration if needed.
-
-#### Location in config.toml
-
-Add the following configuration section to your `config.toml` file:
+Add the following configuration section under the root level in your `config.toml` file:
 
 ```toml
 embedding_provider = "MISTRAL" # Supported: MISTRAL, OPENAI, AZURE_OPENAI
@@ -70,38 +47,27 @@ embedding_provider_dimension = 1024
 embedding_provider_api_key = ""
 ```
 
-## Similarity Threshold Guidelines
+### User Parameters (API Definition)
 
-The similarity thresholds control how similar prompts must be to trigger allow/deny decisions:
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `jsonPath` | string | No | `""` | JSONPath expression to extract the prompt from JSON payload. If empty, validates the entire payload as a string. Examples: `"$.messages[0].content"`, `"$.prompt"` |
+| `allowSimilarityThreshold` | number | No | `0.65` | Minimum similarity threshold (0.0 to 1.0) for a prompt to be considered similar to an allowed phrase. Higher values mean stricter matching. |
+| `denySimilarityThreshold` | number | No | `0.65` | Similarity threshold (0.0 to 1.0) for blocking against denied phrases. If any denied phrase has similarity >= this threshold, the request is blocked. |
+| `allowedPhrases` | array | No* | `[]` | List of phrases that are considered safe. The prompt must match one of these within `allowSimilarityThreshold` when allow-list validation is configured. |
+| `deniedPhrases` | array | No* | `[]` | List of phrases that should block the prompt when similar within `denySimilarityThreshold`. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. If `false`, returns minimal error information. |
 
-### Allow Similarity Threshold
+\* At least one of `allowedPhrases` or `deniedPhrases` must be provided.
 
-- **0.95-1.0**: Very strict matching. Only near-identical prompts to allowed phrases will pass. Use for exact-match scenarios.
-- **0.85-0.94**: Recommended for most use cases. Catches semantically equivalent prompts with some wording variation.
-- **0.75-0.84**: More flexible matching. Useful for broader conceptual similarity.
-- **0.60-0.74**: Very flexible. May allow loosely related prompts.
-- **Below 0.60**: Not recommended. Risk of allowing unrelated prompts.
-
-**Recommendation**: Start with 0.65 and adjust based on your use case. Monitor false positives/negatives to fine-tune.
-
-### Deny Similarity Threshold
-
-- **0.95-1.0**: Very strict blocking. Only near-identical prompts to denied phrases will be blocked.
-- **0.85-0.94**: Recommended for most use cases. Catches semantically equivalent prompts with some wording variation.
-- **0.75-0.84**: More flexible blocking. Useful for catching variations of prohibited content.
-- **0.60-0.74**: Very flexible. May block loosely related prompts.
-- **Below 0.60**: Not recommended. Risk of blocking legitimate prompts.
-
-**Recommendation**: Start with 0.65 and adjust based on your use case. Monitor false positives to fine-tune.
-
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract specific text from request bodies before validation. This is useful for:
 - Extracting message content from chat completion requests
 - Focusing on specific prompt fields while ignoring metadata
 - Handling structured JSON payloads
 
-### Common JSONPath Examples
+**Common JSONPath Examples**
 
 - `$.messages[0].content` - First message's content in chat completions
 - `$.messages[-1].content` - Last message's content
@@ -109,17 +75,22 @@ The guardrail supports JSONPath expressions to extract specific text from reques
 - `$.input` - Extract input field from embeddings API
 - `$` - Entire request body (default if jsonPath is not specified)
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: semantic-prompt-guard
+  gomodule: github.com/wso2/gateway-controllers/policies/semantic-prompt-guard@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Deny List Only - Blocking Prohibited Content
 
 Deploy an LLM provider that blocks prompts similar to prohibited phrases:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -142,7 +113,7 @@ spec:
         methods: [POST]
   policies:
     - name: semantic-prompt-guard
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -154,7 +125,6 @@ spec:
               - "Create malicious code"
               - "Bypass security measures"
             showAssessment: true
-EOF
 ```
 
 **Test the guardrail:**
@@ -191,116 +161,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Example 2: Allow List Only - Whitelist Approach
-
-Deploy an LLM provider that only allows prompts similar to approved phrases:
-
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
-apiVersion: gateway.api-platform.wso2.com/v1alpha1
-kind: LlmProvider
-metadata:
-  name: whitelist-provider
-spec:
-  displayName: Whitelist Provider
-  version: v1.0
-  template: openai
-  vhost: openai
-  upstream:
-    url: "https://api.openai.com/v1"
-    auth:
-      type: api-key
-      header: Authorization
-      value: Bearer <openai-apikey>
-  accessControl:
-    mode: deny_all
-    exceptions:
-      - path: /chat/completions
-        methods: [POST]
-  policies:
-    - name: semantic-prompt-guard
-      version: v0.1.0
-      paths:
-        - path: /chat/completions
-          methods: [POST]
-          params:
-            jsonPath: "$.messages[0].content"
-            allowSimilarityThreshold: 0.75
-            allowedPhrases:
-              - "How can I help you with customer service?"
-              - "What product information do you need?"
-              - "Tell me about your order status"
-              - "I need help with my account"
-EOF
-```
-
-### Example 3: Combined Allow and Deny Lists
-
-Use both allow and deny lists for comprehensive filtering:
-
-```yaml
-policies:
-  - name: semantic-prompt-guard
-    version: v0.1.0
-    paths:
-      - path: /chat/completions
-        methods: [POST]
-        params:
-          jsonPath: "$.messages[0].content"
-          allowSimilarityThreshold: 0.70
-          denySimilarityThreshold: 0.75
-          allowedPhrases:
-            - "Customer service inquiry"
-            - "Product information request"
-            - "Technical support question"
-          deniedPhrases:
-            - "How to hack"
-            - "Create malware"
-            - "Bypass authentication"
-          showAssessment: true
-```
-
-### Example 4: Azure OpenAI with Custom Timeout
-
-Configure semantic prompt guardrail with Azure OpenAI and extended timeout:
-
-```yaml
-policies:
-  - name: semantic-prompt-guard
-    version: v0.1.0
-    paths:
-      - path: /chat/completions
-        methods: [POST]
-        params:
-          jsonPath: "$.messages[-1].content"
-          denySimilarityThreshold: 0.80
-          deniedPhrases:
-            - "Prohibited content example"
-            - "Another prohibited phrase"
-```
-
-## Use Cases
-
-1. **Content Safety**: Block prompts that are semantically similar to prohibited content, even when exact keywords differ.
-
-2. **Whitelist Filtering**: Only allow prompts that match approved use cases or topics, ensuring LLM usage stays within defined boundaries.
-
-3. **Compliance**: Enforce content policies by blocking prompts similar to non-compliant examples.
-
-4. **Abuse Prevention**: Detect and block variations of known abuse patterns, even when attackers try to evade keyword filters.
-
-5. **Domain Restriction**: Restrict LLM usage to specific domains by allowing only prompts similar to approved domain-specific phrases.
-
-6. **Multi-tenant Security**: Apply different allow/deny lists per tenant or application to enforce tenant-specific content policies.
-
-7. **Prompt Injection Prevention**: Block prompts that are semantically similar to known prompt injection attacks.
-
-8. **Quality Control**: Ensure prompts match expected patterns for better response quality and consistency.
-
-## Error Response
+**Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -331,7 +192,63 @@ If `showAssessment` is enabled, additional details are included in the `assessme
 }
 ```
 
-For allow list violations, the assessment message format is:
+**In case of an error during processing** (e.g., JSONPath extraction failures, embedding generation errors), the `actionReason` contains the specific error message:
+
+```json
+{
+  "type": "SEMANTIC_PROMPT_GUARD",
+  "message": {
+    "action": "GUARDRAIL_INTERVENED",
+    "interveningGuardrail": "semantic-prompt-guard",
+    "actionReason": "Error extracting value from JSONPath",
+    "direction": "REQUEST"
+  }
+}
+```
+
+### Example 2: Allow List Only - Whitelist Approach
+
+Deploy an LLM provider that only allows prompts similar to approved phrases:
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: LlmProvider
+metadata:
+  name: whitelist-provider
+spec:
+  displayName: Whitelist Provider
+  version: v1.0
+  template: openai
+  vhost: openai
+  upstream:
+    url: "https://api.openai.com/v1"
+    auth:
+      type: api-key
+      header: Authorization
+      value: Bearer <openai-apikey>
+  accessControl:
+    mode: deny_all
+    exceptions:
+      - path: /chat/completions
+        methods: [POST]
+  policies:
+    - name: semantic-prompt-guard
+      version: v0
+      paths:
+        - path: /chat/completions
+          methods: [POST]
+          params:
+            jsonPath: "$.messages[0].content"
+            allowSimilarityThreshold: 0.75
+            allowedPhrases:
+              - "How can I help you with customer service?"
+              - "What product information do you need?"
+              - "Tell me about your order status"
+              - "I need help with my account"
+```
+
+**Allow list Violations:**
+For an allow list violations, the assessment message format is:
 
 ```json
 {
@@ -346,33 +263,80 @@ For allow list violations, the assessment message format is:
 }
 ```
 
-For errors during processing (e.g., JSONPath extraction failures, embedding generation errors), the `actionReason` contains the specific error message:
+### Example 3: Combined Allow and Deny Lists
 
-```json
-{
-  "type": "SEMANTIC_PROMPT_GUARD",
-  "message": {
-    "action": "GUARDRAIL_INTERVENED",
-    "interveningGuardrail": "semantic-prompt-guard",
-    "actionReason": "Error extracting value from JSONPath",
-    "direction": "REQUEST"
-  }
-}
+Use both allow and deny lists for comprehensive filtering:
+
+```yaml
+policies:
+  - name: semantic-prompt-guard
+    version: v0
+    paths:
+      - path: /chat/completions
+        methods: [POST]
+        params:
+          jsonPath: "$.messages[0].content"
+          allowSimilarityThreshold: 0.70
+          denySimilarityThreshold: 0.75
+          allowedPhrases:
+            - "Customer service inquiry"
+            - "Product information request"
+            - "Technical support question"
+          deniedPhrases:
+            - "How to hack"
+            - "Create malware"
+            - "Bypass authentication"
+          showAssessment: true
 ```
 
-## Performance Considerations
+### Example 4: Azure OpenAI with Custom Timeout
 
-1. **Embedding Generation Latency**: Generating embeddings adds ~100-500ms to request processing. This is a one-time cost per request.
+Configure semantic prompt guardrail with Azure OpenAI and extended timeout:
 
-2. **Batch Processing**: All allow/deny phrase embeddings are generated in a single batch during policy initialization, minimizing initialization overhead.
+```yaml
+policies:
+  - name: semantic-prompt-guard
+    version: v0
+    paths:
+      - path: /chat/completions
+        methods: [POST]
+        params:
+          jsonPath: "$.messages[-1].content"
+          denySimilarityThreshold: 0.80
+          deniedPhrases:
+            - "Prohibited content example"
+            - "Another prohibited phrase"
+```
 
-3. **Similarity Calculation**: Cosine similarity calculations are fast (typically < 10ms) even with many phrases.
+## How It Works
 
-4. **Embedding Provider Selection**: 
-   - OpenAI: Fast, reliable, good for most use cases
-   - Mistral: Alternative option with good performance
-   - Azure OpenAI: Good for Azure-integrated environments
+#### Request Phase
 
+1. **Text Extraction**: Extracts prompt text from the request body using JSONPath (if configured) or uses the entire request body.
+2. **Embedding Generation**: Generates a vector embedding from the extracted prompt using the configured embedding provider.
+3. **Validation Strategy**: Applies deny-list checks, allow-list checks, or both, depending on configured phrase lists and thresholds.
+4. **Decision Enforcement**: Blocks with HTTP `422` when validation fails; otherwise, request proceeds upstream.
+
+#### Validation Strategy
+
+- **Deny list only**: Compares prompt embedding against all denied phrases. If any denied phrase has similarity >= `denySimilarityThreshold`, the request is blocked.
+- **Allow list only**: Compares prompt embedding against all allowed phrases. If no allowed phrase has similarity >= `allowSimilarityThreshold`, the request is blocked.
+- **Both lists**: Checks deny list first (blocks on deny match), then checks allow list (blocks on allow miss). Request proceeds only if both checks pass.
+
+#### Similarity Thresholds
+
+- **Allow threshold (`allowSimilarityThreshold`)**: Controls minimum similarity required for allow-list matching.
+- **Deny threshold (`denySimilarityThreshold`)**: Controls similarity level that triggers deny-list blocking.
+- **Strict matching (`0.85-1.0`)**: Captures near-identical semantics with fewer broad matches.
+- **Balanced matching (`0.70-0.84`)**: Recommended for most production use cases.
+- **Flexible matching (`0.60-0.69`)**: Broad matching with higher false positive/negative risk depending on list quality.
+
+#### Performance
+
+- **Embedding Generation Latency**: Embedding generation adds approximately `100-500ms` per request.
+- **Batch Initialization**: Allow/deny phrase embeddings are generated in batch during policy initialization.
+- **Similarity Computation**: Cosine similarity calculations are typically fast (< `10ms`) even with moderate phrase lists.
+- **Provider Trade-offs**: OpenAI, Mistral, and Azure OpenAI each have different latency and deployment characteristics.
 
 ## Notes
 

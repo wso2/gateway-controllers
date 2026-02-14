@@ -12,14 +12,21 @@ The Sentence Count Guardrail validates the sentence count of request or response
 - Validates sentence count against minimum and maximum thresholds
 - Supports JSONPath extraction to validate specific fields within JSON payloads
 - Configurable inverted logic to pass when sentence count is outside the range
-- Separate configuration for request and response phases
+- Supports independent request and response phase configuration
 - Optional detailed assessment information in error responses
 
 ## Configuration
 
-### Parameters
+This policy requires only a single-level configuration where all parameters are configured in the API definition YAML.
 
-#### Request Phase
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | `SentenceCountGuardRailConfig` object | No | - | Configuration for request-phase sentence count validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+| `response` | `SentenceCountGuardRailConfig` object | No | - | Configuration for response-phase sentence count validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+
+#### SentenceCountGuardRailConfig Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -29,17 +36,7 @@ The Sentence Count Guardrail validates the sentence count of request or response
 | `invert` | boolean | No | `false` | If `true`, validation passes when sentence count is NOT within the min-max range. If `false`, validation passes when sentence count is within the range. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `min` | integer | Yes | - | Minimum allowed sentence count (inclusive). Must be >= 0. |
-| `max` | integer | Yes | - | Maximum allowed sentence count (inclusive). Must be >= 1. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `invert` | boolean | No | `false` | If `true`, validation passes when sentence count is NOT within the min-max range. If `false`, validation passes when sentence count is within the range. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -50,26 +47,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## Sentence Detection
+**Note:**
 
-Sentences are detected based on standard sentence-ending punctuation marks:
-- Period (.)
-- Exclamation mark (!)
-- Question mark (?)
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
-The guardrail counts sequences of characters ending with these punctuation marks as sentences.
+```yaml
+- name: sentence-count-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/sentence-count-guardrail@v0
+```
 
-## Examples
+## Reference Scenarios
 
 ### Example 1: Basic Sentence Count Validation
 
 Deploy an LLM provider that ensures requests contain between 1 and 10 sentences:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -96,7 +89,7 @@ spec:
         methods: [GET]
   policies:
     - name: sentence-count-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -105,7 +98,6 @@ spec:
               min: 2
               max: 10
               jsonPath: "$.messages[0].content"
-EOF
 ```
 
 **Test the guardrail:**
@@ -142,31 +134,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Additional Configuration Options
-
-You can customize the guardrail behavior by modifying the `policies` section:
-
-- **Request and Response Validation**: Configure both `request` and `response` parameters to validate sentence counts in both directions. Use `showAssessment: true` to include detailed assessment information in error responses.
-
-- **Inverted Logic**: Set `invert: true` to allow only content *outside* the specified sentence range. This is useful for blocking content that falls within a prohibited sentence count range.
-
-- **Full Payload Validation**: Omit the `jsonPath` parameter to validate the entire request body without JSONPath extraction.
-
-- **Field-Specific Validation**: Use `jsonPath` to extract and validate specific fields within JSON payloads (e.g., `"$.messages[0].content"` for message content or `"$.choices[0].message.content"` for response content).
-
-## Use Cases
-
-1. **Content Quality Assurance**: Ensure responses meet minimum sentence requirements for completeness and clarity.
-
-2. **Response Length Control**: Limit verbosity to maintain concise communication standards.
-
-3. **Input Validation**: Ensure user prompts contain sufficient context (minimum sentences) without being excessive.
-
-4. **Consistency Enforcement**: Maintain consistent response formats across different AI interactions.
-
-5. **Cost Management**: Control response length to manage token usage and associated costs.
-
-## Error Response
+**In Case of Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -197,10 +165,35 @@ If `showAssessment` is enabled, additional details are included:
 }
 ```
 
+## How it Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Sentence Counting**: Counts detected sentences in the extracted content after trimming whitespace.
+3. **Range Evaluation**: Validates whether the sentence count is within `min` and `max` bounds.
+4. **Invert Handling**: Applies `invert` logic when configured to validate outside-range behavior.
+5. **Intervention on Violation**: If validation fails, returns HTTP `422` and blocks further processing.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Sentence Counting**: Counts detected sentences in the extracted content after trimming whitespace.
+3. **Range Evaluation**: Validates whether the sentence count is within `min` and `max` bounds.
+4. **Invert Handling**: Applies `invert` logic when configured to validate outside-range behavior.
+5. **Intervention on Violation**: If validation fails, returns HTTP `422` to the client.
+
+#### Validation Behavior
+
+- **Sentence Detection Rules**: Sentences are detected using standard sentence-ending punctuation marks (`.`, `!`, `?`).
+- **Normal Mode (`invert: false`)**: Validation passes only when the sentence count is within the configured `[min, max]` range.
+- **Inverted Mode (`invert: true`)**: Validation passes only when the sentence count is outside the configured `[min, max]` range.
+
 ## Notes
 
 - Sentence counting is performed on the extracted or full content after trimming whitespace.
 - Sentences are identified by standard punctuation marks (., !, ?).
+- Use `request` and `response` independently to validate one or both directions.
 - When using JSONPath, if the path does not exist or the extracted value is not a string, validation will fail.
 - Inverted logic is useful for blocking content that falls outside acceptable sentence count ranges.
 - Consider the nature of your content when setting thresholds, as some content types may naturally have different sentence counts.

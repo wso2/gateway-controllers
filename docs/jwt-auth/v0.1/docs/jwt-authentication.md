@@ -21,16 +21,13 @@ The JWT Authentication policy validates JWT access tokens using one or more JWKS
 
 ## Configuration
 
-JWT Authentication uses two levels of configuration.
-
-- System parameters live in `gateway/configs/config.toml` under `policy_configurations.jwtauth_v010`.
-- User parameters are defined in the API configuration under `policies`.
+JWT Authentication requires two levels of configuration.
 
 ### System Parameters (config.toml)
 
 | Parameter | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
-| `keymanagers` | array | Yes | - | List of key manager definitions with JWKS configuration. |
+| `keymanagers` | ```KeyManager``` array | Yes | - | List of key manager definitions with JWKS configuration. |
 | `jwkscachettl` | string | No | `"5m"` | JWKS cache TTL. |
 | `jwksfetchtimeout` | string | No | `"5s"` | JWKS fetch timeout. |
 | `jwksfetchretrycount` | integer | No | `3` | JWKS fetch retry count. |
@@ -44,7 +41,7 @@ JWT Authentication uses two levels of configuration.
 | `errormessage` | string | No | `"Authentication failed."` | Error message body for failures. |
 | `validateissuer` | boolean | No | `true` | Validate the token `iss` claim against key managers. |
 
-#### Key Manager Configuration
+#### KeyManager Configuration
 
 Each entry in `keymanagers` must include a unique `name` and either `jwks.remote` or `jwks.local`.
 
@@ -58,22 +55,10 @@ Each entry in `keymanagers` must include a unique `name` and either `jwks.remote
 | `jwks.local.inline` | string | Conditional | Inline PEM certificate or public key. |
 | `jwks.local.certificatePath` | string | Conditional | Path to certificate or public key file. |
 
-### User Parameters (API Definition)
-
-| Parameter | Type | Required | Description |
-| --- | --- | --- | --- |
-| `issuers` | array | No | List of key manager names (or issuer values) to use. If omitted, runtime matches token `iss` or tries all key managers. |
-| `audiences` | array | No | Acceptable audience values. Token must contain at least one. |
-| `requiredScopes` | array | No | Required scopes. Uses space-delimited `scope` claim or array `scp` claim. |
-| `requiredClaims` | object | No | Map of claim name to expected value. |
-| `claimMappings` | object | No | Map of claim name to downstream header name. |
-| `authHeaderPrefix` | string | No | Overrides the configured authorization header scheme for this route. |
-| `userIdClaim` | string | No | Claim name to extract user ID for analytics. Defaults to `sub`. |
-
-## System Configuration Example
+#### Sample System Configuration
 
 ```toml
-[policy_configurations.jwtauth_v010]
+[policy_configurations.jwtauth_v0]
 jwkscachettl = "5m"
 jwksfetchtimeout = "5s"
 jwksfetchretrycount = 3
@@ -87,24 +72,47 @@ errormessageformat = "json"
 errormessage = "Authentication failed."
 validateissuer = true
 
-[[policy_configurations.jwtauth_v010.keymanagers]]
+[[policy_configurations.jwtauth_v0.keymanagers]]
 name = "PrimaryIDP"
 issuer = "https://idp.example.com/oauth2/token"
 
-[policy_configurations.jwtauth_v010.keymanagers.jwks.remote]
+[policy_configurations.jwtauth_v0.keymanagers.jwks.remote]
 uri = "https://idp.example.com/oauth2/jwks"
 skipTlsVerify = false
 
-[[policy_configurations.jwtauth_v010.keymanagers]]
+[[policy_configurations.jwtauth_v0.keymanagers]]
 name = "SecondaryIDP"
 issuer = "https://auth.example.org/oauth2/token"
 
-[policy_configurations.jwtauth_v010.keymanagers.jwks.remote]
+[policy_configurations.jwtauth_v0.keymanagers.jwks.remote]
 uri = "https://auth.example.org/oauth2/jwks"
 skipTlsVerify = false
 ```
 
-## API Definition Examples
+
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Description |
+| --- | --- | --- | --- |
+| `issuers` | array | No | List of key manager names (or issuer values) to use. If omitted, runtime matches token `iss` or tries all key managers. |
+| `audiences` | array | No | Acceptable audience values. Token must contain at least one. |
+| `requiredScopes` | array | No | Required scopes. Uses space-delimited `scope` claim or array `scp` claim. |
+| `requiredClaims` | object | No | Map of claim name to expected value. |
+| `claimMappings` | object | No | Map of claim name to downstream header name. |
+| `authHeaderPrefix` | string | No | Overrides the configured authorization header scheme for this route. |
+| `userIdClaim` | string | No | Claim name to extract user ID for analytics. Defaults to `sub`. |
+
+
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: jwt-auth
+  gomodule: github.com/wso2/gateway-controllers/policies/jwt-auth@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic JWT Authentication
 
@@ -221,10 +229,3 @@ spec:
             userIdClaim: username
 ```
 
-## Use Cases
-
-1. Secure APIs by requiring valid JWT tokens from trusted identity providers.
-2. Support multiple issuers for multi-tenant or federated authentication.
-3. Enforce scopes and claims for fine-grained access control.
-4. Propagate user identity to upstream services via claim mappings.
-5. Specify user identifiers from custom claims (username, account_id) for analytics purposes.

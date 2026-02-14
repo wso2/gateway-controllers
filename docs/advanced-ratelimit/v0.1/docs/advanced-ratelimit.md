@@ -5,200 +5,6 @@ title: "Overview"
 
 ## Overview
 
-The Advanced Rate Limiting policy provides a powerful, multi-dimensional token bucket implementation for API rate limiting. It supports multiple independent rate limit quotas per API, sophisticated key extraction strategies, and dynamic cost extraction for AI/LLM workloads.
-
-## Features
-
-- **Multi-dimensional Quotas**: Define multiple independent rate limit buckets (e.g., one per user, another per organization).
-- **Multiple Algorithms**: Choose between GCRA (Leaky Bucket variant for smooth shaping) and Fixed Window.
-- **Dynamic Cost Extraction**: Extract request costs from headers, metadata, or JSON bodies (e.g., for LLM token usage).
-- **Flexible Key Extraction**: Rate limit by Header, Metadata, IP, API Name, or Route Name.
-- **Distributed & Local**: Support for both In-Memory (local) and Redis (distributed) backends.
-- **Fail-Open Support**: Configurable behavior when Redis is unavailable.
-- **Comprehensive Headers**: Supports `X-RateLimit-*`, IETF `RateLimit`, and `Retry-After` headers.
-
-## Configuration
-
-The Advanced Rate Limiting policy uses a structure based on **Quotas**. 
-
-- **System Parameters**: Configured by the administrator in `config.toml`.
-- **User Parameters**: Configured per-API/route via the `quotas` array.
-
-### System Parameters (config.toml)
-
-These parameters are set globally by the administrator.
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `algorithm` | string | `"gcra"` | Rate limiting algorithm: `"gcra"` (smooth, burst-capable) or `"fixed-window"` (simple counter). |
-| `backend` | string | `"memory"` | Storage backend: `"memory"` (single-instance) or `"redis"` (distributed). |
-| `redis` | object | - | Redis configuration (host, port, auth, timeouts). Used when `backend: redis`. |
-| `memory` | object | - | Memory backend configuration (max entries, cleanup interval). |
-| `headers` | object | - | Controls which response headers (X-RateLimit, IETF, Retry-After) are included. |
-
-### User Parameters (API Definition)
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `quotas` | array | **Yes** | Array of independent rate limit quotas. Each quota tracks usage separately. |
-| `keyExtraction` | array | No | **Global** key extraction config. Used as a default for quotas that don't specify their own. |
-| `onRateLimitExceeded` | object | No | Customize the 429 response (status code, body). |
-
-#### Quota Configuration
-
-Each item in the `quotas` array represents an independent dimension of rate limiting.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | No | Name of the quota (e.g. "per-user", "per-ip"). Useful for debugging and logs. |
-| `limits` | array | **Yes** | List of limits for this quota (e.g. 10/s AND 100/m). All must be satisfied. |
-| `keyExtraction` | array | No | Per-quota key extraction. Overrides global `keyExtraction`. Defaults to `routename`. |
-| `costExtraction` | object | No | Configuration for dynamic cost extraction (e.g. LLM tokens). |
-
-#### Limit Configuration
-
-Each item in the `limits` array:
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `limit` | integer | **Yes** | Maximum number of requests/tokens allowed. |
-| `duration` | string | **Yes** | Time window (e.g., "1s", "1m", "1h"). |
-| `burst` | integer | No | Maximum burst capacity (GCRA only). Defaults to `limit`. |
-
-#### Key Extraction Configuration
-
-Define how to identify the bucket (e.g., by User ID or IP).
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `type` | string | **Yes** | One of: `header`, `metadata`, `ip`, `apiname`, `apiversion`, `routename`. |
-| `key` | string | Conditional | Header name or metadata key. Required for `header`/`metadata`. |
-
-**Note**: Multiple components are joined with `:` (e.g., `header:X-User-ID` + `ip` -> "user123:1.2.3.4").
-
-#### Cost Extraction Configuration
-
-Used for weighting requests dynamically (e.g. based on response body content).
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable cost extraction. |
-| `default` | integer | `1` | Default cost if extraction fails. |
-| `sources` | array | - | List of sources to extract cost from (summed if multiple succeed). |
-
-**Sources**:
-- `request_header`, `request_metadata`, `request_body` (JsonPath)
-- `response_header`, `response_metadata`, `response_body` (JsonPath)
-
----
-
-## Examples
-
-### Example 1: Basic Per-Route Rate Limit
-
-Simplest configuration: 10 requests per minute per route.
-
-```yaml
-policies:
-  - name: advanced-ratelimit
-    version: v0.1.1
-    params:
-      quotas:
-        - limits:
-            - limit: 10
-              duration: "1m"
-```
-
-### Example 2: Per-User and Per-IP Limits (Multi-Dimensional)
-
-Enforce two independent quotas simultaneously:
-1. **User Quota**: 1000 requests/hour per User ID.
-2. **IP Quota**: 60 requests/minute per IP address.
-
-```yaml
-policies:
-  - name: advanced-ratelimit
-    version: v0.1.1
-    params:
-      quotas:
-        - name: "user_quota"
-          limits:
-            - limit: 1000
-              duration: "1h"
-          keyExtraction:
-            - type: header
-              key: X-User-ID
-        - name: "ip_quota"
-          limits:
-            - limit: 60
-              duration: "1m"
-          keyExtraction:
-            - type: ip
-```
-
-### Example 3: Multiple Time Windows (Bursts)
-
-Allow 10 req/sec (bursty) AND 1000 req/hour (sustained) for the same key.
-
-```yaml
-policies:
-  - name: advanced-ratelimit
-    version: v0.1.1
-    params:
-      quotas:
-        - limits:
-            - limit: 10
-              duration: "1s"
-              burst: 20
-            - limit: 1000
-              duration: "1h"
-          keyExtraction:
-            - type: header
-              key: "X-API-Key"
-```
-
-### Example 4: LLM Token-Based Rate Limiting
-
-Rate limit based on total tokens consumed, extracted from the response body.
-
-```yaml
-policies:
-  - name: advanced-ratelimit
-    version: v0.1.1
-    params:
-      quotas:
-        - limits:
-            - limit: 50000
-              duration: "1h"
-          keyExtraction:
-            - type: header
-              key: X-Org-ID
-          costExtraction:
-            enabled: true
-            default: 1
-            sources:
-              - type: response_body
-                jsonPath: "$.usage.total_tokens"
-```
-
-### Example 5: Custom Error Response
-
-```yaml
-policies:
-  - name: advanced-ratelimit
-    version: v0.1.1
-    params:
-      quotas:
-        - limits:
-            - limit: 5
-              duration: "1m"
-      onRateLimitExceeded:
-        statusCode: 429
-        body: '{"error": "Too Many Requests", "retry_after": "1m"}'
-```
-
-## Overview
-
 The Rate Limiting policy controls the rate of requests to your APIs by enforcing configurable limits based on various criteria. This policy is essential for protecting backend services from overload, ensuring fair usage, and maintaining service availability.
 
 ## Features
@@ -215,12 +21,9 @@ The Rate Limiting policy controls the rate of requests to your APIs by enforcing
 
 ## Configuration
 
-The Rate Limiting policy uses a two-level configuration model:
+The Rate Limiting policy uses a two-level configuration
 
-- **System Parameters**: Configured by the administrator in `config.toml` under `policy_configurations.ratelimit_v010`
-- **User Parameters**: Configured per-API/route in the API definition YAML
-
-### System Parameters (config.toml)
+### System Parameters (From config.toml)
 
 These parameters are set by the administrator and apply globally to all rate limiting policies:
 
@@ -228,9 +31,9 @@ These parameters are set by the administrator and apply globally to all rate lim
 |-----------|------|----------|---------|-------------|
 | `algorithm` | string | No | `"gcra"` | Rate limiting algorithm: `"gcra"` (smooth rate limiting with burst support) or `"fixed-window"` (simple counter per time window). |
 | `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance or `"redis"` for distributed rate limiting. |
-| `redis` | object | No | - | Redis configuration (only used when `backend=redis`). |
-| `memory` | object | No | - | In-memory storage configuration (only used when `backend=memory`). |
-| `headers` | object | No | - | Control which rate limit headers are included in responses. |
+| `redis` | ```Redis``` object | No | - | Redis configuration (only used when `backend=redis`). |
+| `memory` | ```Memory``` object | No | - | In-memory storage configuration (only used when `backend=memory`). |
+| `headers` | ```Headers``` object | No | - | Control which rate limit headers are included in responses. |
 
 #### Redis Configuration
 
@@ -274,15 +77,13 @@ These parameters are configured per-API/route by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `limits` | array | Yes | - | Array of rate limit policies to enforce. Multiple limits can be specified for different time windows. |
+| `limits` | ```Limit``` array | Yes | - | Array of rate limit policies to enforce. Multiple limits can be specified for different time windows. |
 | `cost` | integer | No | `1` | Number of tokens this operation consumes per request (weighted rate limiting). Ignored when `costExtraction` is enabled. |
-| `costExtraction` | object | No | - | Configuration for extracting cost from response data (post-response rate limiting). |
-| `keyExtraction` | array | No | `[{type: "routename"}]` | Array of components to extract and combine for the rate limit key. |
-| `onRateLimitExceeded` | object | No | - | Customize the 429 response when rate limit is exceeded. |
+| `costExtraction` | ```CostExtraction``` object | No | - | Configuration for extracting cost from response data (post-response rate limiting). |
+| `keyExtraction` | ```KeyExtraction``` array | No | `[{type: "routename"}]` | Array of components to extract and combine for the rate limit key. |
+| `onRateLimitExceeded` | ```RateLimitExceed``` object | No | - | Customize the 429 response when rate limit is exceeded. |
 
 #### Limit Configuration
-
-Each item in the `limits` array supports the following structure:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -290,9 +91,7 @@ Each item in the `limits` array supports the following structure:
 | `duration` | string | Yes | - | Time window for the limit (Go duration format: "1s", "1m", "1h", "24h"). |
 | `burst` | integer | No | Same as `limit` | Maximum burst capacity (GCRA only). Number of requests that can accumulate. |
 
-#### Key Extraction Configuration
-
-Each item in the `keyExtraction` array supports the following structure:
+#### KeyExtraction Configuration
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -333,19 +132,17 @@ Each item in the `keyExtraction` array supports the following structure:
 >
 > **Best Practice:** Maintain consistent component ordering across all environments and configuration updates to avoid unexpected rate limit resets.
 
-#### Cost Extraction Configuration
+#### CostExtraction Configuration
 
-The `costExtraction` object enables post-response rate limiting, where the cost is extracted from the response data instead of using a static value. This is useful for scenarios where the actual resource consumption is only known after the request completes (e.g., LLM token usage, compute units).
+This enables post-response rate limiting, where the cost is extracted from the response data instead of using a static value. This is useful for scenarios where the actual resource consumption is only known after the request completes (e.g., LLM token usage, compute units).
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `false` | Enable post-response cost extraction. |
-| `sources` | array | Yes (if enabled) | - | Ordered list of sources to extract cost from. Sources are tried in order until one succeeds. |
+| `sources` | ```Source``` array | Yes (if enabled) | - | Ordered list of sources to extract cost from. Sources are tried in order until one succeeds. |
 | `default` | integer | No | `1` | Default cost to use if extraction fails from all sources. |
 
 **Source Configuration:**
-
-Each item in the `sources` array supports the following structure:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -372,9 +169,7 @@ Each item in the `sources` array supports the following structure:
 > - Use cases where cost is only known after the operation completes (e.g., LLM token usage)
 > - Usage tracking with pre-flight protection against fully exhausted quotas
 
-#### Rate Limit Exceeded Response
-
-The `onRateLimitExceeded` object supports:
+#### RateLimitExceeded Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -382,52 +177,30 @@ The `onRateLimitExceeded` object supports:
 | `body` | string | No | `{"error": "Too Many Requests", "message": "Rate limit exceeded. Please try again later."}` | Custom error message body. |
 | `bodyFormat` | string | No | `"json"` | Response body content type: `"json"` or `"plain"`. |
 
-## Algorithm Comparison
-
-### GCRA (Generic Cell Rate Algorithm)
-
-- **Best for**: Smooth traffic shaping, burst handling, consistent rate enforcement
-- **How it works**: Token bucket semantics with smooth rate limiting
-- **Advantages**: Prevents traffic bursts at window boundaries, supports burst capacity
-- **Use when**: You need consistent rate enforcement and burst tolerance
-
-### Fixed Window
-
-- **Best for**: Simple counting, lower computational overhead
-- **How it works**: Divides time into fixed intervals and counts requests per window
-- **Advantages**: Simple to understand, lower memory overhead
-- **Limitation**: Can allow up to 2x burst at window boundaries
-- **Use when**: Simplicity is preferred and boundary bursts are acceptable
-
-## System Configuration Example
-
-Add the following to your `gateway/configs/config.toml` file under `policy_configurations`:
+#### Sample System Configuration
 
 ```toml
-[policy_configurations.ratelimit_v010]
+[policy_configurations.ratelimit_v0]
 algorithm = "gcra"
 backend = "memory"
 
-[policy_configurations.ratelimit_v010.memory]
+[policy_configurations.ratelimit_v0.memory]
 max_entries = 10000
 cleanup_interval = "5m"
 
-[policy_configurations.ratelimit_v010.headers]
+[policy_configurations.ratelimit_v0.headers]
 include_x_rate_limit = true
 include_ietf = true
 include_retry_after = true
-```
 
-### Redis Backend Configuration
 
-For distributed rate limiting across multiple gateway instances:
-
-```toml
-[policy_configurations.ratelimit_v010]
+#Redis Backend Configuration
+#For distributed rate limiting across multiple gateway instances:
+[policy_configurations.ratelimit_v0]
 algorithm = "gcra"
 backend = "redis"
 
-[policy_configurations.ratelimit_v010.redis]
+[policy_configurations.ratelimit_v0.redis]
 host = "redis.example.com"
 port = 6379
 password = "your-redis-password"
@@ -438,13 +211,22 @@ connection_timeout = "5s"
 read_timeout = "3s"
 write_timeout = "3s"
 
-[policy_configurations.ratelimit_v010.headers]
+[policy_configurations.ratelimit_v0.headers]
 include_x_rate_limit = true
 include_ietf = true
 include_retry_after = true
 ```
 
-## API Definition Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: token-based-ratelimit
+  gomodule: github.com/wso2/gateway-controllers/policies/token-based-ratelimit@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic Rate Limiting
 
@@ -786,11 +568,29 @@ spec:
       path: /analyze
 ```
 
-## Response Headers
+## How it Works
+
+#### GCRA (Generic Cell Rate Algorithm)
+
+- Token bucket semantics with smooth rate limiting
+- **Best for**: Smooth traffic shaping, burst handling, consistent rate enforcement
+- **Advantages**: Prevents traffic bursts at window boundaries, supports burst capacity
+- **Use when**: You need consistent rate enforcement and burst tolerance
+
+#### Fixed Window
+
+- Divides time into fixed intervals and counts requests per window
+- **Best for**: Simple counting, lower computational overhead
+- **Advantages**: Simple to understand, lower memory overhead
+- **Limitation**: Can allow up to 2x burst at window boundaries
+- **Use when**: Simplicity is preferred and boundary bursts are acceptable
+
+
+## Notes:
 
 When rate limiting is applied, the following headers may be included in responses:
 
-### X-RateLimit Headers (Industry Standard)
+##### X-RateLimit Headers (Industry Standard)
 
 | Header | Description |
 |--------|-------------|
@@ -798,7 +598,7 @@ When rate limiting is applied, the following headers may be included in response
 | `X-RateLimit-Remaining` | Remaining requests in the current window |
 | `X-RateLimit-Reset` | Unix timestamp when the rate limit resets |
 
-### IETF RateLimit Headers (Draft Standard)
+##### IETF RateLimit Headers (Draft Standard)
 
 | Header | Description |
 |--------|-------------|
@@ -807,30 +607,10 @@ When rate limiting is applied, the following headers may be included in response
 | `RateLimit-Reset` | Seconds until the rate limit resets |
 | `RateLimit-Policy` | Rate limit policy description |
 
-### Retry-After Header (RFC 7231)
+##### Retry-After Header (RFC 7231)
 
 | Header | Description |
 |--------|-------------|
 | `Retry-After` | Seconds to wait before retrying (only on 429 responses) |
 
-## Use Cases
 
-1. **API Protection**: Prevent backend services from being overwhelmed by excessive requests.
-
-2. **Fair Usage**: Ensure fair resource allocation among different clients or tenants.
-
-3. **Cost Control**: Use weighted rate limiting to control expensive operations like complex queries or report generation.
-
-4. **DDoS Mitigation**: Apply per-IP rate limiting to mitigate denial-of-service attacks.
-
-5. **Tiered API Access**: Implement different rate limits for different subscription tiers by using header-based key extraction.
-
-6. **Multi-Tenant Rate Limiting**: Rate limit per tenant in multi-tenant applications using composite keys.
-
-7. **Distributed Rate Limiting**: Use Redis backend to enforce consistent rate limits across multiple gateway instances.
-
-8. **Graceful Degradation**: Configure fail-open mode to maintain availability when the rate limiting backend is unavailable.
-
-9. **LLM Token Budgeting**: Use post-response cost extraction to rate limit based on actual token usage from LLM APIs, enabling accurate quota management for AI workloads.
-
-10. **Usage-Based Billing**: Track and limit resource consumption based on actual usage metrics extracted from responses (e.g., compute units, storage operations).

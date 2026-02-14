@@ -17,15 +17,24 @@ The Prompt Template policy enables dynamic prompt transformation by replacing `t
 
 ## Configuration
 
-### Parameters
+This policy requires only a single-level configuration where all parameters are configured in the API definition YAML.
+
+### User Parameters (API Definition)
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `promptTemplateConfig` | string | Yes | - | JSON string containing an array of template objects. Each template must have a `name` and `prompt` field. Example: `[{"name": "translate", "prompt": "Translate from [[from]] to [[to]]: [[text]]"}]` |
+| `promptTemplateConfig` | `PromptTemplateConfig[]` (JSON string) | Yes | - | JSON string containing an array of `PromptTemplateConfig` objects. |
+
+#### PromptTemplateConfig Object
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `name` | string | Yes | - | Unique identifier for the template (used in `template://` URIs). |
+| `prompt` | string | Yes | - | Template prompt string with `[[parameter-name]]` placeholder syntax. |
 
 ### Template Configuration Format
 
-The `promptTemplateConfig` must be a JSON array of template objects:
+The `promptTemplateConfig` value must be a JSON string representing an array of `PromptTemplateConfig` objects:
 
 ```json
 [
@@ -40,9 +49,9 @@ Each template object contains:
 - **name**: Unique identifier for the template (used in `template://` URIs)
 - **prompt**: The template string with `[[parameter-name]]` placeholders that will be replaced
 
-## Template Syntax
+#### Template Syntax
 
-### Template URI Format
+##### Template URI Format
 
 Templates are referenced in JSON payloads using the following URI format:
 
@@ -55,7 +64,7 @@ Example:
 template://translate?from=english&to=spanish&text=Hello world
 ```
 
-### Placeholder Syntax
+##### Placeholder Syntax
 
 Within template prompts, use double square brackets to define placeholders:
 
@@ -75,17 +84,22 @@ When called with `template://translate?from=english&to=spanish&text=Hello`, the 
 Translate the following text from english to spanish: Hello
 ```
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: prompt-template
+  gomodule: github.com/wso2/gateway-controllers/policies/prompt-template@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Translation Template
 
 Deploy an LLM provider with a translation prompt template:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -108,13 +122,12 @@ spec:
         methods: [POST]
   policies:
     - name: prompt-template
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
           params:
             promptTemplateConfig: '[{"name": "translate", "prompt": "Translate the following text from [[from]] to [[to]]: [[text]]"}]'
-EOF
 ```
 
 **Test the template:**
@@ -154,11 +167,7 @@ The policy will transform the request to:
 
 Create a template for summarizing content with configurable length:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -181,13 +190,12 @@ spec:
         methods: [POST]
   policies:
     - name: prompt-template
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
           params:
             promptTemplateConfig: '[{"name": "summarize", "prompt": "Summarize the following content in [[length]] words: [[content]]"}]'
-EOF
 ```
 
 **Test with template:**
@@ -214,7 +222,7 @@ Configure multiple templates in a single policy:
 ```yaml
 policies:
   - name: prompt-template
-    version: v0.1.0
+    version: v0
     paths:
       - path: /chat/completions
         methods: [POST]
@@ -236,44 +244,33 @@ policies:
             ]
 ```
 
-## Use Cases
+## How It Works
 
-1. **Standardized Prompts**: Ensure consistent prompt formatting across different API consumers by centralizing prompt definitions.
+#### Request Phase
 
-2. **Reusable Templates**: Create library of common prompts (translation, summarization, explanation) that can be reused across multiple APIs.
+1. **Pattern Detection**: Scans the incoming JSON payload as a string for `template://` URI patterns.
+2. **Template Resolution**: Extracts template name and query parameters, then finds the matching template in `promptTemplateConfig`.
+3. **Placeholder Substitution**: Replaces `[[parameter-name]]` placeholders in the template prompt using URL-decoded query parameter values.
+4. **Safe Replacement**: JSON-escapes the resolved prompt and replaces the matched `template://` pattern in the payload.
+5. **Forwarding**: Sends the transformed payload to the upstream API.
 
-3. **Parameterized Prompts**: Allow dynamic content insertion while maintaining consistent prompt structure and quality.
-
-4. **Multi-language Support**: Use templates with language parameters to standardize prompts for different locales.
-
-5. **Prompt Versioning**: Update prompt templates centrally without requiring changes to client applications.
-
-## Template Pattern Matching
-
-The policy uses regex pattern matching to find `template://` URIs in the JSON payload:
+#### Template Pattern Matching
 
 - **Pattern**: `template://[a-zA-Z0-9_-]+\?[^\s"']*`
-- **Location**: Searches the entire JSON payload as a string
-- **Replacement**: Each matched pattern is replaced with the resolved template string (JSON-escaped)
+- **Location**: Searches the entire JSON payload as a string.
+- **Replacement**: Each matched pattern is replaced with the resolved template string (JSON-escaped).
+- **Multi-match support**: Multiple `template://` patterns can exist in a single payload and are resolved independently.
 
-### Pattern Details
 
-- Template names can contain letters, numbers, underscores, and hyphens
-- Query parameters can contain any characters except spaces, quotes, or single quotes
-- Multiple template:// patterns can exist in a single payload
-- Each pattern is resolved independently
-
-## Error Handling
-
-If a template:// pattern references a template name that doesn't exist in the configuration, the pattern is left unchanged (no replacement occurs). This allows for graceful handling of missing templates.
-
-When template resolution fails (e.g., invalid JSON escaping), the specific pattern is skipped and other patterns continue to be processed.
 
 ## Notes
 
+- Common use cases include standardized prompts, reusable prompt libraries, parameterized prompts, multi-language prompt generation, and centralized prompt versioning.
 - Template names are case-sensitive and must match exactly between the URI reference and the configuration.
 - Parameter names in placeholders `[[param]]` are case-sensitive and must match query parameter names exactly.
 - Query parameter values are URL-decoded before being inserted into templates.
 - The resolved template string is JSON-escaped (special characters like quotes, newlines are escaped) before replacement.
+- If a specific template resolution fails (for example, JSON escaping issues), that pattern is skipped and processing continues for other matches.
 - The policy processes the entire JSON payload as a string, so templates can be used anywhere in the JSON structure.
 - Multiple `template://` patterns can appear in a single payload and will all be processed.
+- If a `template://` pattern references a template name that does not exist, the original pattern is left unchanged.

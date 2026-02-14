@@ -12,14 +12,21 @@ The Regex Guardrail validates request or response body content against regular e
 - Pattern matching using regular expressions
 - Supports JSONPath extraction to validate specific fields within JSON payloads
 - Configurable inverted logic to pass when pattern does not match
-- Separate configuration for request and response phases
+- Supports independent request and response phase configuration
 - Optional detailed assessment information in error responses
 
 ## Configuration
 
-### Parameters
+This policy requires only a single-level configuration where all parameters are configured in the API definition YAML.
 
-#### Request Phase
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | `RegexGuardRailConfig` object | No | - | Configuration for request-phase regex validation. Supports `regex`, `jsonPath`, `invert`, and `showAssessment`. |
+| `response` | `RegexGuardRailConfig` object | No | - | Configuration for response-phase regex validation. Supports `regex`, `jsonPath`, `invert`, and `showAssessment`. |
+
+#### RegexGuardRailConfig Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -28,16 +35,7 @@ The Regex Guardrail validates request or response body content against regular e
 | `invert` | boolean | No | `false` | If `true`, validation passes when regex does NOT match. If `false`, validation passes when regex matches. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `regex` | string | Yes | - | Regular expression pattern to match against the content. Must be at least 1 character. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `invert` | boolean | No | `false` | If `true`, validation passes when regex does NOT match. If `false`, validation passes when regex matches. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -48,7 +46,7 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## Regular Expression Syntax
+#### Regular Expression Syntax
 
 The guardrail uses Go's standard regexp package, which supports RE2 syntax. Key features:
 
@@ -59,17 +57,22 @@ The guardrail uses Go's standard regexp package, which supports RE2 syntax. Key 
 - Quantifiers: `*`, `+`, `?`, `{n}`, `{n,m}`
 - Groups and alternation: `(abc|def)`, `(?:non-capturing)`
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: regex-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/regex-guardrail@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Email Validation
 
 Deploy an LLM provider that protects against sensitive data leaks by blocking any payloads that mention the word "password" (case-insensitive) in either the user’s message or the LLM’s response. This is achieved by using the regex policy to validate both request and response payloads:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -96,7 +99,7 @@ spec:
         methods: [GET]
   policies:
     - name: regex-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -105,7 +108,6 @@ spec:
               regex: "(?i).*password.*"
               invert: true
               jsonPath: "$.messages[0].content"
-EOF
 ```
 
 **Test the guardrail:**
@@ -142,31 +144,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Additional Configuration Options
-
-You can customize the guardrail behavior by modifying the `policies` section:
-
-- **Request and Response Validation**: Configure both `request` and `response` parameters to validate patterns in both directions. Use `showAssessment: true` to include detailed assessment information in error responses.
-
-- **Inverted Logic**: Set `invert: true` to allow only content that does *not* match the regex pattern. This is useful for blocking prohibited patterns (e.g., password-related content, admin keywords).
-
-- **Full Payload Validation**: Omit the `jsonPath` parameter to validate the entire request body without JSONPath extraction.
-
-- **Field-Specific Validation**: Use `jsonPath` to extract and validate specific fields within JSON payloads (e.g., `"$.messages[0].content"` for message content or `"$.choices[0].message.content"` for response content).
-
-## Use Cases
-
-1. **Format Validation**: Ensure user inputs match expected formats (emails, phone numbers, IDs).
-
-2. **Content Filtering**: Block or allow content based on pattern matching (prohibited words, sensitive patterns).
-
-3. **Security Enforcement**: Detect and block potentially malicious patterns or injection attempts.
-
-4. **Data Quality**: Ensure responses follow specific formatting requirements or contain required elements.
-
-5. **Compliance**: Enforce patterns required by regulatory standards or business rules.
-
-## Error Response
+**Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -197,10 +175,34 @@ If `showAssessment` is enabled, additional details are included:
 }
 ```
 
+## How It Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Pattern Evaluation**: Applies the configured `regex` pattern to the extracted content.
+3. **Invert Handling**: Uses `invert` to decide whether matching or non-matching content should pass.
+4. **Decision Enforcement**: Blocks with HTTP `422` when validation fails; otherwise, request proceeds upstream.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Pattern Evaluation**: Applies the configured `regex` pattern to the extracted content.
+3. **Invert Handling**: Uses `invert` to decide whether matching or non-matching content should pass.
+4. **Decision Enforcement**: Blocks with HTTP `422` when validation fails; otherwise, response is returned to the client.
+
+#### Validation Behavior
+
+- **Normal Mode (`invert: false`)**: Validation passes when regex matches.
+- **Inverted Mode (`invert: true`)**: Validation passes when regex does not match.
+- **Assessment Details**: When `showAssessment` is enabled, failure responses include regex-related assessment information.
+
+
 ## Notes
 
 - Regular expressions are evaluated using Go's regexp package (RE2 syntax).
 - Pattern matching is case-sensitive by default. Use `(?i)` flag for case-insensitive matching.
+- Use `request` and `response` independently to validate one or both directions.
 - When using JSONPath, if the path does not exist or the extracted value is not a string, validation will fail.
 - Inverted logic is useful for blocking content that matches prohibited patterns.
 - Complex regex patterns may impact performance; test thoroughly with expected content volumes.

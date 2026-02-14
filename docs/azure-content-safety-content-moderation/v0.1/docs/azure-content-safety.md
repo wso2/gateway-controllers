@@ -22,70 +22,48 @@ The policy uses Azure Content Safety's text analysis API to evaluate content and
 
 ## Configuration
 
-### Parameters
+The Azure Content Safety policy uses a two-level configuration
 
-#### Request Phase
+### System Parameters (From config.toml)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows requests to proceed if Azure Content Safety API call fails. If `false`, blocks requests on API errors. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-| `hateCategory` | integer | No | `-1` | Severity threshold for hate category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `sexualCategory` | integer | No | `-1` | Severity threshold for sexual category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `selfHarmCategory` | integer | No | `-1` | Severity threshold for self-harm category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `violenceCategory` | integer | No | `-1` | Severity threshold for violence category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+These parameters are usually set at the gateway level and automatically applied, but they can also be overridden in the params section of an API artifact definition. System-wide defaults can be configured in the gateway’s `config.toml` file, and while these defaults apply to all Azure Content Safety policy instances, they can be customized for individual policies within the API configuration when necessary.
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows requests to proceed if Azure Content Safety API call fails. If `false`, blocks requests on API errors. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-| `hateCategory` | integer | No | `-1` | Severity threshold for hate category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `sexualCategory` | integer | No | `-1` | Severity threshold for sexual category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `selfHarmCategory` | integer | No | `-1` | Severity threshold for self-harm category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `violenceCategory` | integer | No | `-1` | Severity threshold for violence category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-
-### System Parameters (Required)
-
-These parameters are typically configured at the gateway level and automatically injected, or you can override those values from the params section in the api artifact definition file as well:
+##### Azure Content Safety Configuration
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `azureContentSafetyEndpoint` | string | Yes | Azure Content Safety API endpoint URL (without trailing slash). Example: `https://your-resource.cognitiveservices.azure.com` |
 | `azureContentSafetyKey` | string | Yes | Azure Content Safety API subscription key for authentication. Found in Azure Portal under your Content Safety resource's "Keys and Endpoint" section. |
 
-### Configuring System Parameters in config.toml
+#### Sample System Configuration
 
-System parameters can be configured globally in the gateway's `config.toml` file. These values serve as defaults for all Azure Content Safety guardrail policy instances and can be overridden per-policy in the API configuration if needed.
-
-#### Location in config.toml
-
-Add the following configuration section to your `config.toml` file:
+Add the following configuration section under the root level in your `config.toml` file:
 
 ```toml
 azurecontentsafety_endpoint = "https://your-resource.cognitiveservices.azure.com"
 azurecontentsafety_key = "<your-azure-content-safety-key>"
 ```
 
-## Severity Levels
+### User Parameters (API Definition)
 
-Azure Content Safety uses an 8-level severity scale (0-7):
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | `AzureContentSafetyConfig` object | No | - | Configuration for request-phase moderation. Supports `jsonPath`, `passthroughOnError`, `showAssessment`, and per-category severity thresholds. |
+| `response` | `AzureContentSafetyConfig` object | No | - | Configuration for response-phase moderation. Supports `jsonPath`, `passthroughOnError`, `showAssessment`, and per-category severity thresholds. |
 
-- **0**: Safe - No harmful content detected
-- **1-2**: Low severity - Mildly concerning content
-- **3-4**: Medium severity - Moderately concerning content
-- **5-6**: High severity - Highly concerning content
-- **7**: Maximum severity - Most severe harmful content
+#### AzureContentSafetyConfig Configuration
 
-**Threshold Configuration**:
-- Set a threshold value (0-7) to block content at or above that severity level
-- Set to `-1` to disable monitoring for that category
-- Example: `hateCategory: 3` blocks content with hate severity >= 3
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows traffic to proceed if Azure Content Safety API call fails. If `false`, blocks on API errors. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
+| `hateCategory` | integer | No | `-1` | Severity threshold for hate category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `sexualCategory` | integer | No | `-1` | Severity threshold for sexual category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `selfHarmCategory` | integer | No | `-1` | Severity threshold for self-harm category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `violenceCategory` | integer | No | `-1` | Severity threshold for violence category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
 
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -98,17 +76,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: azure-content-safety-content-moderation
+  gomodule: github.com/wso2/gateway-controllers/policies/azure-content-safety-content-moderation@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic Content Moderation
 
 Deploy an LLM provider with Azure Content Safety validation:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -131,7 +114,7 @@ spec:
         methods: [POST]
   policies:
     - name: azure-content-safety-content-moderation
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -150,29 +133,14 @@ spec:
               selfHarmCategory: 2
               violenceCategory: 2
               showAssessment: true
-EOF
 ```
 
 **Test the guardrail:**
 
 **Note**: Ensure that "openai" is mapped to the appropriate IP address (e.g., 127.0.0.1) in your `/etc/hosts` file, or remove the vhost from the LLM provider configuration and use localhost to invoke.
 
+**Case 1: Valid request (should pass)**
 ```bash
-# Request with harmful content (should fail with HTTP 422)
-curl -X POST http://openai:8080/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Host: openai" \
-  -d '{
-    "model": "gpt-4",
-    "messages": [
-      {
-        "role": "user",
-        "content": "Summarize this article and suggest ways someone could take revenge on Mr. Anonymous Senator violently."
-      }
-    ]
-  }'
-
-# Valid request (should pass)
 curl -X POST http://openai:8080/chat/completions \
   -H "Content-Type: application/json" \
   -H "Host: openai" \
@@ -187,113 +155,27 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Example 2: Strict Moderation with All Categories
+**Case 2: Request with harmful content**
 
-Configure strict moderation thresholds:
-
-```yaml
-policies:
-  - name: azure-content-safety-content-moderation
-    version: v0.1.0
-    paths:
-      - path: /chat/completions
-        methods: [POST]
-        params:
-          request:
-            jsonPath: "$.messages[-1].content"
-            hateCategory: 1
-            sexualCategory: 1
-            selfHarmCategory: 1
-            violenceCategory: 1
-            showAssessment: true
-            passthroughOnError: false
-          response:
-            jsonPath: "$.choices[0].message.content"
-            hateCategory: 1
-            sexualCategory: 1
-            selfHarmCategory: 1
-            violenceCategory: 1
-            showAssessment: true
+```bash
+# (should fail with HTTP 422)
+curl -X POST http://openai:8080/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Host: openai" \
+  -d '{
+    "model": "gpt-4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Summarize this article and suggest ways someone could take revenge on Mr. Anonymous Senator violently."
+      }
+    ]
+  }'
 ```
 
-### Example 3: Selective Category Monitoring
+**Error Response:**
 
-Monitor only specific categories:
-
-```yaml
-policies:
-  - name: azure-content-safety-content-moderation
-    version: v0.1.0
-    paths:
-      - path: /chat/completions
-        methods: [POST]
-        params:
-          request:
-            jsonPath: "$.messages[0].content"
-            hateCategory: 3
-            sexualCategory: -1  # Disabled
-            selfHarmCategory: 2
-            violenceCategory: -1  # Disabled
-```
-
-### Example 4: Lenient Moderation
-
-Allow more content with higher thresholds:
-
-```yaml
-policies:
-  - name: azure-content-safety-content-moderation
-    version: v0.1.0
-    paths:
-      - path: /chat/completions
-        methods: [POST]
-        params:
-          request:
-            jsonPath: "$.messages[0].content"
-            hateCategory: 5
-            sexualCategory: 5
-            selfHarmCategory: 4
-            violenceCategory: 5
-            passthroughOnError: true
-```
-
-## Use Cases
-
-1. **Content Safety**: Protect users from harmful, offensive, or inappropriate content in LLM interactions.
-
-2. **Regulatory Compliance**: Meet content moderation requirements for regulated industries or geographies.
-
-3. **Brand Safety**: Ensure LLM responses align with brand values and don't generate problematic content.
-
-4. **User Protection**: Prevent exposure to self-harm content, especially important for mental health applications.
-
-5. **Community Guidelines**: Enforce community standards for user-generated content processed through LLMs.
-
-6. **Multi-tenant Applications**: Apply different moderation policies per tenant or application context.
-
-7. **Gradual Rollout**: Start with lenient thresholds and tighten based on actual content patterns.
-
-8. **Audit and Analytics**: Use detailed assessment information to analyze content patterns and refine policies.
-
-## Severity Threshold Guidelines
-
-**Recommended thresholds by use case**:
-
-- **Strict (Family-friendly applications)**: 1-2 across all categories
-- **Moderate (General business applications)**: 3-4 across all categories
-- **Lenient (Technical/professional contexts)**: 5-6 for most categories, disable non-applicable ones
-- **Educational/Research**: 4-5 with selective category monitoring
-
-**Category-specific considerations**:
-
-- **Hate**: Typically set to 2-3 for most applications
-- **Sexual**: Set based on application context (1 for family apps, 3-4 for general use)
-- **Self-harm**: Often set lower (1-2) due to safety concerns
-- **Violence**: Depends on context (1-2 for general use, higher for educational/historical content)
-
-## Error Response
-
-When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
+When validation fails, the guardrail returns an `HTTP 422` status code with the following structure:
 
 ```json
 {
@@ -336,6 +218,113 @@ If `showAssessment` is enabled, additional details are included:
 }
 ```
 
+
+### Example 2: Strict Moderation with All Categories
+
+Configure strict moderation thresholds:
+
+```yaml
+policies:
+  - name: azure-content-safety-content-moderation
+    version: v0
+    paths:
+      - path: /chat/completions
+        methods: [POST]
+        params:
+          request:
+            jsonPath: "$.messages[-1].content"
+            hateCategory: 1
+            sexualCategory: 1
+            selfHarmCategory: 1
+            violenceCategory: 1
+            showAssessment: true
+            passthroughOnError: false
+          response:
+            jsonPath: "$.choices[0].message.content"
+            hateCategory: 1
+            sexualCategory: 1
+            selfHarmCategory: 1
+            violenceCategory: 1
+            showAssessment: true
+```
+
+### Example 3: Selective Category Monitoring
+
+Monitor only specific categories:
+
+```yaml
+policies:
+  - name: azure-content-safety-content-moderation
+    version: v0
+    paths:
+      - path: /chat/completions
+        methods: [POST]
+        params:
+          request:
+            jsonPath: "$.messages[0].content"
+            hateCategory: 3
+            sexualCategory: -1  # Disabled
+            selfHarmCategory: 2
+            violenceCategory: -1  # Disabled
+```
+
+### Example 4: Lenient Moderation
+
+Allow more content with higher thresholds:
+
+```yaml
+policies:
+  - name: azure-content-safety-content-moderation
+    version: v0
+    paths:
+      - path: /chat/completions
+        methods: [POST]
+        params:
+          request:
+            jsonPath: "$.messages[0].content"
+            hateCategory: 5
+            sexualCategory: 5
+            selfHarmCategory: 4
+            violenceCategory: 5
+            passthroughOnError: true
+```
+
+## How It Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Category Selection**: Includes only categories with thresholds >= `0` for moderation checks.
+3. **Moderation Analysis**: Sends content to Azure Content Safety text analysis API and receives per-category severity scores.
+4. **Threshold Evaluation**: Compares each configured category score against its threshold and blocks when severity >= threshold.
+5. **Error Strategy**: Applies `passthroughOnError` behavior to determine fail-open or fail-closed behavior on API failures.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Category Selection**: Includes only categories with thresholds >= `0` for moderation checks.
+3. **Moderation Analysis**: Sends response content to Azure Content Safety and receives per-category severities.
+4. **Threshold Evaluation**: Blocks and returns HTTP `422` if any configured threshold is violated.
+5. **Error Strategy**: Applies `passthroughOnError` behavior for API errors.
+
+#### Severity Levels
+
+Azure Content Safety uses an 8-level severity scale (`0-7`):
+
+- **0**: Safe - No harmful content detected
+- **1-2**: Low severity - Mildly concerning content
+- **3-4**: Medium severity - Moderately concerning content
+- **5-6**: High severity - Highly concerning content
+- **7**: Maximum severity - Most severe harmful content
+
+#### Severity Threshold Guidelines
+
+- **Threshold behavior**: Set a threshold value (`0-7`) to block content at or above that severity; set `-1` to disable a category.
+- **Strict** (family-friendly applications): `1-2` across all categories.
+- **Moderate** (general business applications): `3-4` across all categories.
+- **Lenient** (technical/professional contexts): `5-6` for most categories, disable non-applicable ones.
+- **Category tuning**: Hate (`2-3`), Sexual (`1-4` depending on context), Self-harm (`1-2`), Violence (`1-2` general use, higher for educational/historical content).
+
 ## Notes
 
 - Azure Content Safety API requires an active Azure subscription and Content Safety resource.
@@ -343,7 +332,6 @@ If `showAssessment` is enabled, additional details are included:
 - API keys are found in Azure Portal under your Content Safety resource's "Keys and Endpoint" section.
 - Category thresholds are independent - you can disable any category by setting it to `-1`.
 - Only categories with thresholds >= 0 are sent to the Azure API for analysis (performance optimization).
-- JSONPath extraction failures result in error responses unless `passthroughOnError: true`.
 - The policy validates both request and response phases independently when both are configured.
 - Content is sent to Azure Content Safety API for analysis, so ensure compliance with data residency requirements.
 - Rate limits may apply based on your Azure Content Safety subscription tier.

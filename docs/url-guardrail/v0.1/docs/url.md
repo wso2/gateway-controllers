@@ -12,14 +12,21 @@ The URL Guardrail validates URLs found in request or response body content by ch
 - Validates URLs via DNS resolution or HTTP HEAD requests
 - Supports JSONPath extraction to validate specific fields within JSON payloads
 - Configurable timeout for URL validation
-- Separate configuration for request and response phases
+- Supports independent request and response phase configuration
 - Optional detailed assessment information including invalid URLs in error responses
 
 ## Configuration
 
-### Parameters
+This policy requires only a single-level configuration where all parameters are configured in the API definition YAML.
 
-#### Request Phase
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | ```URLGuardrailConfig``` object | No | - | Configuration for request-phase URL validation. Supports `jsonPath`, `onlyDNS`, `timeout`, and `showAssessment`. |
+| `response` | ```URLGuardrailConfig``` object | No | - | Configuration for response-phase URL validation. Supports `jsonPath`, `onlyDNS`, `timeout`, and `showAssessment`. |
+
+#### URLGuardrailConfig Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -28,16 +35,7 @@ The URL Guardrail validates URLs found in request or response body content by ch
 | `timeout` | integer | No | `3000` | Timeout in milliseconds for DNS lookup or HTTP HEAD request. Default is 3000ms (3 seconds). |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information including invalid URLs in error responses. |
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `onlyDNS` | boolean | No | `false` | If `true`, validates URLs only via DNS resolution (faster, less reliable). If `false`, validates URLs via HTTP HEAD request (slower, more reliable). |
-| `timeout` | integer | No | `3000` | Timeout in milliseconds for DNS lookup or HTTP HEAD request. Default is 3000ms (3 seconds). |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information including invalid URLs in error responses. |
-
-## JSONPath Support
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -48,36 +46,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## URL Validation Modes
+**Note:**
 
-### DNS-Only Validation (`onlyDNS: true`)
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
-- Faster validation method
-- Only checks if the domain name resolves via DNS
-- Does not verify HTTP/HTTPS accessibility
-- Less reliable for detecting broken links
-- Suitable for quick validation when HTTP checks are not necessary
+```yaml
+- name: url-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/url-guardrail@v0
+```
 
-### HTTP HEAD Request Validation (`onlyDNS: false`)
-
-- More thorough validation method
-- Performs DNS lookup and HTTP HEAD request
-- Verifies that the URL is actually reachable
-- More reliable for detecting broken or inaccessible URLs
-- Slower due to network request overhead
-- Recommended for production use
-
-## Examples
+## Reference Scenarios
 
 ### Example 1: Basic URL Validation
 
 Deploy an LLM provider that validates URLs in request content using HTTP HEAD requests:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -104,7 +88,7 @@ spec:
         methods: [GET]
   policies:
     - name: url-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -113,7 +97,7 @@ spec:
               jsonPath: "$.messages[0].content"
               onlyDNS: false
               timeout: 5000
-EOF
+
 ```
 
 **Test the guardrail:**
@@ -150,35 +134,7 @@ curl -X POST http://openai:8080/chat/completions \
   }'
 ```
 
-### Additional Configuration Options
-
-You can customize the guardrail behavior by modifying the `policies` section:
-
-- **Request and Response Validation**: Configure both `request` and `response` parameters to validate URLs in both directions. Use `showAssessment: true` to include detailed assessment information including invalid URLs in error responses.
-
-- **DNS-Only Validation**: Set `onlyDNS: true` for faster validation that only checks DNS resolution. This is less reliable but faster than HTTP HEAD validation.
-
-- **HTTP HEAD Validation**: Set `onlyDNS: false` (default) for more thorough validation that performs both DNS lookup and HTTP HEAD request to verify URL reachability.
-
-- **Timeout Configuration**: Adjust the `timeout` parameter (in milliseconds) based on network conditions and acceptable latency. Default is 3000ms (3 seconds).
-
-- **Full Payload Validation**: Omit the `jsonPath` parameter to validate URLs in the entire request body without JSONPath extraction.
-
-- **Field-Specific Validation**: Use `jsonPath` to extract and validate URLs from specific fields within JSON payloads (e.g., `"$.messages[0].content"` for message content or `"$.choices[0].message.content"` for response content).
-
-## Use Cases
-
-1. **Link Validation**: Ensure all URLs in AI-generated content are valid and accessible.
-
-2. **Security**: Detect and block potentially malicious or suspicious URLs.
-
-3. **Quality Assurance**: Prevent broken links from being included in responses.
-
-4. **Content Moderation**: Validate URLs before allowing them in user-generated content.
-
-5. **Resource Verification**: Ensure referenced resources are available before processing.
-
-## Error Response
+**In Case of Error Response:**
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -215,10 +171,34 @@ If `showAssessment` is enabled, additional details including invalid URLs are in
 }
 ```
 
+## How it Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **URL Detection**: Finds all URLs in the extracted content using pattern matching.
+3. **Validation Execution**: Validates each detected URL using either DNS-only lookup or DNS + HTTP HEAD request based on `onlyDNS`.
+4. **Timeout Enforcement**: Applies the configured `timeout` to each validation operation.
+5. **Intervention on Violation**: If any URL is invalid, returns HTTP `422` and blocks further processing.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **URL Detection**: Finds all URLs in the extracted content using pattern matching.
+3. **Validation Execution**: Validates each detected URL using the configured mode (`onlyDNS`).
+4. **Timeout Enforcement**: Applies the configured `timeout` to each validation operation.
+5. **Intervention on Violation**: If any URL is invalid, returns HTTP `422` to the client.
+
+#### URL Validation Modes
+
+- **DNS-Only Validation (`onlyDNS: true`)**: Faster method that checks whether the domain resolves via DNS, without confirming HTTP/HTTPS accessibility.
+- **HTTP HEAD Request Validation (`onlyDNS: false`)**: More thorough method that performs DNS lookup and HTTP HEAD checks to verify URL reachability.
+
 ## Notes
 
 - URL validation extracts all URLs from the content using pattern matching.
 - DNS-only validation is faster but less reliable than HTTP HEAD validation.
+- Use `request` and `response` independently to validate one or both directions.
 - Timeout values should be set based on network conditions and acceptable latency.
 - HTTP HEAD requests may fail for URLs that require specific headers or authentication.
 - Some URLs may be temporarily unavailable; consider retry logic for production use.

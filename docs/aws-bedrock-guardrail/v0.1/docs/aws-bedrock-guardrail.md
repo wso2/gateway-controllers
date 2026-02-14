@@ -24,34 +24,19 @@ The policy supports multiple authentication modes including AWS IAM role assumpt
 
 ## Configuration
 
-### Parameters
+The AWS Bedrock Guardrail policy uses a two-level configuration
 
-#### Request Phase
+### System Parameters (From config.toml)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with "*****" (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows requests to proceed if AWS Bedrock Guardrail API call fails. If `false`, blocks requests on API errors. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
+These parameters are usually set at the gateway level and automatically applied, but they can also be overridden in the params section of an API artifact definition. System-wide defaults can be configured in the gateway’s `config.toml` file, and while these defaults apply to all AWS Bedrock Guardrail policy instances, they can be customized for individual policies within the API configuration when necessary.
 
-#### Response Phase
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows requests to proceed if AWS Bedrock Guardrail API call fails. If `false`, blocks requests on API errors. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
-
-### System Parameters (Required)
-
-These parameters are typically configured at the gateway level and automatically injected, or you can override those values from the params section in the api artifact definition file as well:
+##### AWS Bedrock Guardrail Configuration
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `region` | string | Yes | AWS region where the Bedrock Guardrail is located (e.g., "us-east-1", "us-west-2"). |
+| `region` | string | Yes | AWS region where the Bedrock Guardrail is located (e.g., `us-east-1`, `us-west-2`). |
 | `guardrailID` | string | Yes | AWS Bedrock Guardrail identifier (the unique ID of your guardrail). |
-| `guardrailVersion` | string | Yes | AWS Bedrock Guardrail version (e.g., "DRAFT", "1", "2"). Use "DRAFT" for testing, numbered versions for production. |
+| `guardrailVersion` | string | Yes | AWS Bedrock Guardrail version (e.g., `DRAFT`, `1`, `2`). Use `DRAFT` for testing, numbered versions for production. |
 | `awsAccessKeyID` | string | No | AWS access key ID (for static credentials or role assumption). If omitted, runtime uses default AWS credential chain (environment variables, IAM roles, etc.). |
 | `awsSecretAccessKey` | string | No | AWS secret access key (for static credentials or role assumption). If omitted, runtime uses default AWS credential chain. |
 | `awsSessionToken` | string | No | AWS session token (optional, for temporary credentials). |
@@ -59,14 +44,9 @@ These parameters are typically configured at the gateway level and automatically
 | `awsRoleRegion` | string | No | AWS region for role assumption (required if `awsRoleARN` is specified). |
 | `awsRoleExternalID` | string | No | External ID for role assumption (optional, for cross-account access security). |
 
+#### Sample System Configuration
 
-### Configuring System Parameters in config.toml
-
-System parameters can be configured globally in the gateway's `config.toml` file. These values serve as defaults for all AWS Bedrock Guardrail policy instances and can be overridden per-policy in the API configuration if needed.
-
-#### Location in config.toml
-
-Add the following configuration section to your `config.toml` file:
+Add the following configuration section under the root level in your `config.toml` file:
 
 ```toml
 awsbedrock_guardrail_region = "us-east-1" 
@@ -80,7 +60,23 @@ awsbedrock_role_region = ""
 awsbedrock_role_external_id = ""
 ```
 
-## JSONPath Support
+### User Parameters (API Definition)
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `request` | `BedrockGuardrailConfig` object | No | - | Configuration for request-phase validation. Supports `jsonPath`, `redactPII`, `passthroughOnError`, and `showAssessment`. |
+| `response` | `BedrockGuardrailConfig` object | No | - | Configuration for response-phase validation. Supports `jsonPath`, `passthroughOnError`, and `showAssessment`. |
+
+#### BedrockGuardrailConfig Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
+| `redactPII` | boolean | No | `false` | Request phase only. If `true`, redacts PII by replacing with `*****` (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows traffic to proceed when AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
+
+#### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
@@ -92,32 +88,22 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
-## PII Handling
+**Note:**
 
-### Masking Mode (redactPII: false)
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
-When `redactPII` is `false`:
-- **Request phase**: PII entities are masked with placeholders like `EMAIL_0001`, `PHONE_0002`, etc.
-- Use this mode when you need PII to flow through the system but want it masked during processing
+```yaml
+- name: aws-bedrock-guardrail
+  gomodule: github.com/wso2/gateway-controllers/policies/aws-bedrock-guardrail@v0
+```
 
-### Redaction Mode (redactPII: true)
-
-When `redactPII` is `true`:
-- PII entities are permanently replaced with `*****`
-- Original values cannot be restored
-- Use this mode when you want to completely remove PII from content
-
-## Examples
+## Reference Scenarios
 
 ### Example 1: Basic Guardrail with Static Credentials
 
 Deploy an LLM provider with AWS Bedrock Guardrail validation:
 
-```bash
-curl -X POST http://localhost:9090/llm-providers \
-  -H "Content-Type: application/yaml" \
-  -H "Authorization: Basic YWRtaW46YWRtaW4=" \
-  --data-binary @- <<'EOF'
+```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
 kind: LlmProvider
 metadata:
@@ -140,7 +126,7 @@ spec:
         methods: [POST]
   policies:
     - name: aws-bedrock-guardrail
-      version: v0.1.0
+      version: v0
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -152,7 +138,6 @@ spec:
             response:
               jsonPath: "$.choices[0].message.content"
               showAssessment: true
-EOF
 ```
 
 **Test the guardrail:**
@@ -196,7 +181,7 @@ Configure to redact PII:
 ```yaml
 policies:
   - name: aws-bedrock-guardrail
-    version: v0.1.0
+    version: v0
     paths:
       - path: /chat/completions
         methods: [POST]
@@ -209,23 +194,7 @@ policies:
             jsonPath: "$.choices[0].message.content"
 ```
 
-## Use Cases
-
-1. **Content Safety**: Enforce enterprise content policies to prevent inappropriate or harmful content from being processed or returned.
-
-2. **Compliance**: Meet regulatory requirements (HIPAA, GDPR, etc.) by detecting and masking PII in LLM interactions.
-
-3. **Topic Control**: Restrict LLM usage to approved topics only, preventing misuse or access to sensitive domains.
-
-4. **Data Privacy**: Mask sensitive information during processing while maintaining the ability to restore it in responses when needed.
-
-5. **Prohibited Word Filtering**: Block content containing prohibited words, phrases, or patterns defined in your guardrail.
-
-6. **Multi-tenant Security**: Isolate content policies per tenant or application using different guardrail configurations.
-
-7. **Audit and Monitoring**: Use detailed assessment information to audit content violations and improve policies.
-
-## Error Response
+### Example 3: Error Response
 
 When validation fails, the guardrail returns an HTTP 422 status code with the following structure:
 
@@ -267,6 +236,35 @@ If `showAssessment` is enabled, additional details are included:
 }
 ```
 
+## How It Works
+
+#### Request Phase
+
+1. **Content Extraction**: Extracts content from the request body using `jsonPath` (if configured) or uses the entire payload.
+2. **Guardrail Evaluation**: Sends the extracted content to AWS Bedrock Guardrail using configured region, guardrail ID, and version.
+3. **PII Processing**: If `redactPII` is `false`, masks PII entities with placeholders for potential restoration. If `redactPII` is `true`, replaces PII with `*****` permanently.
+4. **Violation Handling**: Blocks and returns HTTP `422` when Bedrock reports a violation.
+5. **Error Strategy**: Applies `passthroughOnError` behavior to decide whether to fail closed or allow traffic on Bedrock API failures.
+
+#### Response Phase
+
+1. **Content Extraction**: Extracts content from the response body using `jsonPath` (if configured) or uses the entire payload.
+2. **Guardrail Evaluation**: Validates response content through AWS Bedrock Guardrail.
+3. **PII Restoration**: In masking mode (`redactPII: false`), restores masked PII values in response content when mappings are available from request metadata.
+4. **Violation Handling**: Blocks and returns HTTP `422` when Bedrock reports a violation.
+5. **Error Strategy**: Applies `passthroughOnError` behavior for Bedrock API failures.
+
+#### PII Handling Modes
+
+- **Masking Mode (`redactPII: false`)**: PII entities are replaced with placeholders such as `EMAIL_0001`, `PHONE_0002`, and can be restored in the response phase.
+- **Redaction Mode (`redactPII: true`)**: PII entities are permanently replaced with `*****`, and original values cannot be restored.
+
+#### Authentication Modes
+
+- **Default Credential Chain**: Uses runtime AWS credentials from environment variables, IAM roles, or other default provider sources.
+- **Static Credentials**: Uses `awsAccessKeyID`, `awsSecretAccessKey`, and optional `awsSessionToken`.
+- **Role Assumption**: Uses `awsRoleARN` (and related role fields) to assume a target IAM role before calling Bedrock.
+
 ## Notes
 
 - The guardrail must be created in AWS Bedrock before use. Use AWS Console, CLI, or SDK to create guardrails with your policies.
@@ -274,7 +272,6 @@ If `showAssessment` is enabled, additional details are included:
 - PII masking with restoration (`redactPII: false`) stores mapping between original and masked values in request metadata, which is used during response processing.
 - When using role assumption, ensure the IAM role has `bedrock:ApplyGuardrail` permission.
 - The policy uses AWS SDK v2 for authentication and API calls.
-- JSONPath extraction failures result in error responses unless `passthroughOnError: true`.
 - Content modifications (PII masking) are applied to the payload and forwarded to upstream if no blocking violation occurs.
 - The policy validates both request and response phases independently when both are configured.
 - Ensure your guardrail is in the specified AWS region; cross-region calls are not supported.

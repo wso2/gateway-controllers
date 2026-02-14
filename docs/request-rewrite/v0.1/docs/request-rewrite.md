@@ -19,22 +19,32 @@ At least one of `pathRewrite`, `queryRewrite`, or `methodRewrite` must be config
 
 ## Configuration
 
+The Request Rewrite policy uses a single-level configuration model where all parameters are configured per-API/route in the API definition YAML.
+
 ### User Parameters (API Definition)
 
 These parameters are configured per API/route by the API developer:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `match` | object | No | Optional conditions that must match before any rewrite is applied. |
-| `match.headers` | array | No | Header matchers. All entries must match. |
-| `match.queryParams` | array | No | Query parameter matchers. All entries must match. |
-| `pathRewrite` | object | No | Path rewrite configuration. |
-| `queryRewrite` | object | No | Query rewrite configuration. |
+| `match` | `MatchConfig` object | No | Optional match conditions that gate whether rewrite actions are applied. |
+| `pathRewrite` | `PathRewriteConfig` object | No | Path rewrite configuration. |
+| `queryRewrite` | `QueryRewriteConfig` object | No | Query parameter rewrite configuration. |
 | `methodRewrite` | string | No | HTTP method to rewrite to. Allowed values: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`. |
 
 > **Note**: At least one of `pathRewrite`, `queryRewrite`, or `methodRewrite` is required.
 
-### Match Conditions
+
+### MatchConfig Configuration
+
+The `MatchConfig` object supports the following fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `headers` | `MatchCondition` array | No | Header matchers. All entries must match for rewrite execution. |
+| `queryParams` | `MatchCondition` array | No | Query parameter matchers. All entries must match for rewrite execution. |
+
+### MatchCondition Configuration
 
 Both header and query parameter matchers use the same structure:
 
@@ -44,7 +54,16 @@ Both header and query parameter matchers use the same structure:
 | `type` | string | Yes | Match type: `Exact`, `Regex`, or `Present`. |
 | `value` | string | Conditional | Required for `Exact` and `Regex`; not used for `Present`. |
 
-### Path Rewrite
+### PathRewriteConfig Configuration
+
+The `PathRewriteConfig` object supports the following fields:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `type` | string | Yes | Path rewrite type: `ReplacePrefixMatch`, `ReplaceFullPath`, or `ReplaceRegexMatch`. |
+| `replacePrefixMatch` | string | Conditional | Required when `type` is `ReplacePrefixMatch`. Replaces the matched operation path prefix. |
+| `replaceFullPath` | string | Conditional | Required when `type` is `ReplaceFullPath`. Replaces the full relative path. |
+| `replaceRegexMatch` | `ReplaceRegexMatchConfig` object | Conditional | Required when `type` is `ReplaceRegexMatch`. Applies regex substitution on the relative path. |
 
 `pathRewrite.type` controls how the path is transformed:
 
@@ -54,16 +73,26 @@ Both header and query parameter matchers use the same structure:
 | `ReplaceFullPath` | `replaceFullPath` | Replaces the full relative path with `replaceFullPath`. |
 | `ReplaceRegexMatch` | `replaceRegexMatch.pattern`, `replaceRegexMatch.substitution` | Applies regex substitution on the relative path. |
 
-`replaceRegexMatch` format:
+### ReplaceRegexMatchConfig Configuration
+
+The `ReplaceRegexMatchConfig` object supports:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `pattern` | string | Yes | Regex pattern (RE2 syntax). |
 | `substitution` | string | Yes | Replacement string. Capture groups can be referenced using `\1`, `\2`, etc. |
 
-### Query Rewrite
+### QueryRewriteConfig Configuration
+
+The `QueryRewriteConfig` object supports:
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `rules` | `QueryRewriteRule` array | Yes | Ordered list of query rewrite rules. Rules are applied sequentially. |
 
 `queryRewrite.rules` are applied in order.
+
+### QueryRewriteRule Configuration
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
@@ -74,7 +103,16 @@ Both header and query parameter matchers use the same structure:
 | `pattern` | string | Conditional | Used by `ReplaceRegexMatch`. |
 | `substitution` | string | Conditional | Used by `ReplaceRegexMatch`. Supports capture groups (`\1`, `\2`, etc.). |
 
-## API Definition Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: request-rewrite
+  gomodule: github.com/wso2/gateway-controllers/policies/request-rewrite@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Prefix Path Rewrite
 
@@ -177,16 +215,56 @@ spec:
             methodRewrite: GET
 ```
 
-## Use Cases
+## How it Works
 
-1. **Version Migration**: Redirect legacy paths to new upstream routes without changing client-facing APIs.
-2. **Query Normalization**: Standardize client query parameters before backend processing.
-3. **Conditional Routing Behavior**: Apply rewrites only for selected traffic using headers/query conditions.
-4. **Protocol Adaptation**: Convert request methods for upstream compatibility.
+**Configuration Object Flow**
+
+```mermaid
+flowchart TD
+  A[RequestRewritePolicyParams]
+
+  A --> B[match MatchConfig]
+  A --> C[pathRewrite PathRewriteConfig]
+  A --> D[queryRewrite QueryRewriteConfig]
+  A --> E[methodRewrite string]
+
+  B --> B1[headers MatchConditionArray]
+  B --> B2[queryParams MatchConditionArray]
+
+  B1 --> M1[matchName]
+  B1 --> M2[matchType]
+  B1 --> M3[matchValue]
+
+  B2 --> M1
+  B2 --> M2
+  B2 --> M3
+
+  C --> C1[pathRewriteType]
+  C --> C2[replacePrefixMatch]
+  C --> C3[replaceFullPath]
+  C --> C4[replaceRegexMatch ReplaceRegexMatchConfig]
+
+  C4 --> C41[regexPattern]
+  C4 --> C42[regexSubstitution]
+
+  D --> D1[rules QueryRewriteRuleArray]
+  D1 --> D2[ruleAction]
+  D1 --> D3[ruleName]
+  D1 --> D4[ruleValue]
+  D1 --> D5[ruleSeparator]
+  D1 --> D6[rulePattern]
+  D1 --> D7[ruleSubstitution]
+```
+
+- The policy evaluates optional `match` conditions first; rewrites are applied only when all configured header and query matchers succeed.
+- Path rewrite, query rewrite, and method rewrite are then applied in request phase using the configured objects; at least one rewrite object must be present.
+- Path rewriting operates on the path relative to API context, and query rewrite rules are executed sequentially in the order provided.
+- Regex-based path and query substitutions use RE2 syntax and support capture-group substitutions in replacement strings.
+- Invalid rewrite configuration at runtime results in an immediate `500` configuration error response.
+
 
 ## Notes
 
 - Path rewrites are applied to the path relative to API context, then API context is preserved in the final forwarded path.
 - For `ReplacePrefixMatch`, the matched prefix is derived from the operation path where the policy is attached.
 - Query rewrite rules run sequentially; later rules see the results of earlier rules.
-- Invalid rewrite configuration returns an immediate HTTP `500` response with a configuration error payload.

@@ -39,7 +39,16 @@ These parameters are configured per-API/route by the API developer:
 | `maxAge` | integer | No | `3600` | Maximum time in seconds that a preflight response can be cached by the browser. Valid range: 0 to 86400. Helps reduce the number of preflight requests. |
 | `forwardPreflight` | boolean | No | `false` | If true, forwards preflight requests that do not match the CORS policy to the upstream service instead of responding with CORS headers. |
 
-## API Definition Examples
+**Note:**
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+
+```yaml
+- name: cors
+  gomodule: github.com/wso2/gateway-controllers/policies/cors@v0
+```
+
+## Reference Scenarios
 
 ### Example 1: Basic CORS Configuration (Allow All Origins)
 
@@ -263,9 +272,9 @@ spec:
       path: /resource/{id}
 ```
 
-## Important Considerations
+## Notes:
 
-### API-Level Configuration Requirement
+**API-Level Configuration Requirement**
 
 The CORS policy MUST be applied at the API level in the `policies` section of the API definition, not at individual operation/resource level. Even though the policy framework technically supports operation-level configuration, CORS handling requires API-level application to work correctly with preflight requests.
 
@@ -289,7 +298,7 @@ operations:
     path: /users/{id}
 ```
 
-### CORS Constraints
+**CORS Constraints**
 
 When `allowCredentials` is set to `true`, the following constraints apply:
 
@@ -300,20 +309,20 @@ When `allowCredentials` is set to `true`, the following constraints apply:
 
 These constraints are enforced by the CORS specification to prevent security issues when credentials are involved.
 
-### Regex Pattern Origins
+**Regex Pattern Origins**
 
 You can use regex patterns for `allowedOrigins` to match multiple origins dynamically. For example:
 
 - `"https://.*\.example\.com"` matches `https://app.example.com`, `https://api.example.com`, etc.
 - `"http://localhost:(3000|8080)"` matches `http://localhost:3000` and `http://localhost:8080`
 
-### Preflight Caching
+**Preflight Caching**
 
 The `maxAge` parameter controls how long browsers cache the preflight response. A higher value reduces preflight requests but means changes to CORS configuration take longer to take effect. Recommended values:
 
 - Development: 300-600 seconds (5-10 minutes)
 - Production: 3600-86400 seconds (1-24 hours)
 
-### Forward Preflight
+**Forward Preflight**
 
 When `forwardPreflight` is enabled, preflight requests that don't match the CORS policy are forwarded to the upstream service. This is useful when the upstream service handles CORS validation directly. By default, non-compliant requests receive an empty response.

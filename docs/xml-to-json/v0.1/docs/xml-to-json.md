@@ -5,8 +5,7 @@ title: "Overview"
 
 ## Overview
 
-The XML to JSON policy provides the capability to transform request and response payloads from XML format to JSON format.
-This policy operates on both the request flow (transforming client XML requests before forwarding to upstream services) and the response flow (transforming XML responses from upstream services before returning to clients).
+The XML to JSON policy enables transformation of request and response payloads from XML to JSON, operating on the request flow to convert client XML requests before forwarding them to upstream services and on the response flow to convert XML responses from upstream services before returning them to clients, with transformation behavior controlled through two boolean parameters that allow enabling the conversion for requests, responses, or both
 
 ## Features
 
@@ -21,7 +20,7 @@ This policy operates on both the request flow (transforming client XML requests 
 
 ## Configuration
 
-The XML to JSON policy supports configuration of transformation directions through two boolean parameters. This allows you to control whether the transformation applies to requests, responses, or both.
+The XML-to-JSON policy requires only per-API/route configuration
 
 ### User Parameters (API Definition)
 
@@ -32,44 +31,18 @@ These parameters are configured per-API/route by the API developer:
 | `onRequestFlow` | boolean | No | `false` | Enables XML to JSON transformation for incoming request payloads (client to upstream). When set to `true`, XML request bodies will be converted to JSON format before forwarding to upstream services. When set to `false`, request bodies will be passed through unchanged. |
 | `onResponseFlow` | boolean | No | `false` | Enables XML to JSON transformation for outgoing response payloads (upstream to client). When set to `true`, XML response bodies will be converted to JSON format before returning to clients. When set to `false`, response bodies will be passed through unchanged. |
 
-### System Parameters
+**Note:**
 
-This policy does not require any system-level configuration parameters.
-
-## API Definition Examples
-
-### Example 1: Basic XML to JSON Transformation
-
-Apply XML to JSON transformation to both requests and responses (requires explicit configuration):
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
 ```yaml
-apiVersion: gateway.api-platform.wso2.com/v1alpha1
-kind: RestApi
-metadata:
-  name: user-api-v1.0
-spec:
-  displayName: User-API
-  version: v1.0
-  context: /users/$version
-  upstream:
-    main:
-      url: http://json-backend:8080
-  policies:
-    - name: xml-to-json
-      version: v0.1.0
-      params:
-        onRequestFlow: true
-        onResponseFlow: true
-  operations:
-    - method: GET
-      path: /profile
-    - method: POST
-      path: /profile
-    - method: PUT
-      path: /settings
+- name: xml-to-json
+  gomodule: github.com/wso2/gateway-controllers/policies/xml-to-json@v0
 ```
 
-### Example 2: Request-Only Transformation
+## Reference Scenarios:
+
+### Example 1: Request-Only Transformation
 
 Apply XML to JSON transformation only to incoming requests (client to upstream):
 
@@ -87,7 +60,7 @@ spec:
       url: http://json-service:9000
   policies:
     - name: xml-to-json
-      version: v0.1.0
+      version: v0
       params:
         onRequestFlow: true
         onResponseFlow: false
@@ -98,7 +71,75 @@ spec:
       path: /xml-data
 ```
 
-### Example 3: Response-Only Transformation
+**Request transformation (Simple XML Object):**
+
+Original client request
+```http
+POST /integration/v1.0/legacy-endpoint HTTP/1.1
+Host: api-gateway.company.com
+Content-Type: application/xml
+
+<root>
+  <name>John Doe</name>
+  <age>30</age>
+  <email>john@example.com</email>
+</root>
+```
+
+Resulting upstream request
+```http
+POST /legacy-endpoint HTTP/1.1
+Host: json-service:9000
+Content-Type: application/json
+Content-Length: 73
+
+{
+  "root": {
+    "name": "John Doe",
+    "age": 30,
+    "email": "john@example.com"
+  }
+}
+```
+
+**Request transformation (Attributes and Repeated Elements):**
+
+Original client request
+```http
+POST /integration/v1.0/xml-data HTTP/1.1
+Host: api-gateway.company.com
+Content-Type: text/xml
+
+<user id="42" active="true">
+  <name>Jane Smith</name>
+  <skills>Java</skills>
+  <skills>Python</skills>
+  <skills>Go</skills>
+</user>
+```
+
+Resulting upstream request
+```http
+POST /xml-data HTTP/1.1
+Host: json-service:9000
+Content-Type: application/json
+Content-Length: 134
+
+{
+  "user": {
+    "@id": "42",
+    "@active": true,
+    "name": "Jane Smith",
+    "skills": [
+      "Java",
+      "Python",
+      "Go"
+    ]
+  }
+}
+```
+
+### Example 2: Response-Only Transformation
 
 Apply XML to JSON transformation only to outgoing responses (upstream to client):
 
@@ -116,7 +157,7 @@ spec:
       url: http://legacy-xml-service:8080
   policies:
     - name: xml-to-json
-      version: v0.1.0
+      version: v0
       params:
         onRequestFlow: false
         onResponseFlow: true
@@ -127,437 +168,251 @@ spec:
       path: /reports
 ```
 
-## Transformation Examples
+**Response transformation:**
 
-The XML to JSON policy handles various XML structures and converts them to appropriate JSON representations. Below are examples of how different XML structures are transformed.
-
-### Simple XML Object
-
-**Input XML:**
-```xml
-<person>
-  <name>John Doe</name>
-  <age>30</age>
-  <active>true</active>
-</person>
-```
-
-**Output JSON:**
-```json
-{
-  "person": {
-    "name": "John Doe",
-    "age": 30,
-    "active": true
-  }
-}
-```
-
-### XML with Attributes
-
-**Input XML:**
-```xml
-<book id="123" isbn="978-0123456789">
-  <title>Go Programming</title>
-  <author>John Doe</author>
-  <price>29.99</price>
-</book>
-```
-
-**Output JSON:**
-```json
-{
-  "book": {
-    "@id": "123",
-    "@isbn": "978-0123456789",
-    "title": "Go Programming",
-    "author": "John Doe",
-    "price": 29.99
-  }
-}
-```
-
-### XML Arrays (Repeated Elements)
-
-**Input XML:**
-```xml
-<users>
-  <user>
-    <id>1</id>
-    <name>Alice</name>
-  </user>
-  <user>
-    <id>2</id>
-    <name>Bob</name>
-  </user>
-</users>
-```
-
-**Output JSON:**
-```json
-{
-  "users": {
-    "user": [
-      {
-        "id": 1,
-        "name": "Alice"
-      },
-      {
-        "id": 2,
-        "name": "Bob"
-      }
-    ]
-  }
-}
-```
-
-### Empty Elements
-
-**Input XML:**
-```xml
-<data>
-  <empty></empty>
-  <selfclosed/>
-  <nonempty>value</nonempty>
-</data>
-```
-
-**Output JSON:**
-```json
-{
-  "data": {
-    "empty": null,
-    "selfclosed": null,
-    "nonempty": "value"
-  }
-}
-```
-
-### Mixed Content and Text-Only Elements
-
-**Input XML:**
-```xml
-<message>Hello World</message>
-```
-
-**Output JSON:**
-```json
-{
-  "message": "Hello World"
-}
-```
-
-### Complex XML with Mixed Attributes and Elements
-
-**Input XML:**
-```xml
-<order id="12345" status="processing">
-  <customer type="premium">
-    <name>Jane Smith</name>
-    <email>jane@example.com</email>
-  </customer>
-  <items>
-    <item>
-      <sku>BOOK-001</sku>
-      <quantity>2</quantity>
-      <price>29.99</price>
-    </item>
-    <item>
-      <sku>PEN-002</sku>
-      <quantity>5</quantity>
-      <price>1.99</price>
-    </item>
-  </items>
-  <total>69.93</total>
-</order>
-```
-
-**Output JSON:**
-```json
-{
-  "order": {
-    "@id": "12345",
-    "@status": "processing",
-    "customer": {
-      "@type": "premium",
-      "name": "Jane Smith",
-      "email": "jane@example.com"
-    },
-    "items": {
-      "item": [
-        {
-          "sku": "BOOK-001",
-          "quantity": 2,
-          "price": 29.99
-        },
-        {
-          "sku": "PEN-002",
-          "quantity": 5,
-          "price": 1.99
-        }
-      ]
-    },
-    "total": 69.93
-  }
-}
-```
-
-## Request Transformation Examples
-
-### Basic JSON Object Transformation
-
-**Original client request:**
-```http
-POST /users/v1.0/profile HTTP/1.1
-Host: api-gateway.company.com
-Content-Type: application/xml
-
-<root>
-  <name>John Doe</name>
-  <age>30</age>
-  <email>john@example.com</email>
-</root>
-```
-
-**Resulting upstream request (Example 1):**
-```
-POST /profile HTTP/1.1
-Host: legacy-backend:8080
-Content-Type: application/json
-Content-Length: 135
-
-{
-  "name": "John Doe",
-  "age": 30,
-  "email": "john@example.com"
-}
-```
-
-### Complex JSON with Arrays Transformation
-
-**Original client request:**
-```http
-POST /users/v1.0/profile HTTP/1.1
-Host: api-gateway.company.com
-Content-Type: application/xml
-
-<root>
-  <user>
-    <name>Jane Smith</name>
-    <skills>Java</skills>
-    <skills>Python</skills>
-    <skills>Go</skills>
-    <address>
-      <city>New York</city>
-      <zipcode>10001</zipcode>
-    </address>
-  </user>
-  <active>true</active>
-</root>
-```
-
-**Resulting upstream request:**
-```http
-POST /profile HTTP/1.1
-Host: legacy-backend:8080
-Content-Type: application/json
-Content-Length: 298
-
-{
-  "user": {
-    "name": "Jane Smith",
-    "skills": ["Java", "Python", "Go"],
-    "address": {
-      "city": "New York",
-      "zipcode": "10001"
-    }
-  },
-  "active": true
-}
-```
-
-## Response Transformation Examples
-
-### JSON Response to XML
-
-**Original upstream response:**
-```http
-HTTP/1.1 200 OK
-Content-Type: application/json
-Content-Length: 78
-
-{
-  "status": "success",
-  "data": {
-    "id": 12345,
-    "created": true
-  }
-}
-```
-
-**Resulting client response:**
+Original upstream response
 ```http
 HTTP/1.1 200 OK
 Content-Type: application/xml
-Content-Length: 156
+Content-Length: 126
 
-<root>
+<response>
   <status>success</status>
   <data>
     <id>12345</id>
     <created>true</created>
   </data>
-</root>
+</response>
 ```
 
-## Policy Behavior
+Resulting client response
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 89
 
-### Direction Control
+{
+  "response": {
+    "status": "success",
+    "data": {
+      "id": 12345,
+      "created": true
+    }
+  }
+}
+```
 
-The policy behavior is controlled by two boolean parameters:
+### Example 3: Basic XML to JSON Transformation
 
-- **`onRequestFlow: true`**: Transforms XML request bodies to JSON before forwarding to upstream services. When `false`, request bodies are left unchanged.
-- **`onResponseFlow: true`**: Transforms XML response bodies to JSON before returning to clients. When `false`, response bodies are left unchanged.
-- **Both `false` (default)**: No transformation is performed in either direction (policy effectively disabled by default).
-- **Both `true`**: Transforms both XML request bodies (to upstream) and XML response bodies (to client).
+Apply XML to JSON transformation to both requests and responses (requires explicit configuration):
 
-### Content-Type Detection
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+metadata:
+  name: user-api-v1.0
+spec:
+  displayName: User-API
+  version: v1.0
+  context: /users/$version
+  upstream:
+    main:
+      url: http://json-backend:8080
+  policies:
+    - name: xml-to-json
+      version: v0
+      params:
+        onRequestFlow: true
+        onResponseFlow: true
+  operations:
+    - method: GET
+      path: /profile
+    - method: POST
+      path: /profile
+    - method: PUT
+      path: /settings
+```
 
-The policy only processes requests and responses that have the `Content-Type` header set to `application/xml` or `text/xml` (case-insensitive). Other content types will result in a 500 Internal Server Error.
+**End-to-end transformation sample:**
 
-### XML to JSON Conversion Rules
+Incoming client request body
+```xml
+<profile>
+  <name>Alex</name>
+  <age>28</age>
+</profile>
+```
 
-1. **XML Elements**: Converted to JSON objects with properties for each child element
-2. **XML Attributes**: Converted to JSON properties with `@` prefix (e.g., `id="123"` becomes `"@id": "123"`)
-3. **Repeated Elements**: Multiple elements with the same name become JSON arrays
-4. **Text Content**: Element text content becomes the property value
-5. **Empty Elements**: Converted to `null` values
-6. **Type Conversion**:
-   - Text containing "true" or "false" becomes boolean values
-   - Numeric text containing decimals becomes float values
-   - Simple numeric text in element content becomes integer values
-   - Attribute values are preserved as strings to avoid converting IDs or codes
+Forwarded upstream request body
+```json
+{
+  "profile": {
+    "name": "Alex",
+    "age": 28
+  }
+}
+```
 
-### JSON Output Format
+Upstream response body
+```xml
+<result>
+  <updated>true</updated>
+  <id>9001</id>
+</result>
+```
 
-- **Preserves Structure**: Maintains the hierarchical structure of the original XML
-- **Attribute Handling**: XML attributes are converted to JSON properties with `@` prefix
-- **Array Detection**: Repeated XML elements with the same name are automatically converted to JSON arrays
-- **Indented Format**: JSON is formatted with 2-space indentation for readability
+Returned client response body
+```json
+{
+  "result": {
+    "updated": true,
+    "id": 9001
+  }
+}
+```
 
-### Header Management
+### Example 4: Operation-Specific Direction Control
 
-- **Request Flow**: Updates `Content-Type` to `application/json` and `Content-Length` to reflect the new JSON payload size
-- **Response Flow**: Updates `Content-Type` to `application/json` and `Content-Length` to reflect the new JSON payload size
+Apply different transformation directions to different operations:
 
-### Error Handling
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+metadata:
+  name: mixed-api-v1.0
+spec:
+  displayName: Mixed-API
+  version: v1.0
+  context: /mixed/$version
+  upstream:
+    main:
+      url: http://backend-service:8080
+  operations:
+    - method: POST
+      path: /json-required
+      policies:
+        - name: xml-to-json
+          version: v0
+          params:
+            onRequestFlow: true
+            onResponseFlow: false
+    - method: GET
+      path: /json-response
+      policies:
+        - name: xml-to-json
+          version: v0
+          params:
+            onRequestFlow: false
+            onResponseFlow: true
+    - method: PUT
+      path: /full-transform
+      policies:
+        - name: xml-to-json
+          version: v0
+          params:
+            onRequestFlow: true
+            onResponseFlow: true
+```
 
-#### Request Flow Errors (Returns 500 Internal Server Error)
+**Route-level transformation sample:**
 
-1. **Invalid Content-Type**: If the request `Content-Type` is not `application/xml` or `text/xml`
-   ```json
-   {
-     "error": "Internal Server Error",
-     "message": "Content-Type must be application/xml or text/xml for XML to JSON transformation"
-   }
-   ```
+For `/json-required` (request only)
+```xml
+<job><name>daily-sync</name><enabled>true</enabled></job>
+```
+becomes
+```json
+{
+  "job": {
+    "name": "daily-sync",
+    "enabled": true
+  }
+}
+```
 
-2. **Invalid XML**: If the request body contains malformed XML
-   ```json
-   {
-     "error": "Internal Server Error", 
-     "message": "Failed to convert XML to JSON format: failed to parse XML: ..."
-   }
-   ```
+For `/json-response` (response only)
+```xml
+<health><status>ok</status><uptime>1024</uptime></health>
+```
+becomes
+```json
+{
+  "health": {
+    "status": "ok",
+    "uptime": 1024
+  }
+}
+```
 
-#### Response Flow Errors (Returns 500 Internal Server Error)
+### Example 6: Default Behavior
 
-1. **Invalid Content-Type**: If the response `Content-Type` is not `application/xml` or `text/xml`
-2. **Invalid XML**: If the response body contains malformed XML
-3. **Conversion Failure**: If XML to JSON conversion fails
+When no parameters are specified, no transformations are performed by default:
 
-Note: Response errors return 500 status codes with error details in the response body, similar to request flow errors.
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1alpha1
+kind: RestApi
+metadata:
+  name: default-transform-api-v1.0
+spec:
+  displayName: Default-Transform-API
+  version: v1.0
+  context: /default-transform/$version
+  upstream:
+    main:
+      url: http://backend-service:8080
+  policies:
+    - name: xml-to-json
+      version: v0
+      # No params specified - defaults to onRequestFlow: false, onResponseFlow: false
+      # This policy will be effectively disabled unless explicitly configured
+  operations:
+    - method: GET
+      path: /data
+    - method: POST
+      path: /submit
+```
 
-### Empty or Missing Bodies
+**Behavior sample (no transformation):**
 
-- **Empty Request Body**: Request passed through unchanged
-- **Missing Request Body**: Request passed through unchanged
-- **Empty Response Body**: Response passed through unchanged
-- **Missing Response Body**: Response passed through unchanged
+Input XML payload
+```xml
+<event><type>ping</type></event>
+```
 
-## Common Use Cases
+Output payload (unchanged)
+```xml
+<event><type>ping</type></event>
+```
 
-1. **Legacy System Integration**: Transform XML-based legacy systems to work with modern JSON APIs
+## How it Works
 
-2. **Protocol Bridging**: Enable XML clients to interact with JSON-only web services
+* The policy uses two booleans, `onRequestFlow` and `onResponseFlow`, to control whether XML-to-JSON conversion is applied on request flow, response flow, or both; when both are `false`, the policy is effectively disabled.
+* Transformation is applied only when the corresponding payload has `Content-Type: application/xml` or `text/xml` (case-insensitive); unsupported content types cause an immediate error response.
+* XML is converted into JSON by preserving hierarchy, mapping attributes with `@` prefixes, converting repeated elements into arrays, and applying value parsing for booleans and numbers where applicable.
+* After successful conversion, the policy updates `Content-Type` to `application/json` and recalculates `Content-Length` to match the transformed payload size.
+* In both request and response flow, invalid content-type for transformation, malformed XML, or conversion failures return `500 Internal Server Error` with a JSON error body.
+* Empty or missing request/response bodies are not transformed and continue without modification.
 
-3. **Data Format Migration**: Gradually migrate from XML to JSON while maintaining backward compatibility
-
-4. **Third-Party Integration**: Integrate with external services that only provide XML responses
-
-5. **Enterprise Service Bus**: Convert XML messages to JSON for modern message routing
-
-6. **REST API Integration**: Transform SOAP/XML responses to JSON format for REST API consumption
-
-7. **JSON Database Integration**: Convert XML data to JSON format for JSON databases or storage systems
-
-8. **Compliance Requirements**: Meet regulatory or industry standards that require JSON data format
-
-## Best Practices
-
-1. **Content-Type Validation**: Ensure client applications send proper `Content-Type: application/xml` headers
-
-2. **Error Handling**: Implement proper error handling on the client side for 500 Internal Server Error responses
-
-3. **Performance Considerations**: Be aware that XML to JSON conversion adds processing overhead
-
-4. **Payload Size**: Monitor payload sizes as JSON typically has smaller overhead than XML
-
-5. **Testing**: Thoroughly test with various XML structures including nested elements, attributes and arrays
-
-6. **Documentation**: Document the JSON schema expectations for upstream services
-
-7. **Monitoring**: Monitor conversion success rates and error patterns
-
-## Security Considerations
-
-1. **Payload Validation**: Ensure upstream services validate the converted JSON payloads
-
-2. **Size Limits**: Implement appropriate payload size limits to prevent excessive resource usage
-
-3. **XML Injection**: Be aware that malformed XML input may cause parsing errors
-
-4. **Error Information**: Error messages are returned to clients - ensure they don't expose sensitive information
-
-5. **Content Validation**: Validate that XML content is appropriate before transformation
-
-6. **Logging**: Consider logging transformation activities for audit purposes (excluding sensitive data)
 
 ## Limitations
 
-1. **Single Use**: This policy cannot be applied multiple times to the same resource since the payload becomes JSON after the first transformation
+1. **XML-Only Processing**: Transformation runs only for payloads marked as `application/xml` or `text/xml`; other content types produce errors when transformation is enabled.
+2. **Non-Customizable JSON Shape**: Output conventions (for example, attribute prefix `@`) are fixed and cannot be customized per API.
+3. **Single-Pass Semantics**: Reapplying the policy on the same message has no practical value once payload format has already changed to JSON.
+4. **Memory Buffering Requirement**: Request and response bodies are buffered for parsing and transformation, which can increase memory use for large payloads.
+5. **Ordering Sensitivity**: Policy order matters and it should execute before policies that require XML payloads.
 
-2. **XML Only**: Only processes payloads with `Content-Type: application/xml` or `text/xml` - other formats result in errors
 
-3. **No Configuration**: The transformation behavior cannot be customized (e.g., custom attribute prefix)
+## Notes
 
-4. **Memory Usage**: Large XML payloads require buffering in memory for transformation
+**Security and Data Validation**
 
-5. **Processing Order**: Must be applied before any policies that expect XML format
+Validate XML inputs before transformation and ensure downstream services validate resulting JSON content according to expected schemas. Since the policy can return detailed conversion errors, keep client-facing error handling controlled to avoid exposing unnecessary internals. Apply payload size limits and XML parsing protections in your deployment to reduce risk from malformed or oversized XML inputs.
 
-## Performance Considerations
+**Performance and Resource Management**
 
-- **Memory Buffering**: Both request and response bodies are buffered in memory during transformation
-- **Processing Overhead**: XML parsing and JSON generation add latency to requests
-- **Payload Size**: JSON output is typically smaller than equivalent XML input
-- **CPU Usage**: Recursive processing of nested XML structures uses CPU resources
+XML parsing and JSON generation add CPU overhead, and buffering increases memory pressure for large or deeply nested payloads. For high-throughput routes, enable transformation only where strictly needed and monitor transformation latency and payload sizes. Although JSON payloads are often smaller than XML, conversion still adds processing cost that should be included in capacity planning.
 
-## Troubleshooting
+**Operational Best Practices**
 
-### Common Issues
-
-1. **500 Internal Server Error - Content-Type**: Ensure client sends `Content-Type: application/xml` or `text/xml`
-2. **500 Internal Server Error - Invalid XML**: Validate XML format before sending requests  
-3. **Transformation Ignored**: Check that the payload has the correct content type
-4. **Large Payloads**: Consider payload size limits and memory constraints
-5. **Performance Issues**: Monitor transformation time for large or complex XML structures
+Use direction control (`onRequestFlow`/`onResponseFlow`) deliberately per operation rather than enabling both flows globally by default. Keep API contracts explicit about where XML is accepted and where JSON is returned to avoid client integration issues. During rollout, test realistic XML structures (attributes, repeated elements, empty nodes, mixed content), verify transformed headers, and monitor transformation failures with clear operational alerts.
