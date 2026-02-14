@@ -62,7 +62,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: remove-headers
-      version: v0.1.0
+      version: v0
       params:
         requestHeaders:
           - name: Authorization
@@ -115,7 +115,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: remove-headers
-      version: v0.1.0
+      version: v0
       params:
         responseHeaders:
           - name: Server
@@ -171,7 +171,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: remove-headers
-      version: v0.1.0
+      version: v0
       params:
         requestHeaders:
           - name: X-Internal-Token
@@ -247,7 +247,7 @@ spec:
       path: /{country_code}/{city}
       policies:
         - name: remove-headers
-          version: v0.1.0
+          version: v0
           params:
             requestHeaders:
               - name: X-Cache-Control  # Remove caching hints for weather data
@@ -257,7 +257,7 @@ spec:
       path: /alerts/active
       policies:
         - name: remove-headers
-          version: v0.1.0
+          version: v0
           params:
             requestHeaders:
               - name: If-Modified-Since  # Remove conditional headers for alerts
@@ -267,7 +267,7 @@ spec:
       path: /alerts/active
       policies:
         - name: remove-headers
-          version: v0.1.0
+          version: v0
           params:
             requestHeaders:
               - name: X-Requested-With  # Remove AJAX headers
@@ -294,7 +294,7 @@ spec:
   policies:
     # Remove authentication headers
     - name: remove-headers
-      version: v0.1.0
+      version: v0
       params:
         requestHeaders:
           - name: Authorization
@@ -302,14 +302,14 @@ spec:
           - name: Cookie
     # Remove server identification
     - name: remove-headers
-      version: v0.1.0
+      version: v0
       params:
         responseHeaders:
           - name: Server
           - name: X-Powered-By
     # Remove debugging headers
     - name: remove-headers
-      version: v0.1.0
+      version: v0
       params:
         requestHeaders:
           - name: X-Debug-Mode

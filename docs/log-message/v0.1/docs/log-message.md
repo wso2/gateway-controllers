@@ -66,7 +66,7 @@ spec:
       url: http://backend-service:8080
   policies:
     - name: log-message
-      version: v0.1.0
+      version: v0
       # No params specified - defaults to all false (no logging)
   operations:
     - method: GET
@@ -93,7 +93,7 @@ spec:
       url: http://user-service:8080
   policies:
     - name: log-message
-      version: v0.1.0
+      version: v0
       params:
         logRequestPayload: true
         logRequestHeaders: true
@@ -126,7 +126,7 @@ spec:
       url: http://backend-service:8080
   policies:
     - name: log-message
-      version: v0.1.0
+      version: v0
       params:
         logRequestPayload: true
         logRequestHeaders: true
@@ -155,7 +155,7 @@ spec:
       url: http://backend-service:8080
   policies:
     - name: log-message
-      version: v0.1.0
+      version: v0
       params:
         # Request parameters default to false (omitted)
         logResponsePayload: true
@@ -183,7 +183,7 @@ spec:
       url: http://payment-service:8080
   policies:
     - name: log-message
-      version: v0.1.0
+      version: v0
       params:
         logRequestPayload: true
         logRequestHeaders: true
@@ -216,7 +216,7 @@ spec:
       url: http://backend-service:8080
   policies:
     - name: log-message
-      version: v0.1.0
+      version: v0
       params:
         logRequestPayload: true
         logRequestHeaders: false
@@ -248,7 +248,7 @@ spec:
       path: /public-data
       policies:
         - name: log-message
-          version: v0.1.0
+          version: v0
           params:
             logRequestPayload: false
             logRequestHeaders: true
@@ -259,7 +259,7 @@ spec:
       path: /sensitive-operation
       policies:
         - name: log-message
-          version: v0.1.0
+          version: v0
           params:
             logRequestPayload: true
             logRequestHeaders: false
@@ -269,7 +269,7 @@ spec:
       path: /debug-endpoint
       policies:
         - name: log-message
-          version: v0.1.0
+          version: v0
           params:
             logRequestPayload: true
             logRequestHeaders: true

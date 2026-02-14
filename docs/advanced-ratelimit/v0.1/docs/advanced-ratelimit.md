@@ -249,7 +249,7 @@ spec:
       path: /{country_code}/{city}
       policies:
         - name: ratelimit
-          version: v0.1.1
+          version: v0
           params:
             cost: 1
             limits:
@@ -280,7 +280,7 @@ spec:
       path: /{country_code}/{city}
       policies:
         - name: ratelimit
-          version: v0.1.1
+          version: v0
           params:
             cost: 1
             limits:
@@ -313,7 +313,7 @@ spec:
       path: /{country_code}/{city}
       policies:
         - name: ratelimit
-          version: v0.1.1
+          version: v0
           params:
             cost: 1
             limits:
@@ -342,7 +342,7 @@ spec:
       url: https://public-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 60
@@ -372,7 +372,7 @@ spec:
       url: https://tenant-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 500
@@ -404,7 +404,7 @@ spec:
       url: https://analytics-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 1000
@@ -414,7 +414,7 @@ spec:
       path: /simple-query
       policies:
         - name: ratelimit
-          version: v0.1.1
+          version: v0
           params:
             limits:
               - limit: 1000
@@ -424,7 +424,7 @@ spec:
       path: /complex-report
       policies:
         - name: ratelimit
-          version: v0.1.1
+          version: v0
           params:
             limits:
               - limit: 1000
@@ -448,7 +448,7 @@ spec:
       url: https://burst-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 10
@@ -477,7 +477,7 @@ spec:
       url: https://backend-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 100
@@ -507,7 +507,7 @@ spec:
       url: https://llm-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 100000
@@ -546,7 +546,7 @@ spec:
       url: https://compute-service:8080
   policies:
     - name: ratelimit
-      version: v0.1.1
+      version: v0
       params:
         limits:
           - limit: 1000

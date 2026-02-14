@@ -73,7 +73,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: modify-headers
-      version: v0.1.2
+      version: v0
       params:
         requestHeaders:
           - action: SET
@@ -125,7 +125,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: modify-headers
-      version: v0.1.2
+      version: v0
       params:
         requestHeaders:
           - action: DELETE
@@ -179,7 +179,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: modify-headers
-      version: v0.1.2
+      version: v0
       params:
         responseHeaders:
           - action: SET
@@ -237,7 +237,7 @@ spec:
       url: http://sample-backend:5000/api/v2
   policies:
     - name: modify-headers
-      version: v0.1.2
+      version: v0
       params:
         requestHeaders:
           - action: SET
@@ -307,7 +307,7 @@ spec:
       path: /public
       policies:
         - name: modify-headers
-          version: v0.1.2
+          version: v0
           params:
             responseHeaders:
               - action: SET
@@ -317,7 +317,7 @@ spec:
       path: /internal
       policies:
         - name: modify-headers
-          version: v0.1.2
+          version: v0
           params:
             requestHeaders:
               - action: SET
@@ -359,7 +359,7 @@ spec:
       url: http://backend-service:8080
   policies:
     - name: modify-headers
-      version: v0.1.2
+      version: v0
       params:
         requestHeaders:
           - action: SET
