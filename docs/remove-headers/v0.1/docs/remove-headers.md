@@ -30,8 +30,8 @@ These parameters are configured per-API/route by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `requestHeaders` | string array | No | - | Array of header names to remove from requests before forwarding to upstream. At least one of `requestHeaders` or `responseHeaders` must be specified. |
-| `responseHeaders` | string array | No | - | Array of header names to remove from responses before returning to clients. At least one of `requestHeaders` or `responseHeaders` must be specified. |
+| `requestHeaders` | string array | No | - | Array of header names to remove from requests before forwarding to upstream.|
+| `responseHeaders` | string array | No | - | Array of header names to remove from responses before returning to clients.|
 
 **Note:**
 

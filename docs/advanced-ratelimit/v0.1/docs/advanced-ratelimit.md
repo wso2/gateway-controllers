@@ -222,8 +222,8 @@ include_retry_after = true
 Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
 ```yaml
-- name: token-based-ratelimit
-  gomodule: github.com/wso2/gateway-controllers/policies/token-based-ratelimit@v0
+ - name: advanced-ratelimit
+  gomodule: github.com/wso2/gateway-controllers/policies/advanced-ratelimit@v0
 ```
 
 ## Reference Scenarios

@@ -214,21 +214,19 @@ spec:
 
 ## How it Works
 
-- The system enforces configurable per-user, per-API limits on the number of API keys that can be created. It maintains separate quotas for each user and API combination.
+- On each request, the gateway policy reads `key`, `in`, and optional `value-prefix` from the policy configuration and validates that required parameters are present.
 
-- It tracks and returns remaining quota information in API responses for visibility. Generating a new key reduces the quota, regenerating an existing key does not, and revoking a key restores the available quota. This helps prevent abuse and ensures fair usage of the platform.
+- Based on `in`, it extracts the API key either from a request header (case-insensitive header lookup) or from a query parameter in the request URL.
 
-- API key generation and regeneration responses include a `remaining_api_key_quota` field that shows how many additional API keys the user can create for the specific API.
+- If `value-prefix` is configured (for example, `Bearer `), the policy strips that prefix from the extracted value before validation.
 
-- All generated API keys use a consistent format consisting of the apip_ prefix, followed by 64 hexadecimal characters, an underscore (_), and 22 URL-safe characters, resulting in a total length of 92 characters (for example, apip_b9abae64a955aded2eb700aff88235ce3f7e6a8ca0f2f52ba31f73bcbb960360_jh~cPInvccQ09goMO5-4mQ).
+- If the key is missing, empty, or the required API context values are unavailable, the policy short-circuits the request and returns `401 Unauthorized` with a JSON error response.
 
-- API keys are securely hashed before being stored in the database using the SHA-256 cryptographic algorithm.
+- For valid inputs, the policy calls the API key store validator using API and operation context (`apiId`, operation path, HTTP method) to determine whether the key is allowed for the target operation.
 
-- The platform supports secure key validation using constant-time comparison and allows migration between hashing algorithms without exposing key material.
+- On successful validation, the request continues upstream and authentication metadata is added to request context (`auth.success=true`, `auth.method=api-key`). The policy does not modify response traffic (`OnResponse` is a no-op).
 
-- When listed, API keys are masked to show only the first 10 characters, and the full value is returned only at creation or regeneration to prevent accidental exposure.
-
-- Access control and auditing are enforced: users can manage only their own keys, administrators can manage all keys, all operations require authentication (Basic Auth or JWT), and every action is logged for auditability.
+- Key lifecycle and control-plane capabilities still apply, but are handled outside this gateway runtime policy: quota enforcement (including `remaining_api_key_quota` in key management APIs), key generation/regeneration, key format, secure hashing/storage, masking, access control, and audit logging.
 
 
 ## Notes:

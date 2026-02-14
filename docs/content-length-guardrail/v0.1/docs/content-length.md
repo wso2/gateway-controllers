@@ -17,7 +17,7 @@ The Content Length Guardrail validates the byte length of request or response bo
 
 ## Configuration
 
-The Basic Auth policy uses a single-level configuration where all parameters are configured in the API definition YAML.
+This policy uses a single-level configuration where all parameters are configured in the API definition YAML.
 
 ### User Parameters (API Definition)
 

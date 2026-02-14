@@ -21,7 +21,7 @@ The Add Headers policy dynamically adds HTTP headers to incoming requests before
 
 ## Configuration
 
-The Basic Auth policy uses a single-level configuration where all parameters are configured in the API definition YAML.
+This policy uses a single-level configuration where all parameters are configured in the API definition YAML.
 
 At least one of `requestHeaders` or `responseHeaders` must be specified in the policy configuration. The policy will fail validation if both arrays are empty or omitted.
 

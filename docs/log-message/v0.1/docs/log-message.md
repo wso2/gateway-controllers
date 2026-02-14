@@ -281,8 +281,9 @@ spec:
 
 ## How it Works
 
-* The log-message policy ensures **security by default**, automatically masking `Authorization` headers with `"***"` to prevent accidental exposure of bearer tokens, basic auth credentials, and API keys, applying this rule case-insensitively.
+* The log-message policy automatically masks only the `Authorization` header with `"***"` by default (case-insensitive), preventing accidental exposure of bearer tokens and basic auth credentials carried in that header.
 * Administrators can configure **header exclusions** separately for requests and responses using `excludedRequestHeaders` and `excludedResponseHeaders`; multiple headers can be excluded with comma separation, and excluded headers are completely omitted from log output.
+* Sensitive headers other than `Authorization` (for example `X-API-Key`, `Cookie`, or `Set-Cookie`) are not masked automatically and should be explicitly excluded when header logging is enabled.
 * The policy supports **request ID correlation** by extracting the `x-request-id` header, using the same ID in both request and response logs, or `<request-id-unavailable>` if absent, enabling end-to-end tracing.
 * **Content processing** is non-intrusive: request and response bodies are buffered in memory, headers are filtered for security, and flows are automatically identified and tagged as REQUEST or RESPONSE.
 * When content is missing or empty, the policy still creates log entries with placeholders—omitting payloads or headers fields as needed, and providing fallback values for missing request IDs.
@@ -302,7 +303,7 @@ spec:
 
 **Sensitive Data Protection and Security**
 
-Protect sensitive data by excluding authentication and confidential headers, masking authorization headers, and carefully evaluating the sensitivity of logged payload content. Regularly review the excluded headers list to ensure headers with credentials or personal data are not logged, and apply selective logging per operation. Beyond technical controls, control log access and handling by restricting log visibility to authorized personnel and ensuring secure transmission and storage of logs. Maintain compliance with data privacy regulations such as GDPR and CCPA by aligning your logging practices accordingly.
+Protect sensitive data by excluding authentication and confidential headers, relying on default masking only for the `Authorization` header, and carefully evaluating the sensitivity of logged payload content. Regularly review the excluded headers list to ensure headers with credentials or personal data are not logged, and apply selective logging per operation. Beyond technical controls, control log access and handling by restricting log visibility to authorized personnel and ensuring secure transmission and storage of logs. Maintain compliance with data privacy regulations such as GDPR and CCPA by aligning your logging practices accordingly.
 
 **Performance and Resource Management**
 
