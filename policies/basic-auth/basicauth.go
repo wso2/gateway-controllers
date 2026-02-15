@@ -153,16 +153,15 @@ func (p *BasicAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, username
 	ctx.Metadata[MetadataKeyAuthMethod] = "basic"
 
 	// Populate AuthContext struct
-	if ctx.SharedContext != nil {
-		if ctx.SharedContext.AuthContext == nil {
-			ctx.SharedContext.AuthContext = &policy.AuthContext{}
-		}
-		ac := ctx.SharedContext.AuthContext
-		ac.Authenticated = true
-		ac.AuthType = "basic"
-		ac.Subject = username
-		ac.UserID = username
+	if ctx.SharedContext.AuthContext == nil {
+		ctx.SharedContext.AuthContext = &policy.AuthContext{}
 	}
+	ac := ctx.SharedContext.AuthContext
+	ac.Authenticated = true
+	ac.AuthType = "basic"
+	ac.Subject = username
+	ac.UserID = username
+	
 
 	// Continue to upstream with no modifications
 	return policy.UpstreamRequestModifications{}
@@ -178,6 +177,14 @@ func (p *BasicAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, allowUna
 	// Set metadata indicating failed authentication
 	ctx.Metadata[MetadataKeyAuthSuccess] = false
 	ctx.Metadata[MetadataKeyAuthMethod] = "basic"
+
+	// Populate AuthContext for failed authentication
+	if ctx.SharedContext.AuthContext == nil {
+		ctx.SharedContext.AuthContext = &policy.AuthContext{}
+	}
+	ctx.SharedContext.AuthContext.Authenticated = false
+	ctx.SharedContext.AuthContext.AuthType = "basic"
+	
 
 	// If allowUnauthenticated is true, allow request to proceed
 	if allowUnauthenticated {

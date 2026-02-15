@@ -215,14 +215,13 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 	ctx.Metadata[MetadataKeyAuthMethod] = "api-key"
 
 	// Populate AuthContext struct (AppID/UserID left empty until store supports returning them)
-	if ctx.SharedContext != nil {
-		if ctx.SharedContext.AuthContext == nil {
-			ctx.SharedContext.AuthContext = &policy.AuthContext{}
-		}
-		ac := ctx.SharedContext.AuthContext
-		ac.Authenticated = true
-		ac.AuthType = "apikey"
+	if ctx.SharedContext.AuthContext == nil {
+		ctx.SharedContext.AuthContext = &policy.AuthContext{}
 	}
+	ac := ctx.SharedContext.AuthContext
+	ac.Authenticated = true
+	ac.AuthType = "api-key"
+	
 
 	slog.Debug("API Key Auth Policy: Authentication metadata set",
 		"authSuccess", true,
@@ -256,6 +255,14 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 	// Set metadata indicating failed authentication
 	ctx.Metadata[MetadataKeyAuthSuccess] = false
 	ctx.Metadata[MetadataKeyAuthMethod] = "api-key"
+
+	// Populate AuthContext for failed authentication
+	if ctx.SharedContext.AuthContext == nil {
+		ctx.SharedContext.AuthContext = &policy.AuthContext{}
+	}
+	ctx.SharedContext.AuthContext.Authenticated = false
+	ctx.SharedContext.AuthContext.AuthType = "api-key"
+	
 
 	headers := map[string]string{
 		"content-type": "application/json",

@@ -1277,9 +1277,7 @@ var standardJWTClaimNames = map[string]bool{
 
 // populateAuthContext fills the SDK AuthContext struct from validated JWT claims
 func (p *JwtAuthPolicy) populateAuthContext(ctx *policy.RequestContext, claims jwt.MapClaims, userIdClaim string) {
-	if ctx.SharedContext == nil {
-		return
-	}
+
 	// Ensure AuthContext is initialized when it is a pointer (SDK may pass nil)
 	if ctx.SharedContext.AuthContext == nil {
 		ctx.SharedContext.AuthContext = &policy.AuthContext{}
@@ -1410,6 +1408,14 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 	// Set metadata indicating failed authentication
 	ctx.Metadata[MetadataKeyAuthSuccess] = false
 	ctx.Metadata[MetadataKeyAuthMethod] = "jwt"
+
+	// Populate AuthContext for failed authentication
+	if ctx.SharedContext.AuthContext == nil {
+		ctx.SharedContext.AuthContext = &policy.AuthContext{}
+	}
+	ctx.SharedContext.AuthContext.Authenticated = false
+	ctx.SharedContext.AuthContext.AuthType = "jwt"
+	
 
 	headers := map[string]string{
 		"content-type": "application/json",
