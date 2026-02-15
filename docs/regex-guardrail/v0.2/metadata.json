@@ -1,0 +1,11 @@
+{
+  "name": "regex-guardrail",
+  "displayName": "Regex Guardrail",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request or response body content against a regular expression pattern.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nCan be configured to match or invert the regex pattern.\nSupports separate configuration for request and response phases."
+}

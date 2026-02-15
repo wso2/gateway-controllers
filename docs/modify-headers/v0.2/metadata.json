@@ -1,0 +1,10 @@
+{
+  "name": "modify-headers",
+  "displayName": "Modify Headers",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Transformation"
+  ],
+  "description": "Comprehensive header manipulation policy for both request and response flows.\nSupports SET (replace), APPEND (add), and DELETE (remove) operations on headers.\nCan modify request headers before forwarding to upstream and response headers before returning to client."
+}

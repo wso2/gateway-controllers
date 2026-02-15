@@ -1,0 +1,10 @@
+{
+  "name": "xml-to-json",
+  "displayName": "XML to JSON",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Transformation"
+  ],
+  "description": "This policy provides the capability to transform a request/response with an XML payload to a request/response with a JSON payload.\nThis policy assumes that the request/response payload is XML. Attempting to use it on a request/response with a non-XML payload will result in premature termination of the mediation flow.\nFor the same reason, this policy cannot be attached multiple times to a resource since once it is used, the payload will be a JSON value."
+}
