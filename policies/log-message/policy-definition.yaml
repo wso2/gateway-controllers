@@ -1,5 +1,5 @@
 name: log-message
-version: v0.1.0
+version: v0.2.0
 description: |
   This policy provides the capability to log the payload and headers of a request/response.
   It supports separate configuration for request and response flows.

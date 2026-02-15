@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v0.1.3
+version: v0.2.0
 description: |
   Validates JWT access tokens using one or more JWKS providers (key managers).
   System-level configuration holds key manager endpoints and fetch behavior.

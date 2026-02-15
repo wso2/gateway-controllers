@@ -1,5 +1,5 @@
 name: semantic-cache
-version: v0.1.0
+version: v0.2.0
 description: |
   Implements semantic caching for LLM responses using vector similarity search.
   Generates embeddings from request bodies and checks for semantically similar cached responses.

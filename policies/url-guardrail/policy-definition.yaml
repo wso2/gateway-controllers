@@ -1,5 +1,5 @@
 name: url-guardrail
-version: v0.1.0
+version: v0.2.0
 description: |
   Validates URLs found in request or response body content.
   Supports JSONPath extraction to validate specific fields within JSON payloads.

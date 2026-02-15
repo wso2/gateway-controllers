@@ -1,5 +1,5 @@
 name: token-based-ratelimit
-version: v0.1.1
+version: v0.2.0
 description: |
   A specialized rate limiting policy for LLMs that limits usage based on token counts.
   It dynamically resolves token extraction paths (JSON paths) from the LLM Provider Template

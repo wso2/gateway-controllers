@@ -1,5 +1,5 @@
 name: set-headers
-version: v0.1.1
+version: v0.2.0
 description: |
   This policy provides the capability to set arbitrary headers to either the request or the response.
   Setting the same header multiple times will overwrite the existing header value.
