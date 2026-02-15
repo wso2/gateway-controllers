@@ -179,6 +179,8 @@ This enables post-response rate limiting, where the cost is extracted from the r
 
 #### Sample System Configuration
 
+##### Memory Backend Configuration
+
 ```toml
 [policy_configurations.ratelimit_v0]
 algorithm = "gcra"
@@ -192,10 +194,13 @@ cleanup_interval = "5m"
 include_x_rate_limit = true
 include_ietf = true
 include_retry_after = true
+```
 
+##### Redis Backend Configuration
 
-#Redis Backend Configuration
-#For distributed rate limiting across multiple gateway instances:
+For distributed rate limiting across multiple gateway instances:
+
+```toml
 [policy_configurations.ratelimit_v0]
 algorithm = "gcra"
 backend = "redis"
