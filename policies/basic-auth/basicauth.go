@@ -161,7 +161,7 @@ func (p *BasicAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, username
 	ac.AuthType = "basic"
 	ac.Subject = username
 	ac.UserID = username
-	
+	ac.Basic = &policy.BasicAuthDetails{}
 
 	// Continue to upstream with no modifications
 	return policy.UpstreamRequestModifications{}
@@ -184,7 +184,7 @@ func (p *BasicAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, allowUna
 	}
 	ctx.SharedContext.AuthContext.Authenticated = false
 	ctx.SharedContext.AuthContext.AuthType = "basic"
-	
+	ctx.SharedContext.AuthContext.Basic = &policy.BasicAuthDetails{}
 
 	// If allowUnauthenticated is true, allow request to proceed
 	if allowUnauthenticated {

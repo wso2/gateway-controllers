@@ -1285,9 +1285,6 @@ func (p *JwtAuthPolicy) populateAuthContext(ctx *policy.RequestContext, claims j
 	ac := ctx.SharedContext.AuthContext
 	ac.Authenticated = true
 	ac.AuthType = "jwt"
-	ac.Subject = getString(claims["sub"])
-	ac.Issuer = getString(claims["iss"])
-	ac.Audience = audienceToString(claims["aud"])
 	ac.UserID = ""
 	if userIdClaim != "" {
 		if claimValue, exists := claims[userIdClaim]; exists {
@@ -1307,29 +1304,39 @@ func (p *JwtAuthPolicy) populateAuthContext(ctx *policy.RequestContext, claims j
 			ac.Scopes[s] = true
 		}
 	}
-	// Copy non-standard claims to Properties
-	if ac.Properties == nil {
-		ac.Properties = make(map[string]string)
+
+	// Initialize JWT-specific details
+	ac.JWT = &policy.JWTAuthDetails{
+		Subject:  getString(claims["sub"]),
+		Issuer:   getString(claims["iss"]),
+		Audience: audienceToSlice(claims["aud"]),
+		Claims:   make(map[string]string),
 	}
+
+	// Copy non-standard claims to JWT.Claims
 	for k, v := range claims {
 		if standardJWTClaimNames[k] {
 			continue
 		}
-		ac.Properties[k] = claimValueToString(v)
+		ac.JWT.Claims[k] = claimValueToString(v)
 	}
 }
 
-// audienceToString returns a single string for the aud claim (first element if array)
-func audienceToString(audClaim interface{}) string {
+// audienceToSlice returns all audience values as a string slice
+func audienceToSlice(audClaim interface{}) []string {
 	if audStr, ok := audClaim.(string); ok {
-		return audStr
+		return []string{audStr}
 	}
-	if audArr, ok := audClaim.([]interface{}); ok && len(audArr) > 0 {
-		if aStr, ok := audArr[0].(string); ok {
-			return aStr
+	if audArr, ok := audClaim.([]interface{}); ok {
+		result := make([]string, 0, len(audArr))
+		for _, item := range audArr {
+			if aStr, ok := item.(string); ok {
+				result = append(result, aStr)
+			}
 		}
+		return result
 	}
-	return ""
+	return []string{}
 }
 
 // handleAuthSuccess handles successful authentication
@@ -1415,7 +1422,7 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 	}
 	ctx.SharedContext.AuthContext.Authenticated = false
 	ctx.SharedContext.AuthContext.AuthType = "jwt"
-	
+	ctx.SharedContext.AuthContext.JWT = &policy.JWTAuthDetails{}
 
 	headers := map[string]string{
 		"content-type": "application/json",

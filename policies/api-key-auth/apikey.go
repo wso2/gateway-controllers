@@ -221,7 +221,8 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 	ac := ctx.SharedContext.AuthContext
 	ac.Authenticated = true
 	ac.AuthType = "api-key"
-	
+	ac.UserID = "" // Todo: Populate the UserID with the application or user associated with the API key once the store supports it
+	ac.APIKey = &policy.APIKeyAuthDetails{}
 
 	slog.Debug("API Key Auth Policy: Authentication metadata set",
 		"authSuccess", true,
@@ -262,7 +263,7 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 	}
 	ctx.SharedContext.AuthContext.Authenticated = false
 	ctx.SharedContext.AuthContext.AuthType = "api-key"
-	
+	ctx.SharedContext.AuthContext.APIKey = &policy.APIKeyAuthDetails{}
 
 	headers := map[string]string{
 		"content-type": "application/json",
