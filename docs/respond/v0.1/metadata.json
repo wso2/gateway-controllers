@@ -1,0 +1,10 @@
+{
+  "name": "respond",
+  "displayName": "Respond",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Returns an immediate response to the client without forwarding the request to the upstream backend.\nThis policy terminates the request processing chain and is useful for mocking APIs, returning\nerror responses, or implementing custom short-circuit logic."
+}
