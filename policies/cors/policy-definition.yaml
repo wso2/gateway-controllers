@@ -1,9 +1,9 @@
 name: cors
-version: v0.2.0
+version: v0.2.1
 description: |
-  Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds
-  appropriate CORS headers to responses. Enables controlled access to resources from different
-  origins by configuring allowed origins, methods, headers, and credentials.
+  Applies Cross-Origin Resource Sharing (CORS) rules by handling preflight
+  requests and adding CORS headers to responses. Controls cross-origin access
+  through configured origins, methods, headers, credentials, and cache settings.
 
 parameters:
   type: object
@@ -11,11 +11,9 @@ parameters:
     allowedOrigins:
       type: array
       description:
-        List of origins allowed to access the resource. Use "*" to allow
-        all origins, specify exact origins (e.g., "https://example.com"), 
-        or regular expressions (e.g., "^https://[^.]+\.example\.com$"). 
-        At least one origin must be specified. If no origins are specified, the policy
-        will reject all cross-origin requests.
+        Specifies allowed origins for cross-origin access. Supports "*", exact
+        origins, and regex patterns. At least one origin is required; otherwise
+        cross-origin requests are rejected.
       items:
         type: string
         minLength: 1
@@ -24,8 +22,8 @@ parameters:
     allowedMethods:
       type: array
       description:
-        HTTP methods allowed for cross-origin requests. Common methods
-        include GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD.
+        Specifies allowed HTTP methods for cross-origin requests, such as GET,
+        POST, PUT, DELETE, PATCH, OPTIONS, and HEAD.
       items:
         type: string
         enum:
@@ -47,9 +45,8 @@ parameters:
     allowedHeaders:
       type: array
       description:
-        Request headers that can be used in the actual request. Use "*"
-        to allow all headers, or specify exact header names (e.g., "Content-Type",
-        "Authorization").
+        Specifies request headers allowed in cross-origin requests. Supports "*"
+        to allow all headers or explicit header names.
       items:
         type: string
         minLength: 1
@@ -57,8 +54,8 @@ parameters:
     exposedHeaders:
       type: array
       description:
-        Response headers that browsers are allowed to access. Only these
-        headers will be exposed to the client-side JavaScript code.
+        Specifies response headers exposed to browser JavaScript in
+        cross-origin responses.
       items:
         type: string
         minLength: 1
@@ -66,21 +63,19 @@ parameters:
       default: []
     allowCredentials:
       type: boolean
-      description: Indicates whether the response can be shared when credentials
-        (cookies, authorization headers, TLS certificates) are included. When true,
-        allowedOrigins cannot contain "*".
+      description: Specifies whether credentials are allowed in cross-origin requests.
+        When true, allowedOrigins cannot contain "*".
       default: false
     maxAge:
       type: integer
-      description: Maximum time in seconds that preflight response can be cached
-        by the browser. Helps reduce the number of preflight requests.
+      description: Specifies how long, in seconds, browsers can cache preflight responses.
       minimum: 0
       maximum: 86400
       default: 3600
     forwardPreflight:
       type: boolean
-      description: If true, forwards preflight requests that do not match the CORS
-        policy to the upstream service instead of responding with CORS headers.
+      description: Specifies whether unmatched preflight requests are forwarded
+        upstream instead of handled by this policy.
       default: false
 
   required:
