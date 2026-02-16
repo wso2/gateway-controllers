@@ -1,22 +1,23 @@
 name: remove-headers
-version: v0.2.0
+version: v0.2.1
 description: |
-  This policy provides the capability to remove headers from either the request or the response.
-  Header removal is performed by header name matching (case-insensitive). If a header does not exist, the removal operation is ignored without error.
+  Removes configured headers from requests and/or responses. Header matching is
+  case-insensitive, and removing a non-existent header is ignored.
 
 parameters:
   type: object
   properties:
     requestHeaders:
       type: array
-      description: Array of header names to remove from the request during request phase. At least
+      description: Specifies headers to remove during the request phase. At least
         one of requestHeaders or responseHeaders must be specified.
       items:
         type: object
         properties:
           name:
             type: string
-            description: Header name (case-insensitive)
+            description: Specifies the header name to remove. Matching is
+              case-insensitive.
             minLength: 1
             maxLength: 256
             pattern: "^[a-zA-Z0-9-_]+$"
@@ -24,14 +25,15 @@ parameters:
         - name
     responseHeaders:
       type: array
-      description: Array of header names to remove from the response during response phase. At
-        least one of requestHeaders or responseHeaders must be specified.
+      description: Specifies headers to remove during the response phase. At least
+        one of requestHeaders or responseHeaders must be specified.
       items:
         type: object
         properties:
           name:
             type: string
-            description: Header name (case-insensitive)
+            description: Specifies the header name to remove. Matching is
+              case-insensitive.
             minLength: 1
             maxLength: 256
             pattern: "^[a-zA-Z0-9-_]+$"
