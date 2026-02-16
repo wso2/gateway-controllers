@@ -1,129 +1,118 @@
 name: azure-content-safety-content-moderation
-version: v0.2.0
+version: v0.2.1
 description: |
-  Validates request or response body content against Azure Content Safety API for content moderation.
-  Supports detection of hate speech, sexual content, self-harm, and violence with configurable severity thresholds.
-  Supports JSONPath extraction to validate specific fields within JSON payloads.
-  Supports separate configuration for request and response phases.
+  Validates request and response content with Azure Content Safety moderation
+  checks. Supports configurable category thresholds, optional JSONPath
+  extraction, and separate settings for request and response phases.
 
 parameters:
   type: object
   properties:
     request:
       type: object
-      description: Configuration for request phase validation
+      description: Specifies content moderation settings for request payloads.
       properties:
         jsonPath:
           type: string
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            If empty, validates the entire payload as a string.
-            Examples: "$.message", "$.data.content", "$.items[0].text"
+            Specifies the JSONPath used to extract content for moderation. When
+            empty, the entire payload is evaluated as plain text.
           default: ""
         passthroughOnError:
           type: boolean
           description: |
-            If true, allows requests to proceed if Azure Content Safety API call fails.
-            If false (default), blocks requests on API errors.
+            Specifies whether requests continue when the Azure Content Safety
+            API call fails. True allows passthrough; false blocks on API errors.
           default: false
         showAssessment:
           type: boolean
           description: |
-            If true, includes detailed assessment information in error responses.
-            If false, returns minimal error information.
+            Specifies whether blocked responses include detailed moderation
+            assessment information.
           default: false
         hateCategory:
           type: integer
           description: |
-            Severity threshold for hate category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the hate category severity threshold (0-7). Use -1 to
+            disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
         sexualCategory:
           type: integer
           description: |
-            Severity threshold for sexual category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the sexual category severity threshold (0-7). Use -1 to
+            disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
         selfHarmCategory:
           type: integer
           description: |
-            Severity threshold for self-harm category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the self-harm category severity threshold (0-7). Use -1
+            to disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
         violenceCategory:
           type: integer
           description: |
-            Severity threshold for violence category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the violence category severity threshold (0-7). Use -1 to
+            disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
     response:
       type: object
-      description: Configuration for response phase validation
+      description: Specifies content moderation settings for response payloads.
       properties:
         jsonPath:
           type: string
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            If empty, validates the entire payload as a string.
-            Examples: "$.message", "$.data.content", "$.items[0].text"
+            Specifies the JSONPath used to extract content for moderation. When
+            empty, the entire payload is evaluated as plain text.
           default: ""
         passthroughOnError:
           type: boolean
           description: |
-            If true, allows requests to proceed if Azure Content Safety API call fails.
-            If false (default), blocks requests on API errors.
+            Specifies whether responses continue when the Azure Content Safety
+            API call fails. True allows passthrough; false blocks on API errors.
           default: false
         showAssessment:
           type: boolean
           description: |
-            If true, includes detailed assessment information in error responses.
-            If false, returns minimal error information.
+            Specifies whether blocked responses include detailed moderation
+            assessment information.
           default: false
         hateCategory:
           type: integer
           description: |
-            Severity threshold for hate category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the hate category severity threshold (0-7). Use -1 to
+            disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
         sexualCategory:
           type: integer
           description: |
-            Severity threshold for sexual category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the sexual category severity threshold (0-7). Use -1 to
+            disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
         selfHarmCategory:
           type: integer
           description: |
-            Severity threshold for self-harm category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the self-harm category severity threshold (0-7). Use -1
+            to disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
         violenceCategory:
           type: integer
           description: |
-            Severity threshold for violence category (0-7).
-            -1 disables this category.
-            Content with severity >= threshold will be blocked.
+            Specifies the violence category severity threshold (0-7). Use -1 to
+            disable this category. Content at or above the threshold is blocked.
           minimum: -1
           maximum: 7
           default: -1
