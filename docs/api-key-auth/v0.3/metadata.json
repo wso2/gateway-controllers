@@ -1,0 +1,11 @@
+{
+  "name": "api-key-auth",
+  "displayName": "API Key Auth",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "The API Key Authentication policy secures APIs by requiring clients to include a valid API key with each request. The API key can be provided either as an HTTP header or as a query parameter, based on the API configuration."
+}

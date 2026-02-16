@@ -1,9 +1,8 @@
 name: api-key-auth
-version: v0.2.0
+version: v0.3.0
 description: |
-  The API Key Authentication policy secures APIs by requiring clients to include a
-  valid API key with each request. The API key can be provided either as an HTTP
-  header or as a query parameter, based on the API configuration.
+  Validates API keys in incoming requests and authorizes access when a valid key
+  is present. Reads the key from a configured header or query parameter.
 
 parameters:
   type: object
@@ -12,9 +11,8 @@ parameters:
     key:
       type: string
       description: |
-        The name of the header or query parameter that contains the API key.
-        For headers: case-insensitive matching is used (e.g., "X-API-Key", "Authorization")
-        For query parameters: exact name matching is used (e.g., "api_key", "token")
+        Specifies the header or query parameter name that carries the API key.
+        Header lookup is case-insensitive; query parameter lookup uses exact matching.
       validation:
         minLength: 1
         maxLength: 128
@@ -22,21 +20,11 @@ parameters:
     in:
       type: string
       description: |
-        Specifies where to look for the API key.
-        Must be either "header" or "query".
+        Specifies where to read the API key. Supported values are "header" and
+        "query".
       enum:
         - "header"
         - "query"
-
-    value-prefix:
-      type: string
-      description: |
-        Optional prefix that should be stripped from the API key value before validation.
-        Case-insensitive matching and removal. Common use case is "Bearer " for Authorization headers.
-        If specified, the prefix will be removed from the extracted value.
-      validation:
-        minLength: 1
-        maxLength: 64
 
   required:
     - key
