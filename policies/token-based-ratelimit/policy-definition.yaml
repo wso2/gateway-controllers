@@ -1,9 +1,9 @@
 name: token-based-ratelimit
-version: v0.2.0
+version: v0.2.1
 description: |
-  A specialized rate limiting policy for LLMs that limits usage based on token counts.
-  It dynamically resolves token extraction paths (JSON paths) from the LLM Provider Template
-  and delegates the actual rate limiting to the advanced-ratelimit engine.
+  Enforces token-based rate limits for LLM traffic by resolving token extraction
+  paths from provider templates and delegating enforcement to the
+  advanced-ratelimit engine.
 
 parameters:
   type: object
@@ -11,48 +11,54 @@ parameters:
   properties:
     promptTokenLimits:
       type: array
-      description: Rate limits for prompt (input) tokens.
+      description: Specifies rate limits for prompt (input) tokens.
       items:
         type: object
         required: ["count", "duration"]
         properties:
           count:
             type: integer
-            description: Maximum number of tokens allowed in the duration.
+            description: Specifies the maximum number of tokens allowed in the
+              configured duration.
             minimum: 1
           duration:
             type: string
-            description: Time window for the limit (e.g., "1m", "1h", "24h").
+            description: Specifies the duration window for the limit, for
+              example "1m", "1h", or "24h".
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
     completionTokenLimits:
       type: array
-      description: Rate limits for completion (output) tokens.
+      description: Specifies rate limits for completion (output) tokens.
       items:
         type: object
         required: ["count", "duration"]
         properties:
           count:
             type: integer
-            description: Maximum number of tokens allowed in the duration.
+            description: Specifies the maximum number of tokens allowed in the
+              configured duration.
             minimum: 1
           duration:
             type: string
-            description: Time window for the limit (e.g., "1m", "1h", "24h").
+            description: Specifies the duration window for the limit, for
+              example "1m", "1h", or "24h".
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
     totalTokenLimits:
       type: array
-      description: Rate limits for total (prompt + completion) tokens.
+      description: Specifies rate limits for total tokens (prompt + completion).
       items:
         type: object
         required: ["count", "duration"]
         properties:
           count:
             type: integer
-            description: Maximum number of tokens allowed in the duration.
+            description: Specifies the maximum number of tokens allowed in the
+              configured duration.
             minimum: 1
           duration:
             type: string
-            description: Time window for the limit (e.g., "1m", "1h", "24h").
+            description: Specifies the duration window for the limit, for
+              example "1m", "1h", or "24h".
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
 
 systemParameters:
