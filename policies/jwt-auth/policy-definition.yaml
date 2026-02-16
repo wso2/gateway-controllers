@@ -1,8 +1,9 @@
 name: jwt-auth
-version: v0.2.0
+version: v0.2.2
 description: |
-  Validates JWT access tokens included in API requests. The gateway verifies the
-  token's signature, expiry, issuer, audience, scopes, and required claims.
+  Validates JWT access tokens in API requests using configured JWKS providers.
+  Verifies signature and claims such as expiry, issuer, audience, scopes, and
+  required claims.
 
 parameters:
   type: object
@@ -11,45 +12,45 @@ parameters:
     issuers:
       type: array
       description: >-
-        List of issuer names (referencing entries in `system.keyManagers`) to use
-        for validating tokens for this route. If omitted, runtime will try to
-        match token `iss` claim to available key managers or try all providers.
+        Specifies issuer names for token validation by referencing entries in
+        `system.keyManagers`. If omitted, runtime matches by token `iss` or
+        tries all configured providers.
       items:
         type: string
 
     audiences:
       type: array
-      description: List of acceptable audience values; token must contain at least one.
+      description: Specifies accepted audience values. Token validation succeeds only when at least one configured audience is present.
       items:
         type: string
 
     requiredScopes:
       type: array
-      description: List of scopes that must be present in the token (space-delimited 'scope' claim or array 'scp').
+      description: Specifies scopes that must exist in the token from `scope` (space-delimited) or `scp` (array) claims.
       items:
         type: string
 
     requiredClaims:
       type: object
-      description: Map of claimName -> expectedValue. Runtime may support equality or regex-based matching.
+      description: Specifies required claim-value pairs as `claimName -> expectedValue`.
       additionalProperties:
         type: string
 
     claimMappings:
       type: object
-      description: Map claimName -> downstream header or context key to expose for downstream services.
+      description: Specifies claim-to-output mappings as `claimName -> headerOrContextKey` for downstream use.
       additionalProperties:
         type: string
 
     authHeaderPrefix:
       type: string
-      description: Override for the authorization header scheme prefix (e.g., "Bearer", "JWT"). If specified at user-level, takes precedence over system configuration for this route.
+      description: Specifies a route-level authorization scheme prefix (for example, "Bearer" or "JWT") that overrides `system.authHeaderScheme`.
 
     userIdClaim:
       type: string
       description: >-
-        Claim name to extract the user ID from the JWT token for analytics.
-        If not specified, defaults to "sub" claim.
+        Specifies the claim name used to extract the user ID for analytics.
+        Defaults to "sub" when omitted.
       default: sub
 
 systemParameters:          
