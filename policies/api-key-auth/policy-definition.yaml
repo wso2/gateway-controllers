@@ -1,9 +1,9 @@
 name: api-key-auth
 version: v0.2.0
 description: |
-  Implements API Key Authentication to protect APIs with pre-shared API keys.
-  Validates API keys from request headers or query parameters against a configured
-  list of valid keys and sets authentication metadata in the request context.
+  The API Key Authentication policy secures APIs by requiring clients to include a
+  valid API key with each request. The API key can be provided either as an HTTP
+  header or as a query parameter, based on the API configuration.
 
 parameters:
   type: object

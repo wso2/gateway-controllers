@@ -1,9 +1,8 @@
 name: jwt-auth
 version: v0.2.0
 description: |
-  Validates JWT access tokens using one or more JWKS providers (key managers).
-  System-level configuration holds key manager endpoints and fetch behavior.
-  User-level configuration holds per-route assertions (selected issuers, audiences, scopes, claims and mappings).
+  Validates JWT access tokens included in API requests. The gateway verifies the
+  token's signature, expiry, issuer, audience, scopes, and required claims.
 
 parameters:
   type: object
@@ -125,21 +124,25 @@ systemParameters:
     jwksCacheTtl:
       type: string
       description: Duration string for JWKS caching (e.g., "5m"). If omitted a default is used.
+      default: "5m"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.jwkscachettl}"
 
     jwksFetchTimeout:
       type: string
       description: Timeout for HTTP fetch of JWKS, e.g., "5s".
+      default: "5s"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.jwksfetchtimeout}"
 
     jwksFetchRetryCount:
       type: integer
       description: Number of retries for JWKS fetch on transient failures.
+      default: 3
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.jwksfetchretrycount}"
 
     jwksFetchRetryInterval:
       type: string
       description: Interval between JWKS fetch retries, e.g., "2s".
+      default: "2s"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.jwksfetchretryinterval}"
 
     allowedAlgorithms:
@@ -147,11 +150,13 @@ systemParameters:
       description: Allowed JWT signing algorithms (e.g., ["RS256","ES256"]).
       items:
         type: string
+      default: ["RS256", "ES256"]
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.allowedalgorithms}"
 
     leeway:
       type: string
       description: Clock skew allowance for exp/nbf checks, e.g., "30s".
+      default: "30s"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.leeway}"
 
     authHeaderScheme:
@@ -181,11 +186,13 @@ systemParameters:
     errorMessage:
       type: string
       description: Custom error message to include in the response body on authentication failure.
+      default: "Authentication failed"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.errormessage}"
 
     validateIssuer:
       type: boolean
       description: Whether to validate the token's issuer claim against configured key managers.
+      default: true
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v0.validateissuer}"
 
   required: ["keyManagers"]
