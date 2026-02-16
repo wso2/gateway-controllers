@@ -1,28 +1,28 @@
 name: set-headers
-version: v0.2.0
+version: v0.2.1
 description: |
-  This policy provides the capability to set arbitrary headers to either the request or the response.
-  Setting the same header multiple times will overwrite the existing header value.
+  Sets configured headers on requests and/or responses. If the same header is set
+  multiple times, the latest configured value overwrites earlier values.
 
 parameters:
   type: object
   properties:
     requestHeaders:
       type: array
-      description: Array of headers that need to set to the request during request phase. At least
-        one of requestHeaders or responseHeaders must be specified.
+      description: Specifies headers to set during the request phase. At least one
+        of requestHeaders or responseHeaders must be specified.
       items:
         type: object
         properties:
           name:
             type: string
-            description: Header name (case-insensitive)
+            description: Specifies the header name. Matching is case-insensitive.
             minLength: 1
             maxLength: 256
             pattern: "^[a-zA-Z0-9-_]+$"
           value:
             type: string
-            description: Header value
+            description: Specifies the header value to set.
             maxLength: 8192
         required:
         - name
@@ -31,20 +31,20 @@ parameters:
         - value
     responseHeaders:
       type: array
-      description: Array of headers that need to set to the response during response phase. At
-        least one of requestHeaders or responseHeaders must be specified.
+      description: Specifies headers to set during the response phase. At least one
+        of requestHeaders or responseHeaders must be specified.
       items:
         type: object
         properties:
           name:
             type: string
-            description: Header name (case-insensitive)
+            description: Specifies the header name. Matching is case-insensitive.
             minLength: 1
             maxLength: 256
             pattern: "^[a-zA-Z0-9-_]+$"
           value:
             type: string
-            description: Header value
+            description: Specifies the header value to set.
             maxLength: 8192
         required:
         - name
