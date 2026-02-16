@@ -1,6 +1,6 @@
 {
   "name": "basic-ratelimit",
-  "displayName": "Basic Ratelimit",
+  "displayName": "Rate Limit - Basic",
   "version": "0.2",
   "provider": "WSO2",
   "categories": [

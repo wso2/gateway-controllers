@@ -1,6 +1,6 @@
 {
   "name": "advanced-ratelimit",
-  "displayName": "Advanced Ratelimit",
+  "displayName": "Rate Limit - Advanced",
   "version": "0.2",
   "provider": "WSO2",
   "categories": [
