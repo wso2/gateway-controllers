@@ -1,8 +1,8 @@
 name: basic-ratelimit
 version: v0.3.0
 description: |
-  Enforces request rate limits by restricting how many requests are allowed
-  within one or more configured time windows.
+  Limits request rates by restricting the number of requests allowed within one
+  or more defined time windows.
 
 parameters:
   type: object
