@@ -10,6 +10,7 @@ parameters:
   properties:
     allowedOrigins:
       type: array
+      x-wso2-policy-advanced-param: false
       description:
         Specifies allowed origins for cross-origin access. Supports "*", exact
         origins, and regex patterns. At least one origin is required; otherwise
@@ -23,6 +24,7 @@ parameters:
       minItems: 1
     allowedMethods:
       type: array
+      x-wso2-policy-advanced-param: true
       description:
         Specifies allowed HTTP methods for cross-origin requests, such as GET,
         POST, PUT, DELETE, PATCH, OPTIONS, and HEAD.
@@ -46,6 +48,7 @@ parameters:
         - OPTIONS
     allowedHeaders:
       type: array
+      x-wso2-policy-advanced-param: true
       description:
         Specifies request headers allowed in cross-origin requests. Supports "*"
         to allow all headers or explicit header names.
@@ -56,6 +59,7 @@ parameters:
         maxLength: 256
     exposedHeaders:
       type: array
+      x-wso2-policy-advanced-param: true
       description:
         Specifies response headers exposed to browser JavaScript in
         cross-origin responses.
@@ -66,17 +70,20 @@ parameters:
       default: []
     allowCredentials:
       type: boolean
+      x-wso2-policy-advanced-param: true
       description: Specifies whether credentials are allowed in cross-origin requests.
         When true, allowedOrigins cannot contain "*".
       default: false
     maxAge:
       type: integer
+      x-wso2-policy-advanced-param: true
       description: Specifies how long, in seconds, browsers can cache preflight responses.
       minimum: 0
       maximum: 86400
       default: 3600
     forwardPreflight:
       type: boolean
+      x-wso2-policy-advanced-param: true
       description: Specifies whether unmatched preflight requests are forwarded
         upstream instead of handled by this policy.
       default: false
