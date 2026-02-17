@@ -121,11 +121,11 @@ func GetPolicy(
 func parseRequestResponseParams(params map[string]interface{}) (AzureContentSafetyPolicyParams, error) {
 	var result AzureContentSafetyPolicyParams
 
-	// Initialize category thresholds to -1 (disabled by default)
-	result.HateSeverityThreshold = -1
-	result.SexualSeverityThreshold = -1
-	result.SelfHarmSeverityThreshold = -1
-	result.ViolenceSeverityThreshold = -1
+	// Initialize category thresholds to policy defaults
+	result.HateSeverityThreshold = 4
+	result.SexualSeverityThreshold = 5
+	result.SelfHarmSeverityThreshold = 3
+	result.ViolenceSeverityThreshold = 4
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
