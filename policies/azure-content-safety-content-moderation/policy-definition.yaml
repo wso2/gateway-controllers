@@ -132,6 +132,9 @@ parameters:
           minimum: -1
           maximum: 7
           default: 4
+  anyOf:
+    - required: [ request ]
+    - required: [ response ]
 
 systemParameters:
   type: object
