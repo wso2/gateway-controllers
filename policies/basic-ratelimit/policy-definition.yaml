@@ -1,5 +1,5 @@
 name: basic-ratelimit
-version: v0.2.2
+version: v0.3.0
 description: |
   Enforces request rate limits by restricting how many requests are allowed
   within one or more configured time windows.
@@ -19,9 +19,9 @@ parameters:
       items:
         type: object
         additionalProperties: false
-        required: ["limit", "duration"]
+        required: ["requests", "duration"]
         properties:
-          limit:
+          requests:
             type: integer
             description: Specifies the maximum number of requests allowed during
               the configured duration.
