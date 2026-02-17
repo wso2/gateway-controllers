@@ -75,7 +75,7 @@ func TestRegexGuardrailPolicy_GetPolicy_RequestAndResponse(t *testing.T) {
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{
 			"regex":          "hello",
-			"jsonPath":       "$.message",
+			"jsonPath":       "$.messages",
 			"invert":         true,
 			"showAssessment": true,
 		},
@@ -93,7 +93,7 @@ func TestRegexGuardrailPolicy_GetPolicy_RequestAndResponse(t *testing.T) {
 	if p.requestParams.Regex != "hello" || p.responseParams.Regex != "world" {
 		t.Fatalf("unexpected regex values: req=%q resp=%q", p.requestParams.Regex, p.responseParams.Regex)
 	}
-	if p.requestParams.JsonPath != "$.message" || p.responseParams.JsonPath != "$.output" {
+	if p.requestParams.JsonPath != "$.messages" || p.responseParams.JsonPath != "$.output" {
 		t.Fatalf("unexpected jsonPath values: req=%q resp=%q", p.requestParams.JsonPath, p.responseParams.JsonPath)
 	}
 	if !p.requestParams.Invert || p.responseParams.Invert {
@@ -313,11 +313,11 @@ func TestRegexGuardrailPolicy_OnRequest_InvertBehavior(t *testing.T) {
 	passPolicy := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{
 			"regex":    "forbidden",
-			"jsonPath": "$.message",
+			"jsonPath": "$.messages",
 			"invert":   true,
 		},
 	})
-	passAction := passPolicy.OnRequest(newRequestContextWithBody(`{"message":"allowed content"}`), nil)
+	passAction := passPolicy.OnRequest(newRequestContextWithBody(`{"messages":"allowed content"}`), nil)
 	if _, ok := passAction.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected pass with invert=true on non-match, got %T", passAction)
 	}
@@ -325,11 +325,11 @@ func TestRegexGuardrailPolicy_OnRequest_InvertBehavior(t *testing.T) {
 	failPolicy := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{
 			"regex":    "forbidden",
-			"jsonPath": "$.message",
+			"jsonPath": "$.messages",
 			"invert":   true,
 		},
 	})
-	failAction := failPolicy.OnRequest(newRequestContextWithBody(`{"message":"contains forbidden term"}`), nil)
+	failAction := failPolicy.OnRequest(newRequestContextWithBody(`{"messages":"contains forbidden term"}`), nil)
 	assertRequestErrorResponse(t, failAction, false, "REQUEST")
 }
 
@@ -337,12 +337,12 @@ func TestRegexGuardrailPolicy_OnRequest_RegexViolation_ShowAssessmentFalse(t *te
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{
 			"regex":          "abc",
-			"jsonPath":       "$.message",
+			"jsonPath":       "$.messages",
 			"showAssessment": false,
 		},
 	})
 
-	action := p.OnRequest(newRequestContextWithBody(`{"message":"does not match"}`), nil)
+	action := p.OnRequest(newRequestContextWithBody(`{"messages":"does not match"}`), nil)
 	body := assertRequestErrorResponse(t, action, false, "REQUEST")
 
 	message := extractMessageAssessment(t, body)
@@ -355,12 +355,12 @@ func TestRegexGuardrailPolicy_OnRequest_RegexViolation_ShowAssessmentTrue(t *tes
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{
 			"regex":          "abc",
-			"jsonPath":       "$.message",
+			"jsonPath":       "$.messages",
 			"showAssessment": true,
 		},
 	})
 
-	action := p.OnRequest(newRequestContextWithBody(`{"message":"does not match"}`), nil)
+	action := p.OnRequest(newRequestContextWithBody(`{"messages":"does not match"}`), nil)
 	body := assertRequestErrorResponse(t, action, true, "REQUEST")
 
 	message := extractMessageAssessment(t, body)

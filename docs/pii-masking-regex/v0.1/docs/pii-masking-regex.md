@@ -39,7 +39,7 @@ Each PII entity in the `piiEntities` array must contain:
 
 The guardrail supports JSONPath expressions to extract and process specific fields within JSON payloads. Common examples:
 
-- `$.message` - Extracts the `message` field from the root object
+- `$.messages` - Extracts the `messages` field from the root object
 - `$.data.content` - Extracts nested content from `data.content`
 - `$.items[0].text` - Extracts text from the first item in an array
 - `$.messages[0].content` - Extracts content from the first message in a messages array

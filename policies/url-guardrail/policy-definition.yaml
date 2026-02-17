@@ -19,7 +19,7 @@ parameters:
           description: |
             JSONPath expression to extract a specific value from JSON payload.
             If empty, validates the entire payload as a string.
-            Examples: "$.message", "$.data.content", "$.items[0].text"
+            Examples: "$.messages", "$.data.content", "$.items[0].text"
           default: ""
         onlyDNS:
           type: boolean
@@ -52,7 +52,7 @@ parameters:
           description: |
             JSONPath expression to extract a specific value from JSON payload.
             If empty, validates the entire payload as a string.
-            Examples: "$.message", "$.data.content", "$.items[0].text"
+            Examples: "$.messages", "$.data.content", "$.items[0].text"
           default: ""
         onlyDNS:
           type: boolean

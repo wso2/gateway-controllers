@@ -147,7 +147,7 @@ func TestAzureContentSafetyPolicy_OnRequest_NoRequestConfig_NoOp(t *testing.T) {
 		"azureContentSafetyEndpoint": "https://example.com",
 		"azureContentSafetyKey":      "k",
 		"response": map[string]interface{}{
-			"jsonPath": "$.message",
+			"jsonPath": "$.messages",
 		},
 	})
 
@@ -162,7 +162,7 @@ func TestAzureContentSafetyPolicy_OnResponse_NoResponseConfig_NoOp(t *testing.T)
 		"azureContentSafetyEndpoint": "https://example.com",
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath": "$.message",
+			"jsonPath": "$.messages",
 		},
 	})
 
@@ -232,7 +232,7 @@ func TestAzureContentSafetyPolicy_APICallError_PassthroughBehavior(t *testing.T)
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":           "$.message",
+			"jsonPath":           "$.messages",
 			"passthroughOnError": true,
 		},
 	})
@@ -245,7 +245,7 @@ func TestAzureContentSafetyPolicy_APICallError_PassthroughBehavior(t *testing.T)
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":           "$.message",
+			"jsonPath":           "$.messages",
 			"passthroughOnError": false,
 		},
 	})
@@ -267,7 +267,7 @@ func TestAzureContentSafetyPolicy_APISuccess_NoViolation(t *testing.T) {
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":              "$.message",
+			"jsonPath":              "$.messages",
 			"hateSeverityThreshold": 4,
 		},
 	})
@@ -288,12 +288,12 @@ func TestAzureContentSafetyPolicy_APIViolation_RequestAndResponse(t *testing.T) 
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":              "$.message",
+			"jsonPath":              "$.messages",
 			"hateSeverityThreshold": 3,
 			"showAssessment":        true,
 		},
 		"response": map[string]interface{}{
-			"jsonPath":              "$.message",
+			"jsonPath":              "$.messages",
 			"hateSeverityThreshold": 3,
 			"showAssessment":        true,
 		},
