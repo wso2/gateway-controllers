@@ -11,6 +11,7 @@ parameters:
   properties:
     models:
       type: array
+      x-wso2-policy-advanced-param: false
       description: List of models with weights for weighted round-robin distribution
       items:
         type: object
@@ -33,6 +34,7 @@ parameters:
       minItems: 1
     suspendDuration:
       type: integer
+      x-wso2-policy-advanced-param: true
       description: |
         Suspend duration in seconds for failed models.
         If not configured, knowledge about failed invocations is not persisted.
