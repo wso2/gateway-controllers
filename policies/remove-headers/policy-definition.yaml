@@ -15,6 +15,7 @@ parameters:
       properties:
         headers:
           type: array
+          x-wso2-policy-advanced-param: false
           description: Specifies headers to remove during the request phase.
           items:
             type: object
@@ -22,6 +23,7 @@ parameters:
             properties:
               name:
                 type: string
+                x-wso2-policy-advanced-param: false
                 description: Specifies the header name to remove. Matching is
                   case-insensitive.
                 minLength: 1
@@ -38,6 +40,7 @@ parameters:
       properties:
         headers:
           type: array
+          x-wso2-policy-advanced-param: false
           description: Specifies headers to remove during the response phase.
           items:
             type: object
@@ -45,6 +48,7 @@ parameters:
             properties:
               name:
                 type: string
+                x-wso2-policy-advanced-param: false
                 description: Specifies the header name to remove. Matching is
                   case-insensitive.
                 minLength: 1
