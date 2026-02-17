@@ -1,5 +1,5 @@
 name: semantic-prompt-guard
-version: v0.2.2
+version: v0.3.0
 description: |
   Evaluates request prompts using embedding similarity against configured allow
   and deny phrases. Blocks prompts that match denied phrases or fail allow

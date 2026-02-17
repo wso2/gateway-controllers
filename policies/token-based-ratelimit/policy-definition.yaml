@@ -1,5 +1,5 @@
 name: token-based-ratelimit
-version: v0.2.2
+version: v0.3.0
 description: |
   Enforces token-based rate limits for LLM traffic by resolving token extraction
   paths from provider templates and delegating enforcement to the
@@ -11,55 +11,67 @@ parameters:
   properties:
     promptTokenLimits:
       type: array
+      x-wso2-policy-advanced-param: false
       description: Specifies rate limits for prompt (input) tokens.
       default: []
       items:
         type: object
+        x-wso2-policy-advanced-param: false
         required: ["count", "duration"]
         properties:
           count:
             type: integer
+            x-wso2-policy-advanced-param: false
             description: Specifies the maximum number of tokens allowed in the
               configured duration.
             minimum: 1
           duration:
             type: string
+            x-wso2-policy-advanced-param: false
             description: Specifies the duration window for the limit, for
               example "1m", "1h", or "24h".
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
     completionTokenLimits:
       type: array
+      x-wso2-policy-advanced-param: false
       description: Specifies rate limits for completion (output) tokens.
       default: []
       items:
         type: object
+        x-wso2-policy-advanced-param: false
         required: ["count", "duration"]
         properties:
           count:
             type: integer
+            x-wso2-policy-advanced-param: false
             description: Specifies the maximum number of tokens allowed in the
               configured duration.
             minimum: 1
           duration:
             type: string
+            x-wso2-policy-advanced-param: false
             description: Specifies the duration window for the limit, for
               example "1m", "1h", or "24h".
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
     totalTokenLimits:
       type: array
+      x-wso2-policy-advanced-param: false
       description: Specifies rate limits for total tokens (prompt + completion).
       default: []
       items:
         type: object
+        x-wso2-policy-advanced-param: false
         required: ["count", "duration"]
         properties:
           count:
             type: integer
+            x-wso2-policy-advanced-param: false
             description: Specifies the maximum number of tokens allowed in the
               configured duration.
             minimum: 1
           duration:
             type: string
+            x-wso2-policy-advanced-param: false
             description: Specifies the duration window for the limit, for
               example "1m", "1h", or "24h".
             pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
