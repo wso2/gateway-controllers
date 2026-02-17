@@ -7,14 +7,68 @@ description: |
 parameters:
   type: object
   properties:
-    promptTemplateConfig:
-      type: string
+    templates:
+      type: array
+      x-wso2-policy-advanced-param: false
       description: |
-        Specifies a JSON string that defines one or more templates. Each template
-        must include a unique `name` and a `prompt` used during request mediation.
-      minLength: 1
+        Specifies one or more reusable prompt templates. Each template must
+        include a unique name and template content.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        properties:
+          name:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: |
+              Specifies the unique template name used in `template://<name>`
+              references.
+            minLength: 1
+            pattern: "^[a-zA-Z0-9_-]+$"
+          template:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: |
+              Specifies the template text. Query parameters are substituted
+              using placeholders in the form `[[parameter]]`.
+            minLength: 1
+        required:
+          - name
+          - template
+    jsonPath:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Specifies the JSONPath to limit template resolution to a specific
+        string field. If empty, template references are resolved across the
+        entire request payload string.
+      default: ""
+    onMissingTemplate:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Specifies behavior when a referenced template name is not found.
+        `error` returns an immediate error response, `passthrough` leaves the
+        original template reference unchanged.
+      enum:
+        - error
+        - passthrough
+      default: error
+    onUnresolvedPlaceholder:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Specifies behavior when placeholders remain unresolved after query
+        substitution. `keep` keeps placeholders as-is, `empty` replaces them
+        with an empty string, and `error` returns an immediate error response.
+      enum:
+        - keep
+        - empty
+        - error
+      default: keep
   required:
-    - promptTemplateConfig
+    - templates
 
 systemParameters:
   type: object
