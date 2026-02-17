@@ -11,6 +11,7 @@ parameters:
   properties:
     issuers:
       type: array
+      x-wso2-policy-advanced-param: true
       description: >-
         Specifies issuer names for token validation by referencing entries in
         `system.keyManagers`. If omitted, runtime matches by token `iss` or
@@ -21,6 +22,7 @@ parameters:
 
     audiences:
       type: array
+      x-wso2-policy-advanced-param: true
       description: Specifies accepted audience values. Token validation succeeds only when at least one configured audience is present.
       default: []
       items:
@@ -28,6 +30,7 @@ parameters:
 
     requiredScopes:
       type: array
+      x-wso2-policy-advanced-param: true
       description: Specifies scopes that must exist in the token from `scope` (space-delimited) or `scp` (array) claims.
       default: []
       items:
@@ -35,6 +38,7 @@ parameters:
 
     requiredClaims:
       type: object
+      x-wso2-policy-advanced-param: true
       description: Specifies required claim-value pairs as `claimName -> expectedValue`.
       default: {}
       additionalProperties:
@@ -42,6 +46,7 @@ parameters:
 
     claimMappings:
       type: object
+      x-wso2-policy-advanced-param: true
       description: Specifies claim-to-output mappings as `claimName -> headerOrContextKey` for downstream use.
       default: {}
       additionalProperties:
@@ -49,11 +54,13 @@ parameters:
 
     authHeaderPrefix:
       type: string
+      x-wso2-policy-advanced-param: true
       description: Specifies a route-level authorization scheme prefix (for example, "Bearer" or "JWT") that overrides `system.authHeaderScheme`.
       default: Bearer
 
     userIdClaim:
       type: string
+      x-wso2-policy-advanced-param: true
       description: >-
         Specifies the claim name used to extract the user ID for analytics.
         Defaults to "sub" when omitted.
