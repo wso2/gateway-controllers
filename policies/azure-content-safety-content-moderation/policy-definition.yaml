@@ -1,5 +1,5 @@
 name: azure-content-safety-content-moderation
-version: v0.2.1
+version: v0.3.0
 description: |
   Validates request and response content with Azure Content Safety moderation
   checks. Supports configurable category thresholds, optional JSONPath
@@ -30,7 +30,7 @@ parameters:
             Specifies whether blocked responses include detailed moderation
             assessment information.
           default: false
-        hateCategory:
+        hateSeverityThreshold:
           type: integer
           description: |
             Specifies the hate category severity threshold (0-7). Use -1 to
@@ -38,7 +38,7 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
-        sexualCategory:
+        sexualSeverityThreshold:
           type: integer
           description: |
             Specifies the sexual category severity threshold (0-7). Use -1 to
@@ -46,7 +46,7 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
-        selfHarmCategory:
+        selfHarmSeverityThreshold:
           type: integer
           description: |
             Specifies the self-harm category severity threshold (0-7). Use -1
@@ -54,7 +54,7 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
-        violenceCategory:
+        violenceSeverityThreshold:
           type: integer
           description: |
             Specifies the violence category severity threshold (0-7). Use -1 to
@@ -84,7 +84,7 @@ parameters:
             Specifies whether blocked responses include detailed moderation
             assessment information.
           default: false
-        hateCategory:
+        hateSeverityThreshold:
           type: integer
           description: |
             Specifies the hate category severity threshold (0-7). Use -1 to
@@ -92,7 +92,7 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
-        sexualCategory:
+        sexualSeverityThreshold:
           type: integer
           description: |
             Specifies the sexual category severity threshold (0-7). Use -1 to
@@ -100,7 +100,7 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
-        selfHarmCategory:
+        selfHarmSeverityThreshold:
           type: integer
           description: |
             Specifies the self-harm category severity threshold (0-7). Use -1
@@ -108,7 +108,7 @@ parameters:
           minimum: -1
           maximum: 7
           default: -1
-        violenceCategory:
+        violenceSeverityThreshold:
           type: integer
           description: |
             Specifies the violence category severity threshold (0-7). Use -1 to

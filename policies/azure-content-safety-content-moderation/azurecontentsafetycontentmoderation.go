@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package azurecontentsafetycontentmoderation
 
 import (
@@ -61,13 +61,13 @@ type AzureContentSafetyContentModerationPolicy struct {
 }
 
 type AzureContentSafetyPolicyParams struct {
-	JsonPath           string
-	PassthroughOnError bool
-	ShowAssessment     bool
-	HateCategory       int
-	SexualCategory     int
-	SelfHarmCategory   int
-	ViolenceCategory   int
+	JsonPath                  string
+	PassthroughOnError        bool
+	ShowAssessment            bool
+	HateSeverityThreshold     int
+	SexualSeverityThreshold   int
+	SelfHarmSeverityThreshold int
+	ViolenceSeverityThreshold int
 }
 
 func GetPolicy(
@@ -122,10 +122,10 @@ func parseRequestResponseParams(params map[string]interface{}) (AzureContentSafe
 	var result AzureContentSafetyPolicyParams
 
 	// Initialize category thresholds to -1 (disabled by default)
-	result.HateCategory = -1
-	result.SexualCategory = -1
-	result.SelfHarmCategory = -1
-	result.ViolenceCategory = -1
+	result.HateSeverityThreshold = -1
+	result.SexualSeverityThreshold = -1
+	result.SelfHarmSeverityThreshold = -1
+	result.ViolenceSeverityThreshold = -1
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
@@ -159,10 +159,10 @@ func parseRequestResponseParams(params map[string]interface{}) (AzureContentSafe
 		name  string
 		value *int
 	}{
-		{"hateCategory", &result.HateCategory},
-		{"sexualCategory", &result.SexualCategory},
-		{"selfHarmCategory", &result.SelfHarmCategory},
-		{"violenceCategory", &result.ViolenceCategory},
+		{"hateSeverityThreshold", &result.HateSeverityThreshold},
+		{"sexualSeverityThreshold", &result.SexualSeverityThreshold},
+		{"selfHarmSeverityThreshold", &result.SelfHarmSeverityThreshold},
+		{"violenceSeverityThreshold", &result.ViolenceSeverityThreshold},
 	}
 
 	for _, cat := range categories {
@@ -364,10 +364,10 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 // buildCategoryMap builds category threshold map from parameters
 func (p *AzureContentSafetyContentModerationPolicy) buildCategoryMap(params AzureContentSafetyPolicyParams) map[string]int {
 	return map[string]int{
-		"Hate":     params.HateCategory,
-		"Sexual":   params.SexualCategory,
-		"SelfHarm": params.SelfHarmCategory,
-		"Violence": params.ViolenceCategory,
+		"Hate":     params.HateSeverityThreshold,
+		"Sexual":   params.SexualSeverityThreshold,
+		"SelfHarm": params.SelfHarmSeverityThreshold,
+		"Violence": params.ViolenceSeverityThreshold,
 	}
 }
 
