@@ -9,6 +9,7 @@ parameters:
   properties:
     models:
       type: array
+      x-wso2-policy-advanced-param: false
       description: Specifies the list of models used for round-robin request
         distribution.
       items:
@@ -23,6 +24,7 @@ parameters:
       minItems: 1
     suspendDuration:
       type: integer
+      x-wso2-policy-advanced-param: true
       description: |
         Specifies the suspension time in seconds for failed models. If omitted,
         failed-model state is not persisted.
