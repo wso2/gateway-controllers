@@ -10,6 +10,7 @@ parameters:
   properties:
     key:
       type: string
+      x-wso2-policy-advanced-param: false
       description: |
         Specifies the header or query parameter name that carries the API key.
         Header lookup is case-insensitive; query parameter lookup uses exact matching.
@@ -20,6 +21,7 @@ parameters:
 
     in:
       type: string
+      x-wso2-policy-advanced-param: false
       description: |
         Specifies where to read the API key. Supported values are "header" and
         "query".
