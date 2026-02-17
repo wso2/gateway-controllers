@@ -1,5 +1,5 @@
 name: semantic-cache
-version: v0.2.1
+version: v0.2.2
 description: |
   Caches LLM responses using semantic similarity over request embeddings to
   reduce repeated upstream calls. Returns cached responses on similarity hits
@@ -13,6 +13,7 @@ parameters:
       description: |
         Specifies the minimum similarity score (0.0 to 1.0) required to treat a
         request as a cache hit.
+      default: 0.5
       minimum: 0.0
       maximum: 1.0
     jsonPath:

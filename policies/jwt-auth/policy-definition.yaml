@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v0.2.2
+version: v0.2.3
 description: |
   Validates JWT access tokens in API requests using configured JWKS providers.
   Verifies signature and claims such as expiry, issuer, audience, scopes, and
@@ -15,36 +15,42 @@ parameters:
         Specifies issuer names for token validation by referencing entries in
         `system.keyManagers`. If omitted, runtime matches by token `iss` or
         tries all configured providers.
+      default: []
       items:
         type: string
 
     audiences:
       type: array
       description: Specifies accepted audience values. Token validation succeeds only when at least one configured audience is present.
+      default: []
       items:
         type: string
 
     requiredScopes:
       type: array
       description: Specifies scopes that must exist in the token from `scope` (space-delimited) or `scp` (array) claims.
+      default: []
       items:
         type: string
 
     requiredClaims:
       type: object
       description: Specifies required claim-value pairs as `claimName -> expectedValue`.
+      default: {}
       additionalProperties:
         type: string
 
     claimMappings:
       type: object
       description: Specifies claim-to-output mappings as `claimName -> headerOrContextKey` for downstream use.
+      default: {}
       additionalProperties:
         type: string
 
     authHeaderPrefix:
       type: string
       description: Specifies a route-level authorization scheme prefix (for example, "Bearer" or "JWT") that overrides `system.authHeaderScheme`.
+      default: Bearer
 
     userIdClaim:
       type: string

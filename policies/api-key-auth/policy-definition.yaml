@@ -1,5 +1,5 @@
 name: api-key-auth
-version: v0.3.0
+version: v0.3.1
 description: |
   Validates API keys in incoming requests and authorizes access when a valid key
   is present. Reads the key from a configured header or query parameter.
@@ -13,6 +13,7 @@ parameters:
       description: |
         Specifies the header or query parameter name that carries the API key.
         Header lookup is case-insensitive; query parameter lookup uses exact matching.
+      default: API-Key
       validation:
         minLength: 1
         maxLength: 128
@@ -22,6 +23,7 @@ parameters:
       description: |
         Specifies where to read the API key. Supported values are "header" and
         "query".
+      default: header
       enum:
         - "header"
         - "query"

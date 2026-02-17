@@ -1,5 +1,5 @@
 name: model-weighted-round-robin
-version: v0.2.0
+version: v0.2.1
 description: |
   Implements weighted round-robin load balancing for AI models. Distributes requests
   based on predefined weight values assigned to each model, enabling probabilistic
@@ -25,6 +25,7 @@ parameters:
               The weight assigned to this model for distribution.
               Higher weights mean more requests will be routed to this model.
               Weight is relative to total weight of all models.
+            default: 1
             minimum: 1
         required:
           - model

@@ -1,5 +1,5 @@
 name: mcp-authz
-version: v0.2.0
+version: v0.2.1
 description: |
   MCP Authorization policy validates access to MCP resources (tools, resources, prompts) 
   and methods based on JWT claims or OAuth scopes provided by the mcp-auth policy.
@@ -74,6 +74,7 @@ parameters:
                   Examples for resource: "file://documents", "db://users", "*"
                   Examples for prompt: "summarize", "analyze", "*"
                   Examples for method: "tools/call", "resources/list", "prompts/get", "*"
+                default: "*"
                 minLength: 1
                 maxLength: 256
 
@@ -92,6 +93,7 @@ parameters:
               Examples:
                 "sub": "user@example.com" - specific subject
                 "role": "admin" - role claim
+            default: {}
             additionalProperties:
               type: string
 
@@ -111,6 +113,7 @@ parameters:
                 ["mcp:tools:invoke"] - invoke tools
                 ["mcp:resources:read", "mcp:resources:write"]
                 ["mcp:prompts:read"] - read prompts
+            default: []
             items:
               type: string
               minLength: 1

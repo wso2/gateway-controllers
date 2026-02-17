@@ -1,5 +1,5 @@
 name: cors
-version: v0.2.1
+version: v0.2.2
 description: |
   Applies Cross-Origin Resource Sharing (CORS) rules by handling preflight
   requests and adding CORS headers to responses. Controls cross-origin access
@@ -14,6 +14,8 @@ parameters:
         Specifies allowed origins for cross-origin access. Supports "*", exact
         origins, and regex patterns. At least one origin is required; otherwise
         cross-origin requests are rejected.
+      default:
+        - "*"
       items:
         type: string
         minLength: 1
@@ -47,6 +49,7 @@ parameters:
       description:
         Specifies request headers allowed in cross-origin requests. Supports "*"
         to allow all headers or explicit header names.
+      default: []
       items:
         type: string
         minLength: 1

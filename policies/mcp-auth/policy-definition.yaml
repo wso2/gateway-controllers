@@ -1,5 +1,5 @@
 name: mcp-auth
-version: v0.2.0
+version: v0.2.1
 description: |
   This policy is used to secure traffic to Model Context Protocol server as defined in the specification 
   (https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization). The Gateway acts as the 
@@ -19,6 +19,7 @@ parameters:
         selection will be based on the MCP client Implementation.
         Furthermore, this list will also be used for validating tokens. If omitted, 
         runtime will try to match token `iss` claim to available key managers or try all providers.
+      default: []
       items:
         type: string
 
@@ -27,24 +28,28 @@ parameters:
       description: >-
         List of scopes that should be included in the token generated through MCP auth flow.
         List of scopes that must be present in the token (space-delimited 'scope' claim or array 'scp').
+      default: []
       items:
         type: string
 
     audiences:
       type: array
       description: List of acceptable audience values; token must contain at least one.
+      default: []
       items:
         type: string
 
     requiredClaims:
       type: object
       description: Map of claimName -> expectedValue. Runtime may support equality or regex-based matching.
+      default: {}
       additionalProperties:
         type: string
 
     claimMappings:
       type: object
       description: Map claimName -> downstream header or context key to expose for downstream services.
+      default: {}
       additionalProperties:
         type: string
 

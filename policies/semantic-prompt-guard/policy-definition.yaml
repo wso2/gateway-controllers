@@ -1,5 +1,5 @@
 name: semantic-prompt-guard
-version: v0.2.1
+version: v0.2.2
 description: |
   Evaluates request prompts using embedding similarity against configured allow
   and deny phrases. Blocks prompts that match denied phrases or fail allow
@@ -35,6 +35,7 @@ parameters:
       description: |
         Specifies phrases treated as allowed references for semantic comparison
         during request validation.
+      default: []
       items:
         type: string
         description: Specifies a phrase to allow.
@@ -43,6 +44,7 @@ parameters:
       description: |
         Specifies phrases treated as denied references for semantic comparison
         during request validation.
+      default: []
       items:
         type: string
         description: Specifies a phrase to deny.
