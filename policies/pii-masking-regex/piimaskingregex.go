@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package piimaskingregex
 
 import (
@@ -33,6 +33,12 @@ const (
 	APIMInternalExceptionCode = 900967
 	TextCleanRegex            = "^\"|\"$"
 	MetadataKeyPIIEntities    = "piimaskingregex:pii_entities"
+	DefaultEmailEntityName    = "EMAIL"
+	DefaultPhoneEntityName    = "PHONE"
+	DefaultSSNEntityName      = "SSN"
+	DefaultEmailRegex         = `(?i)\b[a-z0-9.!#$%&'*+/=?^_{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])\b`
+	DefaultPhoneRegex         = `(?:\+?1[-.\s]?)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[-.\s]?[2-9][0-9]{2}[-.\s]?[0-9]{4}\b`
+	DefaultSSNRegex           = `(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6(?:[0-57-9][0-9]|6[0-57-9])|[7-8][0-9]{2})[- ]?(?:0[1-9]|[1-9][0-9])[- ]?(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b`
 )
 
 var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
@@ -54,8 +60,8 @@ func GetPolicy(
 ) (policy.Policy, error) {
 	p := &PIIMaskingRegexPolicy{}
 
-	// Parse parameters (piiEntities is required)
-	policyParams, err := parseParams(params, true) // true = piiEntities is required
+	// Parse parameters.
+	policyParams, err := parseParams(params)
 	if err != nil {
 		return nil, fmt.Errorf("invalid parameters: %w", err)
 	}
@@ -64,18 +70,16 @@ func GetPolicy(
 	return p, nil
 }
 
-// parseParams parses and validates parameters from map to struct
-// requirePIIEntities: true for request params (required), false for response params (optional)
-func parseParams(params map[string]interface{}, requirePIIEntities bool) (PIIMaskingRegexPolicyParams, error) {
+// parseParams parses and validates parameters from map to struct.
+func parseParams(params map[string]interface{}) (PIIMaskingRegexPolicyParams, error) {
 	var result PIIMaskingRegexPolicyParams
+	result.JsonPath = "$.messages"
+	piiEntities := make(map[string]*regexp.Regexp)
 
-	// Validate and extract piiEntities parameter
-	piiEntitiesRaw, ok := params["piiEntities"]
-	if !ok && requirePIIEntities {
-		return result, fmt.Errorf("'piiEntities' parameter is required")
-	}
+	// Extract customPIIEntities parameter if provided.
+	piiEntitiesRaw, ok := params["customPIIEntities"]
 	if ok {
-		// Parse PII entities
+		// Parse custom PII entities.
 		var piiEntitiesArray []map[string]interface{}
 		switch v := piiEntitiesRaw.(type) {
 		case string:
@@ -88,33 +92,32 @@ func parseParams(params map[string]interface{}, requirePIIEntities bool) (PIIMas
 				if itemMap, ok := item.(map[string]interface{}); ok {
 					piiEntitiesArray = append(piiEntitiesArray, itemMap)
 				} else {
-					return result, fmt.Errorf("'piiEntities[%d]' must be an object", idx)
+					return result, fmt.Errorf("'customPIIEntities[%d]' must be an object", idx)
 				}
 			}
 		default:
-			return result, fmt.Errorf("'piiEntities' must be an array or JSON string")
+			return result, fmt.Errorf("'customPIIEntities' must be an array or JSON string")
 		}
 
-		// Validate each PII entity
-		piiEntities := make(map[string]*regexp.Regexp)
+		// Validate each custom PII entity.
 		for i, entityConfig := range piiEntitiesArray {
 			piiEntity, ok := entityConfig["piiEntity"].(string)
 			if !ok || piiEntity == "" {
-				return result, fmt.Errorf("'piiEntities[%d].piiEntity' is required and must be a non-empty string", i)
+				return result, fmt.Errorf("'customPIIEntities[%d].piiEntity' is required and must be a non-empty string", i)
 			}
 
 			if !regexp.MustCompile(`^[A-Z_]+$`).MatchString(piiEntity) {
-				return result, fmt.Errorf("'piiEntities[%d].piiEntity' must match ^[A-Z_]+$", i)
+				return result, fmt.Errorf("'customPIIEntities[%d].piiEntity' must match ^[A-Z_]+$", i)
 			}
 
 			piiRegex, ok := entityConfig["piiRegex"].(string)
 			if !ok || piiRegex == "" {
-				return result, fmt.Errorf("'piiEntities[%d].piiRegex' is required and must be a non-empty string", i)
+				return result, fmt.Errorf("'customPIIEntities[%d].piiRegex' is required and must be a non-empty string", i)
 			}
 
 			compiledPattern, err := regexp.Compile(piiRegex)
 			if err != nil {
-				return result, fmt.Errorf("'piiEntities[%d].piiRegex' is invalid: %w", i, err)
+				return result, fmt.Errorf("'customPIIEntities[%d].piiRegex' is invalid: %w", i, err)
 			}
 
 			if _, exists := piiEntities[piiEntity]; exists {
@@ -122,13 +125,45 @@ func parseParams(params map[string]interface{}, requirePIIEntities bool) (PIIMas
 			}
 			piiEntities[piiEntity] = compiledPattern
 		}
-
-		if len(piiEntities) == 0 {
-			return result, fmt.Errorf("'piiEntities' cannot be empty")
-		}
-
-		result.PIIEntities = piiEntities
 	}
+
+	// Extract built-in entity toggles.
+	enableEmail, err := parseBoolParam(params, "email")
+	if err != nil {
+		return result, err
+	}
+	enablePhone, err := parseBoolParam(params, "phone")
+	if err != nil {
+		return result, err
+	}
+	enableSSN, err := parseBoolParam(params, "ssn")
+	if err != nil {
+		return result, err
+	}
+
+	if enableEmail {
+		if _, exists := piiEntities[DefaultEmailEntityName]; exists {
+			return result, fmt.Errorf("duplicate piiEntity: %q", DefaultEmailEntityName)
+		}
+		piiEntities[DefaultEmailEntityName] = regexp.MustCompile(DefaultEmailRegex)
+	}
+	if enablePhone {
+		if _, exists := piiEntities[DefaultPhoneEntityName]; exists {
+			return result, fmt.Errorf("duplicate piiEntity: %q", DefaultPhoneEntityName)
+		}
+		piiEntities[DefaultPhoneEntityName] = regexp.MustCompile(DefaultPhoneRegex)
+	}
+	if enableSSN {
+		if _, exists := piiEntities[DefaultSSNEntityName]; exists {
+			return result, fmt.Errorf("duplicate piiEntity: %q", DefaultSSNEntityName)
+		}
+		piiEntities[DefaultSSNEntityName] = regexp.MustCompile(DefaultSSNRegex)
+	}
+
+	if len(piiEntities) == 0 {
+		return result, fmt.Errorf("at least one PII detector must be configured using 'customPIIEntities' or one of 'email', 'phone', 'ssn'")
+	}
+	result.PIIEntities = piiEntities
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
@@ -149,6 +184,18 @@ func parseParams(params map[string]interface{}, requirePIIEntities bool) (PIIMas
 	}
 
 	return result, nil
+}
+
+func parseBoolParam(params map[string]interface{}, key string) (bool, error) {
+	valRaw, ok := params[key]
+	if !ok {
+		return false, nil
+	}
+	val, ok := valRaw.(bool)
+	if !ok {
+		return false, fmt.Errorf("'%s' must be a boolean", key)
+	}
+	return val, nil
 }
 
 // Mode returns the processing mode for this policy
