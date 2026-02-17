@@ -1,47 +1,62 @@
 name: remove-headers
-version: v0.2.1
+version: v0.3.0
 description: |
   Removes configured headers from requests and/or responses. Header matching is
   case-insensitive, and removing a non-existent header is ignored.
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
-    requestHeaders:
-      type: array
-      description: Specifies headers to remove during the request phase. At least
-        one of requestHeaders or responseHeaders must be specified.
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Specifies the header name to remove. Matching is
-              case-insensitive.
-            minLength: 1
-            maxLength: 256
-            pattern: "^[a-zA-Z0-9-_]+$"
-        required:
-        - name
-    responseHeaders:
-      type: array
-      description: Specifies headers to remove during the response phase. At least
-        one of requestHeaders or responseHeaders must be specified.
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Specifies the header name to remove. Matching is
-              case-insensitive.
-            minLength: 1
-            maxLength: 256
-            pattern: "^[a-zA-Z0-9-_]+$"
-        required:
-        - name
+    request:
+      type: object
+      additionalProperties: false
+      description: Specifies request-phase header removal settings.
+      properties:
+        headers:
+          type: array
+          description: Specifies headers to remove during the request phase.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              name:
+                type: string
+                description: Specifies the header name to remove. Matching is
+                  case-insensitive.
+                minLength: 1
+                maxLength: 256
+                pattern: "^[a-zA-Z0-9-_]+$"
+            required:
+            - name
+      required:
+      - headers
+    response:
+      type: object
+      additionalProperties: false
+      description: Specifies response-phase header removal settings.
+      properties:
+        headers:
+          type: array
+          description: Specifies headers to remove during the response phase.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              name:
+                type: string
+                description: Specifies the header name to remove. Matching is
+                  case-insensitive.
+                minLength: 1
+                maxLength: 256
+                pattern: "^[a-zA-Z0-9-_]+$"
+            required:
+            - name
+      required:
+      - headers
   anyOf:
-    - required: [ requestHeaders ]
-    - required: [ responseHeaders ]
+    - required: [ request ]
+    - required: [ response ]
 
 systemParameters:
   type: object
