@@ -1,0 +1,11 @@
+{
+  "name": "basic-ratelimit",
+  "displayName": "Rate Limit - Basic",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Simple request rate limiting policy that restricts the number of requests within one or more defined time windows."
+}

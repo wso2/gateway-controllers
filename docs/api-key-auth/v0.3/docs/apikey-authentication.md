@@ -25,8 +25,8 @@ These parameters are configured per API or route by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `key` | string | Yes | - | The name of the header or query parameter that contains the API key. For headers, case-insensitive matching is used (for example, `X-API-Key`, `Authorization`). For query parameters, exact name matching is used (for example, `api_key`, `token`). |
-| `in` | string | Yes | - | Specifies where to look for the API key. Must be either `header` or `query`. |
+| `key` | string | Yes | `API-Key` | The name of the header or query parameter that contains the API key. For headers, case-insensitive matching is used (for example, `X-API-Key`, `Authorization`). For query parameters, exact name matching is used (for example, `api_key`, `token`). |
+| `in` | string | Yes | `header` | Specifies where to look for the API key. Must be either `header` or `query`. |
 
 **Note:**
 
@@ -208,13 +208,13 @@ spec:
 
 ## How it Works
 
-- On each request, the gateway policy reads `key` and `in` from the policy configuration and validates that required parameters are present.
+- On each request, the gateway policy reads `key` and `in` from the policy configuration (or uses defaults) and validates the resolved values.
 - Based on `in`, it extracts the API key either from a request header (case-insensitive lookup) or from a query parameter in the request URL.
 - If the key is missing, empty, or the required API context values are unavailable, the policy short-circuits the request and returns `401 Unauthorized` with a JSON error response.
 - For valid inputs, the policy calls the API key store validator using API and operation context (`apiId`, operation path, HTTP method) to determine whether the key is allowed for the target operation.
 - On successful validation, the request continues upstream and authentication metadata is added to request context (`auth.success=true`, `auth.method=api-key`). The policy does not modify response traffic (`OnResponse` is a no-op).
 
-## Notes
+## Notes:
 
 - API keys offer a lightweight authentication mechanism for internal services, partner integrations, and service-to-service communication where full OAuth flows are not required.
 - Store API keys securely and avoid exposing them in client-side code, logs, or version control systems.
