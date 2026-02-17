@@ -1,59 +1,76 @@
 name: set-headers
-version: v0.2.1
+version: v0.3.0
 description: |
   Sets configured headers on requests and/or responses. If the same header is set
   multiple times, the latest configured value overwrites earlier values.
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
-    requestHeaders:
-      type: array
-      description: Specifies headers to set during the request phase. At least one
-        of requestHeaders or responseHeaders must be specified.
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Specifies the header name. Matching is case-insensitive.
-            minLength: 1
-            maxLength: 256
-            pattern: "^[a-zA-Z0-9-_]+$"
-          value:
-            type: string
-            description: Specifies the header value to set.
-            maxLength: 8192
-        required:
-        - name
-        - value
-        resolve:
-        - value
-    responseHeaders:
-      type: array
-      description: Specifies headers to set during the response phase. At least one
-        of requestHeaders or responseHeaders must be specified.
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Specifies the header name. Matching is case-insensitive.
-            minLength: 1
-            maxLength: 256
-            pattern: "^[a-zA-Z0-9-_]+$"
-          value:
-            type: string
-            description: Specifies the header value to set.
-            maxLength: 8192
-        required:
-        - name
-        - value
-        resolve:
-        - value
+    request:
+      type: object
+      additionalProperties: false
+      description: Specifies request-phase header settings.
+      properties:
+        headers:
+          type: array
+          description: Specifies headers to set during the request phase.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              name:
+                type: string
+                description: Specifies the header name. Matching is case-insensitive.
+                minLength: 1
+                maxLength: 256
+                pattern: "^[a-zA-Z0-9-_]+$"
+              value:
+                type: string
+                description: Specifies the header value to set.
+                maxLength: 8192
+            required:
+            - name
+            - value
+            resolve:
+            - value
+      required:
+      - headers
+
+    response:
+      type: object
+      additionalProperties: false
+      description: Specifies response-phase header settings.
+      properties:
+        headers:
+          type: array
+          description: Specifies headers to set during the response phase.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              name:
+                type: string
+                description: Specifies the header name. Matching is case-insensitive.
+                minLength: 1
+                maxLength: 256
+                pattern: "^[a-zA-Z0-9-_]+$"
+              value:
+                type: string
+                description: Specifies the header value to set.
+                maxLength: 8192
+            required:
+            - name
+            - value
+            resolve:
+            - value
+      required:
+      - headers
+
   anyOf:
-    - required: [ requestHeaders ]
-    - required: [ responseHeaders ]
+    - required: [ request ]
+    - required: [ response ]
 
 systemParameters:
   type: object
