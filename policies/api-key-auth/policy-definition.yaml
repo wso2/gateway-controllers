@@ -1,5 +1,5 @@
 name: api-key-auth
-version: v0.3.1
+version: v0.3.0
 description: |
   Validates API keys in incoming requests and authorizes access when a valid key
   is present. Reads the key from a configured header or query parameter.
