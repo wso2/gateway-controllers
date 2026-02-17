@@ -38,7 +38,7 @@ JWT Authentication requires two levels of configuration.
 | `headername` | string | No | `"Authorization"` | Header name to extract the token from. |
 | `onfailurestatuscode` | integer | No | `401` | HTTP status code on authentication failure. |
 | `errormessageformat` | string | No | `"json"` | Error format: `"json"`, `"plain"`, or `"minimal"`. |
-| `errormessage` | string | No | `"Authentication failed."` | Error message body for failures. |
+| `errormessage` | string | No | `"Authentication failed"` | Error message body for failures. |
 | `validateissuer` | boolean | No | `true` | Validate the token `iss` claim against key managers. |
 
 #### KeyManager Configuration
@@ -69,7 +69,7 @@ authheaderscheme = "Bearer"
 headername = "Authorization"
 onfailurestatuscode = 401
 errormessageformat = "json"
-errormessage = "Authentication failed."
+errormessage = "Authentication failed"
 validateissuer = true
 
 [[policy_configurations.jwtauth_v0.keymanagers]]
@@ -228,4 +228,3 @@ spec:
               role: X-User-Role
             userIdClaim: username
 ```
-
