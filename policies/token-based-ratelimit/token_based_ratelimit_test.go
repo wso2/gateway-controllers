@@ -545,6 +545,57 @@ func TestTransformToRatelimitParams_NoLimits(t *testing.T) {
 	}
 }
 
+// TestTransformToRatelimitParams_EmptyPromptAndCompletionLimits ensures empty arrays are ignored.
+func TestTransformToRatelimitParams_EmptyPromptAndCompletionLimits(t *testing.T) {
+	params := map[string]interface{}{
+		"promptTokenLimits":     []interface{}{},
+		"completionTokenLimits": []interface{}{},
+		"totalTokenLimits": []interface{}{
+			map[string]interface{}{
+				"count":    float64(10),
+				"duration": "1m",
+			},
+		},
+	}
+
+	template := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"promptTokens": map[string]interface{}{
+				"identifier": "$.usage.prompt_tokens",
+				"location":   "payload",
+			},
+			"completionTokens": map[string]interface{}{
+				"identifier": "$.usage.completion_tokens",
+				"location":   "payload",
+			},
+			"totalTokens": map[string]interface{}{
+				"identifier": "$.usage.total_tokens",
+				"location":   "payload",
+			},
+		},
+	}
+
+	result := transformToRatelimitParams(params, template)
+
+	quotas, ok := result["quotas"].([]interface{})
+	if !ok {
+		t.Fatal("Expected quotas to be []interface{}")
+	}
+
+	if len(quotas) != 1 {
+		t.Fatalf("Expected only 1 quota (total_tokens), got %d", len(quotas))
+	}
+
+	quota, ok := quotas[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected quota to be map[string]interface{}, got %T", quotas[0])
+	}
+
+	if quota["name"] != "total_tokens" {
+		t.Fatalf("Expected quota name total_tokens, got %v", quota["name"])
+	}
+}
+
 // TestTransformToRatelimitParams_NoTemplatePaths tests transformation without template paths
 func TestTransformToRatelimitParams_NoTemplatePaths(t *testing.T) {
 	params := map[string]interface{}{

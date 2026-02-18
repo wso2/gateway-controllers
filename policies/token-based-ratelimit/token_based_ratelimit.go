@@ -417,9 +417,17 @@ func transformToRatelimitParams(params map[string]interface{}, template map[stri
 			return
 		}
 
+		convertedLimits := convertLimits(limits)
+		if len(convertedLimits) == 0 {
+			slog.Debug("addQuota: empty limits, skipping",
+				"name", name,
+				"limitsKey", limitsKey)
+			return
+		}
+
 		quota := map[string]interface{}{
 			"name":   name,
-			"limits": convertLimits(limits),
+			"limits": convertedLimits,
 			"keyExtraction": []interface{}{
 				map[string]interface{}{"type": "routename"},
 			},
