@@ -267,11 +267,11 @@ func TestAzureContentSafetyPolicy_APISuccess_NoViolation(t *testing.T) {
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":              "$.message",
+			"jsonPath":              "$.messages",
 			"hateSeverityThreshold": 4,
 		},
 	})
-	action := p.OnRequest(azureRequestContext(`{"message":"hello"}`), nil)
+	action := p.OnRequest(azureRequestContext(`{"messages":"hello"}`), nil)
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications on non-violation, got %T", action)
 	}
@@ -288,18 +288,18 @@ func TestAzureContentSafetyPolicy_APIViolation_RequestAndResponse(t *testing.T) 
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":              "$.message",
+			"jsonPath":              "$.messages",
 			"hateSeverityThreshold": 3,
 			"showAssessment":        true,
 		},
 		"response": map[string]interface{}{
-			"jsonPath":              "$.message",
+			"jsonPath":              "$.messages",
 			"hateSeverityThreshold": 3,
 			"showAssessment":        true,
 		},
 	})
 
-	reqAction := p.OnRequest(azureRequestContext(`{"message":"blocked text"}`), nil)
+	reqAction := p.OnRequest(azureRequestContext(`{"messages":"blocked text"}`), nil)
 	reqBody := assertAzureRequestError(t, reqAction, true, "REQUEST")
 	reqMsg := extractAzureMessage(t, reqBody)
 	assessment, ok := reqMsg["assessments"].(map[string]interface{})
@@ -310,7 +310,7 @@ func TestAzureContentSafetyPolicy_APIViolation_RequestAndResponse(t *testing.T) 
 		t.Fatalf("expected assessments.categories on violation")
 	}
 
-	respAction := p.OnResponse(azureResponseContext(`{"message":"blocked response"}`), nil)
+	respAction := p.OnResponse(azureResponseContext(`{"messages":"blocked response"}`), nil)
 	respBody := assertAzureResponseError(t, respAction, true, "RESPONSE")
 	respMsg := extractAzureMessage(t, respBody)
 	if _, ok := respMsg["assessments"]; !ok {
