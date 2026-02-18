@@ -71,27 +71,46 @@ func (r *RedisLimiter) Allow(ctx context.Context, key string) (*limiter.Result, 
 // AllowN checks if N requests are allowed for the given key
 // Atomically consumes N request tokens if allowed
 func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	return r.runScript(ctx, key, n, false)
+}
+
+// ConsumeOrClampN consumes up to n tokens atomically.
+// If n exceeds available capacity, it consumes available capacity and returns denied.
+func (r *RedisLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	return r.runScript(ctx, key, n, true)
+}
+
+func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp bool) (*limiter.Result, error) {
 	now := r.clock.Now()
 	fullKey := r.keyPrefix + key
+
+	if n < 0 {
+		n = 0
+	}
 
 	slog.Debug("GCRA(Redis): checking rate limit",
 		"key", key,
 		"fullKey", fullKey,
 		"cost", n,
+		"clamp", clamp,
 		"now", now)
 
 	emissionInterval := r.policy.EmissionInterval()
 	burstAllowance := r.policy.BurstAllowance()
 	expirationSeconds := int64((r.policy.Duration + burstAllowance).Seconds())
+	clampFlag := int64(0)
+	if clamp {
+		clampFlag = 1
+	}
 
 	slog.Debug("GCRA(Redis): executing Lua script",
 		"key", key,
 		"fullKey", fullKey,
 		"emissionInterval", emissionInterval,
 		"burstAllowance", burstAllowance,
-		"burst", r.policy.Burst)
+		"burst", r.policy.Burst,
+		"clamp", clamp)
 
-	// Execute Lua script atomically
 	result, err := r.script.Run(ctx, r.client,
 		[]string{fullKey},
 		now.UnixNano(),                 // ARGV[1]: current time in nanoseconds
@@ -99,19 +118,16 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 		burstAllowance.Nanoseconds(),   // ARGV[3]: burst allowance in nanoseconds
 		r.policy.Burst,                 // ARGV[4]: burst capacity
 		expirationSeconds,              // ARGV[5]: expiration in seconds
-		n,                              // ARGV[6]: count (number of requests)
+		n,                              // ARGV[6]: requested count
+		clampFlag,                      // ARGV[7]: clamp mode
 	).Result()
 
 	if err != nil {
-		// Handle NOSCRIPT error - script not loaded in Redis
 		if strings.Contains(err.Error(), "NOSCRIPT") {
-			// Load script and retry once
 			_, loadErr := r.script.Load(ctx, r.client).Result()
 			if loadErr != nil {
 				return nil, fmt.Errorf("failed to load Lua script: %w", loadErr)
 			}
-
-			// Retry execution
 			result, err = r.script.Run(ctx, r.client,
 				[]string{fullKey},
 				now.UnixNano(),
@@ -120,35 +136,38 @@ func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 				r.policy.Burst,
 				expirationSeconds,
 				n,
+				clampFlag,
 			).Result()
-
-			if err != nil {
-				return nil, fmt.Errorf("script execution failed after load: %w", err)
-			}
-		} else {
+		}
+		if err != nil {
 			return nil, fmt.Errorf("script execution failed: %w", err)
 		}
 	}
 
-	// Parse result from Lua script
-	// Returns: {allowed, remaining, reset_nanos, retry_after_nanos, full_quota_at_nanos}
+	// Returns: {allowed, remaining, reset_nanos, retry_after_nanos, full_quota_at_nanos, consumed, overflow}
 	values := result.([]interface{})
-
 	allowed := values[0].(int64) == 1
 	remaining := values[1].(int64)
 	resetNanos := values[2].(int64)
 	retryAfterNanos := values[3].(int64)
 	fullQuotaAtNanos := values[4].(int64)
+	consumed := values[5].(int64)
+	overflow := values[6].(int64)
 
 	slog.Debug("GCRA(Redis): script execution result",
 		"key", key,
 		"fullKey", fullKey,
 		"allowed", allowed,
 		"remaining", remaining,
+		"consumed", consumed,
+		"overflow", overflow,
 		"reset", time.Unix(0, resetNanos))
 
 	return &limiter.Result{
 		Allowed:     allowed,
+		Requested:   n,
+		Consumed:    consumed,
+		Overflow:    overflow,
 		Limit:       r.policy.Limit,
 		Remaining:   remaining,
 		Reset:       time.Unix(0, resetNanos),

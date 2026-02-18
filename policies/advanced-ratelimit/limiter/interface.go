@@ -31,6 +31,11 @@ type Limiter interface {
 	// AllowN checks if N requests are allowed for the given key
 	AllowN(ctx context.Context, key string, n int64) (*Result, error)
 
+	// ConsumeOrClampN consumes up to N tokens atomically.
+	// If N exceeds available capacity, it consumes the available remainder (clamps to zero)
+	// and returns a denied result with overflow details in Result.
+	ConsumeOrClampN(ctx context.Context, key string, n int64) (*Result, error)
+
 	// GetAvailable returns the available tokens for the given key without consuming
 	// This is useful for checking remaining capacity before making a request
 	GetAvailable(ctx context.Context, key string) (int64, error)

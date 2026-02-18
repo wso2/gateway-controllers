@@ -210,6 +210,84 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	}, nil
 }
 
+// ConsumeOrClampN consumes up to n tokens atomically.
+// If n exceeds available burst capacity, it consumes the available remainder and returns denied.
+func (m *MemoryLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if n < 0 {
+		n = 0
+	}
+
+	now := m.clock.Now()
+	emissionInterval := m.policy.EmissionInterval()
+	burstAllowance := m.policy.BurstAllowance()
+
+	var tat time.Time
+	entry, exists := m.data[key]
+	if exists && now.Before(entry.expiration) {
+		tat = entry.tat
+	} else {
+		tat = now
+	}
+
+	if tat.Before(now) {
+		tat = now
+	}
+
+	allowAt := tat.Add(-burstAllowance)
+	remainingBefore := m.calculateRemaining(tat, now, emissionInterval, burstAllowance)
+
+	consumed := n
+	if now.Before(allowAt) {
+		consumed = 0
+	}
+	if consumed > remainingBefore {
+		consumed = remainingBefore
+	}
+	overflow := n - consumed
+	allowed := overflow == 0
+
+	newTAT := tat.Add(emissionInterval * time.Duration(consumed))
+	if consumed > 0 {
+		expiration := m.policy.Duration + burstAllowance
+		m.data[key] = &tatEntry{
+			tat:        newTAT,
+			expiration: now.Add(expiration),
+		}
+	}
+
+	remainingAfter := m.calculateRemaining(newTAT, now, emissionInterval, burstAllowance)
+
+	fullQuotaAt := newTAT
+	if newTAT.Before(now) {
+		fullQuotaAt = now
+	}
+
+	retryAfter := time.Duration(0)
+	if !allowed {
+		nextAllowAt := newTAT.Add(-burstAllowance)
+		if nextAllowAt.After(now) {
+			retryAfter = nextAllowAt.Sub(now)
+		}
+	}
+
+	return &limiter.Result{
+		Allowed:     allowed,
+		Requested:   n,
+		Consumed:    consumed,
+		Overflow:    overflow,
+		Limit:       m.policy.Limit,
+		Remaining:   remainingAfter,
+		Reset:       newTAT,
+		RetryAfter:  retryAfter,
+		FullQuotaAt: fullQuotaAt,
+		Duration:    m.policy.Duration,
+		Policy:      m.policy,
+	}, nil
+}
+
 // GetAvailable returns the available tokens for the given key without consuming
 func (m *MemoryLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
 	m.mu.RLock()

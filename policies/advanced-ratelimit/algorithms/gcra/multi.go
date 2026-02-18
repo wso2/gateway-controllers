@@ -81,6 +81,35 @@ func (m *MultiLimiter) AllowN(ctx context.Context, key string, n int64) (*limite
 	return mostRestrictive, nil
 }
 
+// ConsumeOrClampN consumes up to n tokens across all policies.
+// It runs all policies so each limiter state is updated consistently.
+func (m *MultiLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	if len(m.limiters) == 0 {
+		return nil, fmt.Errorf("no limiters configured")
+	}
+
+	var mostRestrictive *limiter.Result
+
+	for i, limiter := range m.limiters {
+		policyKey := fmt.Sprintf("%s:p%d", key, i)
+
+		result, err := limiter.ConsumeOrClampN(ctx, policyKey, n)
+		if err != nil {
+			return nil, fmt.Errorf("limiter %d failed: %w", i, err)
+		}
+
+		if mostRestrictive == nil {
+			mostRestrictive = result
+		} else if !result.Allowed {
+			mostRestrictive = result
+		} else if result.Remaining < mostRestrictive.Remaining {
+			mostRestrictive = result
+		}
+	}
+
+	return mostRestrictive, nil
+}
+
 // GetAvailable returns the minimum available tokens across all policies
 func (m *MultiLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
 	if len(m.limiters) == 0 {

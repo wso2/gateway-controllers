@@ -139,6 +139,9 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	// Build result
 	result := &limiter.Result{
 		Allowed:   allowed,
+		Requested: n,
+		Consumed:  boolToCount(allowed && n > 0, n),
+		Overflow:  boolToCount(!allowed && n > 0, n),
 		Limit:     m.policy.Limit,
 		Remaining: remaining,
 		Reset:     windowEnd,
@@ -155,6 +158,83 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	}
 
 	return result, nil
+}
+
+// ConsumeOrClampN consumes up to n tokens atomically.
+// If n exceeds remaining quota, it consumes only the remaining amount and returns denied.
+func (m *MemoryLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := m.clock.Now()
+	windowStart := m.policy.WindowStart(now)
+	windowEnd := m.policy.WindowEnd(now)
+
+	entry, exists := m.data[key]
+	var currentCount int64
+	if !exists || entry.windowStart != windowStart || now.After(entry.expiration) {
+		currentCount = 0
+	} else {
+		currentCount = entry.count
+	}
+
+	remainingBefore := m.policy.Limit - currentCount
+	if remainingBefore < 0 {
+		remainingBefore = 0
+	}
+
+	if n < 0 {
+		n = 0
+	}
+
+	consumed := n
+	if consumed > remainingBefore {
+		consumed = remainingBefore
+	}
+	overflow := n - consumed
+	allowed := overflow == 0
+
+	newCount := currentCount + consumed
+	remaining := m.policy.Limit - newCount
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	if consumed > 0 {
+		m.data[key] = &windowEntry{
+			count:       newCount,
+			windowStart: windowStart,
+			expiration:  windowEnd.Add(time.Minute),
+		}
+	}
+
+	result := &limiter.Result{
+		Allowed:   allowed,
+		Requested: n,
+		Consumed:  consumed,
+		Overflow:  overflow,
+		Limit:     m.policy.Limit,
+		Remaining: remaining,
+		Reset:     windowEnd,
+		Duration:  m.policy.Duration,
+		Policy:    m.policy,
+	}
+
+	if !allowed {
+		result.RetryAfter = time.Until(windowEnd)
+		if result.RetryAfter < 0 {
+			result.RetryAfter = 0
+		}
+	}
+
+	return result, nil
+}
+
+func boolToCount(condition bool, value int64) int64 {
+	if condition {
+		return value
+	}
+	return 0
 }
 
 // GetAvailable returns the available tokens for the given key without consuming

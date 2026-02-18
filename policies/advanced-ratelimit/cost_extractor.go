@@ -14,11 +14,16 @@
  *  limitations under the License.
  *
  */
- 
+
 package ratelimit
 
 import (
+	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"fmt"
+	"io"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -320,7 +325,14 @@ func (e *CostExtractor) extractFromResponseBody(ctx *policy.ResponseContext, jso
 		return 0, false
 	}
 
-	return extractFromBodyBytes(ctx.ResponseBody.Content, jsonPath)
+	content, err := decodeContentEncoding(ctx.ResponseBody.Content, ctx.ResponseHeaders)
+	if err != nil {
+		slog.Debug("Failed to decode response body using Content-Encoding",
+			"error", err)
+		return 0, false
+	}
+
+	return extractFromBodyBytes(content, jsonPath)
 }
 
 // extractFromRequestCEL extracts cost from request context using CEL expression
@@ -419,6 +431,87 @@ func extractFromBodyBytes(bodyBytes []byte, jsonPath string) (float64, bool) {
 	}
 
 	return cost, true
+}
+
+func decodeContentEncoding(bodyBytes []byte, headers *policy.Headers) ([]byte, error) {
+	if len(bodyBytes) == 0 || headers == nil {
+		return bodyBytes, nil
+	}
+
+	encodings := getContentEncodings(headers)
+	if len(encodings) == 0 {
+		return bodyBytes, nil
+	}
+
+	decoded := bodyBytes
+	for i := len(encodings) - 1; i >= 0; i-- {
+		encoding := encodings[i]
+		switch encoding {
+		case "", "identity":
+			continue
+		case "gzip":
+			content, err := gunzip(decoded)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode gzip body: %w", err)
+			}
+			decoded = content
+		case "deflate":
+			content, err := inflate(decoded)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode deflate body: %w", err)
+			}
+			decoded = content
+		default:
+			return nil, fmt.Errorf("unsupported content-encoding: %s", encoding)
+		}
+	}
+
+	return decoded, nil
+}
+
+func getContentEncodings(headers *policy.Headers) []string {
+	if headers == nil {
+		return nil
+	}
+
+	values := headers.Get("content-encoding")
+	if len(values) == 0 {
+		values = headers.Get("Content-Encoding")
+	}
+
+	var encodings []string
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			encoding := strings.TrimSpace(strings.ToLower(part))
+			if encoding != "" {
+				encodings = append(encodings, encoding)
+			}
+		}
+	}
+
+	return encodings
+}
+
+func gunzip(content []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(content))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+
+	return io.ReadAll(reader)
+}
+
+func inflate(content []byte) ([]byte, error) {
+	zlibReader, err := zlib.NewReader(bytes.NewReader(content))
+	if err == nil {
+		defer zlibReader.Close()
+		return io.ReadAll(zlibReader)
+	}
+
+	flateReader := flate.NewReader(bytes.NewReader(content))
+	defer flateReader.Close()
+	return io.ReadAll(flateReader)
 }
 
 // RequiresResponseBody returns true if any source requires response body access

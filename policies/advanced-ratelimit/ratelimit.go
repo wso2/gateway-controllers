@@ -710,8 +710,9 @@ func (p *RateLimitPolicy) OnResponse(
 				continue
 			}
 
-			// Consume tokens now
-			result, err := q.Limiter.AllowN(context.Background(), key, int64(actualCost))
+			// Consume tokens now (clamp to remaining if actual cost exceeds available quota).
+			// This ensures over-limit responses still drain the remaining quota.
+			result, err := q.Limiter.ConsumeOrClampN(context.Background(), key, int64(actualCost))
 			if err != nil {
 				if p.backend == "redis" && p.redisFailOpen {
 					slog.Warn("Post-response rate limit check failed (fail-open)",
@@ -726,7 +727,8 @@ func (p *RateLimitPolicy) OnResponse(
 			if result != nil && !result.Allowed {
 				slog.Warn("Rate limit exceeded post-response",
 					"key", key, "cost", actualCost, "limit", result.Limit,
-					"remaining", result.Remaining, "quota", quotaName)
+					"remaining", result.Remaining, "consumed", result.Consumed,
+					"overflow", result.Overflow, "quota", quotaName)
 			}
 
 			allQuotaResults = append(allQuotaResults, quotaResult{
