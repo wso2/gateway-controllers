@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v0.3.0
+version: v0.8.0
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
