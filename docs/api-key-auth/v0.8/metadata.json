@@ -1,0 +1,11 @@
+{
+  "name": "api-key-auth",
+  "displayName": "API Key Auth",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Implements API Key Authentication to protect APIs with pre-shared API keys.\nValidates API keys from request headers or query parameters against a configured\nlist of valid keys and sets authentication metadata in the request context."
+}
