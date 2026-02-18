@@ -267,7 +267,7 @@ func TestAzureContentSafetyPolicy_APISuccess_NoViolation(t *testing.T) {
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":              "$.messages",
+			"jsonPath":              "$.message",
 			"hateSeverityThreshold": 4,
 		},
 	})
@@ -288,12 +288,12 @@ func TestAzureContentSafetyPolicy_APIViolation_RequestAndResponse(t *testing.T) 
 		"azureContentSafetyEndpoint": srv.URL,
 		"azureContentSafetyKey":      "k",
 		"request": map[string]interface{}{
-			"jsonPath":              "$.messages",
+			"jsonPath":              "$.message",
 			"hateSeverityThreshold": 3,
 			"showAssessment":        true,
 		},
 		"response": map[string]interface{}{
-			"jsonPath":              "$.messages",
+			"jsonPath":              "$.message",
 			"hateSeverityThreshold": 3,
 			"showAssessment":        true,
 		},
