@@ -149,7 +149,7 @@ func GetPolicy(
 	}
 
 	// Parse system parameters
-	algorithm := getStringParam(params, "algorithm", "gcra")
+	algorithm := getStringParam(params, "algorithm", "fixed-window")
 	backend := getStringParam(params, "backend", "memory")
 
 	// Header configuration
