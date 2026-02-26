@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package promptdecorator
 
 import (
@@ -31,6 +31,18 @@ import (
 
 var arrayIndexRegex = regexp.MustCompile(`^([a-zA-Z0-9_]+)\[(-?\d+)\]$`)
 
+const (
+	defaultTextDecorationJSONPath     = "$.messages[-1].content"
+	defaultMessagesDecorationJSONPath = "$.messages"
+)
+
+var validDecoratorRoles = map[string]struct{}{
+	"system":    {},
+	"user":      {},
+	"assistant": {},
+	"tool":      {},
+}
+
 // PromptDecoratorPolicy implements prompt decoration by applying custom decorations
 type PromptDecoratorPolicy struct {
 	params PromptDecoratorPolicyParams
@@ -42,10 +54,8 @@ type Decoration struct {
 }
 
 type PromptDecoratorConfig struct {
-	// Decoration can be either:
-	// 1. A string for text prompt decoration (e.g., "Summarize the following...")
-	// 2. An array of Decoration objects for chat prompt decoration (e.g., [{"role": "system", "content": "..."}])
-	Decoration interface{} `json:"decoration"`
+	Text     *string      `json:"text,omitempty"`
+	Messages []Decoration `json:"messages,omitempty"`
 }
 
 type PromptDecoratorPolicyParams struct {
@@ -75,6 +85,7 @@ func GetPolicy(
 // parseParams parses and validates parameters from map to struct
 func parseParams(params map[string]interface{}) (PromptDecoratorPolicyParams, error) {
 	var result PromptDecoratorPolicyParams
+
 	// Extract required promptDecoratorConfig parameter
 	promptDecoratorConfigRaw, ok := params["promptDecoratorConfig"]
 	if !ok {
@@ -100,53 +111,63 @@ func parseParams(params map[string]interface{}) (PromptDecoratorPolicyParams, er
 		return result, fmt.Errorf("'promptDecoratorConfig' must be a JSON string or object")
 	}
 
-	// Validate decoration is not empty
-	if promptDecoratorConfig.Decoration == nil {
-		return result, fmt.Errorf("'promptDecoratorConfig.decoration' cannot be empty")
+	textConfigured := promptDecoratorConfig.Text != nil
+	messagesConfigured := len(promptDecoratorConfig.Messages) > 0
+
+	if textConfigured && messagesConfigured {
+		return result, fmt.Errorf("'promptDecoratorConfig' must define exactly one of 'text' or 'messages'")
 	}
 
-	// Validate decoration format
-	switch v := promptDecoratorConfig.Decoration.(type) {
-	case string:
-		if strings.TrimSpace(v) == "" {
-			return result, fmt.Errorf("'promptDecoratorConfig.decoration' cannot be empty when provided as string")
+	if !textConfigured && !messagesConfigured {
+		return result, fmt.Errorf("'promptDecoratorConfig' must define one of 'text' or 'messages'")
+	}
+
+	if textConfigured {
+		if strings.TrimSpace(*promptDecoratorConfig.Text) == "" {
+			return result, fmt.Errorf("'promptDecoratorConfig.text' must be a non-empty string")
 		}
-	case []interface{}:
-		if len(v) == 0 {
-			return result, fmt.Errorf("'promptDecoratorConfig.decoration' cannot be empty when provided as array")
-		}
-		// Validate array elements
-		for i, item := range v {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				if role, ok := itemMap["role"].(string); !ok || role == "" {
-					return result, fmt.Errorf("'promptDecoratorConfig.decoration[%d].role' must be a non-empty string", i)
-				}
-				if content, ok := itemMap["content"].(string); !ok || content == "" {
-					return result, fmt.Errorf("'promptDecoratorConfig.decoration[%d].content' must be a non-empty string", i)
-				}
-			} else {
-				return result, fmt.Errorf("'promptDecoratorConfig.decoration[%d]' must be an object with 'role' and 'content' fields", i)
+	}
+
+	if messagesConfigured {
+		for i, msg := range promptDecoratorConfig.Messages {
+			role := strings.ToLower(strings.TrimSpace(msg.Role))
+			if role == "" {
+				return result, fmt.Errorf("'promptDecoratorConfig.messages[%d].role' must be a non-empty string", i)
 			}
+			if _, ok := validDecoratorRoles[role]; !ok {
+				return result, fmt.Errorf("'promptDecoratorConfig.messages[%d].role' must be one of [system,user,assistant,tool]", i)
+			}
+			if strings.TrimSpace(msg.Content) == "" {
+				return result, fmt.Errorf("'promptDecoratorConfig.messages[%d].content' must be a non-empty string", i)
+			}
+			// Normalize role to keep output consistent.
+			promptDecoratorConfig.Messages[i].Role = role
 		}
-	default:
-		return result, fmt.Errorf("'promptDecoratorConfig.decoration' must be a string or an array of objects")
 	}
 
 	result.PromptDecoratorConfig = promptDecoratorConfig
 
-	// Extract required jsonPath parameter
-	jsonPathRaw, ok := params["jsonPath"]
-	if !ok {
-		return result, fmt.Errorf("'jsonPath' parameter is required")
+	// Extract optional jsonPath parameter. If omitted (or empty), select default
+	// based on promptDecoratorConfig type.
+	if jsonPathRaw, ok := params["jsonPath"]; ok {
+		jsonPath, ok := jsonPathRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'jsonPath' must be a string")
+		}
+		if strings.TrimSpace(jsonPath) != "" {
+			result.JsonPath = jsonPath
+		}
+	} else {
+		// jsonPath not provided
 	}
-	jsonPath, ok := jsonPathRaw.(string)
-	if !ok {
-		return result, fmt.Errorf("'jsonPath' must be a string")
+
+	if result.JsonPath == "" {
+		if textConfigured {
+			result.JsonPath = defaultTextDecorationJSONPath
+		} else {
+			result.JsonPath = defaultMessagesDecorationJSONPath
+		}
 	}
-	if jsonPath == "" {
-		return result, fmt.Errorf("'jsonPath' cannot be empty")
-	}
-	result.JsonPath = jsonPath
 
 	// Extract optional append parameter
 	if appendRaw, ok := params["append"]; ok {
@@ -199,29 +220,14 @@ func (p *PromptDecoratorPolicy) OnRequest(ctx *policy.RequestContext, params map
 	// Check if we're decorating a string content field or an array of messages
 	switch v := extractedValue.(type) {
 	case string:
-		// Decorating a content string (e.g., $.messages[-1].content)
-		// Handle decoration - can be a string or array of objects
-		var decorationStr string
-
-		switch dec := p.params.PromptDecoratorConfig.Decoration.(type) {
-		case string:
-			// Simple string decoration (text prompt decoration mode)
-			decorationStr = dec
-		case []interface{}:
-			// Array of decoration objects - extract content from each
-			for _, item := range dec {
-				if itemMap, ok := item.(map[string]interface{}); ok {
-					if content, ok := itemMap["content"].(string); ok && content != "" {
-						if decorationStr != "" {
-							decorationStr += "\n"
-						}
-						decorationStr += content
-					}
-				}
-			}
-		default:
-			return p.buildErrorResponse("Invalid decoration format for string decoration", fmt.Errorf("decoration must be string or array"))
+		// Decorating a content string (for example, $.messages[-1].content)
+		if p.params.PromptDecoratorConfig.Text == nil {
+			return p.buildErrorResponse(
+				"Invalid configuration for string target",
+				fmt.Errorf("use promptDecoratorConfig.text when jsonPath resolves to a string"),
+			)
 		}
+		decorationStr := *p.params.PromptDecoratorConfig.Text
 
 		// Apply decoration (prepend or append)
 		var updatedContent string
@@ -236,7 +242,14 @@ func (p *PromptDecoratorPolicy) OnRequest(ctx *policy.RequestContext, params map
 		return p.updateStringAtPath(payloadData, p.params.JsonPath, updatedContent)
 
 	case []interface{}:
-		// Decorating an array of messages (e.g., $.messages)
+		// Decorating an array of messages (for example, $.messages)
+		if len(p.params.PromptDecoratorConfig.Messages) == 0 {
+			return p.buildErrorResponse(
+				"Invalid configuration for messages target",
+				fmt.Errorf("use promptDecoratorConfig.messages when jsonPath resolves to an array"),
+			)
+		}
+
 		messages := make([]map[string]interface{}, 0, len(v))
 		var malformedEntries []string
 
@@ -279,6 +292,12 @@ func (p *PromptDecoratorPolicy) OnRequest(ctx *policy.RequestContext, params map
 
 	case []map[string]interface{}:
 		// Already in the right format
+		if len(p.params.PromptDecoratorConfig.Messages) == 0 {
+			return p.buildErrorResponse(
+				"Invalid configuration for messages target",
+				fmt.Errorf("use promptDecoratorConfig.messages when jsonPath resolves to an array"),
+			)
+		}
 		messages := v
 
 		// Create decoration messages from decoration config
@@ -306,35 +325,20 @@ func (p *PromptDecoratorPolicy) OnRequest(ctx *policy.RequestContext, params map
 	}
 }
 
-// createDecorationMessages creates decoration messages from the decoration config
-// For chat prompt decoration, decoration must be an array of objects with role and content
+// createDecorationMessages creates decoration messages from promptDecoratorConfig.messages.
 func (p *PromptDecoratorPolicy) createDecorationMessages() ([]map[string]interface{}, error) {
-	decoration := p.params.PromptDecoratorConfig.Decoration
-
-	switch dec := decoration.(type) {
-	case []interface{}:
-		// Array of decoration objects (chat prompt decoration mode)
-		// parseParams guarantees valid role/content, so this routine only converts
-		// the already-validated objects into the expected message format
-		decorationMessages := make([]map[string]interface{}, 0, len(dec))
-		for i, item := range dec {
-			if itemMap, ok := item.(map[string]interface{}); ok {
-				// Type assertions are safe because parseParams validates role/content are non-empty strings
-				role := itemMap["role"].(string)
-				content := itemMap["content"].(string)
-
-				decorationMessages = append(decorationMessages, map[string]interface{}{
-					"role":    role,
-					"content": content,
-				})
-			} else {
-				return nil, fmt.Errorf("decoration[%d] must be an object with 'role' and 'content' fields", i)
-			}
-		}
-		return decorationMessages, nil
-	default:
-		return nil, fmt.Errorf("decoration must be an array of objects with 'role' and 'content' for chat prompt decoration")
+	if len(p.params.PromptDecoratorConfig.Messages) == 0 {
+		return nil, fmt.Errorf("promptDecoratorConfig.messages must be provided for chat prompt decoration")
 	}
+
+	decorationMessages := make([]map[string]interface{}, 0, len(p.params.PromptDecoratorConfig.Messages))
+	for _, item := range p.params.PromptDecoratorConfig.Messages {
+		decorationMessages = append(decorationMessages, map[string]interface{}{
+			"role":    item.Role,
+			"content": item.Content,
+		})
+	}
+	return decorationMessages, nil
 }
 
 // updateStringAtPath updates a string value at the given JSONPath

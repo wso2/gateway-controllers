@@ -1,0 +1,10 @@
+{
+  "name": "token-based-ratelimit",
+  "displayName": "Token Based Ratelimit",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Enforces LLM token usage limits for prompt, completion, and total tokens using configurable windows and shared rate-limit backends."
+}

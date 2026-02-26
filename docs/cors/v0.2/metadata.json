@@ -1,0 +1,11 @@
+{
+  "name": "cors",
+  "displayName": "CORS",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds\nappropriate CORS headers to responses. Enables controlled access to resources from different\norigins by configuring allowed origins, methods, headers, and credentials."
+}

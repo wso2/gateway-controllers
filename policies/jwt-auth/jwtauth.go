@@ -46,6 +46,12 @@ const (
 	MetadataKeyIssuer       = "auth.issuer"
 	MetadataKeySubject      = "auth.subject"
 	MetadataValidatedClaims = "auth.validatedClaims"
+
+	// AuthContext key for user ID (used for analytics)
+	AuthContextKeyUserID = "x-wso2-user-id"
+
+	// Default claim to extract user ID from
+	DefaultUserIdClaim = "sub"
 )
 
 // JwtAuthPolicy implements JWT Authentication with JWKS support
@@ -384,6 +390,7 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	userRequiredClaims := getStringMapParam(params, "requiredClaims", map[string]string{})
 	userClaimMappings := getStringMapParam(params, "claimMappings", map[string]string{})
 	userAuthHeaderPrefix := getStringParam(params, "authHeaderPrefix", "")
+	userIdClaim := getStringParam(params, "userIdClaim", DefaultUserIdClaim)
 
 	slog.Debug("JWT Auth Policy: User configuration loaded",
 		"issuers", userIssuers,
@@ -392,6 +399,7 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 		"requiredClaimsCount", len(userRequiredClaims),
 		"claimMappingsCount", len(userClaimMappings),
 		"authHeaderPrefix", userAuthHeaderPrefix,
+		"userIdClaim", userIdClaim,
 	)
 
 	// Use user override if provided
@@ -545,7 +553,7 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	slog.Debug("JWT Auth Policy: All validations passed, authentication successful")
 
 	// Authentication successful - apply claim mappings and set metadata
-	return p.handleAuthSuccess(ctx, claims, userClaimMappings)
+	return p.handleAuthSuccess(ctx, claims, userClaimMappings, userIdClaim)
 }
 
 // validateTokenWithSignature validates JWT signature using JWKS
@@ -1265,9 +1273,10 @@ func parseScopes(scopeClaim, scpClaim interface{}) []string {
 }
 
 // handleAuthSuccess handles successful authentication
-func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string) policy.RequestAction {
+func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string, userIdClaim string) policy.RequestAction {
 	slog.Debug("JWT Auth Policy: handleAuthSuccess called",
 		"claimMappingsCount", len(claimMappings),
+		"userIdClaim", userIdClaim,
 	)
 
 	// Set metadata indicating successful authentication
@@ -1287,6 +1296,24 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 		slog.Debug("JWT Auth Policy: Set subject metadata",
 			"subject", sub,
 		)
+	}
+
+	// Extract user ID from the specified claim and set it in AuthContext for analytics
+	if userIdClaim != "" {
+		if claimValue, exists := claims[userIdClaim]; exists {
+			userId := claimValueToString(claimValue)
+			if userId != "" {
+				ctx.SharedContext.AuthContext[AuthContextKeyUserID] = userId
+				slog.Debug("JWT Auth Policy: Set user ID in AuthContext",
+					"claim", userIdClaim,
+					"userId", userId,
+				)
+			}
+		} else {
+			slog.Debug("JWT Auth Policy: User ID claim not found or empty",
+				"claim", userIdClaim,
+			)
+		}
 	}
 
 	// Apply claim mappings as headers

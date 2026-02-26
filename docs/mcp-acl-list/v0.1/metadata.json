@@ -1,0 +1,11 @@
+{
+  "name": "mcp-acl-list",
+  "displayName": "MCP ACL List",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "AI"
+  ],
+  "description": "MCP ACL List policy controls access to tools, resources, and prompts using\nmode and exceptions. It filters list responses based on the configured mode\nand enforces the same allow/deny rules on request paths. This policy does not\nrewrite capability fields (tools, resources, or prompts) or modify list entry contents.\n\n- Missing capability config: Allow all capabilities of that type\n- mode: allow, exceptions: [..] => allow all except listed exceptions\n- mode: deny, exceptions: [..] => deny all except listed exceptions"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "semantic-prompt-guard",
+  "displayName": "Semantic Prompt Guard",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Blocks or allows prompts based on semantic similarity to configured allow/deny\nphrase embeddings. The incoming prompt is embedded via the configured embedding provider\nand compared using cosine similarity against pre-computed vectors.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nValidates prompts in the request phase before they are sent to the LLM."
+}

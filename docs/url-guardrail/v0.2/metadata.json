@@ -1,0 +1,11 @@
+{
+  "name": "url-guardrail",
+  "displayName": "URL Guardrail",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates URLs found in request or response body content.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nCan validate URLs via DNS resolution only or HTTP HEAD request reachability.\nSupports separate configuration for request and response phases."
+}

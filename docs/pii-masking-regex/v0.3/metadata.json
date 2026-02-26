@@ -1,0 +1,11 @@
+{
+  "name": "pii-masking-regex",
+  "displayName": "PII Masking Regex",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Masks or redacts PII in payloads using built-in and custom regex detectors, with optional response restoration in masking mode."
+}

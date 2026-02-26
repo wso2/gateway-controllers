@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package limiter
 
 import (
@@ -28,6 +28,17 @@ import (
 type Result struct {
 	// Allowed indicates whether the request is allowed
 	Allowed bool
+
+	// Requested is the number of tokens/requests requested for this operation.
+	Requested int64
+
+	// Consumed is the number of tokens/requests actually consumed.
+	// For normal allow operations this matches Requested when allowed.
+	// For clamp operations this may be lower than Requested.
+	Consumed int64
+
+	// Overflow is the amount that exceeded available quota.
+	Overflow int64
 
 	// Limit is the maximum number of requests allowed in the time window
 	Limit int64

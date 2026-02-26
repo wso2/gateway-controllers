@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package gcra
 
 import (
@@ -85,6 +85,46 @@ func TestMemoryLimiter_AllowN(t *testing.T) {
 	}
 	if result.Allowed {
 		t.Fatal("6 requests should be denied (only 5 remaining)")
+	}
+}
+
+func TestMemoryLimiter_ConsumeOrClampN(t *testing.T) {
+	policy := NewPolicy(10, time.Second, 10)
+	rl := NewMemoryLimiter(policy, 0)
+	defer rl.Close()
+
+	ctx := context.Background()
+	rl.WithClock(limiter.NewFixedClock(time.Unix(1000, 0)))
+
+	result, err := rl.ConsumeOrClampN(ctx, "user:consume-clamp", 8)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.Allowed {
+		t.Fatal("first consume should be allowed")
+	}
+	if result.Consumed != 8 {
+		t.Fatalf("expected consumed=8, got %d", result.Consumed)
+	}
+	if result.Remaining != 2 {
+		t.Fatalf("expected remaining=2, got %d", result.Remaining)
+	}
+
+	result, err = rl.ConsumeOrClampN(ctx, "user:consume-clamp", 5)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Allowed {
+		t.Fatal("second consume should be denied due to overflow")
+	}
+	if result.Consumed != 2 {
+		t.Fatalf("expected consumed=2, got %d", result.Consumed)
+	}
+	if result.Overflow != 3 {
+		t.Fatalf("expected overflow=3, got %d", result.Overflow)
+	}
+	if result.Remaining != 0 {
+		t.Fatalf("expected remaining=0, got %d", result.Remaining)
 	}
 }
 

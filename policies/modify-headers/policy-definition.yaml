@@ -1,8 +1,8 @@
 name: modify-headers
-version: v0.1.0
+version: v0.2.0
 description: |
   Comprehensive header manipulation policy for both request and response flows.
-  Supports SET (replace), APPEND (add), and DELETE (remove) operations on headers.
+  Supports SET (replace) and DELETE (remove) operations on headers.
   Can modify request headers before forwarding to upstream and response headers before returning to client.
 
 parameters:
@@ -20,7 +20,6 @@ parameters:
             description: Action to perform on the header
             enum:
             - SET
-            - APPEND
             - DELETE
           name:
             type: string
@@ -30,11 +29,13 @@ parameters:
             pattern: "^[a-zA-Z0-9-_]+$"
           value:
             type: string
-            description: Header value (required for SET and APPEND, ignored for DELETE)
+            description: Header value (required for SET, ignored for DELETE)
             maxLength: 8192
         required:
         - action
         - name
+        resolve:
+        - value
     responseHeaders:
       type: array
       description: Array of header modifications to apply during response phase. At
@@ -47,7 +48,6 @@ parameters:
             description: Action to perform on the header
             enum:
             - SET
-            - APPEND
             - DELETE
           name:
             type: string
@@ -57,11 +57,13 @@ parameters:
             pattern: "^[a-zA-Z0-9-_]+$"
           value:
             type: string
-            description: Header value (required for SET and APPEND, ignored for DELETE)
+            description: Header value (required for SET, ignored for DELETE)
             maxLength: 8192
         required:
         - action
         - name
+        resolve:
+        - value
 
 systemParameters:
   type: object

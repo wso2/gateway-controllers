@@ -1,0 +1,10 @@
+{
+  "name": "model-round-robin",
+  "displayName": "Model Round Robin",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Distributes requests across configured AI models in round-robin order and can suspend failed models for a configured duration."
+}

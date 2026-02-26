@@ -1,0 +1,11 @@
+{
+  "name": "cors",
+  "displayName": "CORS",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Applies Cross-Origin Resource Sharing (CORS) rules by handling preflight requests and adding CORS headers to responses."
+}
