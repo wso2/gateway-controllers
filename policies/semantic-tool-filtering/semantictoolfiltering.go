@@ -215,19 +215,19 @@ func GetPolicy(
 
 	// Parse and validate embedding provider configuration (from systemParameters)
 	if err := parseEmbeddingConfig(params, p); err != nil {
-		return nil, fmt.Errorf("invalid embedding config: %w", err)
+		return nil, fmt.Errorf("invalid embedding config: %w")
 	}
 
 	// Initialize embedding provider
 	embeddingProvider, err := createEmbeddingProvider(p.embeddingConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create embedding provider: %w", err)
+		return nil, fmt.Errorf("failed to create embedding provider: %w")
 	}
 	p.embeddingProvider = embeddingProvider
 
 	// Parse policy parameters (runtime parameters)
 	if err := parseParams(params, p); err != nil {
-		return nil, fmt.Errorf("invalid params: %w", err)
+		return nil, fmt.Errorf("invalid params: %w")
 	}
 
 	slog.Debug("SemanticToolFiltering: Policy initialized",
@@ -498,7 +498,7 @@ func createEmbeddingProvider(config embeddingproviders.EmbeddingProviderConfig) 
 	}
 
 	if err := provider.Init(config); err != nil {
-		return nil, fmt.Errorf("failed to initialize embedding provider: %w", err)
+		return nil, fmt.Errorf("failed to initialize embedding provider: %w")
 	}
 
 	return provider, nil
@@ -620,6 +620,18 @@ func rebuildTextWithFilteredTools(originalContent string, allTools []TextTool, f
 	result = cleanupWhitespace(result)
 
 	return result
+}
+
+// stripAllTags removes all text-format tags (userq, toolname, tooldescription) from the content.
+// Called after filtering so the downstream payload is clean plain text.
+func stripAllTags(content string) string {
+	content = strings.ReplaceAll(content, "<userq>", "")
+	content = strings.ReplaceAll(content, "</userq>", "")
+	content = strings.ReplaceAll(content, "<toolname>", "")
+	content = strings.ReplaceAll(content, "</toolname>", "")
+	content = strings.ReplaceAll(content, "<tooldescription>", "")
+	content = strings.ReplaceAll(content, "</tooldescription>", "")
+	return cleanupWhitespace(content)
 }
 
 // cleanupWhitespace removes excessive blank lines while preserving original spacing and indentation.
@@ -920,8 +932,9 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx *policy.RequestConte
 		"filteredCount", len(filteredToolNames),
 		"selectionMode", p.selectionMode)
 
-	// Rebuild text content with only filtered tools
+	// Rebuild text content with only filtered tools and strip all tags
 	modifiedContent := rebuildTextWithFilteredTools(contentStr, textTools, filteredToolNames)
+	modifiedContent = stripAllTags(modifiedContent)
 
 	return policy.UpstreamRequestModifications{
 		Body: []byte(modifiedContent),
@@ -1145,6 +1158,7 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx *policy.RequestCont
 		}
 
 		modifiedContent := rebuildTextWithFilteredTools(contentStr, textTools, filteredToolNames)
+		modifiedContent = stripAllTags(modifiedContent)
 
 		return policy.UpstreamRequestModifications{
 			Body: []byte(modifiedContent),
