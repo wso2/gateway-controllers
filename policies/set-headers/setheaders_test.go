@@ -585,7 +585,7 @@ func TestSetHeadersPolicy_Validate_NoHeadersSpecified(t *testing.T) {
 	params := map[string]interface{}{}
 
 	err := p.Validate(params)
-	if err == nil || !strings.Contains(err.Error(), "at least one of 'requestHeaders' or 'responseHeaders' must be specified") {
+	if err == nil || !strings.Contains(err.Error(), "at least one of 'request.headers' or 'response.headers' must be specified") {
 		t.Errorf("Expected 'at least one must be specified' error, got: %v", err)
 	}
 }
@@ -629,8 +629,8 @@ func TestSetHeadersPolicy_Validate_EmptyRequestHeaders(t *testing.T) {
 	}
 
 	err := p.Validate(params)
-	if err == nil || !strings.Contains(err.Error(), "requestHeaders cannot be empty") {
-		t.Errorf("Expected 'requestHeaders cannot be empty' error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "request.headers cannot be empty") {
+		t.Errorf("Expected 'request.headers cannot be empty' error, got: %v", err)
 	}
 }
 
@@ -655,5 +655,89 @@ func TestSetHeadersPolicy_Validate_BothInvalid(t *testing.T) {
 	// Should fail on requestHeaders validation first
 	if err == nil || !strings.Contains(err.Error(), "missing required 'name' field") {
 		t.Errorf("Expected 'missing required name field' error, got: %v", err)
+	}
+}
+
+func TestSetHeadersPolicy_OnRequest_NestedHeaders(t *testing.T) {
+	p := &SetHeadersPolicy{}
+	ctx := &policy.RequestContext{
+		Headers: createTestHeaders(map[string]string{}),
+	}
+
+	params := map[string]interface{}{
+		"request": map[string]interface{}{
+			"headers": []interface{}{
+				map[string]interface{}{
+					"name":  "X-Nested-Request",
+					"value": "nested-request-value",
+				},
+			},
+		},
+	}
+
+	result := p.OnRequest(ctx, params)
+	mods, ok := result.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Errorf("Expected UpstreamRequestModifications, got %T", result)
+	}
+
+	if mods.SetHeaders["x-nested-request"] != "nested-request-value" {
+		t.Errorf("Expected nested request header to be set, got %v", mods.SetHeaders)
+	}
+}
+
+func TestSetHeadersPolicy_OnResponse_NestedHeaders(t *testing.T) {
+	p := &SetHeadersPolicy{}
+	ctx := &policy.ResponseContext{
+		ResponseHeaders: createTestHeaders(map[string]string{}),
+	}
+
+	params := map[string]interface{}{
+		"response": map[string]interface{}{
+			"headers": []interface{}{
+				map[string]interface{}{
+					"name":  "X-Nested-Response",
+					"value": "nested-response-value",
+				},
+			},
+		},
+	}
+
+	result := p.OnResponse(ctx, params)
+	mods, ok := result.(policy.UpstreamResponseModifications)
+	if !ok {
+		t.Errorf("Expected UpstreamResponseModifications, got %T", result)
+	}
+
+	if mods.SetHeaders["x-nested-response"] != "nested-response-value" {
+		t.Errorf("Expected nested response header to be set, got %v", mods.SetHeaders)
+	}
+}
+
+func TestSetHeadersPolicy_Validate_NestedConfiguration(t *testing.T) {
+	p := &SetHeadersPolicy{}
+
+	params := map[string]interface{}{
+		"request": map[string]interface{}{
+			"headers": []interface{}{
+				map[string]interface{}{
+					"name":  "X-Nested-Request",
+					"value": "nested-request-value",
+				},
+			},
+		},
+		"response": map[string]interface{}{
+			"headers": []interface{}{
+				map[string]interface{}{
+					"name":  "X-Nested-Response",
+					"value": "nested-response-value",
+				},
+			},
+		},
+	}
+
+	err := p.Validate(params)
+	if err != nil {
+		t.Errorf("Expected no error for nested configuration, got: %v", err)
 	}
 }

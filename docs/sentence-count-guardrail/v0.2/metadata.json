@@ -1,0 +1,11 @@
+{
+  "name": "sentence-count-guardrail",
+  "displayName": "Sentence Count Guardrail",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates the sentence count of request or response body content.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nCan be configured with min/max sentence count constraints and inverted logic.\nSupports separate configuration for request and response phases."
+}

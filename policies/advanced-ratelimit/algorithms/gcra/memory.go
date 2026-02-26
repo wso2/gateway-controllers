@@ -14,11 +14,12 @@
  *  limitations under the License.
  *
  */
- 
+
 package gcra
 
 import (
 	"context"
+	"log/slog"
 	"math"
 	"sync"
 	"time"
@@ -84,6 +85,13 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 
 	now := m.clock.Now()
 
+	slog.Debug("GCRA: checking rate limit",
+		"key", key,
+		"cost", n,
+		"now", now,
+		"limit", m.policy.Limit,
+		"burst", m.policy.Burst)
+
 	// Get current TAT (Theoretical Arrival Time) from map
 	var tat time.Time
 	entry, exists := m.data[key]
@@ -102,6 +110,12 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	emissionInterval := m.policy.EmissionInterval()
 	burstAllowance := m.policy.BurstAllowance()
 
+	slog.Debug("GCRA: calculated parameters",
+		"key", key,
+		"tat", tat,
+		"emissionInterval", emissionInterval,
+		"burstAllowance", burstAllowance)
+
 	// GCRA Algorithm Step 3: Calculate the earliest time this request can be allowed
 	allowAt := tat.Add(-burstAllowance)
 
@@ -111,6 +125,13 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 		// Request denied - calculate retry after
 		retryAfter := allowAt.Sub(now)
 		remaining := m.calculateRemaining(tat, now, emissionInterval, burstAllowance)
+
+		slog.Debug("GCRA: request denied",
+			"key", key,
+			"now", now,
+			"allowAt", allowAt,
+			"retryAfter", retryAfter,
+			"remaining", remaining)
 
 		// Full quota available when TAT <= now
 		fullQuotaAt := tat
@@ -165,6 +186,12 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 	// GCRA Algorithm Step 6: Calculate remaining requests
 	remaining = m.calculateRemaining(newTAT, now, emissionInterval, burstAllowance)
 
+	slog.Debug("GCRA: request allowed",
+		"key", key,
+		"cost", n,
+		"newTAT", newTAT,
+		"remaining", remaining)
+
 	// Full quota available when newTAT <= now
 	fullQuotaAt := newTAT
 	if newTAT.Before(now) {
@@ -181,6 +208,105 @@ func (m *MemoryLimiter) AllowN(ctx context.Context, key string, n int64) (*limit
 		Duration:    m.policy.Duration,
 		Policy:      m.policy,
 	}, nil
+}
+
+// ConsumeOrClampN consumes up to n tokens atomically.
+// If n exceeds available burst capacity, it consumes the available remainder and returns denied.
+func (m *MemoryLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if n < 0 {
+		n = 0
+	}
+
+	now := m.clock.Now()
+	emissionInterval := m.policy.EmissionInterval()
+	burstAllowance := m.policy.BurstAllowance()
+
+	var tat time.Time
+	entry, exists := m.data[key]
+	if exists && now.Before(entry.expiration) {
+		tat = entry.tat
+	} else {
+		tat = now
+	}
+
+	if tat.Before(now) {
+		tat = now
+	}
+
+	allowAt := tat.Add(-burstAllowance)
+	remainingBefore := m.calculateRemaining(tat, now, emissionInterval, burstAllowance)
+
+	consumed := n
+	if now.Before(allowAt) {
+		consumed = 0
+	}
+	if consumed > remainingBefore {
+		consumed = remainingBefore
+	}
+	overflow := n - consumed
+	allowed := overflow == 0
+
+	newTAT := tat.Add(emissionInterval * time.Duration(consumed))
+	if consumed > 0 {
+		expiration := m.policy.Duration + burstAllowance
+		m.data[key] = &tatEntry{
+			tat:        newTAT,
+			expiration: now.Add(expiration),
+		}
+	}
+
+	remainingAfter := m.calculateRemaining(newTAT, now, emissionInterval, burstAllowance)
+
+	fullQuotaAt := newTAT
+	if newTAT.Before(now) {
+		fullQuotaAt = now
+	}
+
+	retryAfter := time.Duration(0)
+	if !allowed {
+		nextAllowAt := newTAT.Add(-burstAllowance)
+		if nextAllowAt.After(now) {
+			retryAfter = nextAllowAt.Sub(now)
+		}
+	}
+
+	return &limiter.Result{
+		Allowed:     allowed,
+		Requested:   n,
+		Consumed:    consumed,
+		Overflow:    overflow,
+		Limit:       m.policy.Limit,
+		Remaining:   remainingAfter,
+		Reset:       newTAT,
+		RetryAfter:  retryAfter,
+		FullQuotaAt: fullQuotaAt,
+		Duration:    m.policy.Duration,
+		Policy:      m.policy,
+	}, nil
+}
+
+// GetAvailable returns the available tokens for the given key without consuming
+func (m *MemoryLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := m.clock.Now()
+	emissionInterval := m.policy.EmissionInterval()
+	burstAllowance := m.policy.BurstAllowance()
+
+	// Get the Theoretical Arrival Time (TAT) for this key
+	tat, exists := m.data[key]
+	if !exists || now.After(tat.expiration) {
+		// No previous request or expired - full burst capacity available
+		return m.policy.Burst, nil
+	}
+
+	// Calculate remaining based on current TAT
+	remaining := m.calculateRemaining(tat.tat, now, emissionInterval, burstAllowance)
+	return remaining, nil
 }
 
 // calculateRemaining computes how many requests can still be made

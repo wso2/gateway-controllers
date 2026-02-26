@@ -48,29 +48,62 @@ func (p *RemoveHeadersPolicy) Mode() policy.ProcessingMode {
 
 // Validate validates the policy configuration parameters
 func (p *RemoveHeadersPolicy) Validate(params map[string]interface{}) error {
-	// At least one of requestHeaders or responseHeaders must be specified
-	requestHeadersRaw, hasRequestHeaders := params["requestHeaders"]
-	responseHeadersRaw, hasResponseHeaders := params["responseHeaders"]
-
-	if !hasRequestHeaders && !hasResponseHeaders {
-		return fmt.Errorf("at least one of 'requestHeaders' or 'responseHeaders' must be specified")
+	// At least one of request.headers or response.headers must be specified.
+	// Legacy flat keys are also accepted for runtime compatibility.
+	requestHeadersRaw, hasRequestHeaders, err := p.getPhaseHeaders(params, "request", "requestHeaders")
+	if err != nil {
+		return err
+	}
+	responseHeadersRaw, hasResponseHeaders, err := p.getPhaseHeaders(params, "response", "responseHeaders")
+	if err != nil {
+		return err
 	}
 
-	// Validate requestHeaders if present
+	if !hasRequestHeaders && !hasResponseHeaders {
+		return fmt.Errorf("at least one of 'request.headers' or 'response.headers' must be specified")
+	}
+
+	// Validate request headers if present
 	if hasRequestHeaders {
-		if err := p.validateHeaderNames(requestHeadersRaw, "requestHeaders"); err != nil {
+		if err := p.validateHeaderNames(requestHeadersRaw, "request.headers"); err != nil {
 			return err
 		}
 	}
 
-	// Validate responseHeaders if present
+	// Validate response headers if present
 	if hasResponseHeaders {
-		if err := p.validateHeaderNames(responseHeadersRaw, "responseHeaders"); err != nil {
+		if err := p.validateHeaderNames(responseHeadersRaw, "response.headers"); err != nil {
 			return err
 		}
 	}
 
 	return nil
+}
+
+// getPhaseHeaders extracts headers for a phase, supporting both nested
+// (`request.headers`/`response.headers`) and legacy flat keys.
+func (p *RemoveHeadersPolicy) getPhaseHeaders(
+	params map[string]interface{},
+	phaseKey string,
+	legacyKey string,
+) (interface{}, bool, error) {
+	if phaseRaw, ok := params[phaseKey]; ok {
+		phaseMap, ok := phaseRaw.(map[string]interface{})
+		if !ok {
+			return nil, false, fmt.Errorf("%s must be an object", phaseKey)
+		}
+		headersRaw, ok := phaseMap["headers"]
+		if !ok {
+			return nil, false, fmt.Errorf("%s.headers must be specified", phaseKey)
+		}
+		return headersRaw, true, nil
+	}
+
+	if headersRaw, ok := params[legacyKey]; ok {
+		return headersRaw, true, nil
+	}
+
+	return nil, false, nil
 }
 
 // validateHeaderNames validates a list of header name objects
@@ -147,9 +180,9 @@ func (p *RemoveHeadersPolicy) parseHeaderNames(headersRaw interface{}) []string 
 // OnRequest removes headers from the request
 // Uses RemoveHeaders to remove specified headers from requests
 func (p *RemoveHeadersPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	// Check if requestHeaders are configured
-	requestHeadersRaw, ok := params["requestHeaders"]
-	if !ok {
+	// Check if request headers are configured.
+	requestHeadersRaw, ok, err := p.getPhaseHeaders(params, "request", "requestHeaders")
+	if err != nil || !ok {
 		// No request headers to remove, pass through
 		return policy.UpstreamRequestModifications{}
 	}
@@ -168,9 +201,9 @@ func (p *RemoveHeadersPolicy) OnRequest(ctx *policy.RequestContext, params map[s
 // OnResponse removes headers from the response
 // Uses RemoveHeaders to remove specified headers from responses
 func (p *RemoveHeadersPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	// Check if responseHeaders are configured
-	responseHeadersRaw, ok := params["responseHeaders"]
-	if !ok {
+	// Check if response headers are configured.
+	responseHeadersRaw, ok, err := p.getPhaseHeaders(params, "response", "responseHeaders")
+	if err != nil || !ok {
 		// No response headers to remove, pass through
 		return policy.UpstreamResponseModifications{}
 	}

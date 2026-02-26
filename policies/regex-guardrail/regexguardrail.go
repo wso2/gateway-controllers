@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package regexguardrail
 
 import (
@@ -29,6 +29,7 @@ import (
 
 const (
 	GuardrailErrorCode = 422
+	DefaultJSONPath    = "$.messages"
 )
 
 // RegexGuardrailPolicy implements regex-based content validation
@@ -84,7 +85,11 @@ func GetPolicy(
 
 // parseParams parses and validates parameters from map to struct
 func parseParams(params map[string]interface{}) (RegexGuardrailPolicyParams, error) {
-	var result RegexGuardrailPolicyParams
+	result := RegexGuardrailPolicyParams{
+		JsonPath:       DefaultJSONPath,
+		Invert:         false,
+		ShowAssessment: false,
+	}
 
 	// Validate and extract regex parameter (required)
 	regexRaw, ok := params["regex"]

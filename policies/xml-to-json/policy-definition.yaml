@@ -1,5 +1,5 @@
 name: xml-to-json
-version: v0.1.0
+version: v0.2.0
 description: |
   This policy provides the capability to transform a request/response with an XML payload to a request/response with a JSON payload.
   This policy assumes that the request/response payload is XML. Attempting to use it on a request/response with a non-XML payload will result in premature termination of the mediation flow.

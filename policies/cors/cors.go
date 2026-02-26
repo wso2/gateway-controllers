@@ -137,6 +137,11 @@ func (p *CorsPolicy) OnRequest(ctx *policy.RequestContext, params map[string]any
 			ctx.Metadata["cors_headers"] = corsHeaders
 		} else {
 			slog.Debug("CORS: No CORS headers to add for non-preflight request")
+			// If there was an Origin header, we must strip any CORS headers
+			// that the upstream may have set, to prevent origin bypass
+			if ctx.Headers.Has("Origin") {
+				ctx.Metadata["cors_strip"] = true
+			}
 		}
 		return nil
 	}
@@ -262,6 +267,16 @@ func (p *CorsPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]a
 		slog.Debug("CORS: Adding CORS headers to response")
 		return policy.UpstreamResponseModifications{
 			SetHeaders: corsHeaders,
+		}
+	}
+	if _, strip := ctx.Metadata["cors_strip"]; strip {
+		slog.Debug("CORS: Stripping upstream CORS headers for disallowed origin")
+		return policy.UpstreamResponseModifications{
+			RemoveHeaders: []string{
+				"Access-Control-Allow-Origin",
+				"Access-Control-Allow-Credentials",
+				"Access-Control-Expose-Headers",
+			},
 		}
 	}
 	slog.Debug("CORS: No CORS headers to add to response")

@@ -55,6 +55,29 @@ func GetPolicy(
 func transformToRatelimitParams(params map[string]interface{}, metadata policy.PolicyMetadata) map[string]interface{} {
 	limits, _ := params["limits"].([]interface{})
 
+	// basic-ratelimit uses `requests` while advanced-ratelimit expects `limit`.
+	// Translate each limit entry before delegating.
+	transformedLimits := make([]interface{}, 0, len(limits))
+	for _, entry := range limits {
+		limitMap, ok := entry.(map[string]interface{})
+		if !ok {
+			transformedLimits = append(transformedLimits, entry)
+			continue
+		}
+
+		translated := make(map[string]interface{}, len(limitMap))
+		for k, v := range limitMap {
+			translated[k] = v
+		}
+
+		if requests, ok := translated["requests"]; ok {
+			translated["limit"] = requests
+			delete(translated, "requests")
+		}
+
+		transformedLimits = append(transformedLimits, translated)
+	}
+
 	keyExtractorType := "routename"
 	if metadata.AttachedTo == policy.LevelAPI {
 		keyExtractorType = "apiname"
@@ -64,7 +87,7 @@ func transformToRatelimitParams(params map[string]interface{}, metadata policy.P
 		"quotas": []interface{}{
 			map[string]interface{}{
 				"name":   "default",
-				"limits": limits,
+				"limits": transformedLimits,
 				"keyExtraction": []interface{}{
 					map[string]interface{}{
 						"type": keyExtractorType,

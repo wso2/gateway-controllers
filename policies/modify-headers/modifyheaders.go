@@ -39,7 +39,6 @@ func GetPolicy(
 
 const (
 	ActionSet    HeaderAction = "SET"
-	ActionAppend HeaderAction = "APPEND"
 	ActionDelete HeaderAction = "DELETE"
 )
 
@@ -122,10 +121,9 @@ func (p *ModifyHeadersPolicy) parseHeaderModifications(headersRaw interface{}) (
 }
 
 // applyHeaderModifications applies header modifications and returns the result
-func (p *ModifyHeadersPolicy) applyHeaderModifications(modifications []HeaderModification) (map[string]string, []string, map[string][]string) {
+func (p *ModifyHeadersPolicy) applyHeaderModifications(modifications []HeaderModification) (map[string]string, []string) {
 	setHeaders := make(map[string]string)
 	removeHeaders := []string{}
-	appendHeaders := make(map[string][]string)
 
 	for _, mod := range modifications {
 		switch mod.Action {
@@ -133,17 +131,10 @@ func (p *ModifyHeadersPolicy) applyHeaderModifications(modifications []HeaderMod
 			setHeaders[mod.Name] = mod.Value
 		case ActionDelete:
 			removeHeaders = append(removeHeaders, mod.Name)
-		case ActionAppend:
-			// Accumulate multiple APPEND operations for the same header
-			if existing, ok := appendHeaders[mod.Name]; ok {
-				appendHeaders[mod.Name] = append(existing, mod.Value)
-			} else {
-				appendHeaders[mod.Name] = []string{mod.Value}
-			}
 		}
 	}
 
-	return setHeaders, removeHeaders, appendHeaders
+	return setHeaders, removeHeaders
 }
 
 // OnRequest modifies request headers
@@ -176,12 +167,11 @@ func (p *ModifyHeadersPolicy) OnRequest(ctx *policy.RequestContext, params map[s
 	}
 
 	// Apply modifications
-	setHeaders, removeHeaders, appendHeaders := p.applyHeaderModifications(modifications)
+	setHeaders, removeHeaders := p.applyHeaderModifications(modifications)
 
 	return policy.UpstreamRequestModifications{
 		SetHeaders:    setHeaders,
 		RemoveHeaders: removeHeaders,
-		AppendHeaders: appendHeaders,
 	}
 }
 
@@ -216,11 +206,10 @@ func (p *ModifyHeadersPolicy) OnResponse(ctx *policy.ResponseContext, params map
 	}
 
 	// Apply modifications
-	setHeaders, removeHeaders, appendHeaders := p.applyHeaderModifications(modifications)
+	setHeaders, removeHeaders := p.applyHeaderModifications(modifications)
 
 	return policy.UpstreamResponseModifications{
 		SetHeaders:    setHeaders,
 		RemoveHeaders: removeHeaders,
-		AppendHeaders: appendHeaders,
 	}
 }

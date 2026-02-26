@@ -1,0 +1,8 @@
+{
+  "name": "add-headers",
+  "displayName": "Add Headers",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": ["Transformation"],
+  "description": "This policy provides the capability to add arbitrary headers to either the request or the response.\nAdding the same header multiple times will not overwrite the existing header values and it will be appended to the list of values if the header already exists."
+}

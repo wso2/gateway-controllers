@@ -1,0 +1,10 @@
+{
+  "name": "request-rewrite",
+  "displayName": "Request Rewrite",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Transformation"
+  ],
+  "description": "Rewrites incoming requests by updating path, query parameters, and/or HTTP method before forwarding to upstream services.\nSupports prefix replacement, full path replacement, and regex-based path substitution.\nSupports query parameter actions including replace, remove, add, append, and regex-based substitution.\nOptional header and query match conditions control when rewrites are applied."
+}

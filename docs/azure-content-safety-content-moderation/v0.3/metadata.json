@@ -1,0 +1,11 @@
+{
+  "name": "azure-content-safety-content-moderation",
+  "displayName": "Azure Content Safety Content Moderation",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request and response content with Azure Content Safety using configurable per-category severity thresholds and JSONPath extraction."
+}

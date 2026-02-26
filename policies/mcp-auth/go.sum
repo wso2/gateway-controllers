@@ -1,6 +1,10 @@
-github.com/golang-jwt/jwt/v5 v5.2.2 h1:Rl4B7itRWVtYIHFrSNd7vhTiz9UpLdi6gZhZ3wEeDy8=
-github.com/golang-jwt/jwt/v5 v5.2.2/go.mod h1:pqrtFR0X4osieyHYxtmOUWsAWrfe1Q5UVIyoH402zdk=
-github.com/wso2/api-platform/sdk v0.3.1 h1:Wr4n+xiJMOH1oqOMyGhiw9bTxCR97OTO5VZMPpp07lc=
-github.com/wso2/api-platform/sdk v0.3.1/go.mod h1:amQIiBlKZEeFFbDhYzIOj47ADc5mDPMNzhR40SByqB8=
-github.com/wso2/gateway-controllers/policies/jwt-auth v0.1.1 h1:g5ASjA6vRqvaQYFcOMOjhiZUWFa+ww8WI7Zl2K5x/gc=
-github.com/wso2/gateway-controllers/policies/jwt-auth v0.1.1/go.mod h1:ja+VqRS5BT4nxvoCuSDHFpU+yTmxe8E0bZerfhEJoQ0=
+github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
+github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
+github.com/wso2/api-platform/sdk v0.3.9 h1:zL2knXB7ZYrGvhCV6SnVwDEfK/YkcEx8gXw8I/Ty+u0=
+github.com/wso2/api-platform/sdk v0.3.9/go.mod h1:pEUne6LknzYXF7htjYWNTTa3Lku3DfhI26dwFnEzK1A=
+github.com/wso2/gateway-controllers/policies/jwt-auth v0.2.0 h1:vdaxiPpffRl8/b/oyOZ3wFU+l7/yT7qazuV05dVAMPI=
+github.com/wso2/gateway-controllers/policies/jwt-auth v0.2.0/go.mod h1:aOfDHYiXfeJaos1V0bDPLNcKKGHWzz/Rivhc4Zxc+8E=
+golang.org/x/crypto v0.47.0 h1:V6e3FRj+n4dbpw86FJ8Fv7XVOql7TEwpHapKoMJ/GO8=
+golang.org/x/crypto v0.47.0/go.mod h1:ff3Y9VzzKbwSSEzWqJsJVBnWmRwRSHt/6Op5n9bQc4A=
+golang.org/x/sys v0.40.0 h1:DBZZqJ2Rkml6QMQsZywtnjnnGvHza6BTfYFWY9kjEWQ=
+golang.org/x/sys v0.40.0/go.mod h1:OgkHotnGiDImocRcuBABYBEXf8A9a87e/uXjp9XT3ks=

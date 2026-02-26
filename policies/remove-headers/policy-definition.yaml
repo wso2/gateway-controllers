@@ -1,45 +1,66 @@
 name: remove-headers
-version: v0.1.0
+version: v0.8.0
 description: |
-  This policy provides the capability to remove headers from either the request or the response.
-  Header removal is performed by header name matching (case-insensitive). If a header does not exist, the removal operation is ignored without error.
+  Removes configured headers from requests and/or responses. Header matching is
+  case-insensitive, and removing a non-existent header is ignored.
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
-    requestHeaders:
-      type: array
-      description: Array of header names to remove from the request during request phase. At least
-        one of requestHeaders or responseHeaders must be specified.
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Header name (case-insensitive)
-            minLength: 1
-            maxLength: 256
-            pattern: "^[a-zA-Z0-9-_]+$"
-        required:
-        - name
-    responseHeaders:
-      type: array
-      description: Array of header names to remove from the response during response phase. At
-        least one of requestHeaders or responseHeaders must be specified.
-      items:
-        type: object
-        properties:
-          name:
-            type: string
-            description: Header name (case-insensitive)
-            minLength: 1
-            maxLength: 256
-            pattern: "^[a-zA-Z0-9-_]+$"
-        required:
-        - name
+    request:
+      type: object
+      additionalProperties: false
+      description: Specifies request-phase header removal settings.
+      properties:
+        headers:
+          type: array
+          x-wso2-policy-advanced-param: false
+          description: Specifies headers to remove during the request phase.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              name:
+                type: string
+                x-wso2-policy-advanced-param: false
+                description: Specifies the header name to remove. Matching is
+                  case-insensitive.
+                minLength: 1
+                maxLength: 256
+                pattern: "^[a-zA-Z0-9-_]+$"
+            required:
+            - name
+      required:
+      - headers
+    response:
+      type: object
+      additionalProperties: false
+      description: Specifies response-phase header removal settings.
+      properties:
+        headers:
+          type: array
+          x-wso2-policy-advanced-param: false
+          description: Specifies headers to remove during the response phase.
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              name:
+                type: string
+                x-wso2-policy-advanced-param: false
+                description: Specifies the header name to remove. Matching is
+                  case-insensitive.
+                minLength: 1
+                maxLength: 256
+                pattern: "^[a-zA-Z0-9-_]+$"
+            required:
+            - name
+      required:
+      - headers
   anyOf:
-    - required: [ requestHeaders ]
-    - required: [ responseHeaders ]
+    - required: [ request ]
+    - required: [ response ]
 
 systemParameters:
   type: object

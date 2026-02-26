@@ -1,0 +1,11 @@
+{
+  "name": "basic-ratelimit",
+  "displayName": "Rate Limit - Basic",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Simple request rate limiting policy that limits the number of requests per time window.\nUses route name as the rate limit key. For advanced rate limiting with multi-dimensional\nquotas, weighted costs, and custom key extraction, use the full 'ratelimit' policy."
+}

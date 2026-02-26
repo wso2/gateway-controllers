@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"strings"
 
+	store "github.com/wso2/api-platform/common/apikey"
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
@@ -88,17 +89,9 @@ func (p *APIKeyPolicy) OnRequest(ctx *policy.RequestContext, params map[string]i
 			"missing or invalid 'in' configuration")
 	}
 
-	var valuePrefix string
-	if valuePrefixRaw, ok := params["value-prefix"]; ok {
-		if vp, ok := valuePrefixRaw.(string); ok {
-			valuePrefix = vp
-		}
-	}
-
 	slog.Debug("API Key Auth Policy: Configuration loaded",
 		"keyName", keyName,
 		"location", location,
-		"valuePrefix", valuePrefix,
 	)
 
 	// Extract API key based on location
@@ -132,24 +125,6 @@ func (p *APIKeyPolicy) OnRequest(ctx *policy.RequestContext, params map[string]i
 		)
 		return p.handleAuthFailure(ctx, 401, "json", "Valid API key required",
 			"missing API key")
-	}
-
-	// Strip prefix if configured
-	if valuePrefix != "" {
-		originalLength := len(providedKey)
-		providedKey = stripPrefix(providedKey, valuePrefix)
-		slog.Debug("API Key Auth Policy: Processed value prefix",
-			"prefix", valuePrefix,
-			"originalLength", originalLength,
-			"processedLength", len(providedKey),
-		)
-
-		// If after stripping prefix, the key is empty, treat as missing
-		if providedKey == "" {
-			slog.Debug("API Key Auth Policy: API key became empty after prefix removal")
-			return p.handleAuthFailure(ctx, 401, "json", "Valid API key required",
-				"missing API key")
-		}
 	}
 
 	apiId := ctx.APIId
@@ -280,7 +255,7 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 
 // validateAPIKey validates the provided API key against external store/service
 func (p *APIKeyPolicy) validateAPIKey(apiId, apiOperation, operationMethod, apiKey string) (bool, error) {
-	apiKeyStore := policy.GetAPIkeyStoreInstance()
+	apiKeyStore := store.GetAPIkeyStoreInstance()
 	isValid, err := apiKeyStore.ValidateAPIKey(apiId, apiOperation, operationMethod, apiKey)
 	if err != nil {
 		return false, fmt.Errorf("failed to validate API key via the policy engine")
@@ -314,17 +289,5 @@ func extractQueryParam(path, param string) string {
 		return value[0]
 	}
 
-	return ""
-}
-
-// stripPrefix removes the specified prefix from the value (case-insensitive)
-// Returns the value with prefix removed, or empty string if prefix doesn't match
-func stripPrefix(value, prefix string) string {
-	// Do exact case-insensitive prefix matching
-	if len(value) >= len(prefix) && strings.EqualFold(value[:len(prefix)], prefix) {
-		return value[len(prefix):]
-	}
-
-	// No matching prefix found, return empty string
 	return ""
 }

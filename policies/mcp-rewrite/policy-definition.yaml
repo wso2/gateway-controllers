@@ -1,5 +1,5 @@
 name: mcp-rewrite
-version: v0.1.0
+version: v0.2.0
 description: |
   MCP Rewrite policy defines user-facing tools, resources, and prompts and maps
   them to backend capability names using optional "target" fields. Request payloads

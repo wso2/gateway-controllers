@@ -1,5 +1,5 @@
 name: mcp-acl-list
-version: v0.1.0
+version: v0.2.0
 description: |
   MCP ACL List policy controls access to tools, resources, and prompts using
   mode and exceptions. It filters list responses based on the configured mode

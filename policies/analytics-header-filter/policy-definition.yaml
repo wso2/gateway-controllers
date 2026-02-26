@@ -1,5 +1,5 @@
 name: analytics-header-filter
-version: v0.1.0
+version: v0.2.0
 description: |
   The Analytics Header Filter policy allows you to control which request and response headers 
   are included in analytics data using allow or deny modes. This policy is intended to prevent sensitive, 

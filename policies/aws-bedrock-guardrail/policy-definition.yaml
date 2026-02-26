@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v0.1.1
+version: v0.2.0
 description: |
   Validates request or response body content against AWS Bedrock Guardrails.
   Supports content filtering, topic detection, word filtering, and PII detection/masking.
@@ -19,7 +19,7 @@ parameters:
           description: |
             JSONPath expression to extract a specific value from JSON payload.
             If empty, validates the entire payload as a string.
-            Examples: "$.message", "$.data.content", "$.items[0].text"
+            Examples: "$.messages", "$.data.content", "$.items[0].text"
           default: ""
         redactPII:
           type: boolean
@@ -48,7 +48,7 @@ parameters:
           description: |
             JSONPath expression to extract a specific value from JSON payload.
             If empty, validates the entire payload as a string.
-            Examples: "$.message", "$.data.content", "$.items[0].text"
+            Examples: "$.messages", "$.data.content", "$.items[0].text"
           default: ""
         passthroughOnError:
           type: boolean

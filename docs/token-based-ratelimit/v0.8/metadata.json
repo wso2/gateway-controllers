@@ -1,0 +1,10 @@
+{
+  "name": "token-based-ratelimit",
+  "displayName": "Token Based Ratelimit",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. Supports independent limits for prompt tokens, completion tokens, and total tokens. Token counts are automatically extracted from LLM provider responses using provider-specific templates, enabling accurate usage-based rate limiting without manual cost configuration."
+}

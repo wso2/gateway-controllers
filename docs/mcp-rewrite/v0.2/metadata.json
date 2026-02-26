@@ -1,0 +1,8 @@
+{
+  "name": "mcp-rewrite",
+  "displayName": "MCP Rewrite",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": ["MCP", "AI"],
+  "description": "MCP Rewrite policy defines user-facing tools, resources, and prompts and maps\nthem to backend capability names using optional \"target\" fields. Request payloads\nare rewritten to the backend capability name when configured, and list responses\nrewrite capability names in-place to return user-facing values. When a list is\nprovided, only the configured capabilities are included in list responses.\n\n- Null or omitted: Allow all capabilities of that type without rewriting"
+}

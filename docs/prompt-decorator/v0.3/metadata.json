@@ -1,0 +1,10 @@
+{
+  "name": "prompt-decorator",
+  "displayName": "Prompt Decorator",
+  "version": "0.3",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Decorates prompts using configured text or messages blocks, with prepend or append behavior before upstream processing."
+}
