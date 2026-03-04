@@ -1274,7 +1274,10 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 	subject := sub
 	if userIdClaim != "" && userIdClaim != "sub" {
 		if v, ok := claims[userIdClaim]; ok {
-			subject = claimValueToString(v)
+			candidate := strings.TrimSpace(claimValueToString(v))
+			if candidate != "" && candidate != "null" {
+				subject = candidate
+			}
 		}
 	}
 
