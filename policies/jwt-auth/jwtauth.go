@@ -381,6 +381,7 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	userRequiredScopes := getStringArrayParam(params, "requiredScopes", []string{})
 	userRequiredClaims := getStringMapParam(params, "requiredClaims", map[string]string{})
 	userClaimMappings := getStringMapParam(params, "claimMappings", map[string]string{})
+	userIdClaim := getStringParam(params, "userIdClaim", "sub")
 	userAuthHeaderPrefix := getStringParam(params, "authHeaderPrefix", "")
 
 	slog.Debug("JWT Auth Policy: User configuration loaded",
@@ -537,7 +538,7 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	slog.Debug("JWT Auth Policy: All validations passed, authentication successful")
 
 	// Authentication successful - apply claim mappings and set AuthContext
-	return p.handleAuthSuccess(ctx, claims, userClaimMappings)
+	return p.handleAuthSuccess(ctx, claims, userClaimMappings, userIdClaim)
 }
 
 // validateTokenWithSignature validates JWT signature using JWKS
@@ -1257,7 +1258,7 @@ func parseScopes(scopeClaim, scpClaim interface{}) []string {
 }
 
 // handleAuthSuccess handles successful authentication
-func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string) policy.RequestAction {
+func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string, userIdClaim string) policy.RequestAction {
 	slog.Debug("JWT Auth Policy: handleAuthSuccess called",
 		"claimMappingsCount", len(claimMappings),
 	)
@@ -1265,11 +1266,18 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 	sub, _ := claims["sub"].(string)
 	iss, _ := claims["iss"].(string)
 
+	subject := sub
+	if userIdClaim != "" && userIdClaim != "sub" {
+		if v, ok := claims[userIdClaim]; ok {
+			subject = claimValueToString(v)
+		}
+	}
+
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      "jwt",
 		PolicyName:    "jwt-auth",
-		Subject:       sub,
+		Subject:       subject,
 		Issuer:        iss,
 		Audience:      parseAudience(claims["aud"]),
 		Scopes:        buildScopesMap(claims),
@@ -1277,7 +1285,7 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 	}
 
 	slog.Debug("JWT Auth Policy: AuthContext set",
-		"subject", sub,
+		"subject", subject,
 		"issuer", iss,
 	)
 

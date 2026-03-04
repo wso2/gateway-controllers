@@ -1449,8 +1449,8 @@ func TestJWTAuthPolicy_UserIdClaim_DefaultSub(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_CustomClaim tests that Subject is always set from 'sub' claim;
-// extra claims (formerly accessed via userIdClaim) are available in Properties.
+// TestJWTAuthPolicy_UserIdClaim_CustomClaim tests that Subject is set from the configured
+// userIdClaim ('user_id') when it is present in the token.
 func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1495,9 +1495,9 @@ func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Subject is always from 'sub' claim; custom claims go into Properties
-	if ctx.SharedContext.AuthContext.Subject != "user-sub-value" {
-		t.Errorf("Expected Subject='user-sub-value' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	// Subject should come from 'user_id' claim as configured by userIdClaim
+	if ctx.SharedContext.AuthContext.Subject != "custom-user-9999" {
+		t.Errorf("Expected Subject='custom-user-9999' (from user_id), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 	if ctx.SharedContext.AuthContext.Properties["user_id"] != "custom-user-9999" {
 		t.Errorf("Expected Properties[\"user_id\"]='custom-user-9999', got %q", ctx.SharedContext.AuthContext.Properties["user_id"])
@@ -1509,7 +1509,8 @@ func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_EmailClaim tests that Subject comes from 'sub'; email is in Properties
+// TestJWTAuthPolicy_UserIdClaim_EmailClaim tests that Subject is set from the configured
+// userIdClaim ('email') when it is present in the token.
 func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1553,9 +1554,9 @@ func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
 		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Subject is always from 'sub'; email is in Properties
-	if ctx.SharedContext.AuthContext.Subject != "subject-value" {
-		t.Errorf("Expected Subject='subject-value' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	// Subject should come from 'email' claim as configured by userIdClaim
+	if ctx.SharedContext.AuthContext.Subject != "alice@example.com" {
+		t.Errorf("Expected Subject='alice@example.com' (from email), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 	if ctx.SharedContext.AuthContext.Properties["email"] != "alice@example.com" {
 		t.Errorf("Expected Properties[\"email\"]='alice@example.com', got %q", ctx.SharedContext.AuthContext.Properties["email"])
@@ -1624,7 +1625,8 @@ func TestJWTAuthPolicy_UserIdClaim_MissingClaim(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_NumericValue tests that numeric claims are stringified in Properties
+// TestJWTAuthPolicy_UserIdClaim_NumericValue tests that Subject is set from the configured
+// userIdClaim ('account_id') with a numeric value, stringified correctly.
 func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1668,9 +1670,9 @@ func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
 		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Subject comes from 'sub'; numeric account_id goes into Properties (stringified)
-	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
-		t.Errorf("Expected Subject='user-12345' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	// Subject should come from 'account_id' claim as configured by userIdClaim (stringified)
+	if ctx.SharedContext.AuthContext.Subject != "987654321" {
+		t.Errorf("Expected Subject='987654321' (from account_id), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 	if ctx.SharedContext.AuthContext.Properties["account_id"] != "987654321" {
 		t.Errorf("Expected Properties[\"account_id\"]='987654321', got %q", ctx.SharedContext.AuthContext.Properties["account_id"])
@@ -1737,8 +1739,8 @@ func TestJWTAuthPolicy_UserIdClaim_EmptyString(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_WithClaimMappings tests that Subject comes from 'sub'
-// and claimMappings continue to work alongside AuthContext
+// TestJWTAuthPolicy_UserIdClaim_WithClaimMappings tests that Subject is set from the configured
+// userIdClaim ('username') and claimMappings continue to work alongside AuthContext.
 func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1788,9 +1790,9 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Subject comes from 'sub'; username is in Properties
-	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
-		t.Errorf("Expected Subject='user-12345' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	// Subject should come from 'username' claim as configured by userIdClaim
+	if ctx.SharedContext.AuthContext.Subject != "johndoe" {
+		t.Errorf("Expected Subject='johndoe' (from username), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 
 	// Verify claim mappings were also applied
