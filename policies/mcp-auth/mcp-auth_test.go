@@ -328,3 +328,59 @@ func createMockRequestContext(headers map[string][]string) *policy.RequestContex
 		Scheme:  "http",
 	}
 }
+
+func TestOnRequest_Delegation_Failure_SetsAuthContext(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(map[string][]string{
+		McpSessionHeader: {"session-123"},
+	})
+	ctx.Method = "GET"
+	ctx.Path = "/api/resource"
+
+	// No valid JWT token — JWT auth should fail, mcp-auth wraps and takes ownership
+	params := map[string]any{
+		"gatewayHost": "gateway.com",
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	// Should return ImmediateResponse (auth failure)
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("Expected ImmediateResponse (auth failure), got %T", action)
+	}
+
+	// AuthContext should be set by mcp-auth
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set on failure")
+	}
+	if ctx.SharedContext.AuthContext.Authenticated {
+		t.Error("Expected AuthContext.Authenticated=false on failure")
+	}
+	if ctx.SharedContext.AuthContext.AuthType != "jwt" {
+		t.Errorf("Expected AuthType='jwt', got %q", ctx.SharedContext.AuthContext.AuthType)
+	}
+	if ctx.SharedContext.AuthContext.PolicyName != "mcp-auth" {
+		t.Errorf("Expected PolicyName='mcp-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
+	}
+}
+
+func TestHandleAuthFailure_SetsAuthContext(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+
+	action := p.handleAuthFailure(ctx, 401, "json", "key managers not configured")
+
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Authenticated {
+		t.Error("Expected Authenticated=false")
+	}
+	if ctx.SharedContext.AuthContext.PolicyName != "mcp-auth" {
+		t.Errorf("Expected PolicyName='mcp-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
+	}
+}

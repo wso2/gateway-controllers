@@ -22,11 +22,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strconv"
 	"strings"
 
-	"github.com/golang-jwt/jwt/v5"
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
@@ -34,7 +32,6 @@ const (
 	WWWAuthenticateHeader     = "WWW-Authenticate"
 	AuthMethodBearer          = "Bearer resource_metadata="
 	WellKnownPath             = ".well-known/oauth-protected-resource"
-	MetadataValidatedClaims   = "auth.validatedClaims"
 	MetadataMcpMethod         = "mcp.method"
 	MetadataMcpCapabilityType = "mcp.type"
 	MetadataMcpCapabilityName = "mcp.name"
@@ -218,15 +215,10 @@ func (p *McpAuthzPolicy) OnRequest(ctx *policy.RequestContext, params map[string
 		slog.Debug("MCP Authorization Policy: Skipping authz...")
 		return nil
 	}
-	// Extract JWT claims
-	jwtClaims, ok := ctx.Metadata[MetadataValidatedClaims]
-	if !ok {
-		slog.Debug("MCP Authorization Policy: No validated claims found in metadata")
-		return p.handleAuthFailure(ctx, "Unauthorized: scope/claim validation failed", nil)
-	}
-	claims, ok := jwtClaims.(jwt.MapClaims)
-	if !ok {
-		slog.Debug("MCP Authorization Policy: Invalid claims type in metadata")
+	// Check AuthContext populated by an upstream auth policy
+	authCtx := ctx.SharedContext.AuthContext
+	if authCtx == nil || !authCtx.Authenticated {
+		slog.Debug("MCP Authorization Policy: No authenticated context found")
 		return p.handleAuthFailure(ctx, "Unauthorized: scope/claim validation failed", nil)
 	}
 
@@ -258,7 +250,7 @@ func (p *McpAuthzPolicy) OnRequest(ctx *policy.RequestContext, params map[string
 	ctx.Metadata[MetadataMcpCapabilityName] = attributeName
 
 	// Check authorization rules
-	authorized, missingScopes := p.checkAuthorization(attributeType, attributeName, mcpReq.Method, claims)
+	authorized, missingScopes := p.checkAuthorization(attributeType, attributeName, mcpReq.Method, authCtx)
 	if !authorized {
 		slog.Debug("MCP Authorization Policy: Authorization check failed",
 			"attributeName", mcpReq.Params.Name,
@@ -315,7 +307,7 @@ func (p *McpAuthzPolicy) getAttributeNameFromParams(method string, params MCPReq
 }
 
 // checkAuthorization validates whether the request should be authorized
-func (p *McpAuthzPolicy) checkAuthorization(attributeType, attributeName, method string, claims jwt.MapClaims) (bool, map[string]struct{}) {
+func (p *McpAuthzPolicy) checkAuthorization(attributeType, attributeName, method string, authCtx *policy.AuthContext) (bool, map[string]struct{}) {
 	if len(p.Rules) == 0 {
 		slog.Debug("MCP Authorization Policy: No rules configured")
 		return true, nil
@@ -332,7 +324,7 @@ func (p *McpAuthzPolicy) checkAuthorization(attributeType, attributeName, method
 	// Check if any matching rule grants access
 	isAuthorized := true
 	for _, rule := range matchingRules {
-		if ok, scopes := p.ruleGrantsAccess(rule, claims); !ok {
+		if ok, scopes := p.ruleGrantsAccess(rule, authCtx); !ok {
 			slog.Debug("MCP Authorization Policy: Rule did not grant access",
 				"attributeType", attributeType,
 				"attributeName", attributeName,
@@ -395,17 +387,17 @@ func (p *McpAuthzPolicy) findMatchingRules(attributeType, attributeName, method 
 }
 
 // ruleGrantsAccess checks if a rule's claims and scopes are satisfied
-func (p *McpAuthzPolicy) ruleGrantsAccess(rule Rule, claims jwt.MapClaims) (bool, []string) {
+func (p *McpAuthzPolicy) ruleGrantsAccess(rule Rule, authCtx *policy.AuthContext) (bool, []string) {
 	// Check required claims
 	if len(rule.RequiredClaims) > 0 {
-		if !p.checkClaims(rule.RequiredClaims, claims) {
+		if !p.checkClaims(rule.RequiredClaims, authCtx) {
 			return false, nil
 		}
 	}
 
 	// Check required scopes
 	if len(rule.RequiredScopes) > 0 {
-		ok, missing := p.checkScopes(rule.RequiredScopes, claims)
+		ok, missing := p.checkScopes(rule.RequiredScopes, authCtx)
 		if !ok {
 			return false, missing
 		}
@@ -414,93 +406,73 @@ func (p *McpAuthzPolicy) ruleGrantsAccess(rule Rule, claims jwt.MapClaims) (bool
 	return true, nil
 }
 
-// checkClaims verifies that all required claims match their expected values
-func (p *McpAuthzPolicy) checkClaims(requiredClaims map[string]string, claims jwt.MapClaims) bool {
+// checkClaims verifies that all required claims match their expected values in the AuthContext
+func (p *McpAuthzPolicy) checkClaims(requiredClaims map[string]string, authCtx *policy.AuthContext) bool {
 	for claimName, expectedValue := range requiredClaims {
-		claimValue, ok := claims[claimName]
-		if !ok {
-			slog.Debug("MCP Authorization Policy: Required claim not found",
-				"claim", claimName)
-			return false
-		}
-
-		// Convert claim value to string for comparison
-		claimStr, ok := claimValue.(string)
-		if !ok {
-			slog.Debug("MCP Authorization Policy: Claim value is not a string",
-				"claim", claimName)
-			return false
-		}
-
-		if claimStr != expectedValue {
-			slog.Debug("MCP Authorization Policy: Claim value mismatch",
-				"claim", claimName,
-				"expected", expectedValue,
-				"actual", claimStr)
-			return false
+		switch claimName {
+		case "sub":
+			if authCtx.Subject != expectedValue {
+				slog.Debug("MCP Authorization Policy: Claim value mismatch",
+					"claim", claimName,
+					"expected", expectedValue,
+					"actual", authCtx.Subject)
+				return false
+			}
+		case "iss":
+			if authCtx.Issuer != expectedValue {
+				slog.Debug("MCP Authorization Policy: Claim value mismatch",
+					"claim", claimName,
+					"expected", expectedValue,
+					"actual", authCtx.Issuer)
+				return false
+			}
+		case "aud":
+			found := false
+			for _, a := range authCtx.Audience {
+				if a == expectedValue {
+					found = true
+					break
+				}
+			}
+			if !found {
+				slog.Debug("MCP Authorization Policy: Required audience not found",
+					"claim", claimName,
+					"expected", expectedValue)
+				return false
+			}
+		default:
+			if authCtx.Properties == nil {
+				slog.Debug("MCP Authorization Policy: Required claim not found (no properties)",
+					"claim", claimName)
+				return false
+			}
+			if authCtx.Properties[claimName] != expectedValue {
+				slog.Debug("MCP Authorization Policy: Claim value mismatch",
+					"claim", claimName,
+					"expected", expectedValue,
+					"actual", authCtx.Properties[claimName])
+				return false
+			}
 		}
 	}
 
 	return true
 }
 
-// checkScopes verifies that at least one required scope is present in the token
-func (p *McpAuthzPolicy) checkScopes(requiredScopes []string, claims jwt.MapClaims) (bool, []string) {
+// checkScopes verifies that all required scopes are present in the AuthContext
+func (p *McpAuthzPolicy) checkScopes(requiredScopes []string, authCtx *policy.AuthContext) (bool, []string) {
 	var missing []string
-	// Get scopes from token (space-delimited "scope" or array "scp")
-	tokenScopes := p.extractScopes(claims)
-	if len(tokenScopes) == 0 {
-		slog.Debug("MCP Authorization Policy: No scopes found in token")
-		missing = append(missing, requiredScopes...)
-		return false, missing
-	}
-
-	// Check if all required scopes are in token scopes
-	for _, requiredScope := range requiredScopes {
-		if slices.Contains(tokenScopes, requiredScope) {
-			slog.Debug("MCP Authorization Policy: Scope match found",
-				"scope", requiredScope)
-		} else {
-			missing = append(missing, requiredScope)
+	for _, required := range requiredScopes {
+		if !authCtx.Scopes[required] {
+			missing = append(missing, required)
 		}
 	}
-
 	if len(missing) == 0 {
 		slog.Debug("MCP Authorization Policy: All required scopes are present")
 		return true, nil
 	}
-
-	slog.Debug("MCP Authorization Policy: No matching scopes found",
-		"required", requiredScopes,
-		"available", tokenScopes)
+	slog.Debug("MCP Authorization Policy: Missing required scopes", "missing", missing)
 	return false, missing
-}
-
-// extractScopes gets scopes from either "scope" (space-delimited) or "scp" (array) claim
-func (p *McpAuthzPolicy) extractScopes(claims jwt.MapClaims) []string {
-	var scopes []string
-
-	// Try space-delimited "scope" claim
-	if scopeVal, ok := claims["scope"]; ok {
-		if scopeStr, ok := scopeVal.(string); ok {
-			scopes = strings.Fields(scopeStr)
-			return scopes
-		}
-	}
-
-	// Try array "scp" claim
-	if scpVal, ok := claims["scp"]; ok {
-		if scpArray, ok := scpVal.([]any); ok {
-			for _, s := range scpArray {
-				if scopeStr, ok := s.(string); ok {
-					scopes = append(scopes, scopeStr)
-				}
-			}
-			return scopes
-		}
-	}
-
-	return scopes
 }
 
 // generateResourcePath generates the full resource URL for the given resource path

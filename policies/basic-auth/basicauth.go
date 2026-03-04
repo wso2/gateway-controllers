@@ -27,12 +27,6 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
-const (
-	// Metadata keys for context storage
-	MetadataKeyAuthSuccess = "auth.success"
-	MetadataKeyAuthUser    = "auth.username"
-	MetadataKeyAuthMethod  = "auth.method"
-)
 
 // BasicAuthPolicy implements HTTP Basic Authentication
 type BasicAuthPolicy struct{}
@@ -147,10 +141,12 @@ func (p *BasicAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[strin
 
 // handleAuthSuccess handles successful authentication
 func (p *BasicAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, username string) policy.RequestAction {
-	// Set metadata indicating successful authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = true
-	ctx.Metadata[MetadataKeyAuthUser] = username
-	ctx.Metadata[MetadataKeyAuthMethod] = "basic"
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "basic",
+		PolicyName:    "basic-auth",
+		Subject:       username,
+	}
 
 	// Continue to upstream with no modifications
 	return policy.UpstreamRequestModifications{}
@@ -163,9 +159,11 @@ func (p *BasicAuthPolicy) OnResponse(ctx *policy.ResponseContext, params map[str
 
 // handleAuthFailure handles authentication failure
 func (p *BasicAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, allowUnauthenticated bool, realm string, reason string) policy.RequestAction {
-	// Set metadata indicating failed authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = false
-	ctx.Metadata[MetadataKeyAuthMethod] = "basic"
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: false,
+		AuthType:      "basic",
+		PolicyName:    "basic-auth",
+	}
 
 	// If allowUnauthenticated is true, allow request to proceed
 	if allowUnauthenticated {

@@ -38,21 +38,13 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
-const (
-	// Metadata keys for context storage
-	MetadataKeyAuthSuccess  = "auth.success"
-	MetadataKeyAuthMethod   = "auth.method"
-	MetadataKeyTokenClaims  = "auth.claims"
-	MetadataKeyIssuer       = "auth.issuer"
-	MetadataKeySubject      = "auth.subject"
-	MetadataValidatedClaims = "auth.validatedClaims"
-
-	// AuthContext key for user ID (used for analytics)
-	AuthContextKeyUserID = "x-wso2-user-id"
-
-	// Default claim to extract user ID from
-	DefaultUserIdClaim = "sub"
-)
+// standardJWTClaims lists registered JWT claim names (RFC 7519) and common OAuth2 claims.
+// These are represented as typed fields on AuthContext and excluded from Properties.
+var standardJWTClaims = map[string]bool{
+	"iss": true, "sub": true, "aud": true,
+	"exp": true, "nbf": true, "iat": true, "jti": true,
+	"scope": true, "scp": true,
+}
 
 // JwtAuthPolicy implements JWT Authentication with JWKS support
 type JwtAuthPolicy struct {
@@ -390,7 +382,6 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	userRequiredClaims := getStringMapParam(params, "requiredClaims", map[string]string{})
 	userClaimMappings := getStringMapParam(params, "claimMappings", map[string]string{})
 	userAuthHeaderPrefix := getStringParam(params, "authHeaderPrefix", "")
-	userIdClaim := getStringParam(params, "userIdClaim", DefaultUserIdClaim)
 
 	slog.Debug("JWT Auth Policy: User configuration loaded",
 		"issuers", userIssuers,
@@ -399,7 +390,6 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 		"requiredClaimsCount", len(userRequiredClaims),
 		"claimMappingsCount", len(userClaimMappings),
 		"authHeaderPrefix", userAuthHeaderPrefix,
-		"userIdClaim", userIdClaim,
 	)
 
 	// Use user override if provided
@@ -462,12 +452,6 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 		)
 		return p.handleAuthFailure(ctx, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("token validation failed: %v", err))
 	}
-	// Store validated claims in metadata for authz policies to use
-	ctx.Metadata[MetadataValidatedClaims] = claims
-
-	// Store validated claims in metadata for authz policies to use
-	ctx.Metadata[MetadataValidatedClaims] = claims
-
 	slog.Debug("JWT Auth Policy: Token signature validated successfully")
 
 	// Note: Issuer validation is now done in validateTokenWithSignature when userIssuers is specified
@@ -552,8 +536,8 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 
 	slog.Debug("JWT Auth Policy: All validations passed, authentication successful")
 
-	// Authentication successful - apply claim mappings and set metadata
-	return p.handleAuthSuccess(ctx, claims, userClaimMappings, userIdClaim)
+	// Authentication successful - apply claim mappings and set AuthContext
+	return p.handleAuthSuccess(ctx, claims, userClaimMappings)
 }
 
 // validateTokenWithSignature validates JWT signature using JWKS
@@ -1273,48 +1257,29 @@ func parseScopes(scopeClaim, scpClaim interface{}) []string {
 }
 
 // handleAuthSuccess handles successful authentication
-func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string, userIdClaim string) policy.RequestAction {
+func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string) policy.RequestAction {
 	slog.Debug("JWT Auth Policy: handleAuthSuccess called",
 		"claimMappingsCount", len(claimMappings),
-		"userIdClaim", userIdClaim,
 	)
 
-	// Set metadata indicating successful authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = true
-	ctx.Metadata[MetadataKeyAuthMethod] = "jwt"
-	ctx.Metadata[MetadataKeyTokenClaims] = claims
+	sub, _ := claims["sub"].(string)
+	iss, _ := claims["iss"].(string)
 
-	// Set standard metadata
-	if iss, ok := claims["iss"].(string); ok {
-		ctx.Metadata[MetadataKeyIssuer] = iss
-		slog.Debug("JWT Auth Policy: Set issuer metadata",
-			"issuer", iss,
-		)
-	}
-	if sub, ok := claims["sub"].(string); ok {
-		ctx.Metadata[MetadataKeySubject] = sub
-		slog.Debug("JWT Auth Policy: Set subject metadata",
-			"subject", sub,
-		)
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		PolicyName:    "jwt-auth",
+		Subject:       sub,
+		Issuer:        iss,
+		Audience:      parseAudience(claims["aud"]),
+		Scopes:        buildScopesMap(claims),
+		Properties:    buildProperties(claims),
 	}
 
-	// Extract user ID from the specified claim and set it in AuthContext for analytics
-	if userIdClaim != "" {
-		if claimValue, exists := claims[userIdClaim]; exists {
-			userId := claimValueToString(claimValue)
-			if userId != "" {
-				ctx.SharedContext.AuthContext[AuthContextKeyUserID] = userId
-				slog.Debug("JWT Auth Policy: Set user ID in AuthContext",
-					"claim", userIdClaim,
-					"userId", userId,
-				)
-			}
-		} else {
-			slog.Debug("JWT Auth Policy: User ID claim not found or empty",
-				"claim", userIdClaim,
-			)
-		}
-	}
+	slog.Debug("JWT Auth Policy: AuthContext set",
+		"subject", sub,
+		"issuer", iss,
+	)
 
 	// Apply claim mappings as headers
 	modifications := policy.UpstreamRequestModifications{
@@ -1346,6 +1311,34 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 	return modifications
 }
 
+// buildScopesMap converts JWT scope/scp claims to a map[string]bool for AuthContext.Scopes.
+func buildScopesMap(claims jwt.MapClaims) map[string]bool {
+	scopes := parseScopes(claims["scope"], claims["scp"])
+	if len(scopes) == 0 {
+		return nil
+	}
+	result := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		result[s] = true
+	}
+	return result
+}
+
+// buildProperties extracts non-standard claims into a map[string]string for AuthContext.Properties.
+func buildProperties(claims jwt.MapClaims) map[string]string {
+	var props map[string]string
+	for k, v := range claims {
+		if standardJWTClaims[k] {
+			continue
+		}
+		if props == nil {
+			props = make(map[string]string)
+		}
+		props[k] = claimValueToString(v)
+	}
+	return props
+}
+
 // OnResponse is not used by this policy (authentication is request-only)
 func (p *JwtAuthPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
 	return nil // No response processing needed
@@ -1360,9 +1353,11 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 		"reason", reason,
 	)
 
-	// Set metadata indicating failed authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = false
-	ctx.Metadata[MetadataKeyAuthMethod] = "jwt"
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: false,
+		AuthType:      "jwt",
+		PolicyName:    "jwt-auth",
+	}
 
 	headers := map[string]string{
 		"content-type": "application/json",

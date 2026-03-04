@@ -104,12 +104,11 @@ func TestJWTAuthPolicy_ValidToken(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify successful authentication
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true")
 	}
-
-	if ctx.Metadata["auth.method"] != "jwt" {
-		t.Errorf("Expected auth.method to be 'jwt', got %v", ctx.Metadata["auth.method"])
+	if ctx.SharedContext.AuthContext != nil && ctx.SharedContext.AuthContext.AuthType != "jwt" {
+		t.Errorf("Expected AuthType='jwt', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
 
 	// Verify it's an UpstreamRequestModifications action
@@ -160,8 +159,8 @@ func TestJWTAuthPolicy_MissingToken(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify authentication failed
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false")
 	}
 
 	// Verify it's an ImmediateResponse
@@ -204,8 +203,8 @@ func TestJWTAuthPolicy_InvalidTokenFormat(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false for invalid token format")
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false for invalid token format")
 	}
 
 	_, ok := action.(policy.ImmediateResponse)
@@ -253,8 +252,8 @@ func TestJWTAuthPolicy_ExpiredToken(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false for expired token")
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false for expired token")
 	}
 
 	_, ok := action.(policy.ImmediateResponse)
@@ -301,8 +300,8 @@ func TestJWTAuthPolicy_InvalidAudience(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false for invalid audience")
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false for invalid audience")
 	}
 
 	_, ok := action.(policy.ImmediateResponse)
@@ -351,8 +350,8 @@ func TestJWTAuthPolicy_CustomClaims(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true when required claims match")
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true when required claims match")
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -401,8 +400,8 @@ func TestJWTAuthPolicy_InvalidCustomClaims(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false for mismatched required claims")
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false for mismatched required claims")
 	}
 
 	_, ok := action.(policy.ImmediateResponse)
@@ -453,8 +452,8 @@ func TestJWTAuthPolicy_InvalidSignature(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Should fail because signature doesn't match the JWKS public key
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false for token signed with invalid key")
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false for token signed with invalid key")
 	}
 
 	response, ok := action.(policy.ImmediateResponse)
@@ -504,8 +503,8 @@ func TestJWTAuthPolicy_CustomHeaderPrefix(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true with custom prefix override")
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true with custom prefix override")
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -663,8 +662,8 @@ func TestJWTAuthPolicy_RemoteWithSelfSignedCert(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify successful authentication - token validated against self-signed JWKS
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true with self-signed certificate, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true with self-signed certificate")
 	}
 
 	// Verify it's an UpstreamRequestModifications action
@@ -756,8 +755,8 @@ func TestJWTAuthPolicy_SkipTlsVerify_Success(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify successful authentication - TLS verification was skipped
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true with skipTlsVerify=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true with skipTlsVerify=true")
 	}
 
 	// Verify it's an UpstreamRequestModifications action
@@ -850,8 +849,8 @@ func TestJWTAuthPolicy_SkipTlsVerify_False_Fails(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify authentication failed - TLS verification should fail for self-signed cert
-	if ctx.Metadata["auth.success"] != false {
-		t.Errorf("Expected auth.success to be false with skipTlsVerify=false and self-signed cert, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=false with skipTlsVerify=false and self-signed cert")
 	}
 
 	// Verify it's an ImmediateResponse (error)
@@ -916,8 +915,8 @@ func TestJWTAuthPolicy_LocalInlineCertificate(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify successful authentication
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true with inline certificate, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true with inline certificate")
 	}
 
 	// Verify it's an UpstreamRequestModifications action
@@ -978,8 +977,8 @@ func TestJWTAuthPolicy_LocalCertificateFile(t *testing.T) {
 	action := p.OnRequest(ctx, params)
 
 	// Verify successful authentication
-	if ctx.Metadata["auth.success"] != true {
-		t.Errorf("Expected auth.success to be true with certificate file, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Errorf("Expected AuthContext.Authenticated=true with certificate file")
 	}
 
 	// Verify it's an UpstreamRequestModifications action
@@ -1070,9 +1069,8 @@ func createJWKSServer(t *testing.T, publicKey *rsa.PublicKey, kid string) *httpt
 func createMockRequestContext(headers map[string][]string) *policy.RequestContext {
 	return &policy.RequestContext{
 		SharedContext: &policy.SharedContext{
-			RequestID:   "test-request-id",
-			Metadata:    make(map[string]interface{}),
-			AuthContext: make(map[string]string), // Initialize AuthContext map
+			RequestID: "test-request-id",
+			Metadata:  make(map[string]interface{}),
 		},
 		Headers: policy.NewHeaders(headers),
 		Body:    nil,
@@ -1436,13 +1434,13 @@ func TestJWTAuthPolicy_UserIdClaim_DefaultSub(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Verify user ID was extracted from 'sub' claim
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "user-12345" {
-		t.Errorf("Expected x-wso2-user-id='user-12345', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	// Verify Subject was populated from 'sub' claim
+	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
+		t.Errorf("Expected Subject='user-12345', got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1451,7 +1449,8 @@ func TestJWTAuthPolicy_UserIdClaim_DefaultSub(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_CustomClaim tests extracting user ID from a custom claim
+// TestJWTAuthPolicy_UserIdClaim_CustomClaim tests that Subject is always set from 'sub' claim;
+// extra claims (formerly accessed via userIdClaim) are available in Properties.
 func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1492,13 +1491,16 @@ func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Verify user ID was extracted from 'user_id' claim, not 'sub'
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "custom-user-9999" {
-		t.Errorf("Expected x-wso2-user-id='custom-user-9999', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	// Subject is always from 'sub' claim; custom claims go into Properties
+	if ctx.SharedContext.AuthContext.Subject != "user-sub-value" {
+		t.Errorf("Expected Subject='user-sub-value' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	}
+	if ctx.SharedContext.AuthContext.Properties["user_id"] != "custom-user-9999" {
+		t.Errorf("Expected Properties[\"user_id\"]='custom-user-9999', got %q", ctx.SharedContext.AuthContext.Properties["user_id"])
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1507,7 +1509,7 @@ func TestJWTAuthPolicy_UserIdClaim_CustomClaim(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_EmailClaim tests extracting user ID from email claim
+// TestJWTAuthPolicy_UserIdClaim_EmailClaim tests that Subject comes from 'sub'; email is in Properties
 func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1547,13 +1549,16 @@ func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Verify user ID was extracted from 'email' claim
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "alice@example.com" {
-		t.Errorf("Expected x-wso2-user-id='alice@example.com', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	// Subject is always from 'sub'; email is in Properties
+	if ctx.SharedContext.AuthContext.Subject != "subject-value" {
+		t.Errorf("Expected Subject='subject-value' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	}
+	if ctx.SharedContext.AuthContext.Properties["email"] != "alice@example.com" {
+		t.Errorf("Expected Properties[\"email\"]='alice@example.com', got %q", ctx.SharedContext.AuthContext.Properties["email"])
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1562,7 +1567,8 @@ func TestJWTAuthPolicy_UserIdClaim_EmailClaim(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_MissingClaim tests behavior when specified claim doesn't exist
+// TestJWTAuthPolicy_UserIdClaim_MissingClaim tests that authentication succeeds when a non-existent
+// custom claim is specified; Subject still comes from 'sub'
 func TestJWTAuthPolicy_UserIdClaim_MissingClaim(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1602,15 +1608,14 @@ func TestJWTAuthPolicy_UserIdClaim_MissingClaim(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	// Authentication should still succeed even if userIdClaim is missing
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	// Authentication should still succeed even if a custom claim doesn't exist
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Verify user ID was NOT set (or is empty) when claim is missing
-	userId, exists := ctx.SharedContext.AuthContext["x-wso2-user-id"]
-	if exists && userId != "" {
-		t.Errorf("Expected x-wso2-user-id to be empty or not set when claim is missing, got '%v'", userId)
+	// Subject always comes from 'sub', regardless of userIdClaim parameter
+	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
+		t.Errorf("Expected Subject='user-12345' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1619,7 +1624,7 @@ func TestJWTAuthPolicy_UserIdClaim_MissingClaim(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_NumericValue tests extracting user ID from a numeric claim
+// TestJWTAuthPolicy_UserIdClaim_NumericValue tests that numeric claims are stringified in Properties
 func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1659,14 +1664,16 @@ func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Verify numeric user ID was converted to string
-	userId := ctx.SharedContext.AuthContext["x-wso2-user-id"]
-	if userId != "987654321" {
-		t.Errorf("Expected x-wso2-user-id='987654321', got '%v'", userId)
+	// Subject comes from 'sub'; numeric account_id goes into Properties (stringified)
+	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
+		t.Errorf("Expected Subject='user-12345' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
+	}
+	if ctx.SharedContext.AuthContext.Properties["account_id"] != "987654321" {
+		t.Errorf("Expected Properties[\"account_id\"]='987654321', got %q", ctx.SharedContext.AuthContext.Properties["account_id"])
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1675,7 +1682,8 @@ func TestJWTAuthPolicy_UserIdClaim_NumericValue(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_EmptyString tests behavior when userIdClaim parameter is empty
+// TestJWTAuthPolicy_UserIdClaim_EmptyString tests that Subject is still populated from 'sub'
+// when userIdClaim parameter is empty
 func TestJWTAuthPolicy_UserIdClaim_EmptyString(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1714,14 +1722,13 @@ func TestJWTAuthPolicy_UserIdClaim_EmptyString(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// When userIdClaim is empty string, should NOT extract user ID
-	userId, exists := ctx.SharedContext.AuthContext["x-wso2-user-id"]
-	if exists && userId != "" {
-		t.Errorf("Expected x-wso2-user-id to be empty when userIdClaim is empty string, got '%v'", userId)
+	// Subject is always from 'sub', even when userIdClaim param is empty
+	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
+		t.Errorf("Expected Subject='user-12345' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 
 	_, ok := action.(policy.UpstreamRequestModifications)
@@ -1730,7 +1737,8 @@ func TestJWTAuthPolicy_UserIdClaim_EmptyString(t *testing.T) {
 	}
 }
 
-// TestJWTAuthPolicy_UserIdClaim_WithClaimMappings tests that userIdClaim works alongside claimMappings
+// TestJWTAuthPolicy_UserIdClaim_WithClaimMappings tests that Subject comes from 'sub'
+// and claimMappings continue to work alongside AuthContext
 func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := createJWKSServer(t, publicKey, "test-kid")
@@ -1776,13 +1784,13 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 
 	action := p.OnRequest(ctx, params)
 
-	if ctx.Metadata["auth.success"] != true {
-		t.Fatalf("Expected auth.success=true, got %v", ctx.Metadata["auth.success"])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("Expected AuthContext.Authenticated=true")
 	}
 
-	// Verify user ID was extracted from 'username' claim
-	if ctx.SharedContext.AuthContext["x-wso2-user-id"] != "johndoe" {
-		t.Errorf("Expected x-wso2-user-id='johndoe', got '%v'", ctx.SharedContext.AuthContext["x-wso2-user-id"])
+	// Subject comes from 'sub'; username is in Properties
+	if ctx.SharedContext.AuthContext.Subject != "user-12345" {
+		t.Errorf("Expected Subject='user-12345' (from sub), got %q", ctx.SharedContext.AuthContext.Subject)
 	}
 
 	// Verify claim mappings were also applied
