@@ -38,6 +38,11 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
+const (
+	AuthType   = "jwt"
+	PolicyName = "jwt-auth"
+)
+
 // standardJWTClaims lists registered JWT claim names (RFC 7519) and common OAuth2 claims.
 // These are represented as typed fields on AuthContext and excluded from Properties.
 var standardJWTClaims = map[string]bool{
@@ -1275,8 +1280,8 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
-		AuthType:      "jwt",
-		PolicyName:    "jwt-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 		Subject:       subject,
 		Issuer:        iss,
 		Audience:      parseAudience(claims["aud"]),
@@ -1363,8 +1368,8 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
-		AuthType:      "jwt",
-		PolicyName:    "jwt-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 	}
 
 	headers := map[string]string{

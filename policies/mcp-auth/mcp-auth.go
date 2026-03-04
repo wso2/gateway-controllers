@@ -34,6 +34,8 @@ const (
 	AuthMethodBearer      = "Bearer resource_metadata="
 	WellKnownPath         = ".well-known/oauth-protected-resource"
 	McpSessionHeader      = "mcp-session-id"
+	AuthType              = "jwt"
+	PolicyName            = "mcp-auth"
 )
 
 type McpAuthPolicy struct{}
@@ -164,8 +166,8 @@ func (p *McpAuthPolicy) handleAuth(ctx *policy.RequestContext, params map[string
 		// Take ownership of AuthContext: mcp-auth is the effective policy that ran
 		ctx.SharedContext.AuthContext = &policy.AuthContext{
 			Authenticated: false,
-			AuthType:      "jwt",
-			PolicyName:    "mcp-auth",
+			AuthType:      AuthType,
+			PolicyName:    PolicyName,
 		}
 		headers := reqAction.(policy.ImmediateResponse).Headers
 		ir := reqAction.(policy.ImmediateResponse)
@@ -195,8 +197,8 @@ func (p *McpAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 	slog.Debug("MCP Auth Policy: Handling authentication failure", "statusCode", statusCode, "reason", reason)
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
-		AuthType:      "jwt",
-		PolicyName:    "mcp-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 	}
 	var body string
 	headers := map[string]string{

@@ -28,6 +28,11 @@ import (
 )
 
 
+const (
+	AuthType   = "basic"
+	PolicyName = "basic-auth"
+)
+
 // BasicAuthPolicy implements HTTP Basic Authentication
 type BasicAuthPolicy struct{}
 
@@ -143,8 +148,8 @@ func (p *BasicAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[strin
 func (p *BasicAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, username string) policy.RequestAction {
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
-		AuthType:      "basic",
-		PolicyName:    "basic-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 		Subject:       username,
 	}
 
@@ -161,8 +166,8 @@ func (p *BasicAuthPolicy) OnResponse(ctx *policy.ResponseContext, params map[str
 func (p *BasicAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, allowUnauthenticated bool, realm string, reason string) policy.RequestAction {
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
-		AuthType:      "basic",
-		PolicyName:    "basic-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 	}
 
 	// If allowUnauthenticated is true, allow request to proceed

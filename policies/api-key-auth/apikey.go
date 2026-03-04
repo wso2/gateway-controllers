@@ -30,6 +30,11 @@ import (
 )
 
 
+const (
+	AuthType   = "apikey"
+	PolicyName = "api-key-auth"
+)
+
 // APIKeyPolicy implements API Key Authentication
 type APIKeyPolicy struct {
 }
@@ -181,8 +186,8 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
-		AuthType:      "apikey",
-		PolicyName:    "api-key-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 	}
 
 	// Continue to upstream with no modifications
@@ -211,8 +216,8 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
-		AuthType:      "apikey",
-		PolicyName:    "api-key-auth",
+		AuthType:      AuthType,
+		PolicyName:    PolicyName,
 	}
 
 	headers := map[string]string{
