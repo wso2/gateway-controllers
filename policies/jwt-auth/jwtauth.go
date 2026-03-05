@@ -1290,6 +1290,7 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 		Audience:      parseAudience(claims["aud"]),
 		Scopes:        buildScopesMap(claims),
 		Properties:    buildProperties(claims),
+		Previous:      ctx.SharedContext.AuthContext,
 	}
 
 	slog.Debug("JWT Auth Policy: AuthContext set",
@@ -1373,6 +1374,7 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 		Authenticated: false,
 		AuthType:      AuthType,
 		PolicyName:    PolicyName,
+		Previous:      ctx.SharedContext.AuthContext,
 	}
 
 	headers := map[string]string{

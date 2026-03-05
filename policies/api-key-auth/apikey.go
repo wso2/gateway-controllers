@@ -188,6 +188,7 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 		Authenticated: true,
 		AuthType:      AuthType,
 		PolicyName:    PolicyName,
+		Previous:      ctx.SharedContext.AuthContext,
 	}
 
 	// Continue to upstream with no modifications
@@ -218,6 +219,7 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 		Authenticated: false,
 		AuthType:      AuthType,
 		PolicyName:    PolicyName,
+		Previous:      ctx.SharedContext.AuthContext,
 	}
 
 	headers := map[string]string{

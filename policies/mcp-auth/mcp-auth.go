@@ -168,6 +168,7 @@ func (p *McpAuthPolicy) handleAuth(ctx *policy.RequestContext, params map[string
 			Authenticated: false,
 			AuthType:      AuthType,
 			PolicyName:    PolicyName,
+			Previous:      ctx.SharedContext.AuthContext,
 		}
 		headers := reqAction.(policy.ImmediateResponse).Headers
 		ir := reqAction.(policy.ImmediateResponse)
@@ -190,6 +191,10 @@ func (p *McpAuthPolicy) handleAuth(ctx *policy.RequestContext, params map[string
 			Body:       reqAction.(policy.ImmediateResponse).Body,
 		}
 	}
+	// Take ownership of PolicyName: mcp-auth is the effective policy that ran
+	if ctx.SharedContext.AuthContext != nil {
+		ctx.SharedContext.AuthContext.PolicyName = PolicyName
+	}
 	return reqAction
 }
 
@@ -199,6 +204,7 @@ func (p *McpAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 		Authenticated: false,
 		AuthType:      AuthType,
 		PolicyName:    PolicyName,
+		Previous:      ctx.SharedContext.AuthContext,
 	}
 	var body string
 	headers := map[string]string{

@@ -1809,3 +1809,36 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 		t.Errorf("Expected X-User-Role='admin', got '%v'", modifications.SetHeaders["X-User-Role"])
 	}
 }
+
+func TestJWTAuthPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
+	p := &JwtAuthPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	ctx := createMockRequestContext(nil)
+	ctx.SharedContext.AuthContext = prior
+
+	claims := jwt.MapClaims{"sub": "alice", "iss": "https://issuer.example.com"}
+	p.handleAuthSuccess(ctx, claims, nil, "sub")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}
+
+func TestJWTAuthPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
+	p := &JwtAuthPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	ctx := createMockRequestContext(nil)
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthFailure(ctx, 401, "json", "Unauthorized", "token validation failed")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}

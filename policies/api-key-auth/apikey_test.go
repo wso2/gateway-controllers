@@ -342,3 +342,35 @@ func sanitizeTestName(v string) string {
 	v = strings.ReplaceAll(v, " ", "-")
 	return strings.ToLower(v)
 }
+
+func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
+	p := &APIKeyPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	ctx := newRequestContext(t, "GET", "/orders", nil, "api-1", "OrdersAPI", "v1", "/orders")
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthSuccess(ctx)
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}
+
+func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
+	p := &APIKeyPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	ctx := newRequestContext(t, "GET", "/orders", nil, "api-1", "OrdersAPI", "v1", "/orders")
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthFailure(ctx, 401, "json", "Valid API key required", "invalid API key")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}

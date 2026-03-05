@@ -267,6 +267,38 @@ func TestBasicAuthPolicy_OnResponse_NoOp(t *testing.T) {
 	}
 }
 
+func TestBasicAuthPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
+	p := &BasicAuthPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	ctx := newBasicRequestContext(nil)
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthSuccess(ctx, "alice")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}
+
+func TestBasicAuthPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
+	p := &BasicAuthPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	ctx := newBasicRequestContext(nil)
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthFailure(ctx, false, "Restricted", "invalid credentials")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}
+
 func assertJSONError(t *testing.T, body []byte) {
 	t.Helper()
 	var result map[string]string
