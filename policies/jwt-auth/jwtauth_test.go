@@ -1812,7 +1812,7 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 
 func TestJWTAuthPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
 	p := &JwtAuthPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := createMockRequestContext(nil)
 	ctx.SharedContext.AuthContext = prior
 
@@ -1829,7 +1829,7 @@ func TestJWTAuthPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
 
 func TestJWTAuthPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
 	p := &JwtAuthPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := createMockRequestContext(nil)
 	ctx.SharedContext.AuthContext = prior
 

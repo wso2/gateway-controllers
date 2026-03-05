@@ -50,7 +50,6 @@ func authenticatedAuthCtx(scopes map[string]bool, subject, issuer string, audien
 	return &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      "jwt",
-		PolicyName:    "jwt-auth",
 		Subject:       subject,
 		Issuer:        issuer,
 		Audience:      audiences,
@@ -275,6 +274,67 @@ func TestOnRequest_WildcardRule(t *testing.T) {
 	action := p.OnRequest(ctx, map[string]any{})
 	if action != nil {
 		t.Errorf("Expected nil (authorized by wildcard rule), got %T", action)
+	}
+}
+
+// ---- AuthContext mutation on success ----
+
+func TestOnRequest_Success_SetsAuthorizedAndAuthType(t *testing.T) {
+	params := rulesParam([]any{
+		map[string]any{
+			"attribute": map[string]any{"type": "tool", "name": "my-tool"},
+		},
+	})
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+
+	authCtx := &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      McpOAuthAuthType,
+		Scopes:        map[string]bool{},
+	}
+	body := toolCallBody("my-tool")
+	ctx := createMockContext("POST", "/mcp", body, authCtx)
+
+	action := p.OnRequest(ctx, params)
+
+	if action != nil {
+		t.Fatalf("Expected nil (pass-through), got %T", action)
+	}
+	if !ctx.SharedContext.AuthContext.Authorized {
+		t.Error("Expected AuthContext.Authorized=true after successful authz")
+	}
+	if ctx.SharedContext.AuthContext.AuthType != McpOAuthzAuthType {
+		t.Errorf("Expected AuthType=%q, got %q", McpOAuthzAuthType, ctx.SharedContext.AuthContext.AuthType)
+	}
+}
+
+func TestOnRequest_Success_NonMcpOAuthAuthType_Unchanged(t *testing.T) {
+	params := rulesParam([]any{
+		map[string]any{
+			"attribute": map[string]any{"type": "tool", "name": "my-tool"},
+		},
+	})
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+
+	authCtx := &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		Scopes:        map[string]bool{},
+	}
+	body := toolCallBody("my-tool")
+	ctx := createMockContext("POST", "/mcp", body, authCtx)
+
+	action := p.OnRequest(ctx, params)
+
+	if action != nil {
+		t.Fatalf("Expected nil (pass-through), got %T", action)
+	}
+	if !ctx.SharedContext.AuthContext.Authorized {
+		t.Error("Expected AuthContext.Authorized=true after successful authz")
+	}
+	// AuthType should be unchanged when it was not "mcp/oauth"
+	if ctx.SharedContext.AuthContext.AuthType != "jwt" {
+		t.Errorf("Expected AuthType='jwt' (unchanged), got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
 }
 

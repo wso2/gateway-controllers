@@ -31,8 +31,7 @@ import (
 
 
 const (
-	AuthType   = "apikey"
-	PolicyName = "api-key-auth"
+	AuthType = "apikey"
 )
 
 // APIKeyPolicy implements API Key Authentication
@@ -187,7 +186,6 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      AuthType,
-		PolicyName:    PolicyName,
 		Previous:      ctx.SharedContext.AuthContext,
 	}
 
@@ -218,7 +216,6 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
-		PolicyName:    PolicyName,
 		Previous:      ctx.SharedContext.AuthContext,
 	}
 

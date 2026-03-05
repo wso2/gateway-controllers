@@ -81,9 +81,6 @@ func TestBasicAuthPolicy_OnRequest_ValidCredentials(t *testing.T) {
 	if ctx.SharedContext.AuthContext.AuthType != "basic" {
 		t.Errorf("expected AuthType='basic', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
-	if ctx.SharedContext.AuthContext.PolicyName != "basic-auth" {
-		t.Errorf("expected PolicyName='basic-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
-	}
 	if ctx.SharedContext.AuthContext.Subject != "admin" {
 		t.Errorf("expected Subject='admin', got %q", ctx.SharedContext.AuthContext.Subject)
 	}
@@ -269,7 +266,7 @@ func TestBasicAuthPolicy_OnResponse_NoOp(t *testing.T) {
 
 func TestBasicAuthPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
 	p := &BasicAuthPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := newBasicRequestContext(nil)
 	ctx.SharedContext.AuthContext = prior
 
@@ -285,7 +282,7 @@ func TestBasicAuthPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
 
 func TestBasicAuthPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
 	p := &BasicAuthPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := newBasicRequestContext(nil)
 	ctx.SharedContext.AuthContext = prior
 

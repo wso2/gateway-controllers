@@ -1,4 +1,4 @@
 github.com/golang-jwt/jwt/v5 v5.3.1 h1:kYf81DTWFe7t+1VvL7eS+jKFVWaUnK9cB1qbwn63YCY=
 github.com/golang-jwt/jwt/v5 v5.3.1/go.mod h1:fxCRLWMO43lRc8nhHWY6LGqRcf+1gQWArsqaEUEa5bE=
-github.com/wso2/api-platform/sdk v0.4.0 h1:SdOcm70SDq0o3+SpbkhJfx65Mkr6y7+vM5mggnzOf8w=
-github.com/wso2/api-platform/sdk v0.4.0/go.mod h1:LeM3nQ86f7cyVg7uZYPgJXFsoBw/iz+nJzr94s40tYs=
+github.com/wso2/api-platform/sdk v0.4.1 h1:o/h02kMHp8knm/os8ie/MPAGYLL6dZamtuh36NpSd4w=
+github.com/wso2/api-platform/sdk v0.4.1/go.mod h1:LeM3nQ86f7cyVg7uZYPgJXFsoBw/iz+nJzr94s40tYs=

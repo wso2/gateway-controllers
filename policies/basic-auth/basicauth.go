@@ -29,8 +29,7 @@ import (
 
 
 const (
-	AuthType   = "basic"
-	PolicyName = "basic-auth"
+	AuthType = "basic"
 )
 
 // BasicAuthPolicy implements HTTP Basic Authentication
@@ -149,7 +148,6 @@ func (p *BasicAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, username
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      AuthType,
-		PolicyName:    PolicyName,
 		Subject:       username,
 		Previous:      ctx.SharedContext.AuthContext,
 	}
@@ -168,7 +166,6 @@ func (p *BasicAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, allowUna
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
-		PolicyName:    PolicyName,
 		Previous:      ctx.SharedContext.AuthContext,
 	}
 

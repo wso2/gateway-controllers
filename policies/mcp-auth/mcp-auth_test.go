@@ -365,11 +365,8 @@ func TestOnRequest_Delegation_Failure_SetsAuthContext(t *testing.T) {
 	if ctx.SharedContext.AuthContext.Authenticated {
 		t.Error("Expected AuthContext.Authenticated=false on failure")
 	}
-	if ctx.SharedContext.AuthContext.AuthType != "jwt" {
-		t.Errorf("Expected AuthType='jwt', got %q", ctx.SharedContext.AuthContext.AuthType)
-	}
-	if ctx.SharedContext.AuthContext.PolicyName != "mcp-auth" {
-		t.Errorf("Expected PolicyName='mcp-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
+	if ctx.SharedContext.AuthContext.AuthType != "mcp/oauth" {
+		t.Errorf("Expected AuthType='mcp/oauth', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
 }
 
@@ -389,14 +386,14 @@ func TestHandleAuthFailure_SetsAuthContext(t *testing.T) {
 	if ctx.SharedContext.AuthContext.Authenticated {
 		t.Error("Expected Authenticated=false")
 	}
-	if ctx.SharedContext.AuthContext.PolicyName != "mcp-auth" {
-		t.Errorf("Expected PolicyName='mcp-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
+	if ctx.SharedContext.AuthContext.AuthType != "mcp/oauth" {
+		t.Errorf("Expected AuthType='mcp/oauth', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
 }
 
 func TestMcpAuth_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
 	p := &McpAuthPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := createMockRequestContext(nil)
 	ctx.SharedContext.AuthContext = prior
 
@@ -410,7 +407,7 @@ func TestMcpAuth_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
 	}
 }
 
-func TestOnRequest_Delegation_Success_SetsAuthContextPolicyName(t *testing.T) {
+func TestOnRequest_Delegation_Success_SetsAuthContextAuthType(t *testing.T) {
 	privateKey, publicKey := generateRSATestKeys(t)
 	jwksServer := createMcpTestJWKSServer(t, publicKey, "test-kid")
 	defer jwksServer.Close()
@@ -461,13 +458,9 @@ func TestOnRequest_Delegation_Success_SetsAuthContextPolicyName(t *testing.T) {
 	if !ctx.SharedContext.AuthContext.Authenticated {
 		t.Error("Expected AuthContext.Authenticated=true on success")
 	}
-	// PolicyName must be overridden to mcp-auth, not jwt-auth
-	if ctx.SharedContext.AuthContext.PolicyName != "mcp-auth" {
-		t.Errorf("Expected PolicyName='mcp-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
-	}
-	// AuthType must remain jwt — only PolicyName is overridden
-	if ctx.SharedContext.AuthContext.AuthType != "jwt" {
-		t.Errorf("Expected AuthType='jwt', got %q", ctx.SharedContext.AuthContext.AuthType)
+	// AuthType must be overridden to mcp/oauth by mcp-auth
+	if ctx.SharedContext.AuthContext.AuthType != "mcp/oauth" {
+		t.Errorf("Expected AuthType='mcp/oauth', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
 }
 

@@ -4,7 +4,7 @@ go 1.25.1
 
 require (
 	github.com/wso2/api-platform/common v0.0.0-20260209055520-167eafeb88ca
-	github.com/wso2/api-platform/sdk v0.4.0
+	github.com/wso2/api-platform/sdk v0.4.1
 )
 
 require (

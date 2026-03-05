@@ -1,7 +1,7 @@
 github.com/wso2/api-platform/common v0.0.0-20260209055520-167eafeb88ca h1:m8Cj8Xi1YKZpIVNPD4GgkisZGxeZPSNIld/3HG8SYhI=
 github.com/wso2/api-platform/common v0.0.0-20260209055520-167eafeb88ca/go.mod h1:mT1Us+TDwhUhFEpOp5porwx3tKCXsWxQzzXgU3cffIQ=
-github.com/wso2/api-platform/sdk v0.4.0 h1:SdOcm70SDq0o3+SpbkhJfx65Mkr6y7+vM5mggnzOf8w=
-github.com/wso2/api-platform/sdk v0.4.0/go.mod h1:LeM3nQ86f7cyVg7uZYPgJXFsoBw/iz+nJzr94s40tYs=
+github.com/wso2/api-platform/sdk v0.4.1 h1:o/h02kMHp8knm/os8ie/MPAGYLL6dZamtuh36NpSd4w=
+github.com/wso2/api-platform/sdk v0.4.1/go.mod h1:LeM3nQ86f7cyVg7uZYPgJXFsoBw/iz+nJzr94s40tYs=
 golang.org/x/crypto v0.47.0 h1:V6e3FRj+n4dbpw86FJ8Fv7XVOql7TEwpHapKoMJ/GO8=
 golang.org/x/crypto v0.47.0/go.mod h1:ff3Y9VzzKbwSSEzWqJsJVBnWmRwRSHt/6Op5n9bQc4A=
 golang.org/x/sys v0.40.0 h1:DBZZqJ2Rkml6QMQsZywtnjnnGvHza6BTfYFWY9kjEWQ=

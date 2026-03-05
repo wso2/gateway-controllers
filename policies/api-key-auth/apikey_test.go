@@ -59,9 +59,6 @@ func TestAPIKeyPolicy_OnRequest_SuccessFromHeader(t *testing.T) {
 	if ctx.SharedContext.AuthContext.AuthType != "apikey" {
 		t.Fatalf("expected AuthType='apikey', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
-	if ctx.SharedContext.AuthContext.PolicyName != "api-key-auth" {
-		t.Fatalf("expected PolicyName='api-key-auth', got %q", ctx.SharedContext.AuthContext.PolicyName)
-	}
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
 	}
@@ -345,7 +342,7 @@ func sanitizeTestName(v string) string {
 
 func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
 	p := &APIKeyPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := newRequestContext(t, "GET", "/orders", nil, "api-1", "OrdersAPI", "v1", "/orders")
 	ctx.SharedContext.AuthContext = prior
 
@@ -361,7 +358,7 @@ func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
 
 func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
 	p := &APIKeyPolicy{}
-	prior := &policy.AuthContext{Authenticated: true, AuthType: "other", PolicyName: "other-policy"}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
 	ctx := newRequestContext(t, "GET", "/orders", nil, "api-1", "OrdersAPI", "v1", "/orders")
 	ctx.SharedContext.AuthContext = prior
 

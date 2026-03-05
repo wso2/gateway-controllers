@@ -35,6 +35,8 @@ const (
 	MetadataMcpMethod         = "mcp.method"
 	MetadataMcpCapabilityType = "mcp.type"
 	MetadataMcpCapabilityName = "mcp.name"
+	McpOAuthAuthType          = "mcp/oauth"
+	McpOAuthzAuthType         = "mcp/oauth+authz"
 )
 
 // MCPRequest represents the JSON-RPC MCP request structure
@@ -259,6 +261,12 @@ func (p *McpAuthzPolicy) OnRequest(ctx *policy.RequestContext, params map[string
 	}
 
 	slog.Debug("MCP Authorization Policy: Authorization check passed")
+	if authCtx := ctx.SharedContext.AuthContext; authCtx != nil {
+		authCtx.Authorized = true
+		if authCtx.AuthType == McpOAuthAuthType {
+			authCtx.AuthType = McpOAuthzAuthType
+		}
+	}
 	return nil
 }
 

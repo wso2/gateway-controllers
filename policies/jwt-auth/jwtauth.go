@@ -39,8 +39,7 @@ import (
 )
 
 const (
-	AuthType   = "jwt"
-	PolicyName = "jwt-auth"
+	AuthType = "jwt"
 )
 
 // standardJWTClaims lists registered JWT claim names (RFC 7519) and common OAuth2 claims.
@@ -1284,7 +1283,6 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      AuthType,
-		PolicyName:    PolicyName,
 		Subject:       subject,
 		Issuer:        iss,
 		Audience:      parseAudience(claims["aud"]),
@@ -1373,7 +1371,6 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 	ctx.SharedContext.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
-		PolicyName:    PolicyName,
 		Previous:      ctx.SharedContext.AuthContext,
 	}
 
