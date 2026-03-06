@@ -43,8 +43,14 @@ parameters:
             If true, includes detailed assessment information in error responses.
             If false, returns minimal error information.
           default: false
-      required:
-      - regex
+      anyOf:
+      - properties:
+          enabled:
+            const: false
+        required:
+        - enabled
+      - required:
+        - regex
     response:
       type: object
       x-wso2-policy-advanced-param: false
@@ -82,8 +88,14 @@ parameters:
             If true, includes detailed assessment information in error responses.
             If false, returns minimal error information.
           default: false
-      required:
-      - regex
+      anyOf:
+      - properties:
+          enabled:
+            const: false
+        required:
+        - enabled
+      - required:
+        - regex
   anyOf:
     - required: [ request ]
     - required: [ response ]

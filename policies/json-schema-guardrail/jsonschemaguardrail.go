@@ -93,6 +93,7 @@ func parseParams(params map[string]interface{}, defaultJSONPath string, defaultE
 		Enabled:  defaultEnabled,
 		JsonPath: defaultJSONPath,
 	}
+	enabledExplicitlyFalse := false
 
 	// Extract optional enabled parameter
 	if enabledRaw, ok := params["enabled"]; ok {
@@ -101,27 +102,30 @@ func parseParams(params map[string]interface{}, defaultJSONPath string, defaultE
 			return result, fmt.Errorf("'enabled' must be a boolean")
 		}
 		result.Enabled = enabled
+		enabledExplicitlyFalse = !enabled
 	}
 
-	// Validate and extract schema parameter (required)
-	schemaRaw, ok := params["schema"]
-	if !ok {
+	schemaRaw, hasSchema := params["schema"]
+	if !enabledExplicitlyFalse && !hasSchema {
 		return result, fmt.Errorf("'schema' parameter is required")
 	}
-	schema, ok := schemaRaw.(string)
-	if !ok {
-		return result, fmt.Errorf("'schema' must be a string")
-	}
-	if schema == "" {
-		return result, fmt.Errorf("'schema' cannot be empty")
-	}
 
-	// Validate schema is valid JSON
-	var schemaJSON interface{}
-	if err := json.Unmarshal([]byte(schema), &schemaJSON); err != nil {
-		return result, fmt.Errorf("'schema' must be valid JSON: %v", err)
+	if hasSchema {
+		schema, ok := schemaRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'schema' must be a string")
+		}
+		if schema == "" {
+			return result, fmt.Errorf("'schema' cannot be empty")
+		}
+
+		// Validate schema is valid JSON
+		var schemaJSON interface{}
+		if err := json.Unmarshal([]byte(schema), &schemaJSON); err != nil {
+			return result, fmt.Errorf("'schema' must be valid JSON: %v", err)
+		}
+		result.Schema = schema
 	}
-	result.Schema = schema
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {

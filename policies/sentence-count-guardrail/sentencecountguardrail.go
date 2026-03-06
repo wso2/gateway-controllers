@@ -121,6 +121,7 @@ func parseParams(params map[string]interface{}, isResponse bool) (SentenceCountG
 		JsonPath: DefaultJSONPath,
 		Enabled:  RequestFlowEnabledByDefault,
 	}
+	enabledExplicitlyFalse := false
 	if isResponse {
 		result.JsonPath = DefaultResponseJSONPath
 		result.Enabled = ResponseFlowEnabledByDefault
@@ -133,38 +134,46 @@ func parseParams(params map[string]interface{}, isResponse bool) (SentenceCountG
 			return result, fmt.Errorf("'enabled' must be a boolean")
 		}
 		result.Enabled = enabled
+		enabledExplicitlyFalse = !enabled
 	}
 
-	// Validate and extract min parameter (required)
-	minRaw, ok := params["min"]
-	if !ok {
-		return result, fmt.Errorf("'min' parameter is required")
-	}
-	min, err := extractInt(minRaw)
-	if err != nil {
-		return result, fmt.Errorf("'min' must be a number: %w", err)
-	}
-	if min < 0 {
-		return result, fmt.Errorf("'min' cannot be negative")
-	}
-	result.Min = min
+	minRaw, hasMin := params["min"]
+	maxRaw, hasMax := params["max"]
 
-	// Validate and extract max parameter (required)
-	maxRaw, ok := params["max"]
-	if !ok {
-		return result, fmt.Errorf("'max' parameter is required")
+	if !enabledExplicitlyFalse {
+		if !hasMin {
+			return result, fmt.Errorf("'min' parameter is required")
+		}
+		if !hasMax {
+			return result, fmt.Errorf("'max' parameter is required")
+		}
 	}
-	max, err := extractInt(maxRaw)
-	if err != nil {
-		return result, fmt.Errorf("'max' must be a number: %w", err)
+
+	if hasMin {
+		min, err := extractInt(minRaw)
+		if err != nil {
+			return result, fmt.Errorf("'min' must be a number: %w", err)
+		}
+		if min < 0 {
+			return result, fmt.Errorf("'min' cannot be negative")
+		}
+		result.Min = min
 	}
-	if max <= 0 {
-		return result, fmt.Errorf("'max' must be greater than 0")
+
+	if hasMax {
+		max, err := extractInt(maxRaw)
+		if err != nil {
+			return result, fmt.Errorf("'max' must be a number: %w", err)
+		}
+		if max <= 0 {
+			return result, fmt.Errorf("'max' must be greater than 0")
+		}
+		result.Max = max
 	}
-	if min > max {
+
+	if hasMin && hasMax && result.Min > result.Max {
 		return result, fmt.Errorf("'min' cannot be greater than 'max'")
 	}
-	result.Max = max
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {

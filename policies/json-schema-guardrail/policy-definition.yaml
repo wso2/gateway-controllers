@@ -38,8 +38,14 @@ parameters:
             If true, includes detailed validation error information in error responses.
             If false, returns minimal error information.
           default: false
-      required:
-      - schema
+      anyOf:
+      - properties:
+          enabled:
+            const: false
+        required:
+        - enabled
+      - required:
+        - schema
     response:
       type: object
       description: Configuration for response phase validation
@@ -72,8 +78,14 @@ parameters:
             If true, includes detailed validation error information in error responses.
             If false, returns minimal error information.
           default: false
-      required:
-      - schema
+      anyOf:
+      - properties:
+          enabled:
+            const: false
+        required:
+        - enabled
+      - required:
+        - schema
 
 systemParameters:         
   type: object

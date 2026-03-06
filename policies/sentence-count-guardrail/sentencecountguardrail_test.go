@@ -189,6 +189,82 @@ func TestParseParams(t *testing.T) {
 	}
 }
 
+func TestParseParams_DisabledFlow_DoesNotRequireMinMax(t *testing.T) {
+	tests := []struct {
+		name       string
+		isResponse bool
+	}{
+		{
+			name:       "request flow disabled",
+			isResponse: false,
+		},
+		{
+			name:       "response flow disabled",
+			isResponse: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseParams(map[string]interface{}{"enabled": false}, tc.isResponse)
+			if err != nil {
+				t.Fatalf("expected disabled flow params to parse without min/max, got error: %v", err)
+			}
+			if got.Enabled {
+				t.Fatalf("expected enabled=false, got true")
+			}
+		})
+	}
+}
+
+func TestDisabledFlow_GetPolicyAndHandlers_NoRequiredParams(t *testing.T) {
+	t.Run("request flow disabled", func(t *testing.T) {
+		pRaw, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+			"request": map[string]interface{}{"enabled": false},
+		})
+		if err != nil {
+			t.Fatalf("expected disabled request flow without min/max to be accepted, got %v", err)
+		}
+		p, ok := pRaw.(*SentenceCountGuardrailPolicy)
+		if !ok {
+			t.Fatalf("expected *SentenceCountGuardrailPolicy, got %T", pRaw)
+		}
+		if !p.hasRequestParams || p.requestParams.Enabled {
+			t.Fatalf("expected request params present and disabled, got hasRequest=%v enabled=%v", p.hasRequestParams, p.requestParams.Enabled)
+		}
+
+		action := p.OnRequest(&policy.RequestContext{
+			Body: &policy.Body{Content: []byte(`{"messages":[{"content":"Hi."}]}`)},
+		}, nil)
+		if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+			t.Fatalf("expected request no-op when request.enabled=false, got %T", action)
+		}
+	})
+
+	t.Run("response flow disabled", func(t *testing.T) {
+		pRaw, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+			"response": map[string]interface{}{"enabled": false},
+		})
+		if err != nil {
+			t.Fatalf("expected disabled response flow without min/max to be accepted, got %v", err)
+		}
+		p, ok := pRaw.(*SentenceCountGuardrailPolicy)
+		if !ok {
+			t.Fatalf("expected *SentenceCountGuardrailPolicy, got %T", pRaw)
+		}
+		if !p.hasResponseParams || p.responseParams.Enabled {
+			t.Fatalf("expected response params present and disabled, got hasResponse=%v enabled=%v", p.hasResponseParams, p.responseParams.Enabled)
+		}
+
+		action := p.OnResponse(&policy.ResponseContext{
+			ResponseBody: &policy.Body{Content: []byte(`{"choices":[{"message":{"content":"Hi."}}]}`)},
+		}, nil)
+		if _, ok := action.(policy.UpstreamResponseModifications); !ok {
+			t.Fatalf("expected response no-op when response.enabled=false, got %T", action)
+		}
+	})
+}
+
 func TestGetPolicy(t *testing.T) {
 	tests := []struct {
 		name        string

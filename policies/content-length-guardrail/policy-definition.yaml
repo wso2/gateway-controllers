@@ -46,9 +46,15 @@ parameters:
             If true, includes detailed assessment information in error responses.
             If false, returns minimal error information.
           default: false
-      required:
-      - min
-      - max
+      anyOf:
+      - properties:
+          enabled:
+            const: false
+        required:
+        - enabled
+      - required:
+        - min
+        - max
     response:
       type: object
       x-wso2-policy-advanced-param: false
@@ -89,9 +95,15 @@ parameters:
             If true, includes detailed assessment information in error responses.
             If false, returns minimal error information.
           default: false
-      required:
-      - min
-      - max
+      anyOf:
+      - properties:
+          enabled:
+            const: false
+        required:
+        - enabled
+      - required:
+        - min
+        - max
 
 systemParameters:         
   type: object

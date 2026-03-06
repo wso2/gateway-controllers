@@ -95,6 +95,7 @@ func parseParams(params map[string]interface{}, defaultJSONPath string, defaultE
 		Invert:         false,
 		ShowAssessment: false,
 	}
+	enabledExplicitlyFalse := false
 
 	// Extract optional enabled parameter
 	if enabledRaw, ok := params["enabled"]; ok {
@@ -103,27 +104,30 @@ func parseParams(params map[string]interface{}, defaultJSONPath string, defaultE
 			return result, fmt.Errorf("'enabled' must be a boolean")
 		}
 		result.Enabled = enabled
+		enabledExplicitlyFalse = !enabled
 	}
 
-	// Validate and extract regex parameter (required)
-	regexRaw, ok := params["regex"]
-	if !ok {
+	regexRaw, hasRegex := params["regex"]
+	if !enabledExplicitlyFalse && !hasRegex {
 		return result, fmt.Errorf("'regex' parameter is required")
 	}
-	regexPattern, ok := regexRaw.(string)
-	if !ok {
-		return result, fmt.Errorf("'regex' must be a string")
-	}
-	if regexPattern == "" {
-		return result, fmt.Errorf("'regex' cannot be empty")
-	}
 
-	// Validate regex is compilable
-	_, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return result, fmt.Errorf("invalid regex pattern: %w", err)
+	if hasRegex {
+		regexPattern, ok := regexRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'regex' must be a string")
+		}
+		if regexPattern == "" {
+			return result, fmt.Errorf("'regex' cannot be empty")
+		}
+
+		// Validate regex is compilable
+		_, err := regexp.Compile(regexPattern)
+		if err != nil {
+			return result, fmt.Errorf("invalid regex pattern: %w", err)
+		}
+		result.Regex = regexPattern
 	}
-	result.Regex = regexPattern
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
