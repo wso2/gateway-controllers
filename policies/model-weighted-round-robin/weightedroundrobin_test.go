@@ -118,8 +118,7 @@ func TestModelWeightedRoundRobinPolicy_GetPolicy_ParseErrors(t *testing.T) {
 
 func TestModelWeightedRoundRobinPolicy_GetPolicy_SuccessAndSequence(t *testing.T) {
 	p := mustGetWeightedPolicy(t, map[string]interface{}{
-		"models":          baseWeightedModels(),
-		"suspendDuration": float64(20),
+		"models": baseWeightedModels(),
 		"requestModel": map[string]interface{}{
 			"location":   "payload",
 			"identifier": "$.model",
@@ -129,8 +128,8 @@ func TestModelWeightedRoundRobinPolicy_GetPolicy_SuccessAndSequence(t *testing.T
 	if len(p.params.Models) != 2 {
 		t.Fatalf("expected two models, got %d", len(p.params.Models))
 	}
-	if p.params.SuspendDuration != 20 {
-		t.Fatalf("expected suspendDuration=20, got %d", p.params.SuspendDuration)
+	if p.params.SuspendDuration != DefaultSuspendDuration {
+		t.Fatalf("expected default suspendDuration=%d, got %d", DefaultSuspendDuration, p.params.SuspendDuration)
 	}
 	// weight 2 + 1 => sequence length 3
 	if len(p.weightedSequence) != 3 {

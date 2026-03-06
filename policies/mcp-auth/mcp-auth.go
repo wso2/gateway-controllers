@@ -30,11 +30,14 @@ import (
 )
 
 const (
-	WWWAuthenticateHeader = "WWW-Authenticate"
-	AuthMethodBearer      = "Bearer resource_metadata="
-	WellKnownPath         = ".well-known/oauth-protected-resource"
-	McpSessionHeader      = "mcp-session-id"
-	AuthType              = "mcp/oauth"
+	WWWAuthenticateHeader  = "WWW-Authenticate"
+	AuthMethodBearer       = "Bearer resource_metadata="
+	WellKnownPath          = ".well-known/oauth-protected-resource"
+	WellKnownEndpointPath  = "/" + WellKnownPath
+	McpSessionHeader       = "mcp-session-id"
+	AuthType               = "mcp/oauth"
+	MetadataKeyAuthSuccess = "auth.success"
+	MetadataKeyAuthMethod  = "auth.method"
 )
 
 type McpAuthPolicy struct{}
@@ -69,12 +72,17 @@ func (p *McpAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	onFailureStatusCode := getIntParam(params, "onFailureStatusCode", 401)
 	errorMessageFormat := getStringParam(params, "errorMessageFormat", "json")
 	userRequiredScopes := getStringArrayParam(params, "requiredScopes", []string{})
+	if err := validateAuthFailureConfig(onFailureStatusCode, errorMessageFormat); err != nil {
+		return buildInvalidConfigResponse(err.Error())
+	}
+
 	gatewayHost := getStringParam(params, "gatewayHost", "")
 	if gatewayHost != "" {
+		ensureRequestMetadata(ctx)
 		ctx.Metadata["gatewayHost"] = gatewayHost
 	}
 	// Check for GET /.well-known/oauth-protected-resource
-	if ctx.Method == "GET" && strings.Contains(ctx.Path, WellKnownPath) {
+	if ctx.Method == "GET" && isWellKnownEndpointRequest(ctx.Path) {
 		slog.Debug("MCP Auth Policy: Handling well-known protected resource metadata request")
 		sessionIds := ctx.Headers.Get(McpSessionHeader)
 		sessionId := ""
@@ -91,21 +99,9 @@ func (p *McpAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 
 		slog.Debug("MCP Auth Policy: Starting to parse key managers configuration")
 
-		issuers := []string{}
-		kms := make(map[string]string)
-		keyManagersList, ok := keyManagersRaw.([]any)
-		if ok {
-			for _, km := range keyManagersList {
-				if kmMap, ok := km.(map[string]any); ok {
-					name := getString(kmMap["name"])
-					issuer := getString(kmMap["issuer"])
-					if name == "" || issuer == "" {
-						continue
-					}
-					issuers = append(issuers, issuer)
-					kms[name] = issuer
-				}
-			}
+		issuers, kms, err := parseKeyManagers(keyManagersRaw)
+		if err != nil {
+			return buildInvalidConfigResponse(err.Error())
 		}
 		if len(issuers) == 0 {
 			return p.handleAuthFailure(ctx, onFailureStatusCode, errorMessageFormat, "no valid key managers found")
@@ -203,6 +199,9 @@ func (p *McpAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 		AuthType:      AuthType,
 		Previous:      ctx.SharedContext.AuthContext,
 	}
+	ensureRequestMetadata(ctx)
+	ctx.Metadata[MetadataKeyAuthSuccess] = false
+	ctx.Metadata[MetadataKeyAuthMethod] = "mcpAuth"
 	var body string
 	headers := map[string]string{
 		"content-type": "application/json",
@@ -350,4 +349,71 @@ func getString(v interface{}) string {
 		return s
 	}
 	return ""
+}
+
+func parseKeyManagers(keyManagersRaw any) ([]string, map[string]string, error) {
+	keyManagersList, ok := keyManagersRaw.([]any)
+	if !ok {
+		return nil, nil, fmt.Errorf("invalid policy configuration: keyManagers must be an array")
+	}
+
+	issuers := make([]string, 0, len(keyManagersList))
+	keyManagers := make(map[string]string, len(keyManagersList))
+	for _, km := range keyManagersList {
+		kmMap, ok := km.(map[string]any)
+		if !ok {
+			return nil, nil, fmt.Errorf("invalid policy configuration: keyManagers entries must be objects")
+		}
+
+		name := strings.TrimSpace(getString(kmMap["name"]))
+		issuer := strings.TrimSpace(getString(kmMap["issuer"]))
+		if name == "" || issuer == "" {
+			return nil, nil, fmt.Errorf("invalid policy configuration: each keyManager requires non-empty name and issuer")
+		}
+
+		issuers = append(issuers, issuer)
+		keyManagers[name] = issuer
+	}
+
+	return issuers, keyManagers, nil
+}
+
+func isWellKnownEndpointRequest(path string) bool {
+	return path == WellKnownEndpointPath || strings.HasSuffix(path, WellKnownEndpointPath)
+}
+
+func validateAuthFailureConfig(statusCode int, format string) error {
+	if statusCode != 401 && statusCode != 403 {
+		return fmt.Errorf("invalid policy configuration: onFailureStatusCode must be 401 or 403")
+	}
+
+	switch format {
+	case "json", "plain", "minimal":
+		return nil
+	default:
+		return fmt.Errorf("invalid policy configuration: errorMessageFormat must be one of [json, plain, minimal]")
+	}
+}
+
+func buildInvalidConfigResponse(message string) policy.RequestAction {
+	body, _ := json.Marshal(map[string]string{
+		"error":   "Internal Server Error",
+		"message": message,
+	})
+	return policy.ImmediateResponse{
+		StatusCode: 500,
+		Headers: map[string]string{
+			"content-type": "application/json",
+		},
+		Body: body,
+	}
+}
+
+func ensureRequestMetadata(ctx *policy.RequestContext) {
+	if ctx.SharedContext == nil {
+		ctx.SharedContext = &policy.SharedContext{}
+	}
+	if ctx.Metadata == nil {
+		ctx.Metadata = map[string]any{}
+	}
 }

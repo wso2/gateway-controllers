@@ -105,6 +105,9 @@ func parseRules(params map[string]any) ([]Rule, error) {
 	if !ok {
 		return nil, fmt.Errorf("rules must be an array")
 	}
+	if len(rulesArray) == 0 {
+		return nil, fmt.Errorf("rules must contain at least one rule")
+	}
 
 	var rules []Rule
 	for i, ruleRaw := range rulesArray {
@@ -126,6 +129,8 @@ func parseRules(params map[string]any) ([]Rule, error) {
 // parseRule parses a single rule from a map
 func parseRule(ruleMap map[string]any, index int) (Rule, error) {
 	rule := Rule{}
+	hasRequiredClaims := false
+	hasRequiredScopes := false
 
 	// Parse attribute (required)
 	attrRaw, ok := ruleMap["attribute"]
@@ -164,6 +169,7 @@ func parseRule(ruleMap map[string]any, index int) (Rule, error) {
 
 	// Parse requiredClaims (optional)
 	if claimsRaw, ok := ruleMap["requiredClaims"]; ok {
+		hasRequiredClaims = true
 		claimsMap, ok := claimsRaw.(map[string]any)
 		if !ok {
 			return rule, fmt.Errorf("rules[%d].requiredClaims must be an object", index)
@@ -180,6 +186,7 @@ func parseRule(ruleMap map[string]any, index int) (Rule, error) {
 
 	// Parse requiredScopes (optional)
 	if scopesRaw, ok := ruleMap["requiredScopes"]; ok {
+		hasRequiredScopes = true
 		scopesArray, ok := scopesRaw.([]any)
 		if !ok {
 			return rule, fmt.Errorf("rules[%d].requiredScopes must be an array", index)
@@ -191,6 +198,12 @@ func parseRule(ruleMap map[string]any, index int) (Rule, error) {
 			}
 			rule.RequiredScopes = append(rule.RequiredScopes, scopeStr)
 		}
+	}
+	if !hasRequiredClaims && !hasRequiredScopes {
+		return rule, fmt.Errorf("rules[%d] must define at least one of requiredClaims or requiredScopes", index)
+	}
+	if len(rule.RequiredClaims) == 0 && len(rule.RequiredScopes) == 0 {
+		return rule, fmt.Errorf("rules[%d] must define at least one non-empty authorization condition", index)
 	}
 
 	return rule, nil

@@ -75,7 +75,8 @@ func toolCallBody(toolName string) []byte {
 func TestGetPolicy(t *testing.T) {
 	params := rulesParam([]any{
 		map[string]any{
-			"attribute": map[string]any{"type": "tool", "name": "my-tool"},
+			"attribute":      map[string]any{"type": "tool", "name": "my-tool"},
+			"requiredScopes": []any{"mcp:tools:read"},
 		},
 	})
 	p, err := GetPolicy(policy.PolicyMetadata{}, params)
@@ -282,7 +283,8 @@ func TestOnRequest_WildcardRule(t *testing.T) {
 func TestOnRequest_Success_SetsAuthorizedAndAuthType(t *testing.T) {
 	params := rulesParam([]any{
 		map[string]any{
-			"attribute": map[string]any{"type": "tool", "name": "my-tool"},
+			"attribute":      map[string]any{"type": "tool", "name": "my-tool"},
+			"requiredScopes": []any{"mcp:tools:read"},
 		},
 	})
 	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
@@ -290,7 +292,7 @@ func TestOnRequest_Success_SetsAuthorizedAndAuthType(t *testing.T) {
 	authCtx := &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      McpOAuthAuthType,
-		Scopes:        map[string]bool{},
+		Scopes:        map[string]bool{"mcp:tools:read": true},
 	}
 	body := toolCallBody("my-tool")
 	ctx := createMockContext("POST", "/mcp", body, authCtx)
@@ -311,7 +313,8 @@ func TestOnRequest_Success_SetsAuthorizedAndAuthType(t *testing.T) {
 func TestOnRequest_Success_NonMcpOAuthAuthType_Unchanged(t *testing.T) {
 	params := rulesParam([]any{
 		map[string]any{
-			"attribute": map[string]any{"type": "tool", "name": "my-tool"},
+			"attribute":      map[string]any{"type": "tool", "name": "my-tool"},
+			"requiredScopes": []any{"mcp:tools:read"},
 		},
 	})
 	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
@@ -319,7 +322,7 @@ func TestOnRequest_Success_NonMcpOAuthAuthType_Unchanged(t *testing.T) {
 	authCtx := &policy.AuthContext{
 		Authenticated: true,
 		AuthType:      "jwt",
-		Scopes:        map[string]bool{},
+		Scopes:        map[string]bool{"mcp:tools:read": true},
 	}
 	body := toolCallBody("my-tool")
 	ctx := createMockContext("POST", "/mcp", body, authCtx)

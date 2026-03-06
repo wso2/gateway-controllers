@@ -160,6 +160,10 @@ func TestParseParams(t *testing.T) {
 		name           string
 		params         map[string]interface{}
 		wantErrContain string
+		wantJSONPath   string
+		wantAssessment bool
+		wantAllowed    int
+		wantDenied     int
 	}{
 		{
 			name: "valid allowed and denied phrases",
@@ -171,6 +175,20 @@ func TestParseParams(t *testing.T) {
 				"allowedPhrases":           []interface{}{"safe"},
 				"deniedPhrases":            []interface{}{"attack"},
 			},
+			wantJSONPath:   "$.prompt",
+			wantAssessment: true,
+			wantAllowed:    1,
+			wantDenied:     1,
+		},
+		{
+			name: "default jsonPath when omitted",
+			params: map[string]interface{}{
+				"allowedPhrases": []interface{}{"safe"},
+			},
+			wantJSONPath:   defaultRequestJSONPath,
+			wantAssessment: false,
+			wantAllowed:    1,
+			wantDenied:     0,
 		},
 		{
 			name: "invalid jsonPath type",
@@ -235,17 +253,21 @@ func TestParseParams(t *testing.T) {
 			if err != nil {
 				t.Fatalf("parseParams failed: %v", err)
 			}
-			if got.JsonPath != "$.prompt" {
-				t.Fatalf("unexpected jsonPath: %q", got.JsonPath)
+			if got.JsonPath != tt.wantJSONPath {
+				t.Fatalf("unexpected jsonPath: got %q, want %q", got.JsonPath, tt.wantJSONPath)
 			}
-			if !got.ShowAssessment {
-				t.Fatalf("expected showAssessment=true")
+			if got.ShowAssessment != tt.wantAssessment {
+				t.Fatalf("unexpected showAssessment: got %v, want %v", got.ShowAssessment, tt.wantAssessment)
 			}
-			if len(got.AllowedPhrases) != 1 || len(got.DeniedPhrases) != 1 {
-				t.Fatalf("unexpected phrase counts: allowed=%d denied=%d", len(got.AllowedPhrases), len(got.DeniedPhrases))
+			if len(got.AllowedPhrases) != tt.wantAllowed || len(got.DeniedPhrases) != tt.wantDenied {
+				t.Fatalf("unexpected phrase counts: allowed=%d denied=%d (want %d/%d)",
+					len(got.AllowedPhrases), len(got.DeniedPhrases), tt.wantAllowed, tt.wantDenied)
 			}
-			if got.AllowedPhrases[0].Embedding == nil || got.DeniedPhrases[0].Embedding == nil {
-				t.Fatalf("expected embeddings to be populated")
+			if tt.wantAllowed > 0 && got.AllowedPhrases[0].Embedding == nil {
+				t.Fatalf("expected allowed phrase embeddings to be populated")
+			}
+			if tt.wantDenied > 0 && got.DeniedPhrases[0].Embedding == nil {
+				t.Fatalf("expected denied phrase embeddings to be populated")
 			}
 		})
 	}

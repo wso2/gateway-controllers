@@ -19,6 +19,8 @@
 package tokenbasedratelimit
 
 import (
+	"fmt"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1039,5 +1041,637 @@ func TestTokenBasedRateLimitPolicy_Integration_ResponsePhaseOnly(t *testing.T) {
 		if len(respMods.SetHeaders) == 0 {
 			t.Error("Expected rate limit headers in response")
 		}
+	}
+}
+
+func setupGlobalResourceStoreWithResources(t *testing.T, resources ...*policy.LazyResource) func() {
+	t.Helper()
+
+	store := policy.GetLazyResourceStoreInstance()
+	_ = store.ClearAll()
+
+	for _, resource := range resources {
+		if resource == nil {
+			continue
+		}
+		if err := store.StoreResource(resource); err != nil {
+			t.Fatalf("Failed to store resource %s/%s: %v", resource.ResourceType, resource.ID, err)
+		}
+	}
+
+	return func() {
+		_ = store.ClearAll()
+	}
+}
+
+func seedProviderTemplateResources(t *testing.T, providerName string, templateSpec map[string]interface{}) func() {
+	t.Helper()
+	return setupGlobalResourceStoreWithResources(
+		t,
+		&policy.LazyResource{
+			ID:           providerName,
+			ResourceType: ResourceTypeProviderTemplateMapping,
+			Resource: map[string]interface{}{
+				"template_handle": "openai-template",
+			},
+		},
+		&policy.LazyResource{
+			ID:           "openai-template",
+			ResourceType: ResourceTypeLlmProviderTemplate,
+			Resource: map[string]interface{}{
+				"spec": templateSpec,
+			},
+		},
+	)
+}
+
+func TestTokenBasedRateLimitPolicy_OnRequest_InvalidProviderMetadataType(t *testing.T) {
+	p, _ := setupPolicyWithMockStore(t)
+
+	ctx := &policy.RequestContext{
+		Headers: policy.NewHeaders(map[string][]string{}),
+		SharedContext: &policy.SharedContext{
+			Metadata: map[string]interface{}{
+				MetadataKeyProviderName: 123,
+			},
+		},
+	}
+
+	action := p.OnRequest(ctx, map[string]interface{}{})
+	if action != nil {
+		t.Fatalf("Expected nil action when provider_name is not a string, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_OnResponse_NoDelegateForProvider(t *testing.T) {
+	cleanup := setupGlobalResourceStore(t)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "no-delegate-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{
+				"count":    float64(5),
+				"duration": "1m",
+			},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	respCtx := createTestResponseContext([]byte(`{"usage":{"prompt_tokens":1}}`))
+	respCtx.SharedContext.Metadata[MetadataKeyProviderName] = "test-provider"
+
+	action := p.OnResponse(respCtx, params)
+	if action != nil {
+		t.Fatalf("Expected nil response action when no delegate exists, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_BoundaryCountOne(t *testing.T) {
+	cleanup := setupGlobalResourceStore(t)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "boundary-count-one-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{
+				"count":    float64(1),
+				"duration": "1m",
+			},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	reqCtx1 := createTestRequestContext("test-provider")
+	action1 := p.OnRequest(reqCtx1, params)
+	if _, ok := action1.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("First request should be allowed, got %T", action1)
+	}
+
+	respCtx1 := createTestResponseContext([]byte(`{"usage":{"prompt_tokens":1}}`))
+	respCtx1.SharedContext = reqCtx1.SharedContext
+	respCtx1.Metadata = reqCtx1.Metadata
+	p.OnResponse(respCtx1, params)
+
+	reqCtx2 := createTestRequestContext("test-provider")
+	action2 := p.OnRequest(reqCtx2, params)
+	immediate, ok := action2.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Second request should be rate-limited, got %T", action2)
+	}
+	if immediate.StatusCode != 429 {
+		t.Fatalf("Expected status 429, got %d", immediate.StatusCode)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_DefaultCostFallbackWhenTokenExtractionFails(t *testing.T) {
+	cleanup := seedProviderTemplateResources(
+		t,
+		"test-provider",
+		map[string]interface{}{
+			"promptTokens": map[string]interface{}{
+				"identifier": "$.usage.non_existent_token_path",
+				"location":   "payload",
+			},
+		},
+	)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "default-cost-fallback-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{
+				"count":    float64(2),
+				"duration": "1m",
+			},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	for i := 0; i < 2; i++ {
+		reqCtx := createTestRequestContext("test-provider")
+		reqAction := p.OnRequest(reqCtx, params)
+		if _, ok := reqAction.(policy.UpstreamRequestModifications); !ok {
+			t.Fatalf("Request %d should be allowed, got %T", i+1, reqAction)
+		}
+
+		// Path is intentionally wrong, so extraction falls back to default cost (=1).
+		respCtx := createTestResponseContext([]byte(`{"usage":{"prompt_tokens":100}}`))
+		respCtx.SharedContext = reqCtx.SharedContext
+		respCtx.Metadata = reqCtx.Metadata
+		p.OnResponse(respCtx, params)
+	}
+
+	reqCtx3 := createTestRequestContext("test-provider")
+	action3 := p.OnRequest(reqCtx3, params)
+	immediate, ok := action3.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Third request should be rate-limited after default-cost fallback, got %T", action3)
+	}
+	if immediate.StatusCode != 429 {
+		t.Fatalf("Expected status 429, got %d", immediate.StatusCode)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_TransformToRatelimitParams_TemplateLocationMapping(t *testing.T) {
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(10), "duration": "1m"},
+		},
+		"completionTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(10), "duration": "1m"},
+		},
+		"totalTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(10), "duration": "1m"},
+		},
+	}
+	template := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"promptTokens": map[string]interface{}{
+				"location":   "payload",
+				"identifier": "$.usage.prompt_tokens",
+			},
+			"completionTokens": map[string]interface{}{
+				"location":   "header",
+				"identifier": "x-completion-cost",
+			},
+			"totalTokens": map[string]interface{}{
+				"location":   "metadata",
+				"identifier": "usage.total_tokens",
+			},
+		},
+	}
+
+	result := transformToRatelimitParams(params, template)
+	quotas, ok := result["quotas"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected quotas to be []interface{}, got %T", result["quotas"])
+	}
+
+	quotaByName := make(map[string]map[string]interface{})
+	for _, q := range quotas {
+		qm, ok := q.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected quota map, got %T", q)
+		}
+		name, _ := qm["name"].(string)
+		quotaByName[name] = qm
+	}
+
+	getSource := func(quotaName string) map[string]interface{} {
+		t.Helper()
+		quota := quotaByName[quotaName]
+		if quota == nil {
+			t.Fatalf("Missing quota %q", quotaName)
+		}
+		ce, ok := quota["costExtraction"].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Missing costExtraction for quota %q", quotaName)
+		}
+		sources, ok := ce["sources"].([]interface{})
+		if !ok || len(sources) != 1 {
+			t.Fatalf("Expected one source for quota %q, got %v", quotaName, ce["sources"])
+		}
+		source, ok := sources[0].(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected source map for quota %q, got %T", quotaName, sources[0])
+		}
+		return source
+	}
+
+	promptSource := getSource("prompt_tokens")
+	if promptSource["type"] != "response_body" || promptSource["jsonPath"] != "$.usage.prompt_tokens" {
+		t.Fatalf("Unexpected prompt source mapping: %v", promptSource)
+	}
+
+	completionSource := getSource("completion_tokens")
+	if completionSource["type"] != "request_header" || completionSource["key"] != "x-completion-cost" {
+		t.Fatalf("Unexpected completion source mapping: %v", completionSource)
+	}
+
+	totalSource := getSource("total_tokens")
+	if totalSource["type"] != "metadata" || totalSource["key"] != "usage.total_tokens" {
+		t.Fatalf("Unexpected total source mapping: %v", totalSource)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_MissingTemplateHandle(t *testing.T) {
+	cleanup := setupGlobalResourceStoreWithResources(
+		t,
+		&policy.LazyResource{
+			ID:           "test-provider",
+			ResourceType: ResourceTypeProviderTemplateMapping,
+			Resource:     map[string]interface{}{},
+		},
+	)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "missing-template-handle-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(5), "duration": "1m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.OnRequest(createTestRequestContext("test-provider"), params)
+	if action != nil {
+		t.Fatalf("Expected nil action when template_handle is missing, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_MissingTemplateResource(t *testing.T) {
+	cleanup := setupGlobalResourceStoreWithResources(
+		t,
+		&policy.LazyResource{
+			ID:           "test-provider",
+			ResourceType: ResourceTypeProviderTemplateMapping,
+			Resource: map[string]interface{}{
+				"template_handle": "missing-template",
+			},
+		},
+	)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "missing-template-resource-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(5), "duration": "1m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.OnRequest(createTestRequestContext("test-provider"), params)
+	if action != nil {
+		t.Fatalf("Expected nil action when template resource is missing, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_InvalidDurationFailsOpen(t *testing.T) {
+	cleanup := setupGlobalResourceStore(t)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "invalid-duration-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{
+				"count":    float64(5),
+				"duration": "not-a-duration",
+			},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.OnRequest(createTestRequestContext("test-provider"), params)
+	if action != nil {
+		t.Fatalf("Expected nil action when delegate creation fails due to invalid duration, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_ConcurrentOnRequestCreatesSingleDelegate(t *testing.T) {
+	cleanup := setupGlobalResourceStore(t)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "singleflight-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{
+				"count":    float64(100),
+				"duration": "1m",
+			},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+	tbPolicy := p.(*TokenBasedRateLimitPolicy)
+
+	const goroutines = 50
+	var wg sync.WaitGroup
+	var allowedCount atomic.Int32
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			action := tbPolicy.OnRequest(createTestRequestContext("test-provider"), params)
+			if _, ok := action.(policy.UpstreamRequestModifications); ok {
+				allowedCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if allowedCount.Load() != goroutines {
+		t.Fatalf("Expected %d allowed actions, got %d", goroutines, allowedCount.Load())
+	}
+
+	delegateCount := 0
+	tbPolicy.delegates.Range(func(_, _ interface{}) bool {
+		delegateCount++
+		return true
+	})
+	if delegateCount != 1 {
+		t.Fatalf("Expected exactly 1 delegate for provider, got %d", delegateCount)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_TemplateChangeRecreatesDelegate(t *testing.T) {
+	cleanup := seedProviderTemplateResources(
+		t,
+		"test-provider",
+		map[string]interface{}{
+			"promptTokens": map[string]interface{}{
+				"identifier": "$.usage.prompt_tokens",
+				"location":   "payload",
+			},
+		},
+	)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "template-change-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(10), "duration": "1m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+	tbPolicy := p.(*TokenBasedRateLimitPolicy)
+
+	firstAction := tbPolicy.OnRequest(createTestRequestContext("test-provider"), params)
+	if _, ok := firstAction.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("First request should be allowed, got %T", firstAction)
+	}
+
+	delegateRaw1, ok := tbPolicy.delegates.Load("test-provider")
+	if !ok {
+		t.Fatal("Expected delegate to be stored after first request")
+	}
+	cacheKeyRaw1, ok := tbPolicy.delegateCacheKeys.Load("test-provider")
+	if !ok {
+		t.Fatal("Expected cache key to be stored after first request")
+	}
+	delegate1 := delegateRaw1.(policy.Policy)
+	cacheKey1 := cacheKeyRaw1.(string)
+
+	store := policy.GetLazyResourceStoreInstance()
+	err = store.StoreResource(&policy.LazyResource{
+		ID:           "openai-template",
+		ResourceType: ResourceTypeLlmProviderTemplate,
+		Resource: map[string]interface{}{
+			"spec": map[string]interface{}{
+				"promptTokens": map[string]interface{}{
+					"identifier": "$.usage.prompt_tokens_v2",
+					"location":   "payload",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Failed to update template resource: %v", err)
+	}
+
+	secondAction := tbPolicy.OnRequest(createTestRequestContext("test-provider"), params)
+	if _, ok := secondAction.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("Second request should be allowed, got %T", secondAction)
+	}
+
+	delegateRaw2, ok := tbPolicy.delegates.Load("test-provider")
+	if !ok {
+		t.Fatal("Expected delegate to remain stored after template update")
+	}
+	cacheKeyRaw2, ok := tbPolicy.delegateCacheKeys.Load("test-provider")
+	if !ok {
+		t.Fatal("Expected cache key to remain stored after template update")
+	}
+	delegate2 := delegateRaw2.(policy.Policy)
+	cacheKey2 := cacheKeyRaw2.(string)
+
+	if cacheKey1 == cacheKey2 {
+		t.Fatalf("Expected cache key to change after template update, got same key %q", cacheKey1)
+	}
+	if fmt.Sprintf("%p", delegate1) == fmt.Sprintf("%p", delegate2) {
+		t.Fatalf("Expected delegate instance to be recreated after template update")
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_RedisFailureModeOpenAllowsRequest(t *testing.T) {
+	cleanup := setupGlobalResourceStore(t)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "redis-open-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(10), "duration": "1m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "redis",
+		"redis": map[string]interface{}{
+			"host":              "127.0.0.1",
+			"port":              float64(1),
+			"failureMode":       "open",
+			"connectionTimeout": "20ms",
+			"readTimeout":       "20ms",
+			"writeTimeout":      "20ms",
+		},
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.OnRequest(createTestRequestContext("test-provider"), params)
+	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("Expected fail-open request action, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_RedisFailureModeClosedSkipsRequest(t *testing.T) {
+	cleanup := setupGlobalResourceStore(t)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "redis-closed-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(10), "duration": "1m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "redis",
+		"redis": map[string]interface{}{
+			"host":              "127.0.0.1",
+			"port":              float64(1),
+			"failureMode":       "closed",
+			"connectionTimeout": "20ms",
+			"readTimeout":       "20ms",
+			"writeTimeout":      "20ms",
+		},
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	action := p.OnRequest(createTestRequestContext("test-provider"), params)
+	if action != nil {
+		t.Fatalf("Expected nil action when redis failureMode=closed and backend is unavailable, got %T", action)
+	}
+}
+
+func TestTokenBasedRateLimitPolicy_Integration_DenyResponseIncludesRateLimitHeaders(t *testing.T) {
+	cleanup := seedProviderTemplateResources(
+		t,
+		"test-provider",
+		map[string]interface{}{
+			"promptTokens": map[string]interface{}{
+				"identifier": "x-token-cost",
+				"location":   "header",
+			},
+		},
+	)
+	defer cleanup()
+
+	metadata := policy.PolicyMetadata{RouteName: "deny-headers-route"}
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(1), "duration": "1m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+
+	p, err := GetPolicy(metadata, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+
+	reqCtx := createTestRequestContext("test-provider")
+	reqCtx.Headers = policy.NewHeaders(map[string][]string{
+		"x-token-cost": {"2"},
+	})
+
+	action := p.OnRequest(reqCtx, params)
+	immediate, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected immediate response due to over-limit request cost, got %T", action)
+	}
+
+	if immediate.StatusCode != 429 {
+		t.Fatalf("Expected status 429, got %d", immediate.StatusCode)
+	}
+	if immediate.Headers["content-type"] != "application/json" {
+		t.Fatalf("Expected content-type application/json, got %q", immediate.Headers["content-type"])
+	}
+	if immediate.Headers["x-ratelimit-quota"] != "prompt_tokens" {
+		t.Fatalf("Expected x-ratelimit-quota=prompt_tokens, got %q", immediate.Headers["x-ratelimit-quota"])
+	}
+
+	requiredHeaders := []string{
+		"x-ratelimit-limit",
+		"x-ratelimit-remaining",
+		"x-ratelimit-reset",
+		"ratelimit-policy",
+		"ratelimit",
+		"retry-after",
+	}
+	for _, header := range requiredHeaders {
+		if immediate.Headers[header] == "" {
+			t.Fatalf("Expected header %q to be present in immediate response", header)
+		}
+	}
+
+	retryAfter, err := strconv.Atoi(immediate.Headers["retry-after"])
+	if err != nil {
+		t.Fatalf("Expected retry-after to be numeric, got %q", immediate.Headers["retry-after"])
+	}
+	if retryAfter < 1 {
+		t.Fatalf("Expected retry-after >= 1, got %d", retryAfter)
 	}
 }

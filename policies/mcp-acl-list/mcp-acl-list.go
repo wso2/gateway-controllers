@@ -32,6 +32,7 @@ const (
 	metadataMcpCapabilityType = "mcp.capabilityType"
 	metadataMcpAction         = "mcp.action"
 	mcpSessionHeader          = "mcp-session-id"
+	defaultAclMode            = "deny"
 )
 
 type AclConfig struct {
@@ -113,16 +114,18 @@ func parseAclConfig(params map[string]any, capabilityType string) (AclConfig, er
 		return config, fmt.Errorf("%s must be an object", capabilityType)
 	}
 
-	modeRaw, ok := entry["mode"].(string)
-	if !ok {
-		slog.Debug("MCP ACL List Policy: Missing or invalid mode", "capabilityType", capabilityType)
-		return config, fmt.Errorf("%s.mode is required", capabilityType)
-	}
-
-	mode := strings.ToLower(strings.TrimSpace(modeRaw))
-	if mode != "allow" && mode != "deny" {
-		slog.Debug("MCP ACL List Policy: Invalid mode", "capabilityType", capabilityType, "mode", modeRaw)
-		return config, fmt.Errorf("%s.mode must be 'allow' or 'deny'", capabilityType)
+	mode := defaultAclMode
+	if modeRaw, ok := entry["mode"]; ok {
+		modeString, isString := modeRaw.(string)
+		if !isString {
+			slog.Debug("MCP ACL List Policy: Invalid mode type", "capabilityType", capabilityType, "mode", modeRaw)
+			return config, fmt.Errorf("%s.mode must be 'allow' or 'deny'", capabilityType)
+		}
+		mode = strings.ToLower(strings.TrimSpace(modeString))
+		if mode != "allow" && mode != "deny" {
+			slog.Debug("MCP ACL List Policy: Invalid mode", "capabilityType", capabilityType, "mode", modeString)
+			return config, fmt.Errorf("%s.mode must be 'allow' or 'deny'", capabilityType)
+		}
 	}
 
 	config.Enabled = true
@@ -141,12 +144,13 @@ func parseAclConfig(params map[string]any, capabilityType string) (AclConfig, er
 
 	for i, item := range list {
 		value, ok := item.(string)
-		if !ok || strings.TrimSpace(value) == "" {
+		trimmed := strings.TrimSpace(value)
+		if !ok || trimmed == "" {
 			slog.Debug("MCP ACL List Policy: Invalid exception", "capabilityType", capabilityType, "index", i, "error", "not a non-empty string")
 			return config, fmt.Errorf("%s.exceptions[%d] must be a non-empty string", capabilityType, i)
 		}
 
-		config.Exceptions[value] = struct{}{}
+		config.Exceptions[trimmed] = struct{}{}
 	}
 
 	return config, nil
@@ -596,7 +600,14 @@ func (p *McpAclListPolicy) buildEventStreamErrorResponse(statusCode int, jsonRpc
 
 // isMcpPostRequest reports whether the request targets the MCP endpoint.
 func isMcpPostRequest(method, path string) bool {
-	return strings.EqualFold(method, "POST") && strings.Contains(path, mcpPathSegment)
+	if !strings.EqualFold(method, "POST") {
+		return false
+	}
+	cleanPath := strings.TrimSpace(path)
+	if idx := strings.Index(cleanPath, "?"); idx >= 0 {
+		cleanPath = cleanPath[:idx]
+	}
+	return cleanPath == mcpPathSegment || strings.HasPrefix(cleanPath, mcpPathSegment+"/")
 }
 
 // buildErrorResponse builds a JSON error response.

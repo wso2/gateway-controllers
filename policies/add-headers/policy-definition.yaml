@@ -1,8 +1,7 @@
 name: add-headers
 version: v0.2.0
 description: |
-  This policy provides the capability to add arbitrary headers to either the request or the response.
-  Adding the same header multiple times will not overwrite the existing header values and it will be appended to the list of values if the header already exists.
+  Add configured headers to requests and/or responses, and append values when the header already exists.
 
 parameters:
   type: object

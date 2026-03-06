@@ -34,12 +34,14 @@ import (
 )
 
 const (
-	GuardrailErrorCode = 422
-	TextCleanRegex     = "^\"|\"$"
-	endpointSuffix     = "/contentsafety/text:analyze?api-version=2024-09-01"
-	requestTimeout     = 30 * time.Second
-	maxRetries         = 5
-	retryDelay         = 1 * time.Second
+	GuardrailErrorCode      = 422
+	TextCleanRegex          = "^\"|\"$"
+	endpointSuffix          = "/contentsafety/text:analyze?api-version=2024-09-01"
+	requestTimeout          = 30 * time.Second
+	maxRetries              = 5
+	retryDelay              = 1 * time.Second
+	requestDefaultJSONPath  = "$.messages[-1].content"
+	responseDefaultJSONPath = "$.choices[0].message.content"
 )
 
 var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
@@ -89,7 +91,7 @@ func GetPolicy(
 
 	// Extract and parse request parameters if present
 	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {
-		requestParams, err := parseRequestResponseParams(requestParamsRaw)
+		requestParams, err := parseRequestResponseParams(requestParamsRaw, false)
 		if err != nil {
 			return nil, fmt.Errorf("invalid request parameters: %w", err)
 		}
@@ -99,7 +101,7 @@ func GetPolicy(
 
 	// Extract and parse response parameters if present
 	if responseParamsRaw, ok := params["response"].(map[string]interface{}); ok {
-		responseParams, err := parseRequestResponseParams(responseParamsRaw)
+		responseParams, err := parseRequestResponseParams(responseParamsRaw, true)
 		if err != nil {
 			return nil, fmt.Errorf("invalid response parameters: %w", err)
 		}
@@ -118,8 +120,13 @@ func GetPolicy(
 }
 
 // parseRequestResponseParams parses and validates request/response parameters from map to struct
-func parseRequestResponseParams(params map[string]interface{}) (AzureContentSafetyPolicyParams, error) {
-	var result AzureContentSafetyPolicyParams
+func parseRequestResponseParams(params map[string]interface{}, isResponse bool) (AzureContentSafetyPolicyParams, error) {
+	result := AzureContentSafetyPolicyParams{
+		JsonPath: requestDefaultJSONPath,
+	}
+	if isResponse {
+		result.JsonPath = responseDefaultJSONPath
+	}
 
 	// Initialize category thresholds to policy defaults
 	result.HateSeverityThreshold = 4

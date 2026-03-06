@@ -36,8 +36,11 @@ func TestRegexGuardrailPolicy_GetPolicy_Defaults_RequestOnly(t *testing.T) {
 	if p.hasResponseParams {
 		t.Fatalf("expected response params to be disabled")
 	}
-	if got := p.requestParams.JsonPath; got != DefaultJSONPath {
-		t.Fatalf("unexpected default jsonPath: got %q, want %q", got, DefaultJSONPath)
+	if got := p.requestParams.JsonPath; got != DefaultRequestJSONPath {
+		t.Fatalf("unexpected default jsonPath: got %q, want %q", got, DefaultRequestJSONPath)
+	}
+	if !p.requestParams.Enabled {
+		t.Fatalf("expected request enabled by default")
 	}
 	if p.requestParams.Invert {
 		t.Fatalf("expected default invert=false")
@@ -60,8 +63,11 @@ func TestRegexGuardrailPolicy_GetPolicy_Defaults_ResponseOnly(t *testing.T) {
 	if !p.hasResponseParams {
 		t.Fatalf("expected response params to be enabled")
 	}
-	if got := p.responseParams.JsonPath; got != DefaultJSONPath {
-		t.Fatalf("unexpected default jsonPath: got %q, want %q", got, DefaultJSONPath)
+	if got := p.responseParams.JsonPath; got != DefaultResponseJSONPath {
+		t.Fatalf("unexpected default jsonPath: got %q, want %q", got, DefaultResponseJSONPath)
+	}
+	if p.responseParams.Enabled {
+		t.Fatalf("expected response disabled by default")
 	}
 	if p.responseParams.Invert {
 		t.Fatalf("expected default invert=false")
@@ -92,6 +98,9 @@ func TestRegexGuardrailPolicy_GetPolicy_RequestAndResponse(t *testing.T) {
 	}
 	if p.requestParams.Regex != "hello" || p.responseParams.Regex != "world" {
 		t.Fatalf("unexpected regex values: req=%q resp=%q", p.requestParams.Regex, p.responseParams.Regex)
+	}
+	if !p.requestParams.Enabled || p.responseParams.Enabled {
+		t.Fatalf("unexpected enabled defaults: req=%v resp=%v", p.requestParams.Enabled, p.responseParams.Enabled)
 	}
 	if p.requestParams.JsonPath != "$.messages" || p.responseParams.JsonPath != "$.output" {
 		t.Fatalf("unexpected jsonPath values: req=%q resp=%q", p.requestParams.JsonPath, p.responseParams.JsonPath)
@@ -162,6 +171,16 @@ func TestRegexGuardrailPolicy_GetPolicy_Errors(t *testing.T) {
 			wantErrContain: "invalid request parameters: 'jsonPath' must be a string",
 		},
 		{
+			name: "enabled wrong type",
+			params: map[string]interface{}{
+				"request": map[string]interface{}{
+					"regex":   "hello",
+					"enabled": "true",
+				},
+			},
+			wantErrContain: "invalid request parameters: 'enabled' must be a boolean",
+		},
+		{
 			name: "invert wrong type",
 			params: map[string]interface{}{
 				"request": map[string]interface{}{
@@ -209,10 +228,38 @@ func TestRegexGuardrailPolicy_OnRequest_NoRequestConfig_NoOp(t *testing.T) {
 	}
 }
 
+func TestRegexGuardrailPolicy_OnRequest_Disabled_NoOp(t *testing.T) {
+	p := mustGetRegexPolicy(t, map[string]interface{}{
+		"request": map[string]interface{}{
+			"regex":   "hello",
+			"enabled": false,
+		},
+	})
+
+	action := p.OnRequest(newRequestContextWithBody(`{"messages":[{"content":"hello"}]}`), nil)
+	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
 func TestRegexGuardrailPolicy_OnResponse_NoResponseConfig_NoOp(t *testing.T) {
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{
 			"regex": "hello",
+		},
+	})
+
+	action := p.OnResponse(newResponseContextWithBody(`{"message":"hello"}`), nil)
+	if _, ok := action.(policy.UpstreamResponseModifications); !ok {
+		t.Fatalf("expected UpstreamResponseModifications, got %T", action)
+	}
+}
+
+func TestRegexGuardrailPolicy_OnResponse_Disabled_NoOp(t *testing.T) {
+	p := mustGetRegexPolicy(t, map[string]interface{}{
+		"response": map[string]interface{}{
+			"regex":   "hello",
+			"enabled": false,
 		},
 	})
 
@@ -275,7 +322,7 @@ func TestRegexGuardrailPolicy_OnRequest_DefaultJSONPath_Success(t *testing.T) {
 		},
 	})
 
-	action := p.OnRequest(newRequestContextWithBody(`{"messages":"hello world"}`), nil)
+	action := p.OnRequest(newRequestContextWithBody(`{"messages":[{"content":"hello world"}]}`), nil)
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
 	}
@@ -396,15 +443,16 @@ func TestRegexGuardrailPolicy_OnRequest_DefaultJSONPath_ArrayPayload_ExtractionE
 		},
 	})
 
-	// Default jsonPath is $.messages; this payload has messages as an array, which
-	// is not extractable as string/number by ExtractStringValueFromJsonpath.
-	action := p.OnRequest(newRequestContextWithBody(`{"messages":[{"content":"hello"}]}`), nil)
+	// Default jsonPath is $.messages[-1].content; this payload has messages as a string,
+	// so indexed extraction fails.
+	action := p.OnRequest(newRequestContextWithBody(`{"messages":"hello"}`), nil)
 	assertRequestErrorResponse(t, action, false, "REQUEST")
 }
 
 func TestRegexGuardrailPolicy_OnResponse_Success(t *testing.T) {
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"response": map[string]interface{}{
+			"enabled":  true,
 			"regex":    "ok",
 			"jsonPath": "$.status",
 		},
@@ -419,6 +467,7 @@ func TestRegexGuardrailPolicy_OnResponse_Success(t *testing.T) {
 func TestRegexGuardrailPolicy_OnResponse_RegexViolation_ShowAssessmentFalse(t *testing.T) {
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"response": map[string]interface{}{
+			"enabled":        true,
 			"regex":          "ok",
 			"jsonPath":       "$.status",
 			"showAssessment": false,
@@ -436,6 +485,7 @@ func TestRegexGuardrailPolicy_OnResponse_RegexViolation_ShowAssessmentFalse(t *t
 func TestRegexGuardrailPolicy_OnResponse_RegexViolation_ShowAssessmentTrue(t *testing.T) {
 	p := mustGetRegexPolicy(t, map[string]interface{}{
 		"response": map[string]interface{}{
+			"enabled":        true,
 			"regex":          "ok",
 			"jsonPath":       "$.status",
 			"showAssessment": true,

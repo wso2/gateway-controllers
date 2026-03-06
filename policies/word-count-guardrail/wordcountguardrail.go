@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package wordcountguardrail
 
 import (
@@ -30,9 +30,13 @@ import (
 )
 
 const (
-	GuardrailErrorCode = 422
-	TextCleanRegex     = "^\"|\"$"
-	WordSplitRegex     = "\\s+"
+	GuardrailErrorCode           = 422
+	TextCleanRegex               = "^\"|\"$"
+	WordSplitRegex               = "\\s+"
+	DefaultJSONPath              = "$.messages[-1].content"
+	DefaultResponseJSONPath      = "$.choices[0].message.content"
+	RequestFlowEnabledByDefault  = true
+	ResponseFlowEnabledByDefault = false
 )
 
 var (
@@ -49,6 +53,7 @@ type WordCountGuardrailPolicy struct {
 }
 
 type WordCountGuardrailPolicyParams struct {
+	Enabled        bool
 	Min            int
 	Max            int
 	JsonPath       string
@@ -62,9 +67,12 @@ func GetPolicy(
 ) (policy.Policy, error) {
 	p := &WordCountGuardrailPolicy{}
 
-	// Extract and parse request parameters if present
-	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {
-		requestParams, err := parseParams(requestParamsRaw)
+	requestParamsRaw, hasRequest, err := getFlowParams(params, "request")
+	if err != nil {
+		return nil, err
+	}
+	if hasRequest {
+		requestParams, err := parseParams(requestParamsRaw, false)
 		if err != nil {
 			return nil, fmt.Errorf("invalid request parameters: %w", err)
 		}
@@ -72,9 +80,12 @@ func GetPolicy(
 		p.requestParams = requestParams
 	}
 
-	// Extract and parse response parameters if present
-	if responseParamsRaw, ok := params["response"].(map[string]interface{}); ok {
-		responseParams, err := parseParams(responseParamsRaw)
+	responseParamsRaw, hasResponse, err := getFlowParams(params, "response")
+	if err != nil {
+		return nil, err
+	}
+	if hasResponse {
+		responseParams, err := parseParams(responseParamsRaw, true)
 		if err != nil {
 			return nil, fmt.Errorf("invalid response parameters: %w", err)
 		}
@@ -92,9 +103,37 @@ func GetPolicy(
 	return p, nil
 }
 
+func getFlowParams(params map[string]interface{}, flow string) (map[string]interface{}, bool, error) {
+	raw, exists := params[flow]
+	if !exists {
+		return nil, false, nil
+	}
+	flowParams, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, false, fmt.Errorf("'%s' must be an object", flow)
+	}
+	return flowParams, true, nil
+}
+
 // parseParams parses and validates parameters from map to struct
-func parseParams(params map[string]interface{}) (WordCountGuardrailPolicyParams, error) {
-	var result WordCountGuardrailPolicyParams
+func parseParams(params map[string]interface{}, isResponse bool) (WordCountGuardrailPolicyParams, error) {
+	result := WordCountGuardrailPolicyParams{
+		JsonPath: DefaultJSONPath,
+		Enabled:  RequestFlowEnabledByDefault,
+	}
+	if isResponse {
+		result.JsonPath = DefaultResponseJSONPath
+		result.Enabled = ResponseFlowEnabledByDefault
+	}
+
+	// Extract optional enabled parameter
+	if enabledRaw, ok := params["enabled"]; ok {
+		enabled, ok := enabledRaw.(bool)
+		if !ok {
+			return result, fmt.Errorf("'enabled' must be a boolean")
+		}
+		result.Enabled = enabled
+	}
 
 	// Validate and extract min parameter (required)
 	minRaw, ok := params["min"]
@@ -195,7 +234,7 @@ func (p *WordCountGuardrailPolicy) Mode() policy.ProcessingMode {
 
 // OnRequest validates request body word count
 func (p *WordCountGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	if !p.hasRequestParams {
+	if !p.hasRequestParams || !p.requestParams.Enabled {
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -208,7 +247,7 @@ func (p *WordCountGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params 
 
 // OnResponse validates response body word count
 func (p *WordCountGuardrailPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	if !p.hasResponseParams {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return policy.UpstreamResponseModifications{}
 	}
 
@@ -222,7 +261,7 @@ func (p *WordCountGuardrailPolicy) OnResponse(ctx *policy.ResponseContext, param
 // validatePayload validates payload word count
 func (p *WordCountGuardrailPolicy) validatePayload(payload []byte, params WordCountGuardrailPolicyParams, isResponse bool) interface{} {
 	// Extract value using JSONPath
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	extractedValue, err := extractStringFromJSONPath(payload, params.JsonPath)
 	if err != nil {
 		slog.Debug("WordCountGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
 		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, params.Min, params.Max)
@@ -267,6 +306,73 @@ func (p *WordCountGuardrailPolicy) validatePayload(payload []byte, params WordCo
 		return policy.UpstreamResponseModifications{}
 	}
 	return policy.UpstreamRequestModifications{}
+}
+
+func extractStringFromJSONPath(payload []byte, jsonPath string) (string, error) {
+	value, err := utils.ExtractStringValueFromJsonpath(payload, jsonPath)
+	if err == nil {
+		return value, nil
+	}
+
+	var jsonData map[string]interface{}
+	if unmarshalErr := json.Unmarshal(payload, &jsonData); unmarshalErr != nil {
+		return "", unmarshalErr
+	}
+
+	extracted, extractErr := utils.ExtractValueFromJsonpath(jsonData, jsonPath)
+	if extractErr != nil {
+		return "", extractErr
+	}
+
+	normalized, normalizeErr := normalizeExtractedValue(extracted)
+	if normalizeErr != nil {
+		return "", normalizeErr
+	}
+
+	return normalized, nil
+}
+
+func normalizeExtractedValue(value interface{}) (string, error) {
+	switch v := value.(type) {
+	case string:
+		return v, nil
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), nil
+	case int:
+		return strconv.Itoa(v), nil
+	case bool:
+		return strconv.FormatBool(v), nil
+	case map[string]interface{}:
+		if content, ok := v["content"]; ok {
+			return normalizeExtractedValue(content)
+		}
+		if text, ok := v["text"]; ok {
+			return normalizeExtractedValue(text)
+		}
+		encoded, err := json.Marshal(v)
+		if err != nil {
+			return "", err
+		}
+		return string(encoded), nil
+	case []interface{}:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			part, itemErr := normalizeExtractedValue(item)
+			if itemErr != nil {
+				continue
+			}
+			part = strings.TrimSpace(part)
+			if part != "" {
+				parts = append(parts, part)
+			}
+		}
+		if len(parts) == 0 {
+			return "", fmt.Errorf("value at JSONPath is an empty array")
+		}
+		return strings.Join(parts, " "), nil
+	default:
+		return "", fmt.Errorf("value at JSONPath is not a supported type")
+	}
 }
 
 // buildErrorResponse builds an error response for both request and response phases
@@ -319,7 +425,7 @@ func (p *WordCountGuardrailPolicy) buildAssessmentObject(reason string, validati
 	if validationError != nil {
 		assessment["actionReason"] = reason
 	} else {
-		assessment["actionReason"] = "Violation of applied word count constraints detected."
+		assessment["actionReason"] = "Violation of applied word count constraints detected"
 	}
 
 	if showAssessment {

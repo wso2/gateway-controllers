@@ -642,62 +642,50 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	// Determine which key managers to use
 	var applicableKeyManagers []*KeyManager
 	if len(userIssuers) > 0 {
-		// User specified issuers - these could be actual issuer values or key manager names
+		// User specified issuers - these could be actual issuer values or key manager names.
+		// Keep all compatible candidates in user-provided order for fallback verification.
 		slog.Debug("JWT Auth Policy: User-specified issuers provided",
 			"userIssuers", userIssuers,
 			"tokenIssuer", tokenIssuer,
 		)
 
-		// First, check if token issuer matches one of the user-specified issuers (actual issuer match)
-		var matchedIssuer string
+		seenKeyManagers := make(map[string]struct{})
 		for _, userIssuer := range userIssuers {
-			if tokenIssuer == userIssuer {
-				matchedIssuer = userIssuer
-				break
-			}
-		}
-
-		if matchedIssuer != "" {
-			// Token issuer matches a user-specified issuer, find the key manager
-			slog.Debug("JWT Auth Policy: Token issuer matches user-specified issuer",
-				"matchedIssuer", matchedIssuer,
-			)
-
-			// Find key manager by issuer field
-			for _, km := range keyManagers {
-				if km.Issuer == matchedIssuer {
-					applicableKeyManagers = append(applicableKeyManagers, km)
-					slog.Debug("JWT Auth Policy: Found key manager by issuer field",
+			// 1) Treat as key manager name.
+			if km, ok := keyManagers[userIssuer]; ok {
+				if km.Issuer == "" || km.Issuer == tokenIssuer {
+					if _, seen := seenKeyManagers[km.Name]; !seen {
+						applicableKeyManagers = append(applicableKeyManagers, km)
+						seenKeyManagers[km.Name] = struct{}{}
+					}
+					slog.Debug("JWT Auth Policy: Added key manager candidate by name",
 						"keyManager", km.Name,
-						"issuer", matchedIssuer,
+						"userIssuer", userIssuer,
+						"tokenIssuer", tokenIssuer,
+						"kmIssuer", km.Issuer,
 					)
-					break
+				} else {
+					slog.Debug("JWT Auth Policy: Key manager found by name but issuer mismatch",
+						"keyManager", km.Name,
+						"userIssuer", userIssuer,
+						"tokenIssuer", tokenIssuer,
+						"expectedIssuer", km.Issuer,
+					)
 				}
 			}
-		}
 
-		// If no key manager found by issuer match, try to find by key manager name
-		// (userIssuers might contain key manager names instead of actual issuers)
-		if len(applicableKeyManagers) == 0 {
-			for _, userIssuer := range userIssuers {
-				if km, ok := keyManagers[userIssuer]; ok {
-					// Found key manager by name
-					// Now verify: if the key manager has an issuer configured, token issuer must match it
-					// If no issuer configured on key manager, we accept the token
-					if km.Issuer == "" || km.Issuer == tokenIssuer {
+			// 2) Treat as actual issuer value.
+			if tokenIssuer == userIssuer {
+				for _, km := range keyManagers {
+					if km.Issuer == userIssuer {
+						if _, seen := seenKeyManagers[km.Name]; seen {
+							continue
+						}
 						applicableKeyManagers = append(applicableKeyManagers, km)
-						slog.Debug("JWT Auth Policy: Found key manager by name",
+						seenKeyManagers[km.Name] = struct{}{}
+						slog.Debug("JWT Auth Policy: Added key manager candidate by issuer value",
 							"keyManager", km.Name,
-							"userIssuer", userIssuer,
-							"tokenIssuer", tokenIssuer,
-							"kmIssuer", km.Issuer,
-						)
-						break
-					} else {
-						slog.Debug("JWT Auth Policy: Key manager found by name but issuer mismatch",
-							"keyManager", km.Name,
-							"tokenIssuer", tokenIssuer,
-							"expectedIssuer", km.Issuer,
+							"issuer", userIssuer,
 						)
 					}
 				}
@@ -785,6 +773,8 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 		)
 	}
 
+	parser := jwt.NewParser(jwt.WithLeeway(leeway))
+
 	// Try to verify signature with applicable key managers
 	var lastErr error
 	for _, km := range applicableKeyManagers {
@@ -805,7 +795,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 			slog.Debug("JWT Auth Policy: Attempting signature verification with local certificate",
 				"keyManager", km.Name,
 			)
-			verifiedToken, err := jwt.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 				return km.JWKS.Local.PublicKey, nil
 			})
 
@@ -868,7 +858,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					"kid", kid,
 				)
 				// Verify signature
-				verifiedToken, err := jwt.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 					return publicKey, nil
 				})
 
@@ -898,7 +888,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					slog.Debug("JWT Auth Policy: Trying key from JWKS",
 						"keyId", keyId,
 					)
-					verifiedToken, err := jwt.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 						return publicKey, nil
 					})
 
@@ -946,6 +936,10 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		"retryCount", retryCount,
 		"retryInterval", retryInterval,
 	)
+
+	if retryCount < 0 {
+		return nil, fmt.Errorf("invalid jwks fetch retry count: %d", retryCount)
+	}
 
 	// Check cache first
 	p.cacheMutex.RLock()
@@ -1010,6 +1004,9 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		"uri", remote.URI,
 		"lastError", lastErr,
 	)
+	if lastErr == nil {
+		return nil, fmt.Errorf("failed to fetch JWKS: no fetch attempts executed")
+	}
 	return nil, lastErr
 }
 
@@ -1158,19 +1155,22 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 func extractToken(authHeader, scheme string) string {
 	authHeader = strings.TrimSpace(authHeader)
 	if scheme != "" {
-		prefix := scheme + " "
-		if strings.HasPrefix(authHeader, prefix) {
-			return strings.TrimPrefix(authHeader, prefix)
+		parts := strings.Fields(authHeader)
+		if len(parts) == 2 && strings.EqualFold(parts[0], scheme) {
+			return parts[1]
 		}
 		// If scheme is specified but not found, return empty
 		return ""
 	}
 	// If no scheme specified, accept raw token or try to strip known schemes
-	if strings.Contains(authHeader, " ") {
-		parts := strings.SplitN(authHeader, " ", 2)
+	parts := strings.Fields(authHeader)
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) > 1 {
 		return parts[1]
 	}
-	return authHeader
+	return parts[0]
 }
 
 // parseRSAPublicKey parses RSA public key from modulus and exponent
@@ -1383,6 +1383,8 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 	case "plain":
 		body = errorMessage
 		headers["content-type"] = "text/plain"
+	case "minimal":
+		body = "Unauthorized"
 	default: // json
 		errResponse := map[string]interface{}{
 			"error":   "Unauthorized",

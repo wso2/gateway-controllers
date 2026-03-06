@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package contentlengthguardrail
 
 import (
@@ -30,8 +30,12 @@ import (
 )
 
 const (
-	GuardrailErrorCode = 422
-	TextCleanRegex     = "^\"|\"$"
+	GuardrailErrorCode           = 422
+	TextCleanRegex               = "^\"|\"$"
+	DefaultJSONPath              = "$.messages[-1].content"
+	DefaultResponseJSONPath      = "$.choices[0].message.content"
+	RequestFlowEnabledByDefault  = true
+	ResponseFlowEnabledByDefault = false
 )
 
 var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
@@ -45,6 +49,7 @@ type ContentLengthGuardrailPolicy struct {
 }
 
 type ContentLengthGuardrailPolicyParams struct {
+	Enabled        bool
 	Min            int
 	Max            int
 	JsonPath       string
@@ -60,7 +65,7 @@ func GetPolicy(
 
 	// Extract and parse request parameters if present
 	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {
-		requestParams, err := parseParams(requestParamsRaw)
+		requestParams, err := parseParams(requestParamsRaw, false)
 		if err != nil {
 			return nil, fmt.Errorf("invalid request parameters: %w", err)
 		}
@@ -70,7 +75,7 @@ func GetPolicy(
 
 	// Extract and parse response parameters if present
 	if responseParamsRaw, ok := params["response"].(map[string]interface{}); ok {
-		responseParams, err := parseParams(responseParamsRaw)
+		responseParams, err := parseParams(responseParamsRaw, true)
 		if err != nil {
 			return nil, fmt.Errorf("invalid response parameters: %w", err)
 		}
@@ -89,8 +94,24 @@ func GetPolicy(
 }
 
 // parseParams parses and validates parameters from map to struct
-func parseParams(params map[string]interface{}) (ContentLengthGuardrailPolicyParams, error) {
-	var result ContentLengthGuardrailPolicyParams
+func parseParams(params map[string]interface{}, isResponse bool) (ContentLengthGuardrailPolicyParams, error) {
+	result := ContentLengthGuardrailPolicyParams{
+		JsonPath: DefaultJSONPath,
+		Enabled:  RequestFlowEnabledByDefault,
+	}
+	if isResponse {
+		result.JsonPath = DefaultResponseJSONPath
+		result.Enabled = ResponseFlowEnabledByDefault
+	}
+
+	// Extract optional enabled parameter
+	if enabledRaw, ok := params["enabled"]; ok {
+		enabled, ok := enabledRaw.(bool)
+		if !ok {
+			return result, fmt.Errorf("'enabled' must be a boolean")
+		}
+		result.Enabled = enabled
+	}
 
 	// Validate and extract min parameter (required)
 	minRaw, ok := params["min"]
@@ -191,7 +212,7 @@ func (p *ContentLengthGuardrailPolicy) Mode() policy.ProcessingMode {
 
 // OnRequest validates request body content length
 func (p *ContentLengthGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	if !p.hasRequestParams {
+	if !p.hasRequestParams || !p.requestParams.Enabled {
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -204,7 +225,7 @@ func (p *ContentLengthGuardrailPolicy) OnRequest(ctx *policy.RequestContext, par
 
 // OnResponse validates response body content length
 func (p *ContentLengthGuardrailPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	if !p.hasResponseParams {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return policy.UpstreamResponseModifications{}
 	}
 

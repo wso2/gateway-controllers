@@ -10,12 +10,14 @@ parameters:
   properties:
     jsonPath:
       type: string
+      x-wso2-policy-advanced-param: false
       description: |
         Specifies the JSONPath used to extract prompt text from JSON payloads.
         When empty, the entire payload is evaluated as plain text.
-      default: ""
+      default: "$.messages[-1].content"
     allowSimilarityThreshold:
       type: number
+      x-wso2-policy-advanced-param: true
       description: |
         Specifies the minimum similarity score (0.0 to 1.0) required to match
         an allowed phrase.
@@ -24,6 +26,7 @@ parameters:
       maximum: 1.0
     denySimilarityThreshold:
       type: number
+      x-wso2-policy-advanced-param: true
       description: |
         Specifies the similarity score (0.0 to 1.0) at or above which a denied
         phrase blocks the request.
@@ -50,10 +53,25 @@ parameters:
         description: Specifies a phrase to deny.
     showAssessment:
       type: boolean
+      x-wso2-policy-advanced-param: true
       description: |
         Specifies whether blocked responses include detailed assessment
         information.
       default: false
+  oneOf:
+    - required:
+      - allowedPhrases
+      not:
+        required:
+        - deniedPhrases
+    - required:
+      - deniedPhrases
+      not:
+        required:
+        - allowedPhrases
+    - required:
+      - allowedPhrases
+      - deniedPhrases
 
 systemParameters:
   type: object

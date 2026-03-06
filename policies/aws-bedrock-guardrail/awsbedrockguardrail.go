@@ -38,12 +38,20 @@ import (
 )
 
 const (
-	GuardrailErrorCode     = 422
-	TextCleanRegex         = "^\"|\"$"
-	MetadataKeyPIIEntities = "awsbedrockguardrail:pii_entities"
+	GuardrailErrorCode           = 422
+	TextCleanRegex               = "^\"|\"$"
+	MetadataKeyPIIEntities       = "awsbedrockguardrail:pii_entities"
+	RequestDefaultJSONPath       = "$.messages[-1].content"
+	ResponseDefaultJSONPath      = "$.choices[0].message.content"
+	RequestFlowEnabledByDefault  = true
+	ResponseFlowEnabledByDefault = false
 )
 
 var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
+
+type bedrockGuardrailClient interface {
+	ApplyGuardrail(ctx context.Context, params *bedrockruntime.ApplyGuardrailInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error)
+}
 
 // AWSBedrockGuardrailPolicy implements AWS Bedrock Guardrail validation
 type AWSBedrockGuardrailPolicy struct {
@@ -63,9 +71,14 @@ type AWSBedrockGuardrailPolicy struct {
 	hasResponseParams bool
 	requestParams     AWSBedrockGuardrailPolicyParams
 	responseParams    AWSBedrockGuardrailPolicyParams
+
+	// Testing hooks for AWS interactions.
+	loadAWSConfigFunc    func(ctx context.Context, region string) (aws.Config, error)
+	newBedrockClientFunc func(cfg aws.Config) bedrockGuardrailClient
 }
 
 type AWSBedrockGuardrailPolicyParams struct {
+	Enabled            bool
 	JsonPath           string
 	RedactPII          bool
 	PassthroughOnError bool
@@ -85,6 +98,10 @@ func GetPolicy(
 		region:           getStringParam(params, "region"),
 		guardrailID:      getStringParam(params, "guardrailID"),
 		guardrailVersion: getStringParam(params, "guardrailVersion"),
+	}
+	p.loadAWSConfigFunc = p.loadAWSConfig
+	p.newBedrockClientFunc = func(cfg aws.Config) bedrockGuardrailClient {
+		return bedrockruntime.NewFromConfig(cfg)
 	}
 
 	// Optional AWS credentials
@@ -121,7 +138,7 @@ func GetPolicy(
 
 	// Extract and parse request parameters if present
 	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {
-		requestParams, err := parseRequestResponseParams(requestParamsRaw)
+		requestParams, err := parseRequestResponseParams(requestParamsRaw, false)
 		if err != nil {
 			return nil, fmt.Errorf("invalid request parameters: %w", err)
 		}
@@ -131,7 +148,7 @@ func GetPolicy(
 
 	// Extract and parse response parameters if present
 	if responseParamsRaw, ok := params["response"].(map[string]interface{}); ok {
-		responseParams, err := parseRequestResponseParams(responseParamsRaw)
+		responseParams, err := parseRequestResponseParams(responseParamsRaw, true)
 		if err != nil {
 			return nil, fmt.Errorf("invalid response parameters: %w", err)
 		}
@@ -153,8 +170,24 @@ func GetPolicy(
 }
 
 // parseRequestResponseParams parses and validates request/response parameters from map to struct
-func parseRequestResponseParams(params map[string]interface{}) (AWSBedrockGuardrailPolicyParams, error) {
-	var result AWSBedrockGuardrailPolicyParams
+func parseRequestResponseParams(params map[string]interface{}, isResponse bool) (AWSBedrockGuardrailPolicyParams, error) {
+	result := AWSBedrockGuardrailPolicyParams{
+		JsonPath: RequestDefaultJSONPath,
+		Enabled:  RequestFlowEnabledByDefault,
+	}
+	if isResponse {
+		result.JsonPath = ResponseDefaultJSONPath
+		result.Enabled = ResponseFlowEnabledByDefault
+	}
+
+	// Extract optional enabled parameter
+	if enabledRaw, ok := params["enabled"]; ok {
+		enabled, ok := enabledRaw.(bool)
+		if !ok {
+			return result, fmt.Errorf("'enabled' must be a boolean")
+		}
+		result.Enabled = enabled
+	}
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
@@ -321,7 +354,7 @@ func (p *AWSBedrockGuardrailPolicy) Mode() policy.ProcessingMode {
 
 // OnRequest validates request body using AWS Bedrock Guardrail
 func (p *AWSBedrockGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	if !p.hasRequestParams {
+	if !p.hasRequestParams || !p.requestParams.Enabled {
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -334,7 +367,7 @@ func (p *AWSBedrockGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params
 
 // OnResponse validates response body using AWS Bedrock Guardrail
 func (p *AWSBedrockGuardrailPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	if !p.hasResponseParams {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return policy.UpstreamResponseModifications{}
 	}
 
@@ -388,7 +421,12 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 	extractedValue = strings.TrimSpace(extractedValue)
 
 	// Create AWS config
-	awsCfg, err := p.loadAWSConfig(context.Background(), p.region)
+	loadConfig := p.loadAWSConfigFunc
+	if loadConfig == nil {
+		loadConfig = p.loadAWSConfig
+	}
+
+	awsCfg, err := loadConfig(context.Background(), p.region)
 	if err != nil {
 		if params.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: AWS config error, passthrough enabled", "error", err, "isResponse", isResponse)
@@ -552,7 +590,13 @@ func (p *AWSBedrockGuardrailPolicy) loadAWSConfigWithAssumeRole(ctx context.Cont
 // applyBedrockGuardrail calls AWS Bedrock Guardrail ApplyGuardrail API
 func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, awsCfg aws.Config, guardrailID, guardrailVersion, content string) (*bedrockruntime.ApplyGuardrailOutput, error) {
 	// Create Bedrock Runtime client
-	client := bedrockruntime.NewFromConfig(awsCfg)
+	newClient := p.newBedrockClientFunc
+	if newClient == nil {
+		newClient = func(cfg aws.Config) bedrockGuardrailClient {
+			return bedrockruntime.NewFromConfig(cfg)
+		}
+	}
+	client := newClient(awsCfg)
 
 	// Prepare ApplyGuardrail input
 	input := &bedrockruntime.ApplyGuardrailInput{

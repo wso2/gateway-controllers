@@ -168,8 +168,7 @@ func TestModelRoundRobinPolicy_GetPolicy_ParseErrors(t *testing.T) {
 
 func TestModelRoundRobinPolicy_GetPolicy_SuccessAndDefaults(t *testing.T) {
 	p := mustGetRRPolicy(t, map[string]interface{}{
-		"models":          baseRRModels(),
-		"suspendDuration": float64(30),
+		"models": baseRRModels(),
 		"requestModel": map[string]interface{}{
 			"location":   "payload",
 			"identifier": "$.model",
@@ -179,8 +178,8 @@ func TestModelRoundRobinPolicy_GetPolicy_SuccessAndDefaults(t *testing.T) {
 	if len(p.params.Models) != 2 {
 		t.Fatalf("expected two models, got %d", len(p.params.Models))
 	}
-	if p.params.SuspendDuration != 30 {
-		t.Fatalf("expected suspendDuration=30, got %d", p.params.SuspendDuration)
+	if p.params.SuspendDuration != DefaultSuspendDuration {
+		t.Fatalf("expected default suspendDuration=%d, got %d", DefaultSuspendDuration, p.params.SuspendDuration)
 	}
 }
 

@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package semanticpromptguard
 
 import (
@@ -35,6 +35,7 @@ const (
 	defaultAllowSimilarityThreshold = 0.65 // Similarity threshold (0-1), higher = stricter matching
 	defaultDenySimilarityThreshold  = 0.65 // Similarity threshold (0-1), higher = stricter blocking
 	defaultTimeoutMs                = 5000 // Default timeout in milliseconds
+	defaultRequestJSONPath          = "$.messages[-1].content"
 )
 
 // PhraseEmbedding represents a configured phrase and its embedding vector.
@@ -159,7 +160,9 @@ func createEmbeddingProvider(config embeddingproviders.EmbeddingProviderConfig) 
 
 // parseParams parses and validates policy parameters
 func parseParams(params map[string]interface{}, p *SemanticPromptGuardPolicy) (SemanticPromptGuardPolicyParams, error) {
-	var result SemanticPromptGuardPolicyParams
+	result := SemanticPromptGuardPolicyParams{
+		JsonPath: defaultRequestJSONPath,
+	}
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {

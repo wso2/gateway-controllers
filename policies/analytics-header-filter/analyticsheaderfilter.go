@@ -16,7 +16,6 @@
  * under the License.
  */
 
- 
 package analyticsheaderfilter
 
 import (
@@ -74,28 +73,29 @@ func (p *AnalyticsHeaderFilterPolicy) parseHeaderList(headersRaw interface{}) []
 	return headerList
 }
 
-// parseOperation parses and validates the operation parameter
-func (p *AnalyticsHeaderFilterPolicy) parseOperation(operationRaw interface{}) (string, error) {
-	if operationRaw == nil {
-		return "", fmt.Errorf("operation is required")
+// parseMode parses and validates the mode parameter.
+// Supported values are "allow" and "deny".
+func (p *AnalyticsHeaderFilterPolicy) parseMode(modeRaw interface{}) (string, error) {
+	if modeRaw == nil {
+		return "", fmt.Errorf("mode is required")
 	}
 
-	operation, ok := operationRaw.(string)
+	mode, ok := modeRaw.(string)
 	if !ok {
-		return "", fmt.Errorf("'operation' must be a string")
+		return "", fmt.Errorf("'mode' must be a string")
 	}
 
-	operation = strings.ToLower(strings.TrimSpace(operation))
-	if operation != "allow" && operation != "deny" {
-		return "", fmt.Errorf("'operation' must be either 'allow' or 'deny', got: %s", operation)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "allow" && mode != "deny" {
+		return "", fmt.Errorf("'mode' must be either 'allow' or 'deny', got: %s", mode)
 	}
 
-	return operation, nil
+	return mode, nil
 }
 
 // parseHeaderFilterConfig parses the header filter configuration object
-// Expected structure: { "operation": "allow"|"deny", "headers": ["header1", "header2"] }
-func (p *AnalyticsHeaderFilterPolicy) parseHeaderFilterConfig(configRaw interface{}) (operation string, headers []string, err error) {
+// Expected structure: { "mode": "allow"|"deny", "headers": ["header1", "header2"] }.
+func (p *AnalyticsHeaderFilterPolicy) parseHeaderFilterConfig(configRaw interface{}) (mode string, headers []string, err error) {
 	if configRaw == nil {
 		return "", nil, nil // No configuration provided
 	}
@@ -105,12 +105,12 @@ func (p *AnalyticsHeaderFilterPolicy) parseHeaderFilterConfig(configRaw interfac
 		return "", nil, fmt.Errorf("header filter config must be an object")
 	}
 
-	// Parse operation (required)
-	operationRaw, hasOperation := config["operation"]
-	if !hasOperation || operationRaw == nil {
-		return "", nil, fmt.Errorf("'operation' is required in header filter config")
+	// Parse mode (required)
+	modeRaw, hasMode := config["mode"]
+	if !hasMode || modeRaw == nil {
+		return "", nil, fmt.Errorf("'mode' is required in header filter config")
 	}
-	operation, err = p.parseOperation(operationRaw)
+	mode, err = p.parseMode(modeRaw)
 	if err != nil {
 		return "", nil, err
 	}
@@ -119,31 +119,31 @@ func (p *AnalyticsHeaderFilterPolicy) parseHeaderFilterConfig(configRaw interfac
 	headersRaw, _ := config["headers"]
 	headers = p.parseHeaderList(headersRaw)
 
-	return operation, headers, nil
+	return mode, headers, nil
 }
 
 // OnRequest processes request headers and marks them for exclusion from analytics
 func (p *AnalyticsHeaderFilterPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	requestConfigRaw, hasRequestConfig := params["requestHeadersToFilter"]
+	requestConfigRaw, hasRequestConfig := params["request"]
 	if !hasRequestConfig || requestConfigRaw == nil {
 		// No request headers filter configuration, return empty action
 		return policy.UpstreamRequestModifications{}
 	}
 
-	operation, specifiedHeaders, err := p.parseHeaderFilterConfig(requestConfigRaw)
+	mode, specifiedHeaders, err := p.parseHeaderFilterConfig(requestConfigRaw)
 	if err != nil {
 		slog.Warn("Analytics Header Filter Policy: Failed to parse request headers filter config", "error", err)
 		return policy.UpstreamRequestModifications{}
 	}
 
 	slog.Debug("Analytics Header Filter Policy: Parsed request config",
-		"operation", operation,
+		"mode", mode,
 		"headers", specifiedHeaders)
 
 	// Set DropHeadersFromAnalytics action (no processing, just pass the config)
 	return policy.UpstreamRequestModifications{
 		DropHeadersFromAnalytics: policy.DropHeaderAction{
-			Action:  operation,
+			Action:  mode,
 			Headers: specifiedHeaders,
 		},
 	}
@@ -151,26 +151,26 @@ func (p *AnalyticsHeaderFilterPolicy) OnRequest(ctx *policy.RequestContext, para
 
 // OnResponse processes response headers and marks them for exclusion from analytics
 func (p *AnalyticsHeaderFilterPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	responseConfigRaw, hasResponseConfig := params["responseHeadersToFilter"]
+	responseConfigRaw, hasResponseConfig := params["response"]
 	if !hasResponseConfig || responseConfigRaw == nil {
 		// No response headers filter configuration, return empty action
 		return policy.UpstreamResponseModifications{}
 	}
 
-	operation, specifiedHeaders, err := p.parseHeaderFilterConfig(responseConfigRaw)
+	mode, specifiedHeaders, err := p.parseHeaderFilterConfig(responseConfigRaw)
 	if err != nil {
 		slog.Warn("Analytics Header Filter Policy: Failed to parse response headers filter config", "error", err)
 		return policy.UpstreamResponseModifications{}
 	}
 
 	slog.Debug("Analytics Header Filter Policy: Parsed response config",
-		"operation", operation,
+		"mode", mode,
 		"headers", specifiedHeaders)
 
 	// Set DropHeadersFromAnalytics action (no processing, just pass the config)
 	return policy.UpstreamResponseModifications{
 		DropHeadersFromAnalytics: policy.DropHeaderAction{
-			Action:  operation,
+			Action:  mode,
 			Headers: specifiedHeaders,
 		},
 	}

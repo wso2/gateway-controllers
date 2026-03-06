@@ -66,12 +66,22 @@ func TestValidateAzureConfigParams(t *testing.T) {
 }
 
 func TestParseRequestResponseParams_DefaultsAndErrors(t *testing.T) {
-	got, err := parseRequestResponseParams(map[string]interface{}{})
+	got, err := parseRequestResponseParams(map[string]interface{}{}, false)
 	if err != nil {
 		t.Fatalf("expected defaults parse success, got error: %v", err)
 	}
+	if got.JsonPath != requestDefaultJSONPath {
+		t.Fatalf("unexpected default request jsonPath: got %q, want %q", got.JsonPath, requestDefaultJSONPath)
+	}
 	if got.HateSeverityThreshold != 4 || got.SexualSeverityThreshold != 5 || got.SelfHarmSeverityThreshold != 3 || got.ViolenceSeverityThreshold != 4 {
 		t.Fatalf("unexpected default thresholds: %+v", got)
+	}
+	gotResponse, err := parseRequestResponseParams(map[string]interface{}{}, true)
+	if err != nil {
+		t.Fatalf("expected response defaults parse success, got error: %v", err)
+	}
+	if gotResponse.JsonPath != responseDefaultJSONPath {
+		t.Fatalf("unexpected default response jsonPath: got %q, want %q", gotResponse.JsonPath, responseDefaultJSONPath)
 	}
 
 	tests := []struct {
@@ -107,7 +117,7 @@ func TestParseRequestResponseParams_DefaultsAndErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := parseRequestResponseParams(tt.params)
+			_, err := parseRequestResponseParams(tt.params, false)
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}

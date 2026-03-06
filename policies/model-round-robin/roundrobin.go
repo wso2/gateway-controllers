@@ -36,6 +36,7 @@ const (
 	// Metadata keys for context storage
 	MetadataKeySelectedModel = "model_roundrobin.selected_model"
 	MetadataKeyOriginalModel = "model_roundrobin.original_model"
+	DefaultSuspendDuration   = 30
 )
 
 // ModelRoundRobinPolicyParams holds the parsed policy parameters
@@ -85,7 +86,9 @@ func GetPolicy(
 
 // parseParams parses and validates parameters from map to struct
 func parseParams(params map[string]interface{}) (ModelRoundRobinPolicyParams, error) {
-	var result ModelRoundRobinPolicyParams
+	result := ModelRoundRobinPolicyParams{
+		SuspendDuration: DefaultSuspendDuration,
+	}
 
 	// Parse models parameter (required)
 	modelsRaw, ok := params["models"]
