@@ -23,7 +23,6 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
-	"reflect"
 	"strings"
 
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
@@ -160,11 +159,9 @@ func (p *RequestRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[
 	}
 
 	if cfg.QueryRewrite != nil {
-		originalQueryValues := cloneQueryValues(queryValues)
 		if err := applyQueryRewrite(queryValues, cfg.QueryRewrite); err != nil {
 			return configErrorResponse("Invalid queryRewrite configuration", err)
 		}
-		queryRewriteChanged = !reflect.DeepEqual(queryValues, originalQueryValues)
 	}
 
 	finalPath := originalPath
@@ -347,15 +344,7 @@ func applyPathRewrite(ctx *policy.RequestContext, currentPath string, cfg *pathR
 		if strings.HasSuffix(operationPath, "/*") {
 			operationPath = strings.TrimSuffix(operationPath, "/*")
 		}
-		if operationPath != "/" {
-			operationPath = strings.TrimSuffix(operationPath, "/")
-		}
 		if !strings.HasPrefix(currentPath, operationPath) {
-			return currentPath
-		}
-		// Enforce segment boundary and wildcard semantics:
-		// "/orders/*" should match only "/orders/..." (not "/orders" and not "/orders123").
-		if !strings.HasPrefix(currentPath, operationPath+"/") {
 			return currentPath
 		}
 		remainder := strings.TrimPrefix(currentPath, operationPath)
@@ -383,9 +372,6 @@ func applyPathRewrite(ctx *policy.RequestContext, currentPath string, cfg *pathR
 }
 
 func splitBasePath(ctx *policy.RequestContext, pathOnly string) (string, string) {
-	if ctx == nil || ctx.SharedContext == nil {
-		return "", pathOnly
-	}
 	base := strings.TrimSpace(ctx.APIContext)
 	if base == "" || base == "/" {
 		return "", pathOnly
@@ -499,21 +485,4 @@ func isAllowedMethod(method string) bool {
 	default:
 		return false
 	}
-}
-
-func cloneQueryValues(values url.Values) url.Values {
-	if values == nil {
-		return url.Values{}
-	}
-	cloned := make(url.Values, len(values))
-	for k, vs := range values {
-		if vs == nil {
-			cloned[k] = nil
-			continue
-		}
-		out := make([]string, len(vs))
-		copy(out, vs)
-		cloned[k] = out
-	}
-	return cloned
 }
