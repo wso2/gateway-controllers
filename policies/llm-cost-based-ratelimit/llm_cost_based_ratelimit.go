@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 	ratelimit "github.com/Tharsanan1/gateway-controllers/policies/advanced-ratelimit"
+	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
 const (
@@ -76,7 +76,7 @@ func (p *LLMCostRateLimitPolicy) Mode() policy.ProcessingMode {
 		RequestHeaderMode:  policy.HeaderModeProcess,
 		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeProcess,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   policy.BodyModeSkip, // Cost is read from x-llm-cost response header
 	}
 }
 
@@ -451,25 +451,11 @@ func transformToRatelimitParams(params map[string]interface{}, template map[stri
 		return map[string]interface{}{"quotas": []interface{}{}}
 	}
 
-	// Get token costs from system parameters (adjusted by costPerNTokens)
-	tokenCosts, costPerNTokens := extractTokenCosts(params)
-
 	// Get the cost scale factor from system parameters
 	costScaleFactor := extractCostScaleFactor(params)
 
-	// Validate costPerNTokens to prevent division by zero
-	if costPerNTokens < 1 {
-		slog.Warn("transformToRatelimitParams: costPerNTokens is less than 1, using default 1000000",
-			"provided", costPerNTokens)
-		costPerNTokens = 1000000
-	}
-
-	slog.Debug("transformToRatelimitParams: extracted token costs",
-		"costPerNTokens", costPerNTokens,
-		"costScaleFactor", costScaleFactor,
-		"hasPromptCost", tokenCosts["promptTokenCost"] != nil,
-		"hasCompletionCost", tokenCosts["completionTokenCost"] != nil,
-		"hasTotalCost", tokenCosts["totalTokenCost"] != nil)
+	slog.Debug("transformToRatelimitParams: using x-llm-cost header for cost extraction",
+		"costScaleFactor", costScaleFactor)
 
 	// Build a single quota with multiple limits for different time windows
 	// Scale the dollar amounts using the configured scale factor for precision
@@ -517,58 +503,14 @@ func transformToRatelimitParams(params map[string]interface{}, template map[stri
 		return map[string]interface{}{"quotas": []interface{}{}}
 	}
 
-	// Build cost extraction sources with multipliers for each token type.
-	// The multiplier converts token count to scaled units:
-	//   scaledCost = tokens × (costPerNTokens / N) × costScaleFactor
-	// where costPerNTokens is the dollar cost for N tokens.
-	var sources []interface{}
-
-	// Add prompt token cost source with multiplier (scaled)
-	if promptCost, ok := tokenCosts["promptTokenCost"].(float64); ok && promptCost > 0 {
-		// costPerToken in dollars, then scale to configured unit
-		costPerTokenDollars := promptCost / float64(costPerNTokens)
-		costPerTokenScaled := costPerTokenDollars * float64(costScaleFactor)
-		if source := buildCostSource(template, "promptTokens", costPerTokenScaled); source != nil {
-			sources = append(sources, source)
-			slog.Debug("transformToRatelimitParams: added prompt cost source",
-				"promptCost", promptCost,
-				"costPerNTokens", costPerNTokens,
-				"costPerTokenDollars", costPerTokenDollars,
-				"costPerTokenScaled", costPerTokenScaled,
-				"costScaleFactor", costScaleFactor)
-		}
-	}
-
-	// Add completion token cost source with multiplier (scaled)
-	if completionCost, ok := tokenCosts["completionTokenCost"].(float64); ok && completionCost > 0 {
-		costPerTokenDollars := completionCost / float64(costPerNTokens)
-		costPerTokenScaled := costPerTokenDollars * float64(costScaleFactor)
-		if source := buildCostSource(template, "completionTokens", costPerTokenScaled); source != nil {
-			sources = append(sources, source)
-			slog.Debug("transformToRatelimitParams: added completion cost source",
-				"completionCost", completionCost,
-				"costPerNTokens", costPerNTokens,
-				"costPerTokenDollars", costPerTokenDollars,
-				"costPerTokenScaled", costPerTokenScaled,
-				"costScaleFactor", costScaleFactor)
-		}
-	}
-
-	// Add total token cost source with multiplier (if individual costs not specified)
-	if len(sources) == 0 {
-		if totalCost, ok := tokenCosts["totalTokenCost"].(float64); ok && totalCost > 0 {
-			costPerTokenDollars := totalCost / float64(costPerNTokens)
-			costPerTokenScaled := costPerTokenDollars * float64(costScaleFactor)
-			if source := buildCostSource(template, "totalTokens", costPerTokenScaled); source != nil {
-				sources = append(sources, source)
-				slog.Debug("transformToRatelimitParams: added total cost source",
-					"totalCost", totalCost,
-					"costPerNTokens", costPerNTokens,
-					"costPerTokenDollars", costPerTokenDollars,
-					"costPerTokenScaled", costPerTokenScaled,
-					"costScaleFactor", costScaleFactor)
-			}
-		}
+	// Read the pre-calculated dollar cost from the x-llm-cost response header,
+	// set by the LLM cost system policy. Scale to int64-compatible units.
+	sources := []interface{}{
+		map[string]interface{}{
+			"type":       "response_header",
+			"key":        "x-llm-cost",
+			"multiplier": float64(costScaleFactor),
+		},
 	}
 
 	// Build the quota
@@ -580,13 +522,10 @@ func transformToRatelimitParams(params map[string]interface{}, template map[stri
 		},
 	}
 
-	// Add cost extraction configuration if we have sources
-	if len(sources) > 0 {
-		quota["costExtraction"] = map[string]interface{}{
-			"enabled": true,
-			"sources": sources,
-			"default": 0, // Default to 0 cost if extraction fails
-		}
+	quota["costExtraction"] = map[string]interface{}{
+		"enabled": true,
+		"sources": sources,
+		"default": 0, // Default to 0 cost if x-llm-cost header is absent
 	}
 
 	quotas := []interface{}{quota}

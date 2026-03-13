@@ -92,16 +92,13 @@ func createTestRequestContext(providerName string) *policy.RequestContext {
 	}
 }
 
-// createTestResponseContext creates a response context with body
-func createTestResponseContext(body []byte) *policy.ResponseContext {
+// createTestResponseContext creates a response context with the x-llm-cost header
+func createTestResponseContext(llmCost string) *policy.ResponseContext {
 	return &policy.ResponseContext{
 		ResponseHeaders: policy.NewHeaders(map[string][]string{
 			"content-type": {"application/json"},
+			"x-llm-cost":   {llmCost},
 		}),
-		ResponseBody: &policy.Body{
-			Present: true,
-			Content: body,
-		},
 		SharedContext: &policy.SharedContext{
 			Metadata: make(map[string]interface{}),
 		},
@@ -117,7 +114,7 @@ func TestLLMCostRateLimitPolicy_Mode(t *testing.T) {
 		RequestHeaderMode:  policy.HeaderModeProcess,
 		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeProcess,
-		ResponseBodyMode:   policy.BodyModeBuffer, // Need body for token extraction
+		ResponseBodyMode:   policy.BodyModeSkip, // Cost is read from x-llm-cost response header
 	}
 
 	if mode != expected {
@@ -250,28 +247,11 @@ func TestTransformToRatelimitParams(t *testing.T) {
 				"duration": "24h",
 			},
 		},
-		"promptTokenCost":     float64(0.000002),
-		"completionTokenCost": float64(0.000006),
-		"algorithm":           "fixed-window",
-		"backend":             "memory",
+		"algorithm": "fixed-window",
+		"backend":   "memory",
 	}
 
-	template := map[string]interface{}{
-		"configuration": map[string]interface{}{
-			"spec": map[string]interface{}{
-				"promptTokens": map[string]interface{}{
-					"identifier": "$.usage.prompt_tokens",
-					"location":   "payload",
-				},
-				"completionTokens": map[string]interface{}{
-					"identifier": "$.usage.completion_tokens",
-					"location":   "payload",
-				},
-			},
-		},
-	}
-
-	result := transformToRatelimitParams(params, template)
+	result := transformToRatelimitParams(params, nil)
 
 	// Check quotas were created
 	quotas, ok := result["quotas"].([]interface{})
@@ -295,19 +275,23 @@ func TestTransformToRatelimitParams(t *testing.T) {
 		t.Errorf("Expected 2 limits, got %d", len(limits))
 	}
 
-	// Check cost extraction configuration
+	// Check cost extraction reads from x-llm-cost header
 	costExtraction, ok := quota["costExtraction"].(map[string]interface{})
 	if !ok {
 		t.Fatal("Expected costExtraction to be present")
 	}
 
 	sources, ok := costExtraction["sources"].([]interface{})
-	if !ok {
-		t.Fatal("Expected sources to be []interface{}")
+	if !ok || len(sources) != 1 {
+		t.Fatalf("Expected 1 cost source (x-llm-cost header), got %d", len(sources))
 	}
 
-	if len(sources) != 2 {
-		t.Errorf("Expected 2 cost sources, got %d", len(sources))
+	source := sources[0].(map[string]interface{})
+	if source["type"] != "response_header" {
+		t.Errorf("Expected source type 'response_header', got %v", source["type"])
+	}
+	if source["key"] != "x-llm-cost" {
+		t.Errorf("Expected source key 'x-llm-cost', got %v", source["key"])
 	}
 
 	// Check passthrough parameters
@@ -320,8 +304,8 @@ func TestTransformToRatelimitParams(t *testing.T) {
 	}
 }
 
-// TestTransformToRatelimitParams_ZeroCostPerNTokens tests that zero costPerNTokens doesn't cause division by zero
-func TestTransformToRatelimitParams_ZeroCostPerNTokens(t *testing.T) {
+// TestTransformToRatelimitParams_CustomScaleFactor tests that a custom costScaleFactor is applied to the multiplier
+func TestTransformToRatelimitParams_CustomScaleFactor(t *testing.T) {
 	params := map[string]interface{}{
 		"budgetLimits": []interface{}{
 			map[string]interface{}{
@@ -329,51 +313,25 @@ func TestTransformToRatelimitParams_ZeroCostPerNTokens(t *testing.T) {
 				"duration": "1h",
 			},
 		},
-		"promptTokenCost":     float64(0.002),
-		"completionTokenCost": float64(0.006),
-		"costPerNTokens":      0, // Zero should not cause panic
-		"algorithm":           "fixed-window",
-		"backend":             "memory",
+		"costScaleFactor": 1000000, // 1M micro-dollars
+		"algorithm":       "fixed-window",
+		"backend":         "memory",
 	}
 
-	template := map[string]interface{}{
-		"configuration": map[string]interface{}{
-			"spec": map[string]interface{}{
-				"promptTokens": map[string]interface{}{
-					"identifier": "$.usage.prompt_tokens",
-					"location":   "payload",
-				},
-				"completionTokens": map[string]interface{}{
-					"identifier": "$.usage.completion_tokens",
-					"location":   "payload",
-				},
-			},
-		},
-	}
-
-	// Should not panic
-	result := transformToRatelimitParams(params, template)
+	result := transformToRatelimitParams(params, nil)
 
 	quotas, ok := result["quotas"].([]interface{})
-	if !ok {
-		t.Fatal("Expected quotas to be []interface{}")
-	}
-
-	if len(quotas) != 1 {
-		t.Fatalf("Expected 1 quota, got %d", len(quotas))
+	if !ok || len(quotas) != 1 {
+		t.Fatal("Expected 1 quota")
 	}
 
 	quota := quotas[0].(map[string]interface{})
+	costExtraction := quota["costExtraction"].(map[string]interface{})
+	sources := costExtraction["sources"].([]interface{})
+	source := sources[0].(map[string]interface{})
 
-	// Should have cost extraction with default costPerNTokens (1000000)
-	costExtraction, ok := quota["costExtraction"].(map[string]interface{})
-	if !ok {
-		t.Fatal("Expected costExtraction to be present")
-	}
-
-	sources, ok := costExtraction["sources"].([]interface{})
-	if !ok || len(sources) != 2 {
-		t.Errorf("Expected 2 cost sources, got %d", len(sources))
+	if source["multiplier"] != float64(1000000) {
+		t.Errorf("Expected multiplier 1000000, got %v", source["multiplier"])
 	}
 }
 
@@ -400,8 +358,9 @@ func TestTransformToRatelimitParams_NoBudgetLimits(t *testing.T) {
 	}
 }
 
-// TestTransformToRatelimitParams_NoTokenCosts tests transformation without token costs
-func TestTransformToRatelimitParams_NoTokenCosts(t *testing.T) {
+// TestTransformToRatelimitParams_AlwaysHasCostExtraction tests that cost extraction
+// is always configured regardless of other parameters, since it reads from x-llm-cost header.
+func TestTransformToRatelimitParams_AlwaysHasCostExtraction(t *testing.T) {
 	params := map[string]interface{}{
 		"budgetLimits": []interface{}{
 			map[string]interface{}{
@@ -413,31 +372,24 @@ func TestTransformToRatelimitParams_NoTokenCosts(t *testing.T) {
 		"backend":   "memory",
 	}
 
-	template := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"promptTokens": map[string]interface{}{
-				"identifier": "$.usage.prompt_tokens",
-				"location":   "payload",
-			},
-		},
-	}
-
-	result := transformToRatelimitParams(params, template)
+	result := transformToRatelimitParams(params, nil)
 
 	quotas, ok := result["quotas"].([]interface{})
-	if !ok {
-		t.Fatal("Expected quotas to be []interface{}")
-	}
-
-	if len(quotas) != 1 {
-		t.Fatalf("Expected 1 quota, got %d", len(quotas))
+	if !ok || len(quotas) != 1 {
+		t.Fatal("Expected 1 quota")
 	}
 
 	quota := quotas[0].(map[string]interface{})
 
-	// Should have no cost extraction when token costs are 0
-	if _, hasCostExtraction := quota["costExtraction"]; hasCostExtraction {
-		t.Error("Expected no costExtraction when token costs are 0")
+	// x-llm-cost source should always be present
+	costExtraction, ok := quota["costExtraction"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected costExtraction to always be present")
+	}
+
+	sources, ok := costExtraction["sources"].([]interface{})
+	if !ok || len(sources) != 1 {
+		t.Fatalf("Expected 1 cost source, got %d", len(sources))
 	}
 }
 
@@ -587,8 +539,8 @@ func TestBuildCostSource(t *testing.T) {
 // TestGetTemplateSpec tests template spec extraction
 func TestGetTemplateSpec(t *testing.T) {
 	tests := []struct {
-		name     string
-		template map[string]interface{}
+		name      string
+		template  map[string]interface{}
 		expectNil bool
 	}{
 		{
@@ -778,9 +730,8 @@ func TestLLMCostRateLimitPolicy_Integration_BasicRateLimit(t *testing.T) {
 			t.Fatalf("Request %d phase should pass pre-check, got %T", i+1, reqAction)
 		}
 
-		// Response phase - consume $0.30 (5 prompt + 1 completion)
-		respBody := []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":1}}`)
-		respCtx := createTestResponseContext(respBody)
+		// Response phase - x-llm-cost header reports $0.30
+		respCtx := createTestResponseContext("0.3000000000")
 		respCtx.SharedContext = reqCtx.SharedContext
 		respCtx.Metadata = reqCtx.Metadata
 		p.OnResponse(respCtx, params)
@@ -831,10 +782,8 @@ func TestLLMCostRateLimitPolicy_Integration_CostCalculation(t *testing.T) {
 		t.Fatalf("First request should be allowed, got %T", action)
 	}
 
-	// Simulate response with 100 prompt tokens and 50 completion tokens
-	// Expected cost: (100 * $0.001) + (50 * $0.002) = $0.10 + $0.10 = $0.20
-	respBody := []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150}}`)
-	respCtx := createTestResponseContext(respBody)
+	// Simulate response where system policy computed $0.20 cost
+	respCtx := createTestResponseContext("0.2000000000")
 	respCtx.SharedContext = reqCtx.SharedContext
 	respCtx.Metadata = reqCtx.Metadata
 
@@ -888,9 +837,8 @@ func TestLLMCostRateLimitPolicy_Integration_MultipleBudgetLimits(t *testing.T) {
 		t.Fatalf("Request should be allowed, got %T", action)
 	}
 
-	// Response with tokens
-	respBody := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
-	respCtx := createTestResponseContext(respBody)
+	// Response with pre-calculated cost from system policy
+	respCtx := createTestResponseContext("0.3000000000")
 	respCtx.SharedContext = reqCtx.SharedContext
 	respCtx.Metadata = reqCtx.Metadata
 
