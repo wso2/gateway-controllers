@@ -1,0 +1,11 @@
+{
+  "name": "json-xml-mediator",
+  "displayName": "JSON/XML Mediator",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "Mediation",
+    "Transformation"
+  ],
+  "description": "Mediates request and response payloads between downstream and upstream JSON/XML formats.\nAutomatically converts requests from the downstream format to the upstream format, and responses\nfrom the upstream format back to the downstream format."
+}
