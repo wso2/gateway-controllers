@@ -162,10 +162,26 @@ func (c *AnthropicCalculator) Adjust(baseCost float64, usage Usage, pricing Mode
 		float64(usage.CacheWriteTokens)*cacheWrite5mRate +
 		float64(usage.CacheWrite1hrTokens)*cacheWrite1hrRate
 
-	nonCacheCost := baseCost - cacheCost
+	// Carve out web search cost — flat fee, not subject to geo/speed multiplier.
+	var webSearchCost float64
+	if usage.WebSearchRequests > 0 {
+		if len(pricing.SearchContextCostPerQuery) > 0 {
+			size := usage.SearchContextSize
+			if size == "" {
+				size = "medium"
+			}
+			if rate, ok := pricing.SearchContextCostPerQuery["search_context_size_"+size]; ok {
+				webSearchCost = float64(usage.WebSearchRequests) * rate
+			}
+		} else if pricing.WebSearchCostPerRequest > 0 {
+			webSearchCost = float64(usage.WebSearchRequests) * pricing.WebSearchCostPerRequest
+		}
+	}
+
+	nonCacheCost := baseCost - cacheCost - webSearchCost
 	if nonCacheCost < 0 {
 		nonCacheCost = 0
 	}
 
-	return nonCacheCost*multiplier + cacheCost
+	return nonCacheCost*multiplier + cacheCost + webSearchCost
 }
