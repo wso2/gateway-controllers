@@ -122,8 +122,8 @@ func TestJWTAuthPolicy_HappyPath_LocalCert_WithClaimMappings_AndUserIdClaim(t *t
 	if mods.SetHeaders["X-User-Email"] != "alice@example.com" {
 		t.Fatalf("expected X-User-Email header to be set")
 	}
-	if ctx.SharedContext.AuthContext[AuthContextKeyUserID] != "alice" {
-		t.Fatalf("expected %s to be set from userIdClaim", AuthContextKeyUserID)
+	if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Subject != "alice" {
+		t.Fatalf("expected AuthContext.Subject to be set from userIdClaim")
 	}
 }
 
@@ -688,14 +688,8 @@ func TestJWTAuthPolicy_Regression_MetadataSetOnSuccessAndFailure(t *testing.T) {
 		ctx, action := executeOnRequest(t, params, authHeader("Authorization", "Bearer", token))
 		assertAuthSuccess(t, ctx, action)
 
-		if ctx.Metadata[MetadataKeyAuthMethod] != "jwt" {
-			t.Fatalf("expected auth method metadata to be jwt")
-		}
-		if _, ok := ctx.Metadata[MetadataKeyTokenClaims]; !ok {
-			t.Fatalf("expected token claims metadata to be set")
-		}
-		if _, ok := ctx.Metadata[MetadataValidatedClaims]; !ok {
-			t.Fatalf("expected validated claims metadata to be set")
+		if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.AuthType != "jwt" {
+			t.Fatalf("expected auth type to be jwt")
 		}
 	})
 
@@ -706,11 +700,9 @@ func TestJWTAuthPolicy_Regression_MetadataSetOnSuccessAndFailure(t *testing.T) {
 		ctx, action := executeOnRequest(t, params, map[string][]string{})
 		assertAuthFailure(t, ctx, action, 401)
 
-		if ctx.Metadata[MetadataKeyAuthMethod] != "jwt" {
-			t.Fatalf("expected auth method metadata to be jwt")
-		}
-		if _, ok := ctx.Metadata[MetadataValidatedClaims]; ok {
-			t.Fatalf("did not expect validated claims on failure path")
+		// On failure, AuthContext should indicate not authenticated
+		if ctx.SharedContext.AuthContext != nil && ctx.SharedContext.AuthContext.Authenticated {
+			t.Fatalf("did not expect authenticated context on failure path")
 		}
 	})
 }
@@ -931,8 +923,8 @@ func assertAuthSuccess(t *testing.T, ctx *policy.RequestContext, action policy.R
 	if ctx == nil {
 		t.Fatalf("request context cannot be nil")
 	}
-	if ctx.Metadata[MetadataKeyAuthSuccess] != true {
-		t.Fatalf("expected auth success, got %v", ctx.Metadata[MetadataKeyAuthSuccess])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected auth success, got unauthenticated context")
 	}
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
@@ -945,8 +937,8 @@ func assertAuthFailure(t *testing.T, ctx *policy.RequestContext, action policy.R
 	if ctx == nil {
 		t.Fatalf("request context cannot be nil")
 	}
-	if ctx.Metadata[MetadataKeyAuthSuccess] != false {
-		t.Fatalf("expected auth failure, got %v", ctx.Metadata[MetadataKeyAuthSuccess])
+	if ctx.SharedContext.AuthContext != nil && ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected auth failure, got authenticated context")
 	}
 
 	resp, ok := action.(policy.ImmediateResponse)
