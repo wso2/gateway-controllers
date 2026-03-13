@@ -124,7 +124,13 @@ func (m *MultiLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limi
 		// Create policy-specific key to separate TAT tracking
 		policyKey := fmt.Sprintf("%s:p%d", key, i)
 
-		result, err := lim.ConsumeN(ctx, policyKey, n)
+		var result *limiter.Result
+		var err error
+		if tracker, ok := lim.(limiter.CostTracker); ok {
+			result, err = tracker.ConsumeN(ctx, policyKey, n)
+		} else {
+			result, err = lim.ConsumeOrClampN(ctx, policyKey, n)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("limiter %d failed: %w", i, err)
 		}

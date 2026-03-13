@@ -29,17 +29,17 @@ import (
 )
 
 type fakeLimiter struct {
-	allowFn           func(ctx context.Context, key string) (*limiter.Result, error)
-	allowNFn          func(ctx context.Context, key string, n int64) (*limiter.Result, error)
-	consumeOrClampNFn func(ctx context.Context, key string, n int64) (*limiter.Result, error)
-	getAvailableFn    func(ctx context.Context, key string) (int64, error)
-	closeFn           func() error
+	allowFn        func(ctx context.Context, key string) (*limiter.Result, error)
+	allowNFn       func(ctx context.Context, key string, n int64) (*limiter.Result, error)
+	consumeNFn     func(ctx context.Context, key string, n int64) (*limiter.Result, error)
+	getAvailableFn func(ctx context.Context, key string) (int64, error)
+	closeFn        func() error
 
-	allowCalls           int
-	allowNCalls          int
-	consumeOrClampNCalls int
-	getAvailableCalls    int
-	closeCalls           int
+	allowCalls        int
+	allowNCalls       int
+	consumeNCalls     int
+	getAvailableCalls int
+	closeCalls        int
 
 	lastKey   string
 	lastCost  int64
@@ -78,11 +78,15 @@ func (f *fakeLimiter) AllowN(ctx context.Context, key string, n int64) (*limiter
 }
 
 func (f *fakeLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
-	f.consumeOrClampNCalls++
+	return newResult(true, 100, 50, 0, time.Minute), nil
+}
+
+func (f *fakeLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	f.consumeNCalls++
 	f.lastKey = key
 	f.lastCost = n
-	if f.consumeOrClampNFn != nil {
-		return f.consumeOrClampNFn(ctx, key, n)
+	if f.consumeNFn != nil {
+		return f.consumeNFn(ctx, key, n)
 	}
 	return newResult(true, 100, 50, 0, time.Minute), nil
 }
@@ -302,9 +306,9 @@ func TestGetPolicy_ConfigAndDefaults(t *testing.T) {
 			"bodyFormat": "plain",
 		}
 		params["headers"] = map[string]interface{}{
-			"includeXRateLimit":  false,
-			"includeIETF":        false,
-			"includeRetryAfter":  false,
+			"includeXRateLimit": false,
+			"includeIETF":       false,
+			"includeRetryAfter": false,
 		}
 		p, err := GetPolicy(policy.PolicyMetadata{RouteName: "r1"}, params)
 		if err != nil {
@@ -371,11 +375,11 @@ func TestGetPolicy_ConfigAndDefaults(t *testing.T) {
 			"algorithm": "fixed-window",
 			"quotas": []interface{}{
 				map[string]interface{}{
-					"name": "burst",
+					"name":   "burst",
 					"limits": []interface{}{map[string]interface{}{"limit": float64(100), "duration": "1m"}},
 				},
 				map[string]interface{}{
-					"name": "daily",
+					"name":   "daily",
 					"limits": []interface{}{map[string]interface{}{"limit": float64(1000), "duration": "24h"}},
 				},
 			},
@@ -407,8 +411,8 @@ func TestMemoryCacheReuseAndRefCounts(t *testing.T) {
 		"algorithm": "fixed-window",
 		"quotas": []interface{}{
 			map[string]interface{}{
-				"name": "api-quota",
-				"limits": []interface{}{map[string]interface{}{"limit": float64(10), "duration": "1m"}},
+				"name":          "api-quota",
+				"limits":        []interface{}{map[string]interface{}{"limit": float64(10), "duration": "1m"}},
 				"keyExtraction": []interface{}{map[string]interface{}{"type": "apiname"}},
 			},
 		},
@@ -454,8 +458,8 @@ func TestSharedQuotaLimiterCleanup(t *testing.T) {
 			"algorithm": "fixed-window",
 			"quotas": []interface{}{
 				map[string]interface{}{
-					"name": "api-quota",
-					"limits": []interface{}{map[string]interface{}{"limit": float64(10), "duration": "1m"}},
+					"name":          "api-quota",
+					"limits":        []interface{}{map[string]interface{}{"limit": float64(10), "duration": "1m"}},
 					"keyExtraction": []interface{}{map[string]interface{}{"type": "apiname"}},
 				},
 			},
@@ -467,8 +471,8 @@ func TestSharedQuotaLimiterCleanup(t *testing.T) {
 			"algorithm": "fixed-window",
 			"quotas": []interface{}{
 				map[string]interface{}{
-					"name": name,
-					"limits": []interface{}{map[string]interface{}{"limit": float64(5), "duration": "1m"}},
+					"name":          name,
+					"limits":        []interface{}{map[string]interface{}{"limit": float64(5), "duration": "1m"}},
 					"keyExtraction": []interface{}{map[string]interface{}{"type": "routename"}},
 				},
 			},
@@ -550,8 +554,8 @@ func TestRouteScopedQuotaCleanup(t *testing.T) {
 			"algorithm": "fixed-window",
 			"quotas": []interface{}{
 				map[string]interface{}{
-					"name": name,
-					"limits": []interface{}{map[string]interface{}{"limit": float64(10), "duration": "1m"}},
+					"name":          name,
+					"limits":        []interface{}{map[string]interface{}{"limit": float64(10), "duration": "1m"}},
 					"keyExtraction": []interface{}{map[string]interface{}{"type": "routename"}},
 				},
 			},
@@ -609,26 +613,26 @@ func TestModeBehavior(t *testing.T) {
 			wantResBody: policy.BodyModeSkip,
 		},
 		{
-			name: "request body source",
-			quotas: []QuotaRuntime{mkQuota(true, []CostSource{{Type: CostSourceRequestBody, JSONPath: "$.tokens"}})},
+			name:        "request body source",
+			quotas:      []QuotaRuntime{mkQuota(true, []CostSource{{Type: CostSourceRequestBody, JSONPath: "$.tokens"}})},
 			wantReqBody: policy.BodyModeBuffer,
 			wantResBody: policy.BodyModeSkip,
 		},
 		{
-			name: "response body source",
-			quotas: []QuotaRuntime{mkQuota(true, []CostSource{{Type: CostSourceResponseBody, JSONPath: "$.usage.total"}})},
+			name:        "response body source",
+			quotas:      []QuotaRuntime{mkQuota(true, []CostSource{{Type: CostSourceResponseBody, JSONPath: "$.usage.total"}})},
 			wantReqBody: policy.BodyModeSkip,
 			wantResBody: policy.BodyModeBuffer,
 		},
 		{
-			name: "mixed body sources",
-			quotas: []QuotaRuntime{mkQuota(true, []CostSource{{Type: CostSourceRequestBody, JSONPath: "$.in"}, {Type: CostSourceResponseBody, JSONPath: "$.out"}})},
+			name:        "mixed body sources",
+			quotas:      []QuotaRuntime{mkQuota(true, []CostSource{{Type: CostSourceRequestBody, JSONPath: "$.in"}, {Type: CostSourceResponseBody, JSONPath: "$.out"}})},
 			wantReqBody: policy.BodyModeBuffer,
 			wantResBody: policy.BodyModeBuffer,
 		},
 		{
-			name: "configured but effectively disabled",
-			quotas: []QuotaRuntime{mkQuota(false, []CostSource{{Type: CostSourceResponseBody, JSONPath: "$.x"}})},
+			name:        "configured but effectively disabled",
+			quotas:      []QuotaRuntime{mkQuota(false, []CostSource{{Type: CostSourceResponseBody, JSONPath: "$.x"}})},
 			wantReqBody: policy.BodyModeSkip,
 			wantResBody: policy.BodyModeSkip,
 		},
@@ -1036,11 +1040,11 @@ func TestOnRequestBehavior(t *testing.T) {
 func TestOnResponseBehavior(t *testing.T) {
 	mkPolicy := func(quotas []QuotaRuntime) *RateLimitPolicy {
 		return &RateLimitPolicy{
-			quotas:      quotas,
-			routeName:   "route-main",
-			backend:     "memory",
-			includeXRL:  true,
-			includeIETF: true,
+			quotas:       quotas,
+			routeName:    "route-main",
+			backend:      "memory",
+			includeXRL:   true,
+			includeIETF:  true,
 			includeRetry: true,
 		}
 	}
@@ -1102,8 +1106,8 @@ func TestOnResponseBehavior(t *testing.T) {
 
 		action := p.OnResponse(ctx, nil)
 		mods := assertUpstreamResponseHeaders(t, action, map[string]string{"x-ratelimit-remaining": "8"})
-		if lim.consumeOrClampNCalls != 0 {
-			t.Fatalf("expected no ConsumeOrClampN call for clamped zero cost")
+		if lim.consumeNCalls != 0 {
+			t.Fatalf("expected no ConsumeN call for clamped zero cost")
 		}
 		if mods.SetHeaders["ratelimit"] == "" {
 			t.Fatalf("expected ratelimit header, got %+v", mods.SetHeaders)
@@ -1139,8 +1143,8 @@ func TestOnResponseBehavior(t *testing.T) {
 		}
 	})
 
-	t.Run("positive response cost consumes via ConsumeOrClampN", func(t *testing.T) {
-		lim := &fakeLimiter{consumeOrClampNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	t.Run("positive response cost consumes via ConsumeN", func(t *testing.T) {
+		lim := &fakeLimiter{consumeNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
 			return newResult(true, 10, 6, 0, time.Minute), nil
 		}}
 		ce := NewCostExtractor(CostExtractionConfig{Enabled: true, Default: 1, Sources: []CostSource{{Type: CostSourceResponseHeader, Key: "x-cost", Multiplier: 1}}})
@@ -1152,13 +1156,13 @@ func TestOnResponseBehavior(t *testing.T) {
 
 		action := p.OnResponse(ctx, nil)
 		_ = assertUpstreamResponseHeaders(t, action, map[string]string{"x-ratelimit-remaining": "6"})
-		if lim.consumeOrClampNCalls != 1 || lim.lastCost != 4 {
-			t.Fatalf("expected ConsumeOrClampN once with cost 4, calls=%d cost=%d", lim.consumeOrClampNCalls, lim.lastCost)
+		if lim.consumeNCalls != 1 || lim.lastCost != 4 {
+			t.Fatalf("expected ConsumeN once with cost 4, calls=%d cost=%d", lim.consumeNCalls, lim.lastCost)
 		}
 	})
 
 	t.Run("consume error fail-open on redis skips quota but still returns other headers", func(t *testing.T) {
-		limResponse := &fakeLimiter{consumeOrClampNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+		limResponse := &fakeLimiter{consumeNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
 			return nil, errors.New("redis error")
 		}}
 		limStandard := &fakeLimiter{}
@@ -1179,7 +1183,7 @@ func TestOnResponseBehavior(t *testing.T) {
 	})
 
 	t.Run("consume error fail-closed currently skipped and returns nil when only quota", func(t *testing.T) {
-		lim := &fakeLimiter{consumeOrClampNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+		lim := &fakeLimiter{consumeNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
 			return nil, errors.New("hard error")
 		}}
 		ce := NewCostExtractor(CostExtractionConfig{Enabled: true, Default: 1, Sources: []CostSource{{Type: CostSourceResponseHeader, Key: "x-cost", Multiplier: 1}}})
@@ -1194,7 +1198,7 @@ func TestOnResponseBehavior(t *testing.T) {
 	})
 
 	t.Run("mixed standard and response quotas produce consolidated headers", func(t *testing.T) {
-		limResponse := &fakeLimiter{consumeOrClampNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+		limResponse := &fakeLimiter{consumeNFn: func(ctx context.Context, key string, n int64) (*limiter.Result, error) {
 			return newResult(true, 20, 11, 0, 2*time.Minute), nil
 		}}
 		ce := NewCostExtractor(CostExtractionConfig{Enabled: true, Default: 1, Sources: []CostSource{{Type: CostSourceResponseHeader, Key: "x-cost", Multiplier: 1}}})
@@ -1483,7 +1487,7 @@ func TestParseQuotasAndHelpers(t *testing.T) {
 				"includeXRateLimit": true,
 			},
 			"onRateLimitExceeded": map[string]interface{}{"statusCode": float64(429), "body": "a"},
-			"memory": map[string]interface{}{"cleanupInterval": "1m"},
+			"memory":              map[string]interface{}{"cleanupInterval": "1m"},
 		}
 		k1 := getBaseCacheKey("route1", "api1", "fixed-window", params1)
 		k2 := getBaseCacheKey("route1", "api1", "fixed-window", params2)
