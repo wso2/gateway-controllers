@@ -120,7 +120,7 @@ systemParameters:
           but can allow up to 2x burst at window boundaries.
       enum: ["gcra", "fixed-window"]
       default: "gcra"
-      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.algorithm}"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.algorithm}"
 
     backend:
       type: string
@@ -129,7 +129,7 @@ systemParameters:
         'redis' for distributed rate limiting across multiple gateway instances.
       enum: ["memory", "redis"]
       default: "memory"
-      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.backend}"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.backend}"
 
     redis:
       type: object
@@ -139,42 +139,42 @@ systemParameters:
         host:
           type: string
           default: "localhost"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.host}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.host}"
         port:
           type: integer
           default: 6379
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.port}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.port}"
         password:
           type: string
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.password}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.password}"
         username:
           type: string
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.username}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.username}"
         db:
           type: integer
           default: 0
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.db}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.db}"
         keyPrefix:
           type: string
           default: "ratelimit:v1:"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.keyprefix}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.keyprefix}"
         failureMode:
           type: string
           enum: ["open", "closed"]
           default: "open"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.failuremode}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.failuremode}"
         connectionTimeout:
           type: string
           default: "5s"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.connectiontimeout}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.connectiontimeout}"
         readTimeout:
           type: string
           default: "3s"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.readtimeout}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.readtimeout}"
         writeTimeout:
           type: string
           default: "3s"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.redis.writetimeout}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.redis.writetimeout}"
 
     memory:
       type: object
@@ -184,8 +184,8 @@ systemParameters:
         maxEntries:
           type: integer
           default: 10000
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.memory.maxentries}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.memory.maxentries}"
         cleanupInterval:
           type: string
           default: "5m"
-          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v010.memory.cleanupinterval}"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v0.memory.cleanupinterval}"
