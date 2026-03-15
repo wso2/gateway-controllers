@@ -29,14 +29,13 @@ import (
 
 const floatTolerance = 1e-12
 
-// testPricingMap is loaded once from the shared model_prices.json in api-platform.
+// testPricingMap is loaded once from the pinned testdata/model_prices.json fixture.
 var testPricingMap map[string]ModelPricing
 
 func init() {
 	_, filename, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(filename)
-	// Traverse from gateway-controllers/policies/llm-cost/ to api-platform/gateway/configs/llm-pricing/
-	pricingFile := filepath.Join(dir, "..", "..", "..", "api-platform", "gateway", "configs", "llm-pricing", "model_prices.json")
+	pricingFile := filepath.Join(dir, "testdata", "model_prices.json")
 	pm, err := loadPricingFromFile(pricingFile)
 	if err != nil {
 		panic("llm_cost_test: failed to load pricing file: " + err.Error())
