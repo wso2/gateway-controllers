@@ -3,8 +3,8 @@ module github.com/Tharsanan1/gateway-controllers/policies/llm-cost-based-ratelim
 go 1.25.1
 
 require (
-	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v0.1.23
 	github.com/wso2/api-platform/sdk v0.3.8
+	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v0.1.23
 )
 
 replace github.com/wso2/gateway-controllers/policies/advanced-ratelimit => ../advanced-ratelimit

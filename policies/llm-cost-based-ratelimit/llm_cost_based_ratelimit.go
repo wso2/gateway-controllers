@@ -33,11 +33,9 @@ import (
 )
 
 const (
-	ResourceTypeLlmProviderTemplate     = "LlmProviderTemplate"
-	ResourceTypeProviderTemplateMapping = "ProviderTemplateMapping"
-	MetadataKeyProviderName             = "provider_name"
-	MetadataKeyDelegate                 = "llm_cost_delegate"
-	MetadataKeyCostScaleFactor          = "llm_cost_scale_factor"
+	MetadataKeyProviderName    = "provider_name"
+	MetadataKeyDelegate        = "llm_cost_delegate"
+	MetadataKeyCostScaleFactor = "llm_cost_scale_factor"
 
 	// DefaultCostScaleFactor is the default scaling factor for dollar amounts.
 	// Converts dollars to nano-dollars to preserve precision in int64 counters.
@@ -53,7 +51,7 @@ type delegateEntry struct {
 }
 
 // LLMCostRateLimitPolicy delegates LLM cost-based rate limiting to advanced-ratelimit
-// by dynamically resolving cost extraction paths from provider templates and applying
+// by reading the pre-calculated cost from the x-llm-cost response header and applying
 // user-defined monetary budgets.
 type LLMCostRateLimitPolicy struct {
 	metadata  policy.PolicyMetadata
@@ -258,96 +256,50 @@ func addScaledHeader(headers map[string]string, sourceKey, targetKey string, cos
 }
 
 // resolveDelegate ensures an advanced-ratelimit instance exists for the given provider.
+// The delegate is cached per provider and invalidated when the effective params change.
 // This method is thread-safe using sync.Map with atomic delegateEntry storage.
 func (p *LLMCostRateLimitPolicy) resolveDelegate(providerName string, params map[string]interface{}) (policy.Policy, error) {
 	slog.Debug("resolveDelegate: checking for existing delegate",
 		"route", p.metadata.RouteName,
 		"provider", providerName)
 
-	// Get the template to compute the cache key
-	store := policy.GetLazyResourceStoreInstance()
+	// Cache key captures all fields that determine the delegate's config.
+	cacheKey := providerName + ":" + computeResourceHash(map[string]interface{}{
+		"budgetLimits":    params["budgetLimits"],
+		"costScaleFactor": extractCostScaleFactor(params),
+		"algorithm":       params["algorithm"],
+		"backend":         params["backend"],
+		"redis":           params["redis"],
+		"memory":          params["memory"],
+	})
 
-	// 1. Get Provider-to-Template Mapping
-	mappingResource, err := store.GetResourceByIDAndType(providerName, ResourceTypeProviderTemplateMapping)
-	if err != nil {
-		slog.Error("resolveDelegate: failed to get provider template mapping",
-			"route", p.metadata.RouteName,
-			"provider", providerName,
-			"error", err)
-		return nil, err
-	}
-
-	if mappingResource == nil {
-		slog.Warn("resolveDelegate: provider template mapping not found",
-			"route", p.metadata.RouteName,
-			"provider", providerName)
-		return nil, nil
-	}
-
-	templateHandle, ok := mappingResource.Resource["template_handle"].(string)
-	if !ok || templateHandle == "" {
-		slog.Warn("resolveDelegate: template_handle not found or empty in mapping",
-			"route", p.metadata.RouteName,
-			"provider", providerName)
-		return nil, nil
-	}
-
-	// 2. Get the Actual Template
-	templateResource, err := store.GetResourceByIDAndType(templateHandle, ResourceTypeLlmProviderTemplate)
-	if err != nil {
-		slog.Error("resolveDelegate: failed to get LLM provider template",
-			"route", p.metadata.RouteName,
-			"provider", providerName,
-			"templateHandle", templateHandle,
-			"error", err)
-		return nil, err
-	}
-
-	if templateResource == nil {
-		slog.Warn("resolveDelegate: LLM provider template not found",
-			"route", p.metadata.RouteName,
-			"provider", providerName,
-			"templateHandle", templateHandle)
-		return nil, nil
-	}
-
-	// 3. Compute a hash of the template to use in the cache key
-	templateHash := computeResourceHash(templateResource.Resource)
-	cacheKey := providerName + ":" + templateHash
-
-	slog.Debug("resolveDelegate: computed cache key",
-		"route", p.metadata.RouteName,
-		"provider", providerName,
-		"templateHandle", templateHandle,
-		"templateHash", truncateHash(templateHash),
-		"cacheKey", cacheKey)
-
-	// Fast path: check if delegate already exists for this provider with same template
+	// Fast path: reuse existing delegate if config hasn't changed.
 	if existing, ok := p.delegates.Load(providerName); ok {
 		if entry, ok := existing.(*delegateEntry); ok && entry.cacheKey == cacheKey {
-			slog.Debug("resolveDelegate: found existing delegate for current template (fast path)",
+			slog.Debug("resolveDelegate: reusing existing delegate (fast path)",
 				"route", p.metadata.RouteName,
-				"provider", providerName,
-				"templateHash", truncateHash(templateHash))
+				"provider", providerName)
 			return entry.delegate, nil
 		}
-		// Template changed - continue to create new delegate
-		if entry, ok := existing.(*delegateEntry); ok {
-			slog.Debug("resolveDelegate: template changed, creating new delegate",
-				"route", p.metadata.RouteName,
-				"provider", providerName,
-				"oldCacheKey", truncateHash(entry.cacheKey),
-				"newCacheKey", truncateHash(cacheKey))
-		}
+		slog.Debug("resolveDelegate: params changed, recreating delegate",
+			"route", p.metadata.RouteName,
+			"provider", providerName)
 	}
 
-	slog.Debug("resolveDelegate: creating new delegate (slow path)",
-		"route", p.metadata.RouteName,
-		"provider", providerName,
-		"templateHash", truncateHash(templateHash))
+	// Slow path: build the delegate from params.
+	rlParams := transformToRatelimitParams(params)
+	if len(rlParams["quotas"].([]interface{})) == 0 {
+		slog.Debug("resolveDelegate: no budget limits configured, skipping delegate creation",
+			"route", p.metadata.RouteName,
+			"provider", providerName)
+		return nil, nil
+	}
 
-	// Slow path: create the delegate
-	delegate, err := p.createDelegateWithTemplate(providerName, params, templateResource.Resource)
+	slog.Debug("resolveDelegate: creating new delegate",
+		"route", p.metadata.RouteName,
+		"provider", providerName)
+
+	delegate, err := ratelimit.GetPolicy(p.metadata, rlParams)
 	if err != nil {
 		slog.Error("resolveDelegate: failed to create delegate",
 			"route", p.metadata.RouteName,
@@ -356,51 +308,9 @@ func (p *LLMCostRateLimitPolicy) resolveDelegate(providerName string, params map
 		return nil, err
 	}
 
-	// Store the delegate entry atomically (single map, single entry)
-	entry := &delegateEntry{
-		cacheKey: cacheKey,
-		delegate: delegate,
-	}
-	p.delegates.Store(providerName, entry)
+	p.delegates.Store(providerName, &delegateEntry{cacheKey: cacheKey, delegate: delegate})
 
 	slog.Debug("resolveDelegate: successfully created and stored new delegate",
-		"route", p.metadata.RouteName,
-		"provider", providerName,
-		"templateHash", truncateHash(templateHash))
-
-	return delegate, nil
-}
-
-// truncateHash safely truncates a hash string for logging purposes
-func truncateHash(s string) string {
-	if len(s) <= 8 {
-		return s
-	}
-	return s[:8]
-}
-
-// createDelegateWithTemplate creates a delegate using the provided template (already fetched).
-// This avoids double-fetching the template when called from resolveDelegate.
-func (p *LLMCostRateLimitPolicy) createDelegateWithTemplate(providerName string, params map[string]interface{}, template map[string]interface{}) (policy.Policy, error) {
-	// Transform LLM cost limits into advanced-ratelimit parameters
-	rlParams := transformToRatelimitParams(params, template)
-
-	slog.Debug("createDelegateWithTemplate: parameters transformed",
-		"route", p.metadata.RouteName,
-		"provider", providerName,
-		"quotasCount", len(rlParams["quotas"].([]interface{})))
-
-	// Create the delegate instance
-	delegate, err := ratelimit.GetPolicy(p.metadata, rlParams)
-	if err != nil {
-		slog.Error("createDelegateWithTemplate: failed to create advanced-ratelimit policy",
-			"route", p.metadata.RouteName,
-			"provider", providerName,
-			"error", err)
-		return nil, err
-	}
-
-	slog.Debug("createDelegateWithTemplate: successfully created delegate",
 		"route", p.metadata.RouteName,
 		"provider", providerName)
 
@@ -439,10 +349,9 @@ func randomString(length int) string {
 // Budget limits (in dollars) are scaled by costScaleFactor (configurable via systemParameters.costScaleFactor)
 // to preserve precision when the underlying rate limiter uses int64 counters.
 // The cost multipliers are also scaled so that the final deduction is in the scaled unit.
-func transformToRatelimitParams(params map[string]interface{}, template map[string]interface{}) map[string]interface{} {
+func transformToRatelimitParams(params map[string]interface{}) map[string]interface{} {
 	slog.Debug("transformToRatelimitParams: starting parameter transformation",
-		"params", params,
-		"template", template)
+		"params", params)
 
 	// Get the budget limits from user parameters
 	budgetLimits := params["budgetLimits"]
@@ -569,46 +478,6 @@ func extractCostScaleFactor(params map[string]interface{}) int {
 	return DefaultCostScaleFactor
 }
 
-// extractTokenCosts extracts token cost configuration and costPerNTokens from system parameters.
-// System parameters define the cost per N tokens set by the gateway admin.
-// Returns the token costs map and the costPerNTokens value (default: 1000000).
-func extractTokenCosts(params map[string]interface{}) (map[string]interface{}, int) {
-	costs := make(map[string]interface{})
-	costPerNTokens := 1000000 // Default: cost applies to 1,000,000 tokens
-
-	// Check for system parameters at root level (injected by gateway)
-	if systemParams, ok := params["systemParameters"].(map[string]interface{}); ok {
-		// Extract costPerNTokens first
-		costPerNTokens = extractIntValue(systemParams["costPerNTokens"], costPerNTokens)
-
-		if promptCost, ok := getFloatValue(systemParams["promptTokenCost"]); ok {
-			costs["promptTokenCost"] = promptCost
-		}
-		if completionCost, ok := getFloatValue(systemParams["completionTokenCost"]); ok {
-			costs["completionTokenCost"] = completionCost
-		}
-		if totalCost, ok := getFloatValue(systemParams["totalTokenCost"]); ok {
-			costs["totalTokenCost"] = totalCost
-		}
-		return costs, costPerNTokens
-	}
-
-	// Also check at root level for directly embedded system parameters
-	costPerNTokens = extractIntValue(params["costPerNTokens"], costPerNTokens)
-
-	if promptCost, ok := getFloatValue(params["promptTokenCost"]); ok {
-		costs["promptTokenCost"] = promptCost
-	}
-	if completionCost, ok := getFloatValue(params["completionTokenCost"]); ok {
-		costs["completionTokenCost"] = completionCost
-	}
-	if totalCost, ok := getFloatValue(params["totalTokenCost"]); ok {
-		costs["totalTokenCost"] = totalCost
-	}
-
-	return costs, costPerNTokens
-}
-
 // extractIntValue extracts an int from various numeric types with a default value
 func extractIntValue(v interface{}, defaultValue int) int {
 	if v == nil {
@@ -647,81 +516,4 @@ func getFloatValue(v interface{}) (float64, bool) {
 		return float64(val), true
 	}
 	return 0, false
-}
-
-// buildCostSource builds a cost extraction source from template configuration.
-// The multiplier represents the cost per token.
-func buildCostSource(template map[string]interface{}, templateKey string, costPerToken float64) map[string]interface{} {
-	if template == nil {
-		return nil
-	}
-
-	// The template structure may have spec directly or nested in configuration
-	spec := getTemplateSpec(template)
-	if spec == nil {
-		return nil
-	}
-
-	usage, ok := spec[templateKey].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-
-	path, ok := usage["identifier"].(string)
-	if !ok || path == "" {
-		return nil
-	}
-
-	location, _ := usage["location"].(string)
-
-	// Map location to source type
-	switch location {
-	case "header":
-		return map[string]interface{}{
-			"type":       "response_header",
-			"key":        path,
-			"multiplier": costPerToken,
-		}
-	case "metadata":
-		return map[string]interface{}{
-			"type":       "response_metadata",
-			"key":        path,
-			"multiplier": costPerToken,
-		}
-	case "payload", "":
-		// Default to response body with jsonPath
-		return map[string]interface{}{
-			"type":       "response_body",
-			"jsonPath":   path,
-			"multiplier": costPerToken,
-		}
-	default:
-		// For any other location, assume payload/response_body
-		return map[string]interface{}{
-			"type":       "response_body",
-			"jsonPath":   path,
-			"multiplier": costPerToken,
-		}
-	}
-}
-
-// getTemplateSpec extracts the spec from a template which may be nested
-func getTemplateSpec(template map[string]interface{}) map[string]interface{} {
-	if template == nil {
-		return nil
-	}
-
-	// Try direct spec
-	if spec, ok := template["spec"].(map[string]interface{}); ok {
-		return spec
-	}
-
-	// Try nested in configuration
-	if config, ok := template["configuration"].(map[string]interface{}); ok {
-		if spec, ok := config["spec"].(map[string]interface{}); ok {
-			return spec
-		}
-	}
-
-	return nil
 }

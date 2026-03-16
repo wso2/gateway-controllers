@@ -26,58 +26,6 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
-// setupGlobalResourceStore sets up the global lazy resource store with test resources
-func setupGlobalResourceStore(t *testing.T) func() {
-	store := policy.GetLazyResourceStoreInstance()
-
-	// Clear any existing resources
-	_ = store.ClearAll()
-
-	// Add provider template mapping
-	mapping := &policy.LazyResource{
-		ID:           "test-provider",
-		ResourceType: ResourceTypeProviderTemplateMapping,
-		Resource: map[string]interface{}{
-			"template_handle": "openai-template",
-		},
-	}
-	if err := store.StoreResource(mapping); err != nil {
-		t.Fatalf("Failed to store mapping: %v", err)
-	}
-
-	// Add LLM provider template with token extraction paths
-	template := &policy.LazyResource{
-		ID:           "openai-template",
-		ResourceType: ResourceTypeLlmProviderTemplate,
-		Resource: map[string]interface{}{
-			"configuration": map[string]interface{}{
-				"spec": map[string]interface{}{
-					"promptTokens": map[string]interface{}{
-						"identifier": "$.usage.prompt_tokens",
-						"location":   "payload",
-					},
-					"completionTokens": map[string]interface{}{
-						"identifier": "$.usage.completion_tokens",
-						"location":   "payload",
-					},
-					"totalTokens": map[string]interface{}{
-						"identifier": "$.usage.total_tokens",
-						"location":   "payload",
-					},
-				},
-			},
-		},
-	}
-	if err := store.StoreResource(template); err != nil {
-		t.Fatalf("Failed to store template: %v", err)
-	}
-
-	// Return cleanup function
-	return func() {
-		_ = store.ClearAll()
-	}
-}
-
 // createTestRequestContext creates a request context with provider metadata
 func createTestRequestContext(providerName string) *policy.RequestContext {
 	return &policy.RequestContext{
@@ -251,7 +199,7 @@ func TestTransformToRatelimitParams(t *testing.T) {
 		"backend":   "memory",
 	}
 
-	result := transformToRatelimitParams(params, nil)
+	result := transformToRatelimitParams(params)
 
 	// Check quotas were created
 	quotas, ok := result["quotas"].([]interface{})
@@ -318,7 +266,7 @@ func TestTransformToRatelimitParams_CustomScaleFactor(t *testing.T) {
 		"backend":         "memory",
 	}
 
-	result := transformToRatelimitParams(params, nil)
+	result := transformToRatelimitParams(params)
 
 	quotas, ok := result["quotas"].([]interface{})
 	if !ok || len(quotas) != 1 {
@@ -343,9 +291,7 @@ func TestTransformToRatelimitParams_NoBudgetLimits(t *testing.T) {
 		"backend":         "memory",
 	}
 
-	template := map[string]interface{}{}
-
-	result := transformToRatelimitParams(params, template)
+	result := transformToRatelimitParams(params)
 
 	quotas, ok := result["quotas"].([]interface{})
 	if !ok {
@@ -372,7 +318,7 @@ func TestTransformToRatelimitParams_AlwaysHasCostExtraction(t *testing.T) {
 		"backend":   "memory",
 	}
 
-	result := transformToRatelimitParams(params, nil)
+	result := transformToRatelimitParams(params)
 
 	quotas, ok := result["quotas"].([]interface{})
 	if !ok || len(quotas) != 1 {
@@ -390,205 +336,6 @@ func TestTransformToRatelimitParams_AlwaysHasCostExtraction(t *testing.T) {
 	sources, ok := costExtraction["sources"].([]interface{})
 	if !ok || len(sources) != 1 {
 		t.Fatalf("Expected 1 cost source, got %d", len(sources))
-	}
-}
-
-// TestExtractTokenCosts tests token cost extraction
-func TestExtractTokenCosts(t *testing.T) {
-	tests := []struct {
-		name     string
-		params   map[string]interface{}
-		expected map[string]float64
-	}{
-		{
-			name: "costs at root level",
-			params: map[string]interface{}{
-				"promptTokenCost":     float64(0.000002),
-				"completionTokenCost": float64(0.000006),
-				"totalTokenCost":      float64(0.000003),
-			},
-			expected: map[string]float64{
-				"promptTokenCost":     0.000002,
-				"completionTokenCost": 0.000006,
-				"totalTokenCost":      0.000003,
-			},
-		},
-		{
-			name: "costs in systemParameters",
-			params: map[string]interface{}{
-				"systemParameters": map[string]interface{}{
-					"promptTokenCost":     float64(0.000001),
-					"completionTokenCost": float64(0.000002),
-				},
-			},
-			expected: map[string]float64{
-				"promptTokenCost":     0.000001,
-				"completionTokenCost": 0.000002,
-			},
-		},
-		{
-			name: "integer costs converted to float",
-			params: map[string]interface{}{
-				"promptTokenCost": int(1),
-				"totalTokenCost":  int64(2),
-			},
-			expected: map[string]float64{
-				"promptTokenCost": 1.0,
-				"totalTokenCost":  2.0,
-			},
-		},
-		{
-			name:     "no costs defined",
-			params:   map[string]interface{}{},
-			expected: map[string]float64{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result, _ := extractTokenCosts(tt.params)
-			if len(result) != len(tt.expected) {
-				t.Errorf("Expected %d costs, got %d", len(tt.expected), len(result))
-			}
-			for key, expectedVal := range tt.expected {
-				if result[key] != expectedVal {
-					t.Errorf("Expected %s=%v, got %v", key, expectedVal, result[key])
-				}
-			}
-		})
-	}
-}
-
-// TestBuildCostSource tests cost source building
-func TestBuildCostSource(t *testing.T) {
-	template := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"promptTokens": map[string]interface{}{
-				"identifier": "$.usage.prompt_tokens",
-				"location":   "payload",
-			},
-			"completionTokens": map[string]interface{}{
-				"identifier": "x-completion-tokens",
-				"location":   "header",
-			},
-			"totalTokens": map[string]interface{}{
-				"identifier": "total_tokens",
-				"location":   "metadata",
-			},
-		},
-	}
-
-	tests := []struct {
-		name         string
-		templateKey  string
-		costPerToken float64
-		expectNil    bool
-		expectedType string
-	}{
-		{
-			name:         "payload location",
-			templateKey:  "promptTokens",
-			costPerToken: 0.000002,
-			expectNil:    false,
-			expectedType: "response_body",
-		},
-		{
-			name:         "header location",
-			templateKey:  "completionTokens",
-			costPerToken: 0.000006,
-			expectNil:    false,
-			expectedType: "response_header",
-		},
-		{
-			name:         "metadata location",
-			templateKey:  "totalTokens",
-			costPerToken: 0.000003,
-			expectNil:    false,
-			expectedType: "response_metadata",
-		},
-		{
-			name:         "non-existent key",
-			templateKey:  "nonExistent",
-			costPerToken: 0.000001,
-			expectNil:    true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := buildCostSource(template, tt.templateKey, tt.costPerToken)
-			if tt.expectNil {
-				if result != nil {
-					t.Errorf("Expected nil, got %v", result)
-				}
-				return
-			}
-			if result == nil {
-				t.Fatal("Expected non-nil result")
-			}
-			if result["type"] != tt.expectedType {
-				t.Errorf("Expected type %s, got %s", tt.expectedType, result["type"])
-			}
-			if result["multiplier"] != tt.costPerToken {
-				t.Errorf("Expected multiplier %v, got %v", tt.costPerToken, result["multiplier"])
-			}
-		})
-	}
-}
-
-// TestGetTemplateSpec tests template spec extraction
-func TestGetTemplateSpec(t *testing.T) {
-	tests := []struct {
-		name      string
-		template  map[string]interface{}
-		expectNil bool
-	}{
-		{
-			name: "direct spec",
-			template: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"promptTokens": map[string]interface{}{
-						"identifier": "$.usage.prompt_tokens",
-					},
-				},
-			},
-			expectNil: false,
-		},
-		{
-			name: "nested in configuration",
-			template: map[string]interface{}{
-				"configuration": map[string]interface{}{
-					"spec": map[string]interface{}{
-						"promptTokens": map[string]interface{}{
-							"identifier": "$.usage.prompt_tokens",
-						},
-					},
-				},
-			},
-			expectNil: false,
-		},
-		{
-			name:      "nil template",
-			template:  nil,
-			expectNil: true,
-		},
-		{
-			name:      "empty template",
-			template:  map[string]interface{}{},
-			expectNil: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := getTemplateSpec(tt.template)
-			if tt.expectNil && result != nil {
-				t.Errorf("Expected nil, got %v", result)
-			}
-			if !tt.expectNil && result == nil {
-				t.Error("Expected non-nil result")
-			}
-		})
 	}
 }
 
@@ -692,10 +439,8 @@ func TestLLMCostRateLimitPolicy_MultipleProviders(t *testing.T) {
 	t.Logf("Created delegates for %d providers", delegateCount)
 }
 
-// TestLLMCostRateLimitPolicy_Integration_BasicRateLimit tests basic rate limiting with store setup
+// TestLLMCostRateLimitPolicy_Integration_BasicRateLimit tests basic rate limiting
 func TestLLMCostRateLimitPolicy_Integration_BasicRateLimit(t *testing.T) {
-	cleanup := setupGlobalResourceStore(t)
-	defer cleanup()
 
 	metadata := policy.PolicyMetadata{
 		RouteName: "test-route",
@@ -748,8 +493,6 @@ func TestLLMCostRateLimitPolicy_Integration_BasicRateLimit(t *testing.T) {
 
 // TestLLMCostRateLimitPolicy_Integration_CostCalculation tests cost calculation
 func TestLLMCostRateLimitPolicy_Integration_CostCalculation(t *testing.T) {
-	cleanup := setupGlobalResourceStore(t)
-	defer cleanup()
 
 	metadata := policy.PolicyMetadata{
 		RouteName: "cost-calc-route",
@@ -799,8 +542,6 @@ func TestLLMCostRateLimitPolicy_Integration_CostCalculation(t *testing.T) {
 
 // TestLLMCostRateLimitPolicy_Integration_MultipleBudgetLimits tests multiple time window budgets
 func TestLLMCostRateLimitPolicy_Integration_MultipleBudgetLimits(t *testing.T) {
-	cleanup := setupGlobalResourceStore(t)
-	defer cleanup()
 
 	metadata := policy.PolicyMetadata{
 		RouteName: "multi-limit-route",
@@ -845,23 +586,15 @@ func TestLLMCostRateLimitPolicy_Integration_MultipleBudgetLimits(t *testing.T) {
 	p.OnResponse(respCtx, params)
 }
 
-// TestLLMCostRateLimitPolicy_Integration_MissingProviderTemplate tests behavior with missing template
-func TestLLMCostRateLimitPolicy_Integration_MissingProviderTemplate(t *testing.T) {
-	// Clear all resources - no templates configured
-	store := policy.GetLazyResourceStoreInstance()
-	_ = store.ClearAll()
-
+// TestLLMCostRateLimitPolicy_Integration_NoBudgetLimits tests that no rate limiting
+// is applied when budgetLimits are not configured.
+func TestLLMCostRateLimitPolicy_Integration_NoBudgetLimits(t *testing.T) {
 	metadata := policy.PolicyMetadata{
 		RouteName: "test-route",
 	}
 
+	// No budgetLimits — delegate should not be created and request should pass through.
 	params := map[string]interface{}{
-		"budgetLimits": []interface{}{
-			map[string]interface{}{
-				"amount":   float64(10),
-				"duration": "1h",
-			},
-		},
 		"algorithm": "fixed-window",
 		"backend":   "memory",
 	}
@@ -871,11 +604,10 @@ func TestLLMCostRateLimitPolicy_Integration_MissingProviderTemplate(t *testing.T
 		t.Fatalf("Failed to create policy: %v", err)
 	}
 
-	// Request should fail to resolve delegate and return nil (skip)
-	ctx := createTestRequestContext("unknown-provider")
+	ctx := createTestRequestContext("any-provider")
 	action := p.OnRequest(ctx, params)
 
 	if action != nil {
-		t.Errorf("Expected nil action when provider template is missing, got %T", action)
+		t.Errorf("Expected nil action when no budget limits configured, got %T", action)
 	}
 }
