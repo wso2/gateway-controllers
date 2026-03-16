@@ -37,7 +37,7 @@ parameters:
             description: |
               Time window for the budget limit (Go duration string format).
               Examples: "1h" (1 hour), "24h" (1 day), "168h" (1 week), "720h" (30 days)
-            pattern: "^[-+]?(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+            pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
 
 systemParameters:
   type: object
