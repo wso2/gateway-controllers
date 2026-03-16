@@ -176,8 +176,9 @@ func (p *LLMCostRateLimitPolicy) OnResponse(
 		}
 	}
 
-	// Retrieve the cost scale factor (stored during OnRequest, or use default)
-	costScaleFactor := DefaultCostScaleFactor
+	// Retrieve the cost scale factor: prefer the value pinned during OnRequest,
+	// fall back to extracting it from params (handles the OnResponse-only path).
+	costScaleFactor := extractCostScaleFactor(params)
 	if scaleFactor, ok := ctx.SharedContext.Metadata[MetadataKeyCostScaleFactor].(int); ok && scaleFactor > 0 {
 		costScaleFactor = scaleFactor
 	}
