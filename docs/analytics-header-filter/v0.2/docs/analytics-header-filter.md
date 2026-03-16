@@ -55,17 +55,17 @@ application_id = "<MOESIF_APPLICATION_ID>"
 
 ### User Parameters (API Definition)
 
-| Parameter                 | Type   | Required | Default | Description                                                                                                |
-| ------------------------- | ------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------- |
-| `requestHeadersToFilter`  | ```HeaderFilter``` object | No       | -       | Configuration for filtering request headers. Contains `operation` and `headers` properties.              |
-| `responseHeadersToFilter` | ```HeaderFilter``` object | No       | -       | Configuration for filtering response headers. Contains `operation` and `headers` properties.              |
+| Parameter | Type | Required | Default | Description |
+| --------- | ---- | -------- | ------- | ----------- |
+| `request` | object | No | - | Configuration for filtering request headers in analytics. At least one of `request` or `response` must be provided. |
+| `response` | object | No | - | Configuration for filtering response headers in analytics. At least one of `request` or `response` must be provided. |
 
-### HeaderFilter Structure
+### Request / Response Configuration
 
-| Property    | Type   | Required | Description                                                                                                |
-| ----------- | ------ | -------- | ---------------------------------------------------------------------------------------------------------- |
-| `operation` | string | Yes      | Operation mode: `"allow"` (whitelist) or `"deny"` (blacklist). Header names are matched case-insensitively. |
-| `headers`   | array  | Yes      | List of header names to filter. Behavior depends on the operation mode. Each header name must be 1-256 characters. |
+| Property | Type | Required | Default | Description |
+| -------- | ---- | -------- | ------- | ----------- |
+| `mode` | string | Yes | `"deny"` | Operation mode: `"allow"` (whitelist) or `"deny"` (blacklist). Header names are matched case-insensitively. |
+| `headers` | array | No | `[]` | List of header names to allow or deny. Each header name must be 1-256 characters. Unique items only. |
 
 **Note**: 
 This policy only affects analytics data collection. It does not remove or modify headers sent to upstream services or returned to clients.
@@ -105,13 +105,13 @@ spec:
           - name: analytics-header-filter
             version: v0
             params:
-              requestHeadersToFilter:
-                operation: deny
+              request:
+                mode: deny
                 headers:
                   - "authorization"
                   - "x-api-key"
-              responseHeadersToFilter:
-                operation: allow
+              response:
+                mode: allow
                 headers:
                   - "content-type"
       - path: /models
@@ -125,8 +125,8 @@ spec:
 ## Notes
 
 * Header name matching is case-insensitive.
-* The `operation` field is required and must be either `"allow"` or `"deny"`.
-* The `headers` array is required but can be empty. When the array is empty, all original headers are included(if allowed explicitly) in analytics for both `"allow"` and `"deny"` modes (safe fallback behavior).
+* The `mode` field is required and must be either `"allow"` or `"deny"`.
+* The `headers` array is optional and defaults to `[]`. When the array is empty, all original headers are included (if allowed explicitly) in analytics for both `"allow"` and `"deny"` modes (safe fallback behavior).
 * Request and response headers can use different operation modes independently.
 * This policy does not block requests or responses.
 * Filtering applies only to analytics collection, not to runtime request handling.

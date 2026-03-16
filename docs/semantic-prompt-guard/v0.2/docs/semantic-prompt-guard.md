@@ -51,7 +51,7 @@ embedding_provider_api_key = ""
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract the prompt from JSON payload. If empty, validates the entire payload as a string. Examples: `"$.messages[0].content"`, `"$.prompt"` |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract the prompt from JSON payload. If empty, validates the entire payload as a string. Examples: `"$.messages[-1].content"`, `"$.prompt"` |
 | `allowSimilarityThreshold` | number | No | `0.65` | Minimum similarity threshold (0.0 to 1.0) for a prompt to be considered similar to an allowed phrase. Higher values mean stricter matching. |
 | `denySimilarityThreshold` | number | No | `0.65` | Similarity threshold (0.0 to 1.0) for blocking against denied phrases. If any denied phrase has similarity >= this threshold, the request is blocked. |
 | `allowedPhrases` | array | No* | `[]` | List of phrases that are considered safe. The prompt must match one of these within `allowSimilarityThreshold` when allow-list validation is configured. |

@@ -58,7 +58,7 @@ These parameters are set by the administrator and apply globally:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `algorithm` | string | No | `"gcra"` | Rate limiting algorithm: `"gcra"` (smooth rate limiting with burst support) or `"fixed-window"` (simple counter per time window). |
+| `algorithm` | string | No | `"fixed-window"` | Rate limiting algorithm: `"gcra"` (smooth rate limiting with burst support) or `"fixed-window"` (simple counter per time window). |
 | `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance or `"redis"` for distributed rate limiting. |
 | `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis`. |
 | `memory` | `Memory` object | No | - | In-memory storage configuration. Used when `backend=memory`. |
@@ -93,7 +93,7 @@ When using in-memory backend, configure the following under `memory`:
 
 ```toml
 [policy_configurations.ratelimit_v0]
-algorithm = "gcra"
+algorithm = "fixed-window"
 backend = "memory"
 
 [policy_configurations.ratelimit_v0.memory]
@@ -105,7 +105,7 @@ For distributed rate limiting across multiple gateway instances:
 
 ```toml
 [policy_configurations.ratelimit_v0]
-algorithm = "gcra"
+algorithm = "fixed-window"
 backend = "redis"
 
 [policy_configurations.ratelimit_v0.redis]
