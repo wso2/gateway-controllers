@@ -333,10 +333,17 @@ func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*lim
 		}
 	}
 
-	// Calculate remaining and check if allowed
+	// Calculate remaining capacity before and after consuming
+	remainingBefore := m.calculateRemaining(tat, now, emissionInterval, burstAllowance)
 	remaining := m.calculateRemaining(newTAT, now, emissionInterval, burstAllowance)
+
 	allowAt := tat.Add(-burstAllowance)
-	allowed := !now.Before(allowAt) && n <= m.policy.Burst
+	allowed := !now.Before(allowAt) && n <= remainingBefore
+
+	overflow := int64(0)
+	if n > remainingBefore {
+		overflow = n - remainingBefore
+	}
 
 	slog.Debug("GCRA: tokens consumed",
 		"key", key,
@@ -353,6 +360,9 @@ func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*lim
 
 	result := &limiter.Result{
 		Allowed:     allowed,
+		Requested:   n,
+		Consumed:    n,
+		Overflow:    overflow,
 		Limit:       m.policy.Limit,
 		Remaining:   remaining,
 		Reset:       newTAT,
@@ -362,7 +372,8 @@ func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*lim
 	}
 
 	if !allowed {
-		result.RetryAfter = allowAt.Sub(now)
+		nextAllowAt := newTAT.Add(-burstAllowance)
+		result.RetryAfter = nextAllowAt.Sub(now)
 		if result.RetryAfter < 0 {
 			result.RetryAfter = 0
 		}
