@@ -1,4 +1,4 @@
-module github.com/Tharsanan1/gateway-controllers/policies/llm-cost-based-ratelimit
+module github.com/wso2/gateway-controllers/policies/llm-cost-based-ratelimit
 
 go 1.25.1
 
