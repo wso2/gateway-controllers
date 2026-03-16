@@ -23,15 +23,28 @@ This policy uses a single-level configuration model where all parameters are con
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `request` | `JSONSchemaGuardRailConfig` object | No | - | Configuration for request-phase schema validation. Supports `schema`, `jsonPath`, `invert`, and `showAssessment`. |
-| `response` | `JSONSchemaGuardRailConfig` object | No | - | Configuration for response-phase schema validation. Supports `schema`, `jsonPath`, `invert`, and `showAssessment`. |
+| `request` | object | No* | - | Configuration for request-phase schema validation. |
+| `response` | object | No* | - | Configuration for response-phase schema validation. |
 
-#### JSONSchemaGuardRailConfig Configuration
+*At least one of `request` or `response` must be provided.
+
+#### Request Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `schema` | string | Yes | - | JSON Schema as a string (must be valid JSON). Supports JSON Schema Draft 7 features. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload for validation. If empty, validates the entire payload against the schema. |
+| `enabled` | boolean | No | `false` | Enables validation for the request flow. |
+| `schema` | string | Conditional | - | JSON Schema as a valid JSON string for validating the extracted or full payload. Required when `enabled` is `true`. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the JSON payload. Set to `""` to validate the entire payload. |
+| `invert` | boolean | No | `false` | If `true`, validation passes when schema validation fails. If `false`, validation passes when schema validation succeeds. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed validation error information in error responses. |
+
+#### Response Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `true` | Enables validation for the response flow. |
+| `schema` | string | Conditional | - | JSON Schema as a valid JSON string for validating the extracted or full payload. Required when `enabled` is `true`. |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the JSON payload. Set to `""` to validate the entire payload. |
 | `invert` | boolean | No | `false` | If `true`, validation passes when schema validation fails. If `false`, validation passes when schema validation succeeds. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed validation error information in error responses. |
 
@@ -39,12 +52,13 @@ This policy uses a single-level configuration model where all parameters are con
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
+- `$.messages[-1].content` - Extracts content from the last message in a messages array (default for request)
+- `$.choices[0].message.content` - Extracts content from the first choice message (default for response)
 - `$.data` - Extracts the `data` object for validation
 - `$.userInfo` - Extracts user information object
 - `$.items[0]` - Extracts the first item in an array
-- `$.messages[0]` - Extracts the first message object
 
-If `jsonPath` is empty or not specified, the entire payload is validated against the schema.
+Set `jsonPath` to `""` to validate the entire payload against the schema.
 
 **Note:**
 
@@ -94,6 +108,8 @@ spec:
           methods: [POST]
           params:
             request:
+              enabled: true
+              jsonPath: ""
               schema: |
                 {
                   "type": "object",
