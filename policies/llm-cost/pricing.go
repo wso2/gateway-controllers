@@ -35,6 +35,9 @@ func loadPricingFromFile(path string) (map[string]ModelPricing, error) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, fmt.Errorf("failed to parse pricing file: %w", err)
 	}
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("pricing file is empty or has no entries: %s", path)
+	}
 	pm := make(map[string]ModelPricing, len(raw))
 	for key, msg := range raw {
 		var p ModelPricing
@@ -248,8 +251,26 @@ var knownProviderPrefixes = []string{
 }
 
 func lookupPricing(pricingMap map[string]ModelPricing, modelName string) (ModelPricing, bool) {
-	// 1. Exact match
-	if p, ok := pricingMap[modelName]; ok {
+	// Canonicalize to lowercase once upfront so all comparisons are case-insensitive.
+	modelName = strings.ToLower(modelName)
+
+	// tryMatch checks the map and also runs progressive suffix stripping on candidate.
+	tryMatch := func(candidate string) (ModelPricing, bool) {
+		if p, ok := pricingMap[candidate]; ok {
+			return p, true
+		}
+		// Progressive suffix stripping: "gpt-4o-2024-11-20" → "gpt-4o-2024-11" → "gpt-4o-2024" → "gpt-4o"
+		parts := strings.Split(candidate, "-")
+		for i := len(parts) - 1; i >= 1; i-- {
+			if p, ok := pricingMap[strings.Join(parts[:i], "-")]; ok {
+				return p, true
+			}
+		}
+		return ModelPricing{}, false
+	}
+
+	// 1. Exact match (with suffix stripping).
+	if p, ok := tryMatch(modelName); ok {
 		return p, true
 	}
 
@@ -257,7 +278,7 @@ func lookupPricing(pricingMap map[string]ModelPricing, modelName string) (ModelP
 	//    but the JSON key is "gpt-4o".
 	if idx := strings.Index(modelName, "/"); idx != -1 {
 		bare := modelName[idx+1:]
-		if p, ok := pricingMap[bare]; ok {
+		if p, ok := tryMatch(bare); ok {
 			return p, true
 		}
 	}
@@ -268,18 +289,9 @@ func lookupPricing(pricingMap map[string]ModelPricing, modelName string) (ModelP
 	//    (e.g. "mistral/mistral-large-latest").
 	if !strings.Contains(modelName, "/") {
 		for _, prefix := range knownProviderPrefixes {
-			if p, ok := pricingMap[prefix+modelName]; ok {
+			if p, ok := tryMatch(prefix + modelName); ok {
 				return p, true
 			}
-		}
-	}
-
-	// 4. Progressive suffix stripping: "gpt-4o-2024-11-20" → "gpt-4o-2024-11" → "gpt-4o-2024" → "gpt-4o"
-	parts := strings.Split(modelName, "-")
-	for i := len(parts) - 1; i >= 1; i-- {
-		candidate := strings.Join(parts[:i], "-")
-		if p, ok := pricingMap[candidate]; ok {
-			return p, true
 		}
 	}
 
