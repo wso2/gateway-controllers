@@ -23,16 +23,30 @@ This policy uses a single-level configuration where all parameters are configure
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `request` | `ContentLengthGuardRailConfig` object | No | - | Configuration for request-phase content length validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
-| `response` | `ContentLengthGuardRailConfig` object | No | - | Configuration for response-phase content length validation. Supports `min`, `max`, `jsonPath`, `invert`, and `showAssessment`. |
+| `request` | object | No* | - | Configuration for request-phase content length validation. |
+| `response` | object | No* | - | Configuration for response-phase content length validation. |
 
-#### ContentLengthGuardRailConfig Configuration
+*At least one of `request` or `response` must be provided.
+
+#### Request Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `min` | integer | Yes | - | Minimum allowed byte length (inclusive). Must be >= 0. |
-| `max` | integer | Yes | - | Maximum allowed byte length (inclusive). Must be >= 1. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
+| `enabled` | boolean | No | `true` | Enables validation for the request flow. |
+| `min` | integer | Conditional | - | Minimum allowed byte length (inclusive). Must be >= 0. Required when `enabled` is `true`. |
+| `max` | integer | Conditional | - | Maximum allowed byte length (inclusive). Must be >= 1. Required when `enabled` is `true`. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the JSON payload. Set to `""` to validate the entire payload. |
+| `invert` | boolean | No | `false` | If `true`, validation passes when content length is NOT within the min-max range. If `false`, validation passes when content length is within the range. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
+
+#### Response Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Enables validation for the response flow. |
+| `min` | integer | Conditional | - | Minimum allowed byte length (inclusive). Must be >= 0. Required when `enabled` is `true`. |
+| `max` | integer | Conditional | - | Maximum allowed byte length (inclusive). Must be >= 1. Required when `enabled` is `true`. |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the JSON payload. Set to `""` to validate the entire payload. |
 | `invert` | boolean | No | `false` | If `true`, validation passes when content length is NOT within the min-max range. If `false`, validation passes when content length is within the range. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 
@@ -40,12 +54,13 @@ This policy uses a single-level configuration where all parameters are configure
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
+- `$.messages[-1].content` - Extracts content from the last message in a messages array (default for request)
+- `$.choices[0].message.content` - Extracts content from the first choice message (default for response)
 - `$.messages` - Extracts the `messages` field from the root object
 - `$.data.content` - Extracts nested content from `data.content`
 - `$.items[0].text` - Extracts text from the first item in an array
-- `$.messages[0].content` - Extracts content from the first message in a messages array
 
-If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
+Set `jsonPath` to `""` to validate the entire payload as a string.
 
 **Note:**
 
@@ -97,6 +112,7 @@ spec:
             request:
               min: 100
               max: 1048576
+              jsonPath: "$.messages[-1].content"
 ```
 
 **Test the guardrail:**
