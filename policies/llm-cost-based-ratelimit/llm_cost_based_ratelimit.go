@@ -19,6 +19,7 @@
 package llmcostratelimit
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -333,12 +334,21 @@ func computeResourceHash(resource map[string]interface{}) string {
 	return hex.EncodeToString(hash[:])[:16]
 }
 
-// randomString generates a random string of the given length
+// randomString generates a random string of the given length using crypto/rand.
 func randomString(length int) string {
 	const charset = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[time.Now().UnixNano()%int64(len(charset))]
+	if _, err := rand.Read(b); err != nil {
+		// Fallback: use timestamp-seeded values if crypto/rand fails
+		ns := time.Now().UnixNano()
+		for i := range b {
+			b[i] = charset[ns%int64(len(charset))]
+			ns >>= 1
+		}
+		return string(b)
+	}
+	for i, v := range b {
+		b[i] = charset[int(v)%len(charset)]
 	}
 	return string(b)
 }

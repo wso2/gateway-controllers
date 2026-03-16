@@ -295,6 +295,10 @@ func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*lim
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if n < 0 {
+		n = 0
+	}
+
 	now := m.clock.Now()
 
 	slog.Debug("GCRA: force consuming tokens",
