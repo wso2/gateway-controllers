@@ -28,8 +28,8 @@ import (
 	"sync"
 	"time"
 
-	ratelimit "github.com/Tharsanan1/gateway-controllers/policies/advanced-ratelimit"
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
+	ratelimit "github.com/wso2/gateway-controllers/policies/advanced-ratelimit"
 )
 
 const (
