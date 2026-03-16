@@ -1802,7 +1802,7 @@ func TestSetCostHeader_Formatting(t *testing.T) {
 		{1.23456789012345, "1.2345678901"},
 	}
 	for _, tc := range cases {
-		result := setCostHeader(tc.cost)
+		result := setCostHeader(tc.cost, costStatusCalculated)
 		mods, ok := result.(policy.UpstreamResponseModifications)
 		if !ok {
 			t.Fatalf("unexpected action type")
@@ -1811,6 +1811,263 @@ func TestSetCostHeader_Formatting(t *testing.T) {
 		if got != tc.expected {
 			t.Errorf("cost=%.15f: expected header %q, got %q", tc.cost, tc.expected, got)
 		}
+		if mods.SetHeaders[HeaderLLMCostStatus] != costStatusCalculated {
+			t.Errorf("expected status %q, got %q", costStatusCalculated, mods.SetHeaders[HeaderLLMCostStatus])
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// OnResponse — cost status header
+// ---------------------------------------------------------------------------
+
+func makeResponseContext(body []byte) *policy.ResponseContext {
+	return &policy.ResponseContext{
+		ResponseBody: &policy.Body{Present: true, Content: body},
+	}
+}
+
+func assertCostHeaders(t *testing.T, action policy.ResponseAction, wantStatus string, wantCost string) {
+	t.Helper()
+	mods, ok := action.(policy.UpstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected UpstreamResponseModifications, got %T", action)
+	}
+	if got := mods.SetHeaders[HeaderLLMCostStatus]; got != wantStatus {
+		t.Errorf("x-llm-cost-status: expected %q, got %q", wantStatus, got)
+	}
+	if wantCost != "" {
+		if got := mods.SetHeaders[HeaderLLMCost]; got != wantCost {
+			t.Errorf("x-llm-cost: expected %q, got %q", wantCost, got)
+		}
+	}
+}
+
+func TestOnResponse_SuccessStatus_Calculated(t *testing.T) {
+	p := &LLMCostPolicy{pricingMap: testPricingMap}
+	body := []byte(`{
+		"model": "gpt-4o-mini-2024-07-18",
+		"usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+	}`)
+	action := p.OnResponse(makeResponseContext(body), nil)
+	assertCostHeaders(t, action, costStatusCalculated, "")
+	// Also verify the cost header is non-empty (exact value tested in calculator tests).
+	mods := action.(policy.UpstreamResponseModifications)
+	if mods.SetHeaders[HeaderLLMCost] == "" {
+		t.Error("expected non-empty x-llm-cost")
+	}
+}
+
+func TestOnResponse_EmptyBody_NotCalculated(t *testing.T) {
+	p := &LLMCostPolicy{pricingMap: testPricingMap}
+	ctx := &policy.ResponseContext{
+		ResponseBody: &policy.Body{Present: false},
+	}
+	assertCostHeaders(t, p.OnResponse(ctx, nil), costStatusNotCalculated, "0.0000000000")
+}
+
+func TestOnResponse_UnparsableBody_NotCalculated(t *testing.T) {
+	p := &LLMCostPolicy{pricingMap: testPricingMap}
+	assertCostHeaders(t, p.OnResponse(makeResponseContext([]byte("not json")), nil), costStatusNotCalculated, "0.0000000000")
+}
+
+func TestOnResponse_NoModelName_NotCalculated(t *testing.T) {
+	p := &LLMCostPolicy{pricingMap: testPricingMap}
+	body := []byte(`{"usage": {"prompt_tokens": 10}}`)
+	assertCostHeaders(t, p.OnResponse(makeResponseContext(body), nil), costStatusNotCalculated, "0.0000000000")
+}
+
+func TestOnResponse_UnknownModel_NotCalculated(t *testing.T) {
+	p := &LLMCostPolicy{pricingMap: testPricingMap}
+	body := []byte(`{"model": "totally-unknown-model-xyz", "usage": {"prompt_tokens": 10}}`)
+	assertCostHeaders(t, p.OnResponse(makeResponseContext(body), nil), costStatusNotCalculated, "0.0000000000")
+}
+
+// ---------------------------------------------------------------------------
+// Additional coverage for identified gaps
+// ---------------------------------------------------------------------------
+
+// TestAnthropicCalculator_Adjust_GeoValueNotInProviderSpecificEntry verifies that
+// when the inference_geo value is not present in provider_specific_entry, the
+// multiplier stays at 1.0 and baseCost is returned unchanged.
+func TestAnthropicCalculator_Adjust_GeoValueNotInProviderSpecificEntry(t *testing.T) {
+	// claude-opus-4-6 PSE has "us" and "fast" — deliberately does NOT have "eu".
+	pricing, ok := lookupPricing(testPricingMap, "claude-opus-4-6")
+	if !ok {
+		t.Skip("claude-opus-4-6 not in pricing map")
+	}
+	if len(pricing.ProviderSpecificEntry) == 0 {
+		t.Skip("claude-opus-4-6 has no provider_specific_entry")
+	}
+	if _, hasEU := pricing.ProviderSpecificEntry["eu"]; hasEU {
+		t.Skip("pricing map has an 'eu' entry — test assumption violated")
+	}
+
+	usage := Usage{
+		PromptTokens:     1000,
+		CompletionTokens: 500,
+		TotalTokens:      1500,
+		InferenceGeo:     "eu", // geo-routed, but "eu" is absent from PSE
+	}
+	baseCost := genericCalculateCost(usage, pricing)
+	c := &AnthropicCalculator{}
+	finalCost := c.Adjust(baseCost, usage, pricing)
+	if !almostEqual(finalCost, baseCost) {
+		t.Errorf("expected pass-through when geo not in PSE: got %.10f, want %.10f", finalCost, baseCost)
+	}
+}
+
+// TestOpenAICalculator_Cost_AudioTokens verifies that audio input and output tokens
+// are billed at their dedicated rates and excluded from the regular text token cost.
+func TestOpenAICalculator_Cost_AudioTokens(t *testing.T) {
+	// Synthetic pricing: text in=1e-6, text out=2e-6, audio in=5e-7, audio out=3e-7.
+	p := ModelPricing{
+		InputCostPerToken:       1e-6,
+		OutputCostPerToken:      2e-6,
+		InputCostPerAudioToken:  5e-7,
+		OutputCostPerAudioToken: 3e-7,
+	}
+	// 100 total prompt (20 audio + 80 text), 60 total completion (30 audio + 30 text)
+	usage := Usage{
+		PromptTokens:      100,
+		CompletionTokens:  60,
+		TotalTokens:       160,
+		AudioInputTokens:  20,
+		AudioOutputTokens: 30,
+	}
+	cost := genericCalculateCost(usage, p)
+	// text prompt: (100-20) × 1e-6
+	// audio in:    20       × 5e-7
+	// text out:    (60-30)  × 2e-6
+	// audio out:   30       × 3e-7
+	expected := float64(80)*1e-6 + float64(20)*5e-7 + float64(30)*2e-6 + float64(30)*3e-7
+	if !almostEqual(cost, expected) {
+		t.Errorf("expected %.10f, got %.10f", expected, cost)
+	}
+}
+
+// TestGeminiCalculator_Normalize_ImageInputTokens verifies that IMAGE tokens in
+// promptTokensDetails are NOT stored in a separate Usage field. They remain part of
+// PromptTokens and are billed at the standard input rate (same as text).
+func TestGeminiCalculator_Normalize_ImageInputTokens(t *testing.T) {
+	body := []byte(`{
+		"usageMetadata": {
+			"promptTokenCount": 400,
+			"candidatesTokenCount": 100,
+			"totalTokenCount": 500,
+			"promptTokensDetails": [
+				{"modality": "TEXT",  "tokenCount": 250},
+				{"modality": "IMAGE", "tokenCount": 150}
+			]
+		}
+	}`)
+	c := &GeminiCalculator{}
+	u, err := c.Normalize(body, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// PromptTokens is the aggregate count from promptTokenCount — unchanged.
+	if u.PromptTokens != 400 {
+		t.Errorf("expected PromptTokens=400, got %d", u.PromptTokens)
+	}
+	// IMAGE input tokens do NOT map to AudioInputTokens.
+	if u.AudioInputTokens != 0 {
+		t.Errorf("expected AudioInputTokens=0 (IMAGE is not AUDIO), got %d", u.AudioInputTokens)
+	}
+	// There is no ImageInputTokens field; images are billed at the standard text input rate.
+}
+
+// TestGenericCalculateCost_AllContextTiers verifies that the correct tier is selected
+// across all four rate bands: base, >128k, >200k, >272k.
+func TestGenericCalculateCost_AllContextTiers(t *testing.T) {
+	p := ModelPricing{
+		InputCostPerToken:           1e-6,
+		OutputCostPerToken:          2e-6,
+		InputCostPerTokenAbove128k:  2e-6,
+		OutputCostPerTokenAbove128k: 4e-6,
+		InputCostPerTokenAbove200k:  3e-6,
+		OutputCostPerTokenAbove200k: 6e-6,
+		InputCostPerTokenAbove272k:  4e-6,
+		OutputCostPerTokenAbove272k: 8e-6,
+	}
+
+	tests := []struct {
+		prompt, completion int64
+		wantIn, wantOut    float64
+		label              string
+	}{
+		{50_000, 1_000, 1e-6, 2e-6, "below 128k → base rate"},
+		{150_000, 1_000, 2e-6, 4e-6, "128k < prompt ≤ 200k → above-128k rate"},
+		{250_000, 1_000, 3e-6, 6e-6, "200k < prompt ≤ 272k → above-200k rate"},
+		{300_000, 1_000, 4e-6, 8e-6, "prompt > 272k → above-272k rate (highest tier wins)"},
+	}
+
+	for _, tc := range tests {
+		usage := Usage{PromptTokens: tc.prompt, CompletionTokens: tc.completion}
+		cost := genericCalculateCost(usage, p)
+		expected := float64(tc.prompt)*tc.wantIn + float64(tc.completion)*tc.wantOut
+		if !almostEqual(cost, expected) {
+			t.Errorf("%s: expected %.10f, got %.10f", tc.label, expected, cost)
+		}
+	}
+}
+
+// TestGenericCalculateCost_WebSearchUnmappedContextSize verifies that an unknown
+// search context size (e.g. "xxl") is silently ignored — no search cost is added.
+func TestGenericCalculateCost_WebSearchUnmappedContextSize(t *testing.T) {
+	p := ModelPricing{
+		InputCostPerToken:  1e-6,
+		OutputCostPerToken: 2e-6,
+		SearchContextCostPerQuery: map[string]float64{
+			"search_context_size_low":    0.005,
+			"search_context_size_medium": 0.010,
+			"search_context_size_high":   0.015,
+		},
+	}
+	usage := Usage{
+		PromptTokens:      100,
+		CompletionTokens:  50,
+		TotalTokens:       150,
+		WebSearchRequests: 3,
+		SearchContextSize: "xxl", // not in the map
+	}
+	cost := genericCalculateCost(usage, p)
+	// Only token costs — no search fee for the unmapped size.
+	expected := float64(100)*1e-6 + float64(50)*2e-6
+	if !almostEqual(cost, expected) {
+		t.Errorf("expected %.10f (no search cost for unmapped size), got %.10f", expected, cost)
+	}
+}
+
+// TestGenericCalculateCost_SearchContextPrecedenceOverFlatRate verifies that when
+// both SearchContextCostPerQuery and WebSearchCostPerRequest are set, the per-query
+// context cost is used (first branch) and the flat rate is ignored.
+func TestGenericCalculateCost_SearchContextPrecedenceOverFlatRate(t *testing.T) {
+	p := ModelPricing{
+		InputCostPerToken:       1e-6,
+		OutputCostPerToken:      2e-6,
+		WebSearchCostPerRequest: 0.10, // flat rate — must NOT be used
+		SearchContextCostPerQuery: map[string]float64{
+			"search_context_size_medium": 0.01,
+		},
+	}
+	usage := Usage{
+		PromptTokens:      100,
+		CompletionTokens:  50,
+		TotalTokens:       150,
+		WebSearchRequests: 2,
+		SearchContextSize: "medium",
+	}
+	cost := genericCalculateCost(usage, p)
+	// Token cost + 2 × $0.01 (context query); NOT 2 × $0.10 (flat rate).
+	expected := float64(100)*1e-6 + float64(50)*2e-6 + 2*0.01
+	if !almostEqual(cost, expected) {
+		t.Errorf("expected %.10f (context cost), got %.10f", expected, cost)
+	}
+	// Sanity: flat rate would give a much larger result.
+	flatResult := float64(100)*1e-6 + float64(50)*2e-6 + 2*0.10
+	if almostEqual(cost, flatResult) {
+		t.Errorf("flat rate was used instead of context cost — SearchContextCostPerQuery must win")
 	}
 }
 

@@ -286,14 +286,29 @@ func lookupPricing(pricingMap map[string]ModelPricing, modelName string) (ModelP
 	return ModelPricing{}, false
 }
 
-// genericCalculateCost computes cost in USD from a normalised Usage and ModelPricing.
-// Handles context-window tiering, service tiers, cache costs, reasoning tokens,
-// audio/image modality tokens, and web search fees. Provider-specific adjustments
-// are applied in calculator.Adjust() after this call.
-func genericCalculateCost(usage Usage, pricing ModelPricing) float64 {
-	totalTokens := usage.TotalTokens
-	if totalTokens == 0 {
-		totalTokens = usage.PromptTokens + usage.CompletionTokens
+// effectiveRates holds the resolved per-token rates after applying context-window
+// tiering and service-tier overrides.
+type effectiveRates struct {
+	input        float64
+	output       float64
+	cacheRead    float64
+	cacheWrite5m float64
+	cacheWrite1h float64
+}
+
+// resolveRates selects the correct per-token rates for the given usage and pricing,
+// applying context-window tiering first and then service-tier overrides on top.
+func resolveRates(usage Usage, pricing ModelPricing) effectiveRates {
+	r := effectiveRates{
+		input:        pricing.InputCostPerToken,
+		output:       pricing.OutputCostPerToken,
+		cacheRead:    pricing.CacheReadInputTokenCost,
+		cacheWrite5m: pricing.CacheCreationInputTokenCost,
+		cacheWrite1h: pricing.CacheCreationInputTokenCostAbove1hr,
+	}
+	if r.cacheWrite1h == 0 {
+		// Fallback: if no distinct 1hr rate is defined, use the standard write rate.
+		r.cacheWrite1h = r.cacheWrite5m
 	}
 
 	// Use provider-specific input token count for tier decisions when available.
@@ -304,144 +319,151 @@ func genericCalculateCost(usage Usage, pricing ModelPricing) float64 {
 		tierTokens = usage.PromptTokens
 	}
 
-	// Select tiered rates based on total token count.
-	inputRate := pricing.InputCostPerToken
-	outputRate := pricing.OutputCostPerToken
-	cacheReadRate := pricing.CacheReadInputTokenCost
-	cacheWrite5mRate := pricing.CacheCreationInputTokenCost
-	cacheWrite1hrRate := pricing.CacheCreationInputTokenCostAbove1hr
-	if cacheWrite1hrRate == 0 {
-		// Fallback: if no distinct 1hr rate is defined, use the standard write rate.
-		cacheWrite1hrRate = cacheWrite5mRate
-	}
-
+	// Context-window tier selection.
 	switch {
 	case tierTokens > 272_000 && pricing.InputCostPerTokenAbove272k > 0:
-		inputRate = pricing.InputCostPerTokenAbove272k
-		outputRate = pricing.OutputCostPerTokenAbove272k
-		cacheReadRate = pricing.CacheReadInputTokenCostAbove272k
+		r.input = pricing.InputCostPerTokenAbove272k
+		r.output = pricing.OutputCostPerTokenAbove272k
+		r.cacheRead = pricing.CacheReadInputTokenCostAbove272k
 	case tierTokens > 200_000 && pricing.InputCostPerTokenAbove200k > 0:
-		inputRate = pricing.InputCostPerTokenAbove200k
-		outputRate = pricing.OutputCostPerTokenAbove200k
-		cacheReadRate = pricing.CacheReadInputTokenCostAbove200k
+		r.input = pricing.InputCostPerTokenAbove200k
+		r.output = pricing.OutputCostPerTokenAbove200k
+		r.cacheRead = pricing.CacheReadInputTokenCostAbove200k
 		if pricing.CacheCreationInputTokenCostAbove200k > 0 {
-			cacheWrite5mRate = pricing.CacheCreationInputTokenCostAbove200k
+			r.cacheWrite5m = pricing.CacheCreationInputTokenCostAbove200k
 			// TODO: if Anthropic ever defines cache_creation_input_token_cost_above_1hr_above_200k_tokens,
 			// select it here. For now, the >200k write rate applies to both TTLs.
-			cacheWrite1hrRate = pricing.CacheCreationInputTokenCostAbove200k
+			r.cacheWrite1h = pricing.CacheCreationInputTokenCostAbove200k
 		}
 	case tierTokens > 128_000 && pricing.InputCostPerTokenAbove128k > 0:
-		inputRate = pricing.InputCostPerTokenAbove128k
-		outputRate = pricing.OutputCostPerTokenAbove128k
+		r.input = pricing.InputCostPerTokenAbove128k
+		r.output = pricing.OutputCostPerTokenAbove128k
 	}
 
-	// Service tier override: priority and flex requests use their respective rate variants.
-	// Priority tiers are checked from the narrowest threshold downward so that a >272k
-	// prompt on a priority tier gets the right compounding rate.
+	// Service-tier override: priority and flex requests use their respective rate
+	// variants. Priority tiers are checked from the narrowest threshold downward so
+	// that a >272k prompt on a priority tier gets the right compounding rate.
 	switch usage.ServiceTier {
 	case "priority":
 		switch {
 		case tierTokens > 272_000 && pricing.InputCostPerTokenAbove272kPriority > 0:
-			inputRate = pricing.InputCostPerTokenAbove272kPriority
+			r.input = pricing.InputCostPerTokenAbove272kPriority
 			if pricing.OutputCostPerTokenAbove272kPriority > 0 {
-				outputRate = pricing.OutputCostPerTokenAbove272kPriority
+				r.output = pricing.OutputCostPerTokenAbove272kPriority
 			}
 			if pricing.CacheReadInputTokenCostAbove272kPriority > 0 {
-				cacheReadRate = pricing.CacheReadInputTokenCostAbove272kPriority
+				r.cacheRead = pricing.CacheReadInputTokenCostAbove272kPriority
 			}
 		case tierTokens > 200_000 && pricing.InputCostPerTokenAbove200kPriority > 0:
-			inputRate = pricing.InputCostPerTokenAbove200kPriority
+			r.input = pricing.InputCostPerTokenAbove200kPriority
 			if pricing.OutputCostPerTokenAbove200kPriority > 0 {
-				outputRate = pricing.OutputCostPerTokenAbove200kPriority
+				r.output = pricing.OutputCostPerTokenAbove200kPriority
 			}
 			if pricing.CacheReadInputTokenCostAbove200kPriority > 0 {
-				cacheReadRate = pricing.CacheReadInputTokenCostAbove200kPriority
+				r.cacheRead = pricing.CacheReadInputTokenCostAbove200kPriority
 			}
 		case pricing.InputCostPerTokenPriority > 0:
-			inputRate = pricing.InputCostPerTokenPriority
+			r.input = pricing.InputCostPerTokenPriority
 			if pricing.OutputCostPerTokenPriority > 0 {
-				outputRate = pricing.OutputCostPerTokenPriority
+				r.output = pricing.OutputCostPerTokenPriority
 			}
 			if pricing.CacheReadInputTokenCostPriority > 0 {
-				cacheReadRate = pricing.CacheReadInputTokenCostPriority
+				r.cacheRead = pricing.CacheReadInputTokenCostPriority
 			}
 		}
 	case "flex":
 		if pricing.InputCostPerTokenFlex > 0 {
-			inputRate = pricing.InputCostPerTokenFlex
+			r.input = pricing.InputCostPerTokenFlex
 			if pricing.OutputCostPerTokenFlex > 0 {
-				outputRate = pricing.OutputCostPerTokenFlex
+				r.output = pricing.OutputCostPerTokenFlex
 			}
 			if pricing.CacheReadInputTokenCostFlex > 0 {
-				cacheReadRate = pricing.CacheReadInputTokenCostFlex
+				r.cacheRead = pricing.CacheReadInputTokenCostFlex
 			}
 		}
 	case "batch":
 		if pricing.InputCostPerTokenBatches > 0 {
-			inputRate = pricing.InputCostPerTokenBatches
+			r.input = pricing.InputCostPerTokenBatches
 			if pricing.OutputCostPerTokenBatches > 0 {
-				outputRate = pricing.OutputCostPerTokenBatches
+				r.output = pricing.OutputCostPerTokenBatches
 			}
 		}
 	}
 
-	// Regular (non-cached, non-reasoning) prompt tokens (audio tokens also excluded
-	// so they can be billed at their own modality rate below)
+	return r
+}
+
+// genericCalculateCost computes cost in USD from a normalised Usage and ModelPricing.
+// Handles context-window tiering, service tiers, cache costs, reasoning tokens,
+// audio/image modality tokens, and web search fees. Provider-specific adjustments
+// are applied in calculator.Adjust() after this call.
+func genericCalculateCost(usage Usage, pricing ModelPricing) float64 {
+	r := resolveRates(usage, pricing)
+
+	// --- Token costs ---------------------------------------------------------
+
+	// Exclude cached, cache-write, and audio tokens from the regular prompt count;
+	// each category is billed separately below.
 	regularPromptTokens := usage.PromptTokens - usage.CachedReadTokens - usage.CacheWriteTokens - usage.CacheWrite1hrTokens - usage.AudioInputTokens
 	if regularPromptTokens < 0 {
 		regularPromptTokens = 0
 	}
-
-	// Regular (non-reasoning, non-audio, non-image) completion tokens
+	// Exclude reasoning, audio, and image tokens from the regular completion count.
 	regularCompletionTokens := usage.CompletionTokens - usage.ReasoningTokens - usage.AudioOutputTokens - usage.ImageOutputTokens
 	if regularCompletionTokens < 0 {
 		regularCompletionTokens = 0
 	}
 
-	promptCost := float64(regularPromptTokens) * inputRate
-	completionCost := float64(regularCompletionTokens) * outputRate
+	promptCost := float64(regularPromptTokens) * r.input
+	completionCost := float64(regularCompletionTokens) * r.output
 
-	// Cache read cost: when the model defines a per-audio cache rate, split
-	// cached tokens by modality; otherwise bill all at cacheReadRate.
+	// Cache read: when the model defines a per-audio cache rate, split cached
+	// tokens by modality; otherwise bill all at the standard cache-read rate.
 	var cacheReadCost float64
 	if pricing.CacheReadInputTokenCostPerAudioToken > 0 {
 		textCachedTokens := usage.CachedReadTokens - usage.CachedAudioInputTokens
 		if textCachedTokens < 0 {
 			textCachedTokens = 0
 		}
-		cacheReadCost = float64(textCachedTokens)*cacheReadRate +
+		cacheReadCost = float64(textCachedTokens)*r.cacheRead +
 			float64(usage.CachedAudioInputTokens)*pricing.CacheReadInputTokenCostPerAudioToken
 	} else {
-		cacheReadCost = float64(usage.CachedReadTokens) * cacheReadRate
+		cacheReadCost = float64(usage.CachedReadTokens) * r.cacheRead
 	}
-	cacheWriteCost := float64(usage.CacheWriteTokens)*cacheWrite5mRate + float64(usage.CacheWrite1hrTokens)*cacheWrite1hrRate
+	cacheWriteCost := float64(usage.CacheWriteTokens)*r.cacheWrite5m + float64(usage.CacheWrite1hrTokens)*r.cacheWrite1h
 
-	// Reasoning tokens billed at their own rate if defined, otherwise at output rate
+	// Reasoning tokens billed at their own rate if defined, otherwise at output rate.
 	reasoningRate := pricing.OutputCostPerReasoningToken
 	if reasoningRate == 0 {
-		reasoningRate = outputRate
+		reasoningRate = r.output
 	}
 	reasoningCost := float64(usage.ReasoningTokens) * reasoningRate
 
-	// Audio input rate (falls back to standard input rate when absent)
+	// --- Modality costs ------------------------------------------------------
+
+	// Note: service-tier (_priority) suffix does not apply to audio token rates.
 	audioInputRate := pricing.InputCostPerAudioToken
 	if audioInputRate == 0 {
-		audioInputRate = inputRate
+		audioInputRate = r.input
 	}
-	// Note: service-tier (_priority) suffix does not apply to audio token rates.
 	audioInputCost := float64(usage.AudioInputTokens) * audioInputRate
 
 	audioOutputRate := pricing.OutputCostPerAudioToken
 	if audioOutputRate == 0 {
-		audioOutputRate = outputRate
+		audioOutputRate = r.output
 	}
 	audioOutputCost := float64(usage.AudioOutputTokens) * audioOutputRate
 
 	imageOutputRate := pricing.OutputCostPerImageToken
 	if imageOutputRate == 0 {
-		imageOutputRate = outputRate
+		imageOutputRate = r.output
 	}
 	imageOutputCost := float64(usage.ImageOutputTokens) * imageOutputRate
+
+	// Audio billed by duration rather than token count (e.g. Mistral Voxtral).
+	audioSecondsCost := usage.AudioInputSeconds * pricing.InputCostPerAudioPerSecond
+
+	// --- Tool / search costs -------------------------------------------------
 
 	// Web search: variable rate keyed by context size, or flat rate per call.
 	var webSearchCost float64
@@ -451,8 +473,7 @@ func genericCalculateCost(usage Usage, pricing ModelPricing) float64 {
 			if size == "" {
 				size = "medium"
 			}
-			jsonKey := "search_context_size_" + size
-			if rate, ok := pricing.SearchContextCostPerQuery[jsonKey]; ok {
+			if rate, ok := pricing.SearchContextCostPerQuery["search_context_size_"+size]; ok {
 				webSearchCost = float64(usage.WebSearchRequests) * rate
 			}
 		} else if pricing.WebSearchCostPerRequest > 0 {
@@ -466,12 +487,9 @@ func genericCalculateCost(usage Usage, pricing ModelPricing) float64 {
 		if pricing.WebSearchCostPerRequest > 0 {
 			toolUseCost = pricing.WebSearchCostPerRequest
 		} else {
-			toolUseCost = float64(usage.ToolUsePromptTokens) * inputRate
+			toolUseCost = float64(usage.ToolUsePromptTokens) * r.input
 		}
 	}
-
-	// Audio billed by duration (e.g. Mistral Voxtral).
-	audioSecondsCost := usage.AudioInputSeconds * pricing.InputCostPerAudioPerSecond
 
 	return promptCost + completionCost + cacheReadCost + cacheWriteCost + reasoningCost + webSearchCost + toolUseCost + audioInputCost + audioOutputCost + imageOutputCost + audioSecondsCost
 }

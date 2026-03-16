@@ -28,6 +28,14 @@ const (
 	// HeaderLLMCost is the response header set by this policy.
 	// Value is a USD float formatted to 10 decimal places.
 	HeaderLLMCost = "x-llm-cost"
+
+	// HeaderLLMCostStatus indicates whether the cost was successfully calculated.
+	// Value is either "calculated" or "not_calculated".
+	// This disambiguates x-llm-cost: 0 (which could mean zero cost or a failed calculation).
+	HeaderLLMCostStatus = "x-llm-cost-status"
+
+	costStatusCalculated    = "calculated"
+	costStatusNotCalculated = "not_calculated"
 )
 
 // LLMCostPolicy calculates the cost of an LLM API call from the response body
@@ -78,7 +86,7 @@ func (p *LLMCostPolicy) OnRequest(ctx *policy.RequestContext, _ map[string]inter
 func (p *LLMCostPolicy) OnResponse(ctx *policy.ResponseContext, _ map[string]interface{}) policy.ResponseAction {
 	if ctx.ResponseBody == nil || !ctx.ResponseBody.Present || len(ctx.ResponseBody.Content) == 0 {
 		slog.Warn("llm-cost: empty or missing response body, skipping cost calculation")
-		return policy.UpstreamResponseModifications{}
+		return setCostHeader(0.0, costStatusNotCalculated)
 	}
 
 	responseBody := ctx.ResponseBody.Content
@@ -91,7 +99,7 @@ func (p *LLMCostPolicy) OnResponse(ctx *policy.ResponseContext, _ map[string]int
 	}
 	if err := json.Unmarshal(responseBody, &probe); err != nil {
 		slog.Warn("llm-cost: could not parse response body", "error", err)
-		return policy.UpstreamResponseModifications{}
+		return setCostHeader(0.0, costStatusNotCalculated)
 	}
 	modelName := probe.Model
 	if modelName == "" {
@@ -99,14 +107,14 @@ func (p *LLMCostPolicy) OnResponse(ctx *policy.ResponseContext, _ map[string]int
 	}
 	if modelName == "" {
 		slog.Warn("llm-cost: no model name found in response body ($.model or $.modelVersion)")
-		return policy.UpstreamResponseModifications{}
+		return setCostHeader(0.0, costStatusNotCalculated)
 	}
 
 	// Look up pricing entry.
 	pricing, found := lookupPricing(p.pricingMap, modelName)
 	if !found {
 		slog.Warn("llm-cost: no pricing entry for model, setting cost to 0", "model", modelName)
-		return setCostHeader(0.0)
+		return setCostHeader(0.0, costStatusNotCalculated)
 	}
 
 	// Select provider calculator.
@@ -122,7 +130,7 @@ func (p *LLMCostPolicy) OnResponse(ctx *policy.ResponseContext, _ map[string]int
 	usage, err := calc.Normalize(responseBody, requestBody)
 	if err != nil {
 		slog.Warn("llm-cost: failed to normalize usage", "model", modelName, "error", err)
-		return setCostHeader(0.0)
+		return setCostHeader(0.0, costStatusNotCalculated)
 	}
 
 	// Calculate base cost using the provider-agnostic generic calculator.
@@ -139,14 +147,15 @@ func (p *LLMCostPolicy) OnResponse(ctx *policy.ResponseContext, _ map[string]int
 		"cost_usd", finalCost,
 	)
 
-	return setCostHeader(finalCost)
+	return setCostHeader(finalCost, costStatusCalculated)
 }
 
-// setCostHeader returns a ResponseAction that sets x-llm-cost to the given USD value.
-func setCostHeader(costUSD float64) policy.ResponseAction {
+// setCostHeader returns a ResponseAction that sets x-llm-cost and x-llm-cost-status.
+func setCostHeader(costUSD float64, status string) policy.ResponseAction {
 	return policy.UpstreamResponseModifications{
 		SetHeaders: map[string]string{
-			HeaderLLMCost: fmt.Sprintf("%.10f", costUSD),
+			HeaderLLMCost:       fmt.Sprintf("%.10f", costUSD),
+			HeaderLLMCostStatus: status,
 		},
 	}
 }
