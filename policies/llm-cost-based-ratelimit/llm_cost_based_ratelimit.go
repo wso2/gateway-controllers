@@ -461,7 +461,7 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 
 // extractCostScaleFactor extracts the cost scale factor from system parameters.
 // The scale factor determines how dollar amounts are scaled for precision in int64 counters.
-// Default: 1,000,000 (micro-dollars)
+// Default: 1,000,000,000 (nano-dollars)
 func extractCostScaleFactor(params map[string]interface{}) int {
 	// Check for system parameters at root level (injected by gateway)
 	if systemParams, ok := params["systemParameters"].(map[string]interface{}); ok {
