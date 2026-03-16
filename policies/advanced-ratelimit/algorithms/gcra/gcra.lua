@@ -59,7 +59,12 @@ if force then
     consumed = count
     new_tat = tat + (emission_interval * consumed)
     if consumed > 0 then
-        redis.call('SET', key, new_tat, 'EX', expiration)
+        local ttl_seconds = expiration
+        local debt_seconds = math.ceil((new_tat - now) / 1000000000)
+        if debt_seconds > ttl_seconds then
+            ttl_seconds = debt_seconds
+        end
+        redis.call('SET', key, new_tat, 'EX', ttl_seconds)
     end
     -- allowed only if within both timing and capacity constraints
     if now >= allow_at and count <= remaining then
