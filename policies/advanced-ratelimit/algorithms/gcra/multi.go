@@ -130,6 +130,9 @@ func (m *MultiLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limi
 			result, err = tracker.ConsumeN(ctx, policyKey, n)
 		} else {
 			result, err = lim.ConsumeOrClampN(ctx, policyKey, n)
+			if err == nil && result.Consumed < n {
+				return nil, fmt.Errorf("limiter %d does not implement CostTracker and clamped consumption to %d (requested %d); cannot guarantee ConsumeN semantics", i, result.Consumed, n)
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("limiter %d failed: %w", i, err)
