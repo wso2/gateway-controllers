@@ -324,9 +324,15 @@ func (m *MemoryLimiter) ConsumeN(ctx context.Context, key string, n int64) (*lim
 	// Calculate new TAT (always advance, regardless of limits)
 	newTAT := tat.Add(emissionInterval * time.Duration(n))
 
-	// Always store new TAT (unlike AllowN which only updates when allowed)
+	// Always store new TAT (unlike AllowN which only updates when allowed).
+	// Extend expiration to cover forced debt when newTAT exceeds the base window,
+	// mirroring the Redis/Lua fix so large post-response costs are not wiped early.
 	if n > 0 {
-		expiration := m.policy.Duration + burstAllowance
+		baseExpiration := m.policy.Duration + burstAllowance
+		expiration := baseExpiration
+		if debt := newTAT.Sub(now); debt > baseExpiration {
+			expiration = debt
+		}
 		m.data[key] = &tatEntry{
 			tat:        newTAT,
 			expiration: now.Add(expiration),
