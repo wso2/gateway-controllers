@@ -52,8 +52,8 @@ type delegateEntry struct {
 }
 
 // LLMCostRateLimitPolicy delegates LLM cost-based rate limiting to advanced-ratelimit
-// by reading the pre-calculated cost from the x-llm-cost response header and applying
-// user-defined monetary budgets.
+// by reading the pre-calculated cost from SharedContext.Metadata (set by the llm-cost system policy)
+// and applying user-defined monetary budgets.
 type LLMCostRateLimitPolicy struct {
 	metadata  policy.PolicyMetadata
 	delegates sync.Map // map[string]*delegateEntry (providerName -> delegate entry)
@@ -75,7 +75,7 @@ func (p *LLMCostRateLimitPolicy) Mode() policy.ProcessingMode {
 		RequestHeaderMode:  policy.HeaderModeProcess,
 		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeProcess,
-		ResponseBodyMode:   policy.BodyModeSkip, // Cost is read from x-llm-cost response header
+		ResponseBodyMode:   policy.BodyModeSkip,
 	}
 }
 
@@ -374,7 +374,7 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 	// Get the cost scale factor from system parameters
 	costScaleFactor := extractCostScaleFactor(params)
 
-	slog.Debug("transformToRatelimitParams: using x-llm-cost header for cost extraction",
+	slog.Debug("transformToRatelimitParams: using x-llm-cost from SharedContext.Metadata for cost extraction",
 		"costScaleFactor", costScaleFactor)
 
 	// Build a single quota with multiple limits for different time windows
@@ -423,11 +423,11 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 		return map[string]interface{}{"quotas": []interface{}{}}
 	}
 
-	// Read the pre-calculated dollar cost from the x-llm-cost response header,
+	// Read the pre-calculated dollar cost from SharedContext.Metadata,
 	// set by the LLM cost system policy. Scale to int64-compatible units.
 	sources := []interface{}{
 		map[string]interface{}{
-			"type":       "response_header",
+			"type":       "response_metadata",
 			"key":        "x-llm-cost",
 			"multiplier": float64(costScaleFactor),
 		},
@@ -445,7 +445,7 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 	quota["costExtraction"] = map[string]interface{}{
 		"enabled": true,
 		"sources": sources,
-		"default": 0, // Default to 0 cost if x-llm-cost header is absent
+		"default": 0, // Default to 0 cost if x-llm-cost metadata is absent
 	}
 
 	quotas := []interface{}{quota}

@@ -40,15 +40,16 @@ func createTestRequestContext(providerName string) *policy.RequestContext {
 	}
 }
 
-// createTestResponseContext creates a response context with the x-llm-cost header
+// createTestResponseContext creates a response context with the x-llm-cost in SharedContext.Metadata
 func createTestResponseContext(llmCost string) *policy.ResponseContext {
 	return &policy.ResponseContext{
 		ResponseHeaders: policy.NewHeaders(map[string][]string{
 			"content-type": {"application/json"},
-			"x-llm-cost":   {llmCost},
 		}),
 		SharedContext: &policy.SharedContext{
-			Metadata: make(map[string]interface{}),
+			Metadata: map[string]interface{}{
+				"x-llm-cost": llmCost,
+			},
 		},
 	}
 }
@@ -62,7 +63,7 @@ func TestLLMCostRateLimitPolicy_Mode(t *testing.T) {
 		RequestHeaderMode:  policy.HeaderModeProcess,
 		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeProcess,
-		ResponseBodyMode:   policy.BodyModeSkip, // Cost is read from x-llm-cost response header
+		ResponseBodyMode:   policy.BodyModeSkip,
 	}
 
 	if mode != expected {
@@ -223,7 +224,7 @@ func TestTransformToRatelimitParams(t *testing.T) {
 		t.Errorf("Expected 2 limits, got %d", len(limits))
 	}
 
-	// Check cost extraction reads from x-llm-cost header
+	// Check cost extraction reads from x-llm-cost in SharedContext.Metadata
 	costExtraction, ok := quota["costExtraction"].(map[string]interface{})
 	if !ok {
 		t.Fatal("Expected costExtraction to be present")
@@ -231,12 +232,12 @@ func TestTransformToRatelimitParams(t *testing.T) {
 
 	sources, ok := costExtraction["sources"].([]interface{})
 	if !ok || len(sources) != 1 {
-		t.Fatalf("Expected 1 cost source (x-llm-cost header), got %d", len(sources))
+		t.Fatalf("Expected 1 cost source (x-llm-cost metadata), got %d", len(sources))
 	}
 
 	source := sources[0].(map[string]interface{})
-	if source["type"] != "response_header" {
-		t.Errorf("Expected source type 'response_header', got %v", source["type"])
+	if source["type"] != "response_metadata" {
+		t.Errorf("Expected source type 'response_metadata', got %v", source["type"])
 	}
 	if source["key"] != "x-llm-cost" {
 		t.Errorf("Expected source key 'x-llm-cost', got %v", source["key"])
@@ -305,7 +306,7 @@ func TestTransformToRatelimitParams_NoBudgetLimits(t *testing.T) {
 }
 
 // TestTransformToRatelimitParams_AlwaysHasCostExtraction tests that cost extraction
-// is always configured regardless of other parameters, since it reads from x-llm-cost header.
+// is always configured regardless of other parameters, since it reads from SharedContext.Metadata.
 func TestTransformToRatelimitParams_AlwaysHasCostExtraction(t *testing.T) {
 	params := map[string]interface{}{
 		"budgetLimits": []interface{}{
@@ -327,7 +328,7 @@ func TestTransformToRatelimitParams_AlwaysHasCostExtraction(t *testing.T) {
 
 	quota := quotas[0].(map[string]interface{})
 
-	// x-llm-cost source should always be present
+	// x-llm-cost metadata source should always be present
 	costExtraction, ok := quota["costExtraction"].(map[string]interface{})
 	if !ok {
 		t.Fatal("Expected costExtraction to always be present")
@@ -475,7 +476,7 @@ func TestLLMCostRateLimitPolicy_Integration_BasicRateLimit(t *testing.T) {
 			t.Fatalf("Request %d phase should pass pre-check, got %T", i+1, reqAction)
 		}
 
-		// Response phase - x-llm-cost header reports $0.30
+		// Response phase - x-llm-cost metadata reports $0.30
 		respCtx := createTestResponseContext("0.3000000000")
 		respCtx.SharedContext = reqCtx.SharedContext
 		respCtx.Metadata = reqCtx.Metadata
