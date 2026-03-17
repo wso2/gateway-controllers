@@ -4,10 +4,8 @@ go 1.25.1
 
 require (
 	github.com/wso2/api-platform/sdk v0.3.8
-	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v0.1.23
+	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v0.3.2
 )
-
-replace github.com/wso2/gateway-controllers/policies/advanced-ratelimit => ../advanced-ratelimit
 
 require (
 	cel.dev/expr v0.25.1 // indirect
