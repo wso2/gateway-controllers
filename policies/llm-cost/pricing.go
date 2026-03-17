@@ -362,12 +362,20 @@ func resolveRates(usage Usage, pricing ModelPricing) effectiveRates {
 	switch {
 	case tierTokens > 272_000 && pricing.InputCostPerTokenAbove272k > 0:
 		r.input = pricing.InputCostPerTokenAbove272k
-		r.output = pricing.OutputCostPerTokenAbove272k
-		r.cacheRead = pricing.CacheReadInputTokenCostAbove272k
+		if pricing.OutputCostPerTokenAbove272k > 0 {
+			r.output = pricing.OutputCostPerTokenAbove272k
+		}
+		if pricing.CacheReadInputTokenCostAbove272k > 0 {
+			r.cacheRead = pricing.CacheReadInputTokenCostAbove272k
+		}
 	case tierTokens > 200_000 && pricing.InputCostPerTokenAbove200k > 0:
 		r.input = pricing.InputCostPerTokenAbove200k
-		r.output = pricing.OutputCostPerTokenAbove200k
-		r.cacheRead = pricing.CacheReadInputTokenCostAbove200k
+		if pricing.OutputCostPerTokenAbove200k > 0 {
+			r.output = pricing.OutputCostPerTokenAbove200k
+		}
+		if pricing.CacheReadInputTokenCostAbove200k > 0 {
+			r.cacheRead = pricing.CacheReadInputTokenCostAbove200k
+		}
 		if pricing.CacheCreationInputTokenCostAbove200k > 0 {
 			r.cacheWrite5m = pricing.CacheCreationInputTokenCostAbove200k
 			// TODO: if Anthropic ever defines cache_creation_input_token_cost_above_1hr_above_200k_tokens,
@@ -376,7 +384,9 @@ func resolveRates(usage Usage, pricing ModelPricing) effectiveRates {
 		}
 	case tierTokens > 128_000 && pricing.InputCostPerTokenAbove128k > 0:
 		r.input = pricing.InputCostPerTokenAbove128k
-		r.output = pricing.OutputCostPerTokenAbove128k
+		if pricing.OutputCostPerTokenAbove128k > 0 {
+			r.output = pricing.OutputCostPerTokenAbove128k
+		}
 	}
 
 	// Service-tier override: priority and flex requests use their respective rate
