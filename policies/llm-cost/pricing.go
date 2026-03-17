@@ -22,11 +22,38 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+)
+
+var (
+	pricingCache   = map[string]map[string]ModelPricing{}
+	pricingCacheMu sync.RWMutex
 )
 
 // loadPricingFromFile reads a JSON pricing file at path and returns a map of
-// model key → ModelPricing. Returns an error if the file cannot be read or parsed.
+// model key → ModelPricing. Results are cached at the package level by file path;
+// a gateway restart is required to pick up changes to the pricing file.
+// Returns an error if the file cannot be read or parsed.
 func loadPricingFromFile(path string) (map[string]ModelPricing, error) {
+	pricingCacheMu.RLock()
+	if pm, ok := pricingCache[path]; ok {
+		pricingCacheMu.RUnlock()
+		return pm, nil
+	}
+	pricingCacheMu.RUnlock()
+
+	pm, err := loadPricingFromDisk(path)
+	if err != nil {
+		return nil, err
+	}
+
+	pricingCacheMu.Lock()
+	pricingCache[path] = pm
+	pricingCacheMu.Unlock()
+	return pm, nil
+}
+
+func loadPricingFromDisk(path string) (map[string]ModelPricing, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
