@@ -1,0 +1,10 @@
+{
+  "name": "subscription-validation",
+  "displayName": "Subscription Validation",
+  "version": "0.2",
+  "provider": "WSO2",
+  "categories": [
+    "Security"
+  ],
+  "description": "Validates that incoming requests are associated with an active subscription for the target API. Supports subscription tokens from a configurable header or cookie, and enforces per-subscription rate limits based on the configured subscription plan."
+}
