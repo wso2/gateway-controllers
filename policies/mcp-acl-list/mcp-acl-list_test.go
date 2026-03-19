@@ -270,7 +270,7 @@ func TestOnRequest_DenyWhenException(t *testing.T) {
 
 	ctx := createMockRequestContext(map[string][]string{})
 	ctx.Method = "POST"
-	ctx.Path = "/mcp"
+	ctx.OperationPath = "/mcp"
 	ctx.Body = &policy.Body{Content: body, Present: true}
 
 	action := p.OnRequest(ctx, params)
@@ -304,7 +304,7 @@ func TestOnRequest_AllowWhenNotException(t *testing.T) {
 
 	ctx := createMockRequestContext(map[string][]string{})
 	ctx.Method = "POST"
-	ctx.Path = "/mcp"
+	ctx.OperationPath = "/mcp"
 	ctx.Body = &policy.Body{Content: body, Present: true}
 
 	action := p.OnRequest(ctx, params)
@@ -342,7 +342,7 @@ func TestOnRequest_DenySSERequestWithSessionHeader(t *testing.T) {
 		"mcp-session-id": {"session-123"},
 	})
 	ctx.Method = "POST"
-	ctx.Path = "/mcp"
+	ctx.OperationPath = "/mcp"
 	ctx.Body = &policy.Body{Content: streamBody, Present: true}
 
 	action := p.OnRequest(ctx, params)
@@ -409,7 +409,7 @@ func TestOnResponse_FilterList_DenyMode(t *testing.T) {
 
 	ctx := createMockResponseContext(nil, nil)
 	ctx.RequestMethod = "POST"
-	ctx.RequestPath = "/mcp"
+	ctx.OperationPath = "/mcp"
 	ctx.ResponseBody = &policy.Body{Content: body, Present: true}
 	ctx.Metadata[metadataMcpCapabilityType] = "tools"
 	ctx.Metadata[metadataMcpAction] = "list"
@@ -462,7 +462,7 @@ func TestOnResponse_FilterList_ResourcesUri(t *testing.T) {
 
 	ctx := createMockResponseContext(nil, nil)
 	ctx.RequestMethod = "POST"
-	ctx.RequestPath = "/mcp"
+	ctx.OperationPath = "/mcp"
 	ctx.ResponseBody = &policy.Body{Content: body, Present: true}
 	ctx.Metadata[metadataMcpCapabilityType] = "resources"
 	ctx.Metadata[metadataMcpAction] = "list"
@@ -532,7 +532,7 @@ func TestOnResponse_SSEFilterOnlyListEvents(t *testing.T) {
 		"content-type": {"text/event-stream"},
 	})
 	ctx.RequestMethod = "POST"
-	ctx.RequestPath = "/mcp"
+	ctx.OperationPath = "/mcp"
 	ctx.ResponseBody = &policy.Body{Content: streamBody, Present: true}
 	ctx.Metadata[metadataMcpCapabilityType] = "tools"
 	ctx.Metadata[metadataMcpAction] = "list"

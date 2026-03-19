@@ -166,7 +166,7 @@ func (p *McpAclListPolicy) Mode() policy.ProcessingMode {
 }
 
 func (p *McpAclListPolicy) OnRequest(ctx *policy.RequestContext, params map[string]any) policy.RequestAction {
-	if !isMcpPostRequest(ctx.Method, ctx.Path) {
+	if !isMcpPostRequest(ctx.Method, ctx.OperationPath) {
 		return nil
 	}
 	slog.Debug("MCP ACL List Policy: OnRequest started")
@@ -226,7 +226,7 @@ func (p *McpAclListPolicy) OnRequest(ctx *policy.RequestContext, params map[stri
 }
 
 func (p *McpAclListPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]any) policy.ResponseAction {
-	if !isMcpPostRequest(ctx.RequestMethod, ctx.RequestPath) {
+	if !isMcpPostRequest(ctx.RequestMethod, ctx.OperationPath) {
 		return nil
 	}
 	slog.Debug("MCP ACL List Policy: OnResponse started")
