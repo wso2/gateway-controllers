@@ -175,4 +175,4 @@ policies:
 }
 ```
 
-The policy extracts `<userq>` as the query and `<toolname>`/`<tooldescription>` as tools, then performs filtering. After filtering process tages are removed.
+The policy extracts `<userq>` as the query and `<toolname>`/`<tooldescription>` as tools, then performs filtering. After the filtering process, the tags are removed.
