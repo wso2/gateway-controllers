@@ -127,7 +127,7 @@ Inside the `gateway/build.yaml`, ensure both policy modules are added under `pol
 
 ## Reference Scenarios
 
-This policy requires the `llm-cost` policy to run on the same path first, so the pre-calculated cost is available in `SharedContext.Metadata`. Both policies must be listed under the same path, with `llm-cost` placed before `llm-cost-based-ratelimit`.
+This policy requires the `llm-cost` policy to run on the same path. Because response-phase policies execute in reverse order of the policy list, place `llm-cost-based-ratelimit` before `llm-cost` in the list — this ensures `llm-cost` runs first in the response phase to calculate the cost, and then `llm-cost-based-ratelimit` deducts it.
 
 ### Example 1: Simple Daily Spending Budget
 
@@ -154,11 +154,6 @@ spec:
       - path: /chat/completions
         methods: [POST]
   policies:
-    - name: llm-cost
-      version: v0
-      paths:
-        - path: /chat/completions
-          methods: [POST]
     - name: llm-cost-based-ratelimit
       version: v0
       paths:
@@ -168,6 +163,11 @@ spec:
             budgetLimits:
               - amount: 50
                 duration: "24h"
+    - name: llm-cost
+      version: v0
+      paths:
+        - path: /chat/completions
+          methods: [POST]
 ```
 
 Once the $50 daily budget is exhausted, subsequent requests receive a `429` response until the 24-hour window resets.
@@ -178,11 +178,6 @@ Apply both a short-term burst limit and a long-term daily budget:
 
 ```yaml
   policies:
-    - name: llm-cost
-      version: v0
-      paths:
-        - path: /chat/completions
-          methods: [POST]
     - name: llm-cost-based-ratelimit
       version: v0
       paths:
@@ -194,6 +189,11 @@ Apply both a short-term burst limit and a long-term daily budget:
                 duration: "1h"
               - amount: 50
                 duration: "24h"
+    - name: llm-cost
+      version: v0
+      paths:
+        - path: /chat/completions
+          methods: [POST]
 ```
 
 This enforces a $5 per hour burst limit alongside a $50 daily cap. Both limits are evaluated independently — a request is rejected if either limit is exceeded.
@@ -204,11 +204,6 @@ Apply long-horizon budget controls suitable for subscription-style APIs:
 
 ```yaml
   policies:
-    - name: llm-cost
-      version: v0
-      paths:
-        - path: /chat/completions
-          methods: [POST]
     - name: llm-cost-based-ratelimit
       version: v0
       paths:
@@ -220,6 +215,11 @@ Apply long-horizon budget controls suitable for subscription-style APIs:
                 duration: "168h"
               - amount: 100
                 duration: "720h"
+    - name: llm-cost
+      version: v0
+      paths:
+        - path: /chat/completions
+          methods: [POST]
 ```
 
 This sets a $25 weekly budget and a $100 monthly budget. Both limits are tracked concurrently.
@@ -230,13 +230,6 @@ Apply different spending limits to different endpoints within the same provider:
 
 ```yaml
   policies:
-    - name: llm-cost
-      version: v0
-      paths:
-        - path: /chat/completions
-          methods: [POST]
-        - path: /completions
-          methods: [POST]
     - name: llm-cost-based-ratelimit
       version: v0
       paths:
@@ -252,6 +245,13 @@ Apply different spending limits to different endpoints within the same provider:
             budgetLimits:
               - amount: 5
                 duration: "24h"
+    - name: llm-cost
+      version: v0
+      paths:
+        - path: /chat/completions
+          methods: [POST]
+        - path: /completions
+          methods: [POST]
 ```
 
 Each path tracks its own independent budget. The `/chat/completions` path is limited to $10 per day, while `/completions` is limited to $5 per day.

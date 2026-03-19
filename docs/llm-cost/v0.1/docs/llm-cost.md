@@ -91,7 +91,7 @@ After each successful response, the policy stores the calculated cost in `Shared
 
 ### Example 2: Use with LLM Cost Based Ratelimit
 
-The primary use case is pairing this policy with `llm-cost-based-ratelimit` to enforce monetary budget limits. Place `llm-cost` before `llm-cost-based-ratelimit` in the policy list so the cost is available when the rate limit check runs:
+The primary use case is pairing this policy with `llm-cost-based-ratelimit` to enforce monetary budget limits. Place `llm-cost-based-ratelimit` before `llm-cost` in the policy list — because response-phase policies execute in reverse order, `llm-cost` runs first in the response to calculate the cost, and then `llm-cost-based-ratelimit` deducts it:
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
@@ -114,11 +114,6 @@ spec:
       - path: /chat/completions
         methods: [POST]
   policies:
-    - name: llm-cost
-      version: v0
-      paths:
-        - path: /chat/completions
-          methods: [POST]
     - name: llm-cost-based-ratelimit
       version: v0
       paths:
@@ -128,17 +123,21 @@ spec:
             budgetLimits:
               - amount: 10
                 duration: "24h"
+    - name: llm-cost
+      version: v0
+      paths:
+        - path: /chat/completions
+          methods: [POST]
 ```
 
 ## How It Works
 
-1. **Request phase**: The request body is buffered (required by some providers such as Anthropic to determine speed tier).
-2. **Response phase**: The response body is buffered and parsed.
-3. The model name is extracted from `$.model` in the response body. For Gemini native format, `$.modelVersion` is used as a fallback.
-4. The model name is looked up in the pricing database loaded at startup.
-5. A provider-specific calculator normalises the usage fields (prompt tokens, completion tokens, and any provider-specific fields such as cache read tokens or reasoning tokens) into a common `Usage` struct.
-6. The cost is calculated using the normalised usage and the pricing entry, then adjusted for any provider-specific multipliers (such as geographic pricing tiers or speed multipliers for Anthropic).
-7. The final cost and status are written to `SharedContext.Metadata` and the response continues unmodified.
+1. **Response phase**: The response body is buffered and parsed.
+2. The model name is extracted from `$.model` in the response body. For Gemini native format, `$.modelVersion` is used as a fallback.
+3. The model name is looked up in the pricing database loaded at startup.
+4. A provider-specific calculator normalises the usage fields (prompt tokens, completion tokens, and any provider-specific fields such as cache read tokens or reasoning tokens) into a common `Usage` struct.
+5. The cost is calculated using the normalised usage and the pricing entry, then adjusted for any provider-specific multipliers (such as geographic pricing tiers or speed multipliers for Anthropic).
+6. The final cost and status are written to `SharedContext.Metadata` and the response continues unmodified.
 
 ## Notes
 
