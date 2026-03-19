@@ -64,16 +64,26 @@ awsbedrock_role_external_id = ""
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `request` | `BedrockGuardrailConfig` object | No | - | Configuration for request-phase validation. Supports `jsonPath`, `redactPII`, `passthroughOnError`, and `showAssessment`. |
-| `response` | `BedrockGuardrailConfig` object | No | - | Configuration for response-phase validation. Supports `jsonPath`, `passthroughOnError`, and `showAssessment`. |
+| `request` | object | No | - | Configuration for request-phase validation. |
+| `response` | object | No | - | Configuration for response-phase validation. |
 
-#### BedrockGuardrailConfig Configuration
+#### Request Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
-| `redactPII` | boolean | No | `false` | Request phase only. If `true`, redacts PII by replacing with `*****` (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows traffic to proceed when AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
+| `enabled` | boolean | No | `true` | Enables validation for the request flow. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the request JSON payload. If empty, validates the entire payload as a string. |
+| `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with `*****` (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows the request to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
+
+#### Response Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Enables validation for the response flow. |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the response JSON payload. If empty, validates the entire payload as a string. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
 
 #### JSONPath Support

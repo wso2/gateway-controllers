@@ -76,8 +76,8 @@ vector_db_provider_ttl = 3600
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `similarityThreshold` | number | Yes | - | Similarity threshold for cache hits (0.0 to 1.0). Higher values require more similarity. For example, 0.9 means 90% similarity required. Recommended: 0.85-0.95 for strict matching, 0.70-0.85 for more flexible matching. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract text from request body for embedding generation. If empty, uses the entire request body. Example: `"$.messages[0].content"` to extract the first message's content. |
+| `similarityThreshold` | number | No | `0.5` | Similarity threshold for cache hits (0.0 to 1.0). Higher values require more similarity. For example, 0.9 means 90% similarity required. Recommended: 0.85-0.95 for strict matching, 0.70-0.85 for more flexible matching. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract text from request body for embedding generation. If empty, uses the entire request body. Example: `"$.messages[-1].content"` to extract the last message's content. |
 
 #### JSONPath Support
 

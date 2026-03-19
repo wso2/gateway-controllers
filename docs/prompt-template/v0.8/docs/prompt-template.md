@@ -23,31 +23,31 @@ This policy requires only a single-level configuration where all parameters are 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `promptTemplateConfig` | `PromptTemplateConfig[]` (JSON string) | Yes | - | JSON string containing an array of `PromptTemplateConfig` objects. |
+| `templates` | array | Yes | - | Specifies one or more reusable prompt templates. Each template must include a unique name and template content. |
+| `jsonPath` | string | No | `""` | Specifies the JSONPath to limit template resolution to a specific string field. If empty, template references are resolved across the entire request payload string. |
+| `onMissingTemplate` | string | No | `"error"` | Specifies behavior when a referenced template name is not found. `error` returns an immediate error response, `passthrough` leaves the original template reference unchanged. |
+| `onUnresolvedPlaceholder` | string | No | `"keep"` | Specifies behavior when placeholders remain unresolved after query substitution. `keep` keeps placeholders as-is, `empty` replaces them with an empty string, and `error` returns an immediate error response. |
 
-#### PromptTemplateConfig Object
+#### Template Object
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `name` | string | Yes | - | Unique identifier for the template (used in `template://` URIs). |
-| `prompt` | string | Yes | - | Template prompt string with `[[parameter-name]]` placeholder syntax. |
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | Yes | Unique identifier for the template (used in `template://` URIs). Must match pattern `^[a-zA-Z0-9_-]+$`. |
+| `template` | string | Yes | Template text with `[[parameter]]` placeholder syntax. Query parameters are substituted using these placeholders. |
 
 ### Template Configuration Format
 
-The `promptTemplateConfig` value must be a JSON string representing an array of `PromptTemplateConfig` objects:
+The `templates` value is an array of template objects:
 
-```json
-[
-  {
-    "name": "template-name",
-    "prompt": "Template prompt with [[placeholder]] syntax"
-  }
-]
+```yaml
+templates:
+  - name: template-name
+    template: "Template text with [[placeholder]] syntax"
 ```
 
 Each template object contains:
 - **name**: Unique identifier for the template (used in `template://` URIs)
-- **prompt**: The template string with `[[parameter-name]]` placeholders that will be replaced
+- **template**: The template string with `[[parameter-name]]` placeholders that will be replaced
 
 #### Template Syntax
 
@@ -127,7 +127,9 @@ spec:
         - path: /chat/completions
           methods: [POST]
           params:
-            promptTemplateConfig: '[{"name": "translate", "prompt": "Translate the following text from [[from]] to [[to]]: [[text]]"}]'
+            templates:
+              - name: translate
+                template: "Translate the following text from [[from]] to [[to]]: [[text]]"
 ```
 
 **Test the template:**
@@ -195,7 +197,9 @@ spec:
         - path: /chat/completions
           methods: [POST]
           params:
-            promptTemplateConfig: '[{"name": "summarize", "prompt": "Summarize the following content in [[length]] words: [[content]]"}]'
+            templates:
+              - name: summarize
+                template: "Summarize the following content in [[length]] words: [[content]]"
 ```
 
 **Test with template:**
@@ -227,32 +231,26 @@ policies:
       - path: /chat/completions
         methods: [POST]
         params:
-          promptTemplateConfig: |
-            [
-              {
-                "name": "translate",
-                "prompt": "Translate from [[from]] to [[to]]: [[text]]"
-              },
-              {
-                "name": "summarize",
-                "prompt": "Summarize in [[length]] words: [[content]]"
-              },
-              {
-                "name": "explain",
-                "prompt": "Explain [[topic]] to a [[audience]] audience: [[question]]"
-              }
-            ]
+          templates:
+            - name: translate
+              template: "Translate from [[from]] to [[to]]: [[text]]"
+            - name: summarize
+              template: "Summarize in [[length]] words: [[content]]"
+            - name: explain
+              template: "Explain [[topic]] to a [[audience]] audience: [[question]]"
 ```
 
 ## How It Works
 
 #### Request Phase
 
-1. **Pattern Detection**: Scans the incoming JSON payload as a string for `template://` URI patterns.
-2. **Template Resolution**: Extracts template name and query parameters, then finds the matching template in `promptTemplateConfig`.
-3. **Placeholder Substitution**: Replaces `[[parameter-name]]` placeholders in the template prompt using URL-decoded query parameter values.
-4. **Safe Replacement**: JSON-escapes the resolved prompt and replaces the matched `template://` pattern in the payload.
-5. **Forwarding**: Sends the transformed payload to the upstream API.
+1. **Pattern Detection**: Scans the incoming JSON payload (or targeted field if `jsonPath` is specified) for `template://` URI patterns.
+2. **Template Resolution**: Extracts template name and query parameters, then finds the matching template in `templates`.
+3. **Placeholder Substitution**: Replaces `[[parameter-name]]` placeholders in the template using URL-decoded query parameter values.
+4. **Missing Template Handling**: If a referenced template is not found, behavior is controlled by `onMissingTemplate` (`error` or `passthrough`).
+5. **Unresolved Placeholder Handling**: If placeholders remain after substitution, behavior is controlled by `onUnresolvedPlaceholder` (`keep`, `empty`, or `error`).
+6. **Safe Replacement**: JSON-escapes the resolved template and replaces the matched `template://` pattern in the payload.
+7. **Forwarding**: Sends the transformed payload to the upstream API.
 
 #### Template Pattern Matching
 
@@ -266,11 +264,11 @@ policies:
 ## Notes
 
 - Common use cases include standardized prompts, reusable prompt libraries, parameterized prompts, multi-language prompt generation, and centralized prompt versioning.
-- Template names are case-sensitive and must match exactly between the URI reference and the configuration.
+- Template names must match pattern `^[a-zA-Z0-9_-]+$` and are case-sensitive.
 - Parameter names in placeholders `[[param]]` are case-sensitive and must match query parameter names exactly.
 - Query parameter values are URL-decoded before being inserted into templates.
 - The resolved template string is JSON-escaped (special characters like quotes, newlines are escaped) before replacement.
-- If a specific template resolution fails (for example, JSON escaping issues), that pattern is skipped and processing continues for other matches.
-- The policy processes the entire JSON payload as a string, so templates can be used anywhere in the JSON structure.
+- Use `jsonPath` to limit template resolution to a specific field instead of the entire payload.
+- Use `onMissingTemplate: passthrough` to leave unresolved template references unchanged instead of returning an error.
+- Use `onUnresolvedPlaceholder: empty` to replace missing placeholders with empty strings, or `error` to fail on missing placeholders.
 - Multiple `template://` patterns can appear in a single payload and will all be processed.
-- If a `template://` pattern references a template name that does not exist, the original pattern is left unchanged.

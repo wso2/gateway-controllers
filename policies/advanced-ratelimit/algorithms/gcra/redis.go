@@ -71,16 +71,16 @@ func (r *RedisLimiter) Allow(ctx context.Context, key string) (*limiter.Result, 
 // AllowN checks if N requests are allowed for the given key
 // Atomically consumes N request tokens if allowed
 func (r *RedisLimiter) AllowN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
-	return r.runScript(ctx, key, n, false)
+	return r.runScript(ctx, key, n, false, false)
 }
 
 // ConsumeOrClampN consumes up to n tokens atomically.
 // If n exceeds available capacity, it consumes available capacity and returns denied.
 func (r *RedisLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
-	return r.runScript(ctx, key, n, true)
+	return r.runScript(ctx, key, n, true, false)
 }
 
-func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp bool) (*limiter.Result, error) {
+func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp bool, force bool) (*limiter.Result, error) {
 	now := r.clock.Now()
 	fullKey := r.keyPrefix + key
 
@@ -102,6 +102,10 @@ func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp
 	if clamp {
 		clampFlag = 1
 	}
+	forceFlag := int64(0)
+	if force {
+		forceFlag = 1
+	}
 
 	slog.Debug("GCRA(Redis): executing Lua script",
 		"key", key,
@@ -109,7 +113,8 @@ func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp
 		"emissionInterval", emissionInterval,
 		"burstAllowance", burstAllowance,
 		"burst", r.policy.Burst,
-		"clamp", clamp)
+		"clamp", clamp,
+		"force", force)
 
 	result, err := r.script.Run(ctx, r.client,
 		[]string{fullKey},
@@ -120,6 +125,7 @@ func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp
 		expirationSeconds,              // ARGV[5]: expiration in seconds
 		n,                              // ARGV[6]: requested count
 		clampFlag,                      // ARGV[7]: clamp mode
+		forceFlag,                      // ARGV[8]: force mode
 	).Result()
 
 	if err != nil {
@@ -137,6 +143,7 @@ func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp
 				expirationSeconds,
 				n,
 				clampFlag,
+				forceFlag,
 			).Result()
 		}
 		if err != nil {
@@ -176,6 +183,13 @@ func (r *RedisLimiter) runScript(ctx context.Context, key string, n int64, clamp
 		Duration:    r.policy.Duration,
 		Policy:      r.policy,
 	}, nil
+}
+
+// ConsumeN always consumes N tokens for the given key, regardless of whether
+// it would exceed the limit. This is used for post-response cost extraction
+// where the upstream has already processed the request.
+func (r *RedisLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	return r.runScript(ctx, key, n, false, true)
 }
 
 // GetAvailable returns the available tokens for the given key without consuming

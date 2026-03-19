@@ -28,36 +28,38 @@ These parameters are configured per MCP Proxy by the API developer:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `tools` | `ToolACLConfig` object | No | ACL configuration for tools. |
-| `resources` | `ResourceACLConfig` object | No | ACL configuration for resources. |
-| `prompts` | `PromptACLConfig` object | No | ACL configuration for prompts. |
+| `tools` | `ToolACLConfig` object | Conditional | ACL configuration for tools. |
+| `resources` | `ResourceACLConfig` object | Conditional | ACL configuration for resources. |
+| `prompts` | `PromptACLConfig` object | Conditional | ACL configuration for prompts. |
+
+> **Note**: At least one of `tools`, `resources`, or `prompts` must be specified.
 
 ### ToolACLConfig Configuration
 
 Each `ToolACLConfig` object supports the following fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mode` | string | Yes | ACL mode for tools: `allow` (allow all except listed exceptions) or `deny` (deny all except listed exceptions). |
-| `exceptions` | string array | No | List of tool names that are exceptions to the selected mode. Tool names must be 1-256 characters. |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | `"deny"` | ACL mode for tools: `allow` (allow all except listed exceptions) or `deny` (deny all except listed exceptions). |
+| `exceptions` | string array | No | - | List of tool names that are exceptions to the selected mode. Tool names must be 1–256 characters. |
 
 ### ResourceACLConfig Configuration
 
 Each `ResourceACLConfig` object supports the following fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mode` | string | Yes | ACL mode for resources: `allow` (allow all except listed exceptions) or `deny` (deny all except listed exceptions). |
-| `exceptions` | string array | No | List of resource URIs that are exceptions to the selected mode. Resource URIs must be 1-2048 characters. |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | `"deny"` | ACL mode for resources: `allow` (allow all except listed exceptions) or `deny` (deny all except listed exceptions). |
+| `exceptions` | string array | No | - | List of resource URIs that are exceptions to the selected mode. Resource URIs must be 1–2048 characters. |
 
 ### PromptACLConfig Configuration
 
 Each `PromptACLConfig` object supports the following fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `mode` | string | Yes | ACL mode for prompts: `allow` (allow all except listed exceptions) or `deny` (deny all except listed exceptions). |
-| `exceptions` | string array | No | List of prompt names that are exceptions to the selected mode. Prompt names must be 1-256 characters. |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `mode` | string | No | `"deny"` | ACL mode for prompts: `allow` (allow all except listed exceptions) or `deny` (deny all except listed exceptions). |
+| `exceptions` | string array | No | - | List of prompt names that are exceptions to the selected mode. Prompt names must be 1–256 characters. |
 
 
 

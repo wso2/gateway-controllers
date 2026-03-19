@@ -138,8 +138,8 @@ func TestPIIMaskingRegexPolicy_GetPolicy_DefaultsAndBuiltins(t *testing.T) {
 		"ssn":   true,
 	})
 
-	if got := p.params.JsonPath; got != "$.messages" {
-		t.Fatalf("expected default jsonPath '$.messages', got %q", got)
+	if got := p.params.JsonPath; got != "$.messages[-1].content" {
+		t.Fatalf("expected default jsonPath '$.messages[-1].content', got %q", got)
 	}
 	if p.params.RedactPII {
 		t.Fatalf("expected default redactPII=false")
@@ -172,7 +172,7 @@ func TestPIIMaskingRegexPolicy_OnRequest_MaskAndStoreMetadata(t *testing.T) {
 		"email": true,
 	})
 
-	ctx := piiRequestContext(`{"messages":"Contact me at a.user@example.com please"}`)
+	ctx := piiRequestContext(`{"messages":[{"content":"Contact me at a.user@example.com please"}]}`)
 	action := p.OnRequest(ctx, nil)
 	mods := mustPIIRequestMods(t, action)
 	if len(mods.Body) == 0 {
@@ -180,7 +180,7 @@ func TestPIIMaskingRegexPolicy_OnRequest_MaskAndStoreMetadata(t *testing.T) {
 	}
 
 	out := decodeJSONMapPII(t, mods.Body)
-	msg, _ := out["messages"].(string)
+	msg := mustGetLastMessageContent(t, out)
 	matched, err := regexp.MatchString(`\[EMAIL_[0-9a-f]{4}\]`, msg)
 	if err != nil {
 		t.Fatalf("failed regex match: %v", err)
@@ -205,11 +205,11 @@ func TestPIIMaskingRegexPolicy_OnRequest_RedactMode(t *testing.T) {
 		"redactPII": true,
 	})
 
-	ctx := piiRequestContext(`{"messages":"email a.user@example.com"}`)
+	ctx := piiRequestContext(`{"messages":[{"content":"email a.user@example.com"}]}`)
 	action := p.OnRequest(ctx, nil)
 	mods := mustPIIRequestMods(t, action)
 	out := decodeJSONMapPII(t, mods.Body)
-	msg, _ := out["messages"].(string)
+	msg := mustGetLastMessageContent(t, out)
 	if !strings.Contains(msg, "*****") {
 		t.Fatalf("expected redacted content, got %q", msg)
 	}
@@ -223,7 +223,7 @@ func TestPIIMaskingRegexPolicy_OnRequest_NoMatch_NoOp(t *testing.T) {
 		"email": true,
 	})
 
-	ctx := piiRequestContext(`{"messages":"no pii here"}`)
+	ctx := piiRequestContext(`{"messages":[{"content":"no pii here"}]}`)
 	action := p.OnRequest(ctx, nil)
 	mods := mustPIIRequestMods(t, action)
 	if mods.Body != nil {
@@ -363,4 +363,24 @@ func decodeJSONMapPII(t *testing.T, body []byte) map[string]interface{} {
 		t.Fatalf("failed to unmarshal json: %v", err)
 	}
 	return m
+}
+
+func mustGetLastMessageContent(t *testing.T, payload map[string]interface{}) string {
+	t.Helper()
+	messages, ok := payload["messages"].([]interface{})
+	if !ok || len(messages) == 0 {
+		t.Fatalf("expected payload.messages to be a non-empty array, got %T", payload["messages"])
+	}
+
+	lastMessage, ok := messages[len(messages)-1].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected payload.messages[-1] to be an object, got %T", messages[len(messages)-1])
+	}
+
+	content, ok := lastMessage["content"].(string)
+	if !ok {
+		t.Fatalf("expected payload.messages[-1].content to be a string, got %T", lastMessage["content"])
+	}
+
+	return content
 }

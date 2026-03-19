@@ -30,26 +30,28 @@ These parameters are configured per MCP Proxy by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `rules` | `MCPAuthRule` array | Yes | - | List of authorization rules that define access control policies for MCP resources. |
+| `rules` | `MCPAuthRule` array | Yes | - | List of authorization rules that define access control policies for MCP resources. Must contain at least one rule. |
 
 ### MCPAuthRule Configuration
 
 Each `MCPAuthRule` object supports the following fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `attribute` | `Attribute` object | Yes | The MCP resource attribute to which this authorization rule applies. |
-| `requiredScopes` | string array | No | List of OAuth scopes required to access this resource. The token must contain all specified scopes. |
-| `requiredClaims` | object | No | Map of claim names to expected values. All specified claims must be present in the token with matching values. |
+> Each rule must specify at least one of `requiredScopes` (with at least one scope) or `requiredClaims` (with at least one claim). Rules with both are also valid — in that case, both conditions must pass.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `attribute` | `Attribute` object | Yes | - | The MCP resource attribute to which this authorization rule applies. |
+| `requiredScopes` | string array | Conditional | `[]` | List of OAuth scopes required to access this resource. The token must contain all specified scopes. |
+| `requiredClaims` | object | Conditional | `{}` | Map of claim names to expected values. All specified claims must be present in the token with matching values. |
 
 ### Attribute Configuration
 
 Each `Attribute` object supports the following fields:
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `type` | string | Yes | Type of MCP resource: `tool`, `resource`, `prompt`, `method`. |
-| `name` | string | No | Name or identifier of the resource. Use `"*"` for wildcard matching (applies to all resources of the specified type). Examples: `list_files` for tools, `file:///some_resource` for resources, `weather_summary` for prompts, `tools/call` for methods. |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `type` | string | Yes | - | Type of MCP resource: `tool`, `resource`, `prompt`, `method`. |
+| `name` | string | No | `"*"` | Name or identifier of the resource (1–256 characters). Use `"*"` for wildcard matching (applies to all resources of the specified type). Examples: `list_files` for tools, `file:///some_resource` for resources, `weather_summary` for prompts, `tools/call` for methods. |
 
 **Note:**
 

@@ -30,12 +30,16 @@ These parameters are configured per-API/route by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `logRequestPayload` | boolean | No | `false` | Enables logging of request payloads. When set to `true`, the request bodies will be logged. When set to `false`, request payloads will not be logged. |
-| `logRequestHeaders` | boolean | No | `false` | Enables logging of request headers. When set to `true`, the request headers will be logged. When set to `false`, request headers will not be logged. |
-| `excludedRequestHeaders` | string | No | `""` | A comma-separated list of header names to exclude from request logging when `logRequestHeaders` is enabled. Example: `"Authorization,X-API-Key"` will exclude these headers from being logged. This parameter is optional and only applies when `logRequestHeaders` is true. Header names are case-insensitive. |
-| `logResponsePayload` | boolean | No | `false` | Enables logging of response payloads. When set to `true`, the response bodies will be logged. When set to `false`, response payloads will not be logged. |
-| `logResponseHeaders` | boolean | No | `false` | Enables logging of response headers. When set to `true`, the response headers will be logged. When set to `false`, response headers will not be logged. |
-| `excludedResponseHeaders` | string | No | `""` | A comma-separated list of header names to exclude from response logging when `logResponseHeaders` is enabled. Example: `"Authorization,X-API-Key"` will exclude these headers from being logged. This parameter is optional and only applies when `logResponseHeaders` is true. Header names are case-insensitive. |
+| `request` | object | No* | - | Configuration for request logging. |
+| `request.payload` | boolean | No | `false` | Enables logging of request payloads. When set to `true`, the request bodies will be logged. |
+| `request.headers` | boolean | No | `false` | Enables logging of request headers. When set to `true`, the request headers will be logged. |
+| `request.excludeHeaders` | array | No | `[]` | An array of header names to exclude from request logging when `request.headers` is enabled. Example: `["Authorization", "X-API-Key"]` will exclude these headers from being logged. Header names are case-insensitive. |
+| `response` | object | No* | - | Configuration for response logging. |
+| `response.payload` | boolean | No | `false` | Enables logging of response payloads. When set to `true`, the response bodies will be logged. |
+| `response.headers` | boolean | No | `false` | Enables logging of response headers. When set to `true`, the response headers will be logged. |
+| `response.excludeHeaders` | array | No | `[]` | An array of header names to exclude from response logging when `response.headers` is enabled. Example: `["Set-Cookie", "X-Internal-Token"]` will exclude these headers from being logged. Header names are case-insensitive. |
+
+*At least one of `request` or `response` must be provided.
 
 **Note:**
 
@@ -95,10 +99,12 @@ spec:
     - name: log-message
       version: v0
       params:
-        logRequestPayload: true
-        logRequestHeaders: true
-        logResponsePayload: true
-        logResponseHeaders: true
+        request:
+          payload: true
+          headers: true
+        response:
+          payload: true
+          headers: true
   operations:
     - method: GET
       path: /profile
@@ -128,10 +134,9 @@ spec:
     - name: log-message
       version: v0
       params:
-        logRequestPayload: true
-        logRequestHeaders: true
-        logResponsePayload: false
-        logResponseHeaders: false
+        request:
+          payload: true
+          headers: true
   operations:
     - method: POST
       path: /sensitive-data
@@ -157,9 +162,9 @@ spec:
     - name: log-message
       version: v0
       params:
-        # Request parameters default to false (omitted)
-        logResponsePayload: true
-        logResponseHeaders: true
+        response:
+          payload: true
+          headers: true
   operations:
     - method: GET
       path: /public-data
@@ -185,12 +190,19 @@ spec:
     - name: log-message
       version: v0
       params:
-        logRequestPayload: true
-        logRequestHeaders: true
-        excludedRequestHeaders: "Authorization,X-API-Key,X-Payment-Token"
-        logResponsePayload: true
-        logResponseHeaders: true
-        excludedResponseHeaders: "Set-Cookie,X-Internal-Token"
+        request:
+          payload: true
+          headers: true
+          excludeHeaders:
+            - Authorization
+            - X-API-Key
+            - X-Payment-Token
+        response:
+          payload: true
+          headers: true
+          excludeHeaders:
+            - Set-Cookie
+            - X-Internal-Token
   operations:
     - method: GET
       path: /transactions
@@ -218,10 +230,10 @@ spec:
     - name: log-message
       version: v0
       params:
-        logRequestPayload: true
-        logRequestHeaders: false
-        logResponsePayload: false
-        logResponseHeaders: true
+        request:
+          payload: true
+        response:
+          headers: true
   operations:
     - method: POST
       path: /analyze
@@ -250,39 +262,44 @@ spec:
         - name: log-message
           version: v0
           params:
-            logRequestPayload: false
-            logRequestHeaders: true
-            excludedRequestHeaders: "Authorization"
-            logResponsePayload: true
-            logResponseHeaders: false
+            request:
+              headers: true
+              excludeHeaders:
+                - Authorization
+            response:
+              payload: true
     - method: POST
       path: /sensitive-operation
       policies:
         - name: log-message
           version: v0
           params:
-            logRequestPayload: true
-            logRequestHeaders: false
-            logResponsePayload: false
-            logResponseHeaders: false
+            request:
+              payload: true
     - method: PUT
       path: /debug-endpoint
       policies:
         - name: log-message
           version: v0
           params:
-            logRequestPayload: true
-            logRequestHeaders: true
-            excludedRequestHeaders: "Authorization,X-Debug-Token"
-            logResponsePayload: true
-            logResponseHeaders: true
-            excludedResponseHeaders: "X-Internal-Key,Set-Cookie"
+            request:
+              payload: true
+              headers: true
+              excludeHeaders:
+                - Authorization
+                - X-Debug-Token
+            response:
+              payload: true
+              headers: true
+              excludeHeaders:
+                - X-Internal-Key
+                - Set-Cookie
 ```
 
 ## How it Works
 
 * The log-message policy automatically masks only the `Authorization` header with `"***"` by default (case-insensitive), preventing accidental exposure of bearer tokens and basic auth credentials carried in that header.
-* Administrators can configure **header exclusions** separately for requests and responses using `excludedRequestHeaders` and `excludedResponseHeaders`; multiple headers can be excluded with comma separation, and excluded headers are completely omitted from log output.
+* Administrators can configure **header exclusions** separately for requests and responses using `request.excludeHeaders` and `response.excludeHeaders` arrays; excluded headers are completely omitted from log output.
 * Sensitive headers other than `Authorization` (for example `X-API-Key`, `Cookie`, or `Set-Cookie`) are not masked automatically and should be explicitly excluded when header logging is enabled.
 * The policy supports **request ID correlation** by extracting the `x-request-id` header, using the same ID in both request and response logs, or `<request-id-unavailable>` if absent, enabling end-to-end tracing.
 * **Content processing** is non-intrusive: request and response bodies are buffered in memory, headers are filtered for security, and flows are automatically identified and tagged as REQUEST or RESPONSE.

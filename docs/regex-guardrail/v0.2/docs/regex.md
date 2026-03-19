@@ -23,15 +23,26 @@ This policy requires only a single-level configuration where all parameters are 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `request` | `RegexGuardRailConfig` object | No | - | Configuration for request-phase regex validation. Supports `regex`, `jsonPath`, `invert`, and `showAssessment`. |
-| `response` | `RegexGuardRailConfig` object | No | - | Configuration for response-phase regex validation. Supports `regex`, `jsonPath`, `invert`, and `showAssessment`. |
+| `request` | object | No | - | Configuration for request-phase regex validation. At least one of `request` or `response` must be provided. |
+| `response` | object | No | - | Configuration for response-phase regex validation. At least one of `request` or `response` must be provided. |
 
-#### RegexGuardRailConfig Configuration
+#### Request Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `regex` | string | Yes | - | Regular expression pattern to match against the content. Must be at least 1 character. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
+| `enabled` | boolean | No | `true` | Enables validation for the request flow. |
+| `regex` | string | Conditional | - | Regular expression pattern to match against the content. Required when `enabled: true`. Must be at least 1 character. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the request JSON payload. If empty, validates the entire payload as a string. |
+| `invert` | boolean | No | `false` | If `true`, validation passes when regex does NOT match. If `false`, validation passes when regex matches. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
+
+#### Response Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Enables validation for the response flow. |
+| `regex` | string | Conditional | - | Regular expression pattern to match against the content. Required when `enabled: true`. Must be at least 1 character. |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the response JSON payload. If empty, validates the entire payload as a string. |
 | `invert` | boolean | No | `false` | If `true`, validation passes when regex does NOT match. If `false`, validation passes when regex matches. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 

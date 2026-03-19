@@ -22,17 +22,20 @@ This policy requires only a single-level configuration where all parameters are 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `piiEntities` | `PIIEntityConfig` array | Yes | - | Array of PII entity configurations. Each entry defines `piiEntity` and `piiRegex`. |
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, processes the entire payload as a string. |
+| `email` | boolean | No | `false` | Enables built-in EMAIL detection. At least one of `email`, `phone`, `ssn`, or `customPIIEntities` must be enabled. |
+| `phone` | boolean | No | `false` | Enables built-in PHONE detection. At least one of `email`, `phone`, `ssn`, or `customPIIEntities` must be enabled. |
+| `ssn` | boolean | No | `false` | Enables built-in SSN detection. At least one of `email`, `phone`, `ssn`, or `customPIIEntities` must be enabled. |
+| `customPIIEntities` | `CustomPIIEntity` array | No | - | Custom PII entity definitions for detection. Each item defines a `piiEntity` name and `piiRegex` pattern. At least one item required if provided. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from JSON payload. If empty, processes the entire payload as a string. |
 | `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with "*****" (permanent, cannot be restored). If `false`, masks PII with placeholders that can be restored in responses. |
 
-### PIIEntityConfig Configuration
+### CustomPIIEntity Configuration
 
-Each PII entity in the `piiEntities` array must contain:
+Each item in the `customPIIEntities` array must contain:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `piiEntity` | string | Yes | Name/type of the PII entity (e.g., "EMAIL", "PHONE", "SSN", "CREDIT_CARD"). Must contain only uppercase letters and underscores (matches `^[A-Z_]+$`). |
+| `piiEntity` | string | Yes | Name/type of the PII entity (e.g., "CREDIT_CARD", "PASSPORT"). Must contain only uppercase letters and underscores. |
 | `piiRegex` | string | Yes | Regular expression pattern to match the PII entity. Must be a valid Go regexp pattern. |
 
 #### JSONPath Support
@@ -93,12 +96,9 @@ spec:
         - path: /chat/completions
           methods: [POST]
           params:
-            piiEntities:
-              - piiEntity: "EMAIL"
-                piiRegex: "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-              - piiEntity: "PHONE"
-                piiRegex: "\+?[1-9]\d{1,14}"
-            jsonPath: "$.messages[0].content"
+            email: true
+            phone: true
+            jsonPath: "$.messages[-1].content"
             redactPII: true
 ```
 

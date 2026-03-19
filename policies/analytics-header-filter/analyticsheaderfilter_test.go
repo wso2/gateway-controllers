@@ -40,7 +40,7 @@ func TestGetPolicy(t *testing.T) {
 func TestMode(t *testing.T) {
 	p := &AnalyticsHeaderFilterPolicy{}
 	mode := p.Mode()
-	
+
 	if mode.RequestHeaderMode != policy.HeaderModeProcess {
 		t.Errorf("Expected RequestHeaderMode to be HeaderModeProcess, got %v", mode.RequestHeaderMode)
 	}
@@ -116,7 +116,7 @@ func TestParseHeaderList(t *testing.T) {
 	}
 }
 
-func TestParseOperation(t *testing.T) {
+func TestParseMode(t *testing.T) {
 	p := &AnalyticsHeaderFilterPolicy{}
 
 	tests := []struct {
@@ -132,31 +132,31 @@ func TestParseOperation(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "valid allow operation",
+			name:        "valid allow mode",
 			input:       "allow",
 			expected:    "allow",
 			expectError: false,
 		},
 		{
-			name:        "valid deny operation",
+			name:        "valid deny mode",
 			input:       "deny",
 			expected:    "deny",
 			expectError: false,
 		},
 		{
-			name:        "valid allow operation with case",
+			name:        "valid allow mode with case",
 			input:       "ALLOW",
 			expected:    "allow",
 			expectError: false,
 		},
 		{
-			name:        "valid deny operation with whitespace",
+			name:        "valid deny mode with whitespace",
 			input:       " deny ",
 			expected:    "deny",
 			expectError: false,
 		},
 		{
-			name:        "invalid operation",
+			name:        "invalid mode",
 			input:       "invalid",
 			expected:    "",
 			expectError: true,
@@ -183,7 +183,7 @@ func TestParseOperation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := p.parseOperation(tt.input)
+			result, err := p.parseMode(tt.input)
 			if tt.expectError && err == nil {
 				t.Error("Expected error but got none")
 			}
@@ -203,89 +203,89 @@ func TestParseHeaderFilterConfig(t *testing.T) {
 	tests := []struct {
 		name            string
 		input           interface{}
-		expectedOp      string
+		expectedMode    string
 		expectedHeaders []string
 		expectError     bool
 	}{
 		{
 			name:            "nil input",
 			input:           nil,
-			expectedOp:      "",
+			expectedMode:    "",
 			expectedHeaders: nil,
 			expectError:     false,
 		},
 		{
-			name: "valid config with allow operation",
+			name: "valid config with allow mode",
 			input: map[string]interface{}{
-				"operation": "allow",
-				"headers":   []interface{}{"Authorization", "Content-Type"},
+				"mode":    "allow",
+				"headers": []interface{}{"Authorization", "Content-Type"},
 			},
-			expectedOp:      "allow",
+			expectedMode:    "allow",
 			expectedHeaders: []string{"authorization", "content-type"},
 			expectError:     false,
 		},
 		{
-			name: "valid config with deny operation",
+			name: "valid config with deny mode",
 			input: map[string]interface{}{
-				"operation": "deny",
-				"headers":   []interface{}{"X-Debug", "X-Internal"},
+				"mode":    "deny",
+				"headers": []interface{}{"X-Debug", "X-Internal"},
 			},
-			expectedOp:      "deny",
+			expectedMode:    "deny",
 			expectedHeaders: []string{"x-debug", "x-internal"},
 			expectError:     false,
 		},
 		{
 			name: "config with empty headers array",
 			input: map[string]interface{}{
-				"operation": "allow",
-				"headers":   []interface{}{},
+				"mode":    "allow",
+				"headers": []interface{}{},
 			},
-			expectedOp:      "allow",
+			expectedMode:    "allow",
 			expectedHeaders: []string{},
 			expectError:     false,
 		},
 		{
 			name: "config without headers field",
 			input: map[string]interface{}{
-				"operation": "deny",
+				"mode": "deny",
 			},
-			expectedOp:      "deny",
+			expectedMode:    "deny",
 			expectedHeaders: nil,
 			expectError:     false,
 		},
 		{
-			name: "config without operation field",
+			name: "config without mode field",
 			input: map[string]interface{}{
 				"headers": []interface{}{"Authorization"},
 			},
-			expectedOp:      "",
+			expectedMode:    "",
 			expectedHeaders: nil,
 			expectError:     true,
 		},
 		{
-			name: "config with null operation",
+			name: "config with null mode",
 			input: map[string]interface{}{
-				"operation": nil,
-				"headers":   []interface{}{"Authorization"},
+				"mode":    nil,
+				"headers": []interface{}{"Authorization"},
 			},
-			expectedOp:      "",
+			expectedMode:    "",
 			expectedHeaders: nil,
 			expectError:     true,
 		},
 		{
-			name: "config with invalid operation",
+			name: "config with invalid mode",
 			input: map[string]interface{}{
-				"operation": "invalid",
-				"headers":   []interface{}{"Authorization"},
+				"mode":    "invalid",
+				"headers": []interface{}{"Authorization"},
 			},
-			expectedOp:      "",
+			expectedMode:    "",
 			expectedHeaders: nil,
 			expectError:     true,
 		},
 		{
 			name:            "non-object input",
 			input:           "not-an-object",
-			expectedOp:      "",
+			expectedMode:    "",
 			expectedHeaders: nil,
 			expectError:     true,
 		},
@@ -293,15 +293,15 @@ func TestParseHeaderFilterConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			operation, headers, err := p.parseHeaderFilterConfig(tt.input)
+			mode, headers, err := p.parseHeaderFilterConfig(tt.input)
 			if tt.expectError && err == nil {
 				t.Error("Expected error but got none")
 			}
 			if !tt.expectError && err != nil {
 				t.Errorf("Expected no error but got: %v", err)
 			}
-			if operation != tt.expectedOp {
-				t.Errorf("Expected operation %s, got %s", tt.expectedOp, operation)
+			if mode != tt.expectedMode {
+				t.Errorf("Expected mode %s, got %s", tt.expectedMode, mode)
 			}
 			if len(headers) != len(tt.expectedHeaders) {
 				t.Errorf("Expected %d headers, got %d", len(tt.expectedHeaders), len(headers))
@@ -320,31 +320,31 @@ func TestOnRequest(t *testing.T) {
 	p := &AnalyticsHeaderFilterPolicy{}
 
 	tests := []struct {
-		name                     string
-		params                   map[string]interface{}
-		expectedDropAction       *policy.DropHeaderAction
-		expectDropActionPresent  bool
+		name                    string
+		params                  map[string]interface{}
+		expectedDropAction      *policy.DropHeaderAction
+		expectDropActionPresent bool
 	}{
 		{
-			name:                    "no requestHeadersToFilter param",
+			name:                    "no request param",
 			params:                  map[string]interface{}{},
 			expectedDropAction:      nil,
 			expectDropActionPresent: false,
 		},
 		{
-			name: "nil requestHeadersToFilter param",
+			name: "nil request param",
 			params: map[string]interface{}{
-				"requestHeadersToFilter": nil,
+				"request": nil,
 			},
 			expectedDropAction:      nil,
 			expectDropActionPresent: false,
 		},
 		{
-			name: "valid requestHeadersToFilter with allow operation",
+			name: "valid request with allow mode",
 			params: map[string]interface{}{
-				"requestHeadersToFilter": map[string]interface{}{
-					"operation": "allow",
-					"headers":   []interface{}{"Authorization", "Content-Type"},
+				"request": map[string]interface{}{
+					"mode":    "allow",
+					"headers": []interface{}{"Authorization", "Content-Type"},
 				},
 			},
 			expectedDropAction: &policy.DropHeaderAction{
@@ -354,11 +354,11 @@ func TestOnRequest(t *testing.T) {
 			expectDropActionPresent: true,
 		},
 		{
-			name: "valid requestHeadersToFilter with deny operation",
+			name: "valid request with deny mode",
 			params: map[string]interface{}{
-				"requestHeadersToFilter": map[string]interface{}{
-					"operation": "deny",
-					"headers":   []interface{}{"X-Debug", "X-Internal"},
+				"request": map[string]interface{}{
+					"mode":    "deny",
+					"headers": []interface{}{"X-Debug", "X-Internal"},
 				},
 			},
 			expectedDropAction: &policy.DropHeaderAction{
@@ -368,26 +368,26 @@ func TestOnRequest(t *testing.T) {
 			expectDropActionPresent: true,
 		},
 		{
-			name: "invalid requestHeadersToFilter config",
+			name: "invalid request config",
 			params: map[string]interface{}{
-				"requestHeadersToFilter": map[string]interface{}{
+				"request": map[string]interface{}{
 					"headers": []interface{}{"Authorization"},
-					// missing operation
+					// missing mode
 				},
 			},
 			expectedDropAction:      nil,
 			expectDropActionPresent: false,
 		},
 		{
-			name: "both requestHeadersToFilter and responseHeadersToFilter present",
+			name: "both request and response present",
 			params: map[string]interface{}{
-				"requestHeadersToFilter": map[string]interface{}{
-					"operation": "allow",
-					"headers":   []interface{}{"Authorization"},
+				"request": map[string]interface{}{
+					"mode":    "allow",
+					"headers": []interface{}{"Authorization"},
 				},
-				"responseHeadersToFilter": map[string]interface{}{
-					"operation": "deny",
-					"headers":   []interface{}{"X-Debug"},
+				"response": map[string]interface{}{
+					"mode":    "deny",
+					"headers": []interface{}{"X-Debug"},
 				},
 			},
 			expectedDropAction: &policy.DropHeaderAction{
@@ -433,31 +433,31 @@ func TestOnResponse(t *testing.T) {
 	p := &AnalyticsHeaderFilterPolicy{}
 
 	tests := []struct {
-		name                     string
-		params                   map[string]interface{}
-		expectedDropAction       *policy.DropHeaderAction
-		expectDropActionPresent  bool
+		name                    string
+		params                  map[string]interface{}
+		expectedDropAction      *policy.DropHeaderAction
+		expectDropActionPresent bool
 	}{
 		{
-			name:                    "no responseHeadersToFilter param",
+			name:                    "no response param",
 			params:                  map[string]interface{}{},
 			expectedDropAction:      nil,
 			expectDropActionPresent: false,
 		},
 		{
-			name: "nil responseHeadersToFilter param",
+			name: "nil response param",
 			params: map[string]interface{}{
-				"responseHeadersToFilter": nil,
+				"response": nil,
 			},
 			expectedDropAction:      nil,
 			expectDropActionPresent: false,
 		},
 		{
-			name: "valid responseHeadersToFilter with allow operation",
+			name: "valid response with allow mode",
 			params: map[string]interface{}{
-				"responseHeadersToFilter": map[string]interface{}{
-					"operation": "allow",
-					"headers":   []interface{}{"Content-Type", "X-Custom"},
+				"response": map[string]interface{}{
+					"mode":    "allow",
+					"headers": []interface{}{"Content-Type", "X-Custom"},
 				},
 			},
 			expectedDropAction: &policy.DropHeaderAction{
@@ -467,11 +467,11 @@ func TestOnResponse(t *testing.T) {
 			expectDropActionPresent: true,
 		},
 		{
-			name: "valid responseHeadersToFilter with deny operation",
+			name: "valid response with deny mode",
 			params: map[string]interface{}{
-				"responseHeadersToFilter": map[string]interface{}{
-					"operation": "deny",
-					"headers":   []interface{}{"X-Debug", "X-Internal"},
+				"response": map[string]interface{}{
+					"mode":    "deny",
+					"headers": []interface{}{"X-Debug", "X-Internal"},
 				},
 			},
 			expectedDropAction: &policy.DropHeaderAction{
@@ -481,26 +481,26 @@ func TestOnResponse(t *testing.T) {
 			expectDropActionPresent: true,
 		},
 		{
-			name: "invalid responseHeadersToFilter config",
+			name: "invalid response config",
 			params: map[string]interface{}{
-				"responseHeadersToFilter": map[string]interface{}{
+				"response": map[string]interface{}{
 					"headers": []interface{}{"Content-Type"},
-					// missing operation
+					// missing mode
 				},
 			},
 			expectedDropAction:      nil,
 			expectDropActionPresent: false,
 		},
 		{
-			name: "both requestHeadersToFilter and responseHeadersToFilter present",
+			name: "both request and response present",
 			params: map[string]interface{}{
-				"requestHeadersToFilter": map[string]interface{}{
-					"operation": "allow",
-					"headers":   []interface{}{"Authorization"},
+				"request": map[string]interface{}{
+					"mode":    "allow",
+					"headers": []interface{}{"Authorization"},
 				},
-				"responseHeadersToFilter": map[string]interface{}{
-					"operation": "deny",
-					"headers":   []interface{}{"X-Debug"},
+				"response": map[string]interface{}{
+					"mode":    "deny",
+					"headers": []interface{}{"X-Debug"},
 				},
 			},
 			expectedDropAction: &policy.DropHeaderAction{

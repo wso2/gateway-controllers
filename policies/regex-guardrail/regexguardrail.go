@@ -28,8 +28,11 @@ import (
 )
 
 const (
-	GuardrailErrorCode = 422
-	DefaultJSONPath    = "$.messages"
+	GuardrailErrorCode           = 422
+	DefaultRequestJSONPath       = "$.messages[-1].content"
+	DefaultResponseJSONPath      = "$.choices[0].message.content"
+	RequestFlowEnabledByDefault  = true
+	ResponseFlowEnabledByDefault = false
 )
 
 // RegexGuardrailPolicy implements regex-based content validation
@@ -41,6 +44,7 @@ type RegexGuardrailPolicy struct {
 }
 
 type RegexGuardrailPolicyParams struct {
+	Enabled        bool
 	Regex          string
 	JsonPath       string
 	Invert         bool
@@ -55,7 +59,7 @@ func GetPolicy(
 
 	// Extract and parse request parameters if present
 	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {
-		requestParams, err := parseParams(requestParamsRaw)
+		requestParams, err := parseParams(requestParamsRaw, DefaultRequestJSONPath, RequestFlowEnabledByDefault)
 		if err != nil {
 			return nil, fmt.Errorf("invalid request parameters: %w", err)
 		}
@@ -65,7 +69,7 @@ func GetPolicy(
 
 	// Extract and parse response parameters if present
 	if responseParamsRaw, ok := params["response"].(map[string]interface{}); ok {
-		responseParams, err := parseParams(responseParamsRaw)
+		responseParams, err := parseParams(responseParamsRaw, DefaultResponseJSONPath, ResponseFlowEnabledByDefault)
 		if err != nil {
 			return nil, fmt.Errorf("invalid response parameters: %w", err)
 		}
@@ -84,32 +88,46 @@ func GetPolicy(
 }
 
 // parseParams parses and validates parameters from map to struct
-func parseParams(params map[string]interface{}) (RegexGuardrailPolicyParams, error) {
+func parseParams(params map[string]interface{}, defaultJSONPath string, defaultEnabled bool) (RegexGuardrailPolicyParams, error) {
 	result := RegexGuardrailPolicyParams{
-		JsonPath:       DefaultJSONPath,
+		Enabled:        defaultEnabled,
+		JsonPath:       defaultJSONPath,
 		Invert:         false,
 		ShowAssessment: false,
 	}
+	enabledExplicitlyFalse := false
 
-	// Validate and extract regex parameter (required)
-	regexRaw, ok := params["regex"]
-	if !ok {
+	// Extract optional enabled parameter
+	if enabledRaw, ok := params["enabled"]; ok {
+		enabled, ok := enabledRaw.(bool)
+		if !ok {
+			return result, fmt.Errorf("'enabled' must be a boolean")
+		}
+		result.Enabled = enabled
+		enabledExplicitlyFalse = !enabled
+	}
+
+	regexRaw, hasRegex := params["regex"]
+	if !enabledExplicitlyFalse && !hasRegex {
 		return result, fmt.Errorf("'regex' parameter is required")
 	}
-	regexPattern, ok := regexRaw.(string)
-	if !ok {
-		return result, fmt.Errorf("'regex' must be a string")
-	}
-	if regexPattern == "" {
-		return result, fmt.Errorf("'regex' cannot be empty")
-	}
 
-	// Validate regex is compilable
-	_, err := regexp.Compile(regexPattern)
-	if err != nil {
-		return result, fmt.Errorf("invalid regex pattern: %w", err)
+	if hasRegex {
+		regexPattern, ok := regexRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'regex' must be a string")
+		}
+		if regexPattern == "" {
+			return result, fmt.Errorf("'regex' cannot be empty")
+		}
+
+		// Validate regex is compilable
+		_, err := regexp.Compile(regexPattern)
+		if err != nil {
+			return result, fmt.Errorf("invalid regex pattern: %w", err)
+		}
+		result.Regex = regexPattern
 	}
-	result.Regex = regexPattern
 
 	// Extract optional jsonPath parameter
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
@@ -153,7 +171,7 @@ func (p *RegexGuardrailPolicy) Mode() policy.ProcessingMode {
 
 // OnRequest validates request body against regex pattern
 func (p *RegexGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	if !p.hasRequestParams {
+	if !p.hasRequestParams || !p.requestParams.Enabled {
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -166,7 +184,7 @@ func (p *RegexGuardrailPolicy) OnRequest(ctx *policy.RequestContext, params map[
 
 // OnResponse validates response body against regex pattern
 func (p *RegexGuardrailPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	if !p.hasResponseParams {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return policy.UpstreamResponseModifications{}
 	}
 

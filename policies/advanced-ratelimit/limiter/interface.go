@@ -14,7 +14,7 @@
  *  limitations under the License.
  *
  */
- 
+
 package limiter
 
 import (
@@ -42,6 +42,17 @@ type Limiter interface {
 
 	// Close cleans up limiter resources
 	Close() error
+}
+
+// CostTracker is an optional interface that limiters can implement to support
+// accurate post-response cost tracking. ConsumeN always records the full cost
+// even if it exceeds the limit, unlike ConsumeOrClampN which clamps to remaining
+// capacity. Callers should check for this interface via type assertion.
+type CostTracker interface {
+	// ConsumeN always consumes N tokens regardless of whether it exceeds the limit.
+	// This is used for post-response cost extraction where the upstream has already
+	// processed the request and the actual cost must be recorded accurately.
+	ConsumeN(ctx context.Context, key string, n int64) (*Result, error)
 }
 
 // LimitConfig is algorithm-agnostic limit configuration

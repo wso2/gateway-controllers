@@ -51,17 +51,29 @@ azurecontentsafety_key = "<your-azure-content-safety-key>"
 | `request` | `AzureContentSafetyConfig` object | No | - | Configuration for request-phase moderation. Supports `jsonPath`, `passthroughOnError`, `showAssessment`, and per-category severity thresholds. |
 | `response` | `AzureContentSafetyConfig` object | No | - | Configuration for response-phase moderation. Supports `jsonPath`, `passthroughOnError`, `showAssessment`, and per-category severity thresholds. |
 
-#### AzureContentSafetyConfig Configuration
+#### Request Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the request JSON payload. If empty, validates the entire payload as a string. |
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows traffic to proceed if Azure Content Safety API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
-| `hateCategory` | integer | No | `-1` | Severity threshold for hate category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `sexualCategory` | integer | No | `-1` | Severity threshold for sexual category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `selfHarmCategory` | integer | No | `-1` | Severity threshold for self-harm category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
-| `violenceCategory` | integer | No | `-1` | Severity threshold for violence category (0-7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `hateSeverityThreshold` | integer | No | `4` | Severity threshold for hate content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `sexualSeverityThreshold` | integer | No | `5` | Severity threshold for sexual content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `selfHarmSeverityThreshold` | integer | No | `3` | Severity threshold for self-harm content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `violenceSeverityThreshold` | integer | No | `4` | Severity threshold for violence content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+
+#### Response Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the response JSON payload. If empty, validates the entire payload as a string. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows traffic to proceed if Azure Content Safety API call fails. If `false`, blocks on API errors. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
+| `hateSeverityThreshold` | integer | No | `4` | Severity threshold for hate content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `sexualSeverityThreshold` | integer | No | `5` | Severity threshold for sexual content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `selfHarmSeverityThreshold` | integer | No | `3` | Severity threshold for self-harm content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
+| `violenceSeverityThreshold` | integer | No | `4` | Severity threshold for violence content (-1 to 7). `-1` disables this category. Content with severity >= threshold will be blocked. |
 
 #### JSONPath Support
 
@@ -121,17 +133,17 @@ spec:
           params:
             request:
               jsonPath: "$.messages[0].content"
-              hateCategory: 2
-              sexualCategory: 2
-              selfHarmCategory: 2
-              violenceCategory: 2
+              hateSeverityThreshold: 2
+              sexualSeverityThreshold: 2
+              selfHarmSeverityThreshold: 2
+              violenceSeverityThreshold: 2
               showAssessment: true
             response:
               jsonPath: "$.choices[0].message.content"
-              hateCategory: 2
-              sexualCategory: 2
-              selfHarmCategory: 2
-              violenceCategory: 2
+              hateSeverityThreshold: 2
+              sexualSeverityThreshold: 2
+              selfHarmSeverityThreshold: 2
+              violenceSeverityThreshold: 2
               showAssessment: true
 ```
 
@@ -233,18 +245,18 @@ policies:
         params:
           request:
             jsonPath: "$.messages[-1].content"
-            hateCategory: 1
-            sexualCategory: 1
-            selfHarmCategory: 1
-            violenceCategory: 1
+            hateSeverityThreshold: 1
+            sexualSeverityThreshold: 1
+            selfHarmSeverityThreshold: 1
+            violenceSeverityThreshold: 1
             showAssessment: true
             passthroughOnError: false
           response:
             jsonPath: "$.choices[0].message.content"
-            hateCategory: 1
-            sexualCategory: 1
-            selfHarmCategory: 1
-            violenceCategory: 1
+            hateSeverityThreshold: 1
+            sexualSeverityThreshold: 1
+            selfHarmSeverityThreshold: 1
+            violenceSeverityThreshold: 1
             showAssessment: true
 ```
 
@@ -262,10 +274,10 @@ policies:
         params:
           request:
             jsonPath: "$.messages[0].content"
-            hateCategory: 3
-            sexualCategory: -1  # Disabled
-            selfHarmCategory: 2
-            violenceCategory: -1  # Disabled
+            hateSeverityThreshold: 3
+            sexualSeverityThreshold: -1  # Disabled
+            selfHarmSeverityThreshold: 2
+            violenceSeverityThreshold: -1  # Disabled
 ```
 
 ### Example 4: Lenient Moderation
@@ -282,10 +294,10 @@ policies:
         params:
           request:
             jsonPath: "$.messages[0].content"
-            hateCategory: 5
-            sexualCategory: 5
-            selfHarmCategory: 4
-            violenceCategory: 5
+            hateSeverityThreshold: 5
+            sexualSeverityThreshold: 5
+            selfHarmSeverityThreshold: 4
+            violenceSeverityThreshold: 5
             passthroughOnError: true
 ```
 

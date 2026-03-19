@@ -28,7 +28,7 @@ These parameters are configured globally and shared with the advanced rate limit
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `algorithm` | string | No | `"gcra"` | Rate limiting algorithm: `"gcra"` for smooth token-bucket-style throttling, or `"fixed-window"` for window-based counters. |
+| `algorithm` | string | No | `"fixed-window"` | Rate limiting algorithm: `"gcra"` for smooth token-bucket-style throttling, or `"fixed-window"` for window-based counters. |
 | `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance operation, or `"redis"` for distributed quotas across gateway instances. |
 | `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis`. |
 | `memory` | `Memory` object | No | - | In-memory storage configuration. Used when `backend=memory`. |
@@ -71,7 +71,7 @@ This policy requires only the list of limits in the API definition.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `limit` | integer | Yes | Maximum requests allowed in the specified duration (1 to 1,000,000,000). |
+| `requests` | integer | Yes | Maximum requests allowed in the specified duration (1 to 1,000,000,000). |
 | `duration` | string | Yes | Time window in Go duration format (for example, `"1s"`, `"1m"`, `"1h"`, `"24h"`). |
 
 **Note:**
@@ -109,7 +109,7 @@ spec:
           version: v0
           params:
             limits:
-              - limit: 1000
+              - requests: 1000
                 duration: "1m"
 ```
 
@@ -139,8 +139,8 @@ spec:
           version: v0
           params:
             limits:
-              - limit: 10
+              - requests: 10
                 duration: "1s"
-              - limit: 500
+              - requests: 500
                 duration: "1h"
 ```

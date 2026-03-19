@@ -19,10 +19,19 @@
 package mcpauthn
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
@@ -114,6 +123,24 @@ func TestOnRequest_WellKnown_NoKeyManagers(t *testing.T) {
 	}
 	if resp.StatusCode != 401 {
 		t.Errorf("Expected status 401, got %d", resp.StatusCode)
+	}
+}
+
+func TestOnRequest_WellKnown_NoKeyManagers_WithForbiddenStatus(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.Method = "GET"
+	ctx.Path = "/.well-known/oauth-protected-resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"onFailureStatusCode": 403,
+	})
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 403 {
+		t.Errorf("Expected status 403, got %d", resp.StatusCode)
 	}
 }
 
@@ -315,6 +342,176 @@ func TestOnRequest_Delegation_Failure(t *testing.T) {
 	}
 }
 
+func TestOnRequest_InvalidOnFailureStatusCode(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.Path = "/api/resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"onFailureStatusCode": 200,
+	})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 500 {
+		t.Fatalf("Expected status 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestOnRequest_InvalidErrorMessageFormat(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.Path = "/api/resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"errorMessageFormat": "xml",
+	})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 500 {
+		t.Fatalf("Expected status 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestOnRequest_WellKnown_PathWithPrefix_Success(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.Method = "GET"
+	ctx.Path = "/mcp/v1/.well-known/oauth-protected-resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"keyManagers": []any{
+			map[string]any{
+				"name":   "km1",
+				"issuer": "https://issuer1.com",
+			},
+		},
+	})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+}
+
+func TestOnRequest_WellKnown_FalsePositivePathDoesNotMatch(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.Method = "GET"
+	ctx.Path = "/api/.well-known/oauth-protected-resource-extra"
+
+	action := p.OnRequest(ctx, map[string]any{})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 401 {
+		t.Fatalf("Expected status 401, got %d", resp.StatusCode)
+	}
+	if resp.Headers[WWWAuthenticateHeader] == "" {
+		t.Fatal("Expected delegated auth failure to include WWW-Authenticate header")
+	}
+}
+
+func TestOnRequest_WellKnown_MissingIssuerInKeyManagerConfig(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.Method = "GET"
+	ctx.Path = "/.well-known/oauth-protected-resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"keyManagers": []any{
+			map[string]any{
+				"name": "km1",
+			},
+		},
+	})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 500 {
+		t.Fatalf("Expected status 500, got %d", resp.StatusCode)
+	}
+}
+
+func TestOnRequest_InitializesNilMetadata(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.SharedContext.Metadata = nil
+	ctx.Method = "GET"
+	ctx.Path = "/.well-known/oauth-protected-resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"gatewayHost": "gateway.example.com",
+		"keyManagers": []any{
+			map[string]any{
+				"name":   "km1",
+				"issuer": "https://issuer1.com",
+			},
+		},
+	})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("Expected status 200, got %d", resp.StatusCode)
+	}
+	if ctx.Metadata == nil {
+		t.Fatal("Expected metadata map to be initialized")
+	}
+	if got := ctx.Metadata["gatewayHost"]; got != "gateway.example.com" {
+		t.Fatalf("Expected gatewayHost metadata to be set, got %v", got)
+	}
+}
+
+func TestOnRequest_HandleAuthFailureWithNilMetadata(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+	ctx.SharedContext.Metadata = nil
+	ctx.Method = "GET"
+	ctx.Path = "/.well-known/oauth-protected-resource"
+
+	action := p.OnRequest(ctx, map[string]any{
+		"keyManagers": []any{
+			map[string]any{
+				"name":   "km1",
+				"issuer": "https://issuer1.com",
+			},
+		},
+		"issuers": []any{"unknown-km"},
+	})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != 401 {
+		t.Fatalf("Expected status 401, got %d", resp.StatusCode)
+	}
+	if ctx.Metadata == nil {
+		t.Fatal("Expected metadata map to be initialized")
+	}
+	if got := ctx.Metadata[MetadataKeyAuthSuccess]; got != false {
+		t.Fatalf("Expected auth.success=false, got %v", got)
+	}
+	if got := ctx.Metadata[MetadataKeyAuthMethod]; got != "mcpAuth" {
+		t.Fatalf("Expected auth.method=mcpAuth, got %v", got)
+	}
+}
+
 func createMockRequestContext(headers map[string][]string) *policy.RequestContext {
 	return &policy.RequestContext{
 		SharedContext: &policy.SharedContext{
@@ -327,4 +524,186 @@ func createMockRequestContext(headers map[string][]string) *policy.RequestContex
 		Method:  "GET",
 		Scheme:  "http",
 	}
+}
+
+func TestOnRequest_Delegation_Failure_SetsAuthContext(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(map[string][]string{
+		McpSessionHeader: {"session-123"},
+	})
+	ctx.Method = "GET"
+	ctx.Path = "/api/resource"
+
+	// No valid JWT token — JWT auth should fail, mcp-auth wraps and takes ownership
+	params := map[string]any{
+		"gatewayHost": "gateway.com",
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	// Should return ImmediateResponse (auth failure)
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("Expected ImmediateResponse (auth failure), got %T", action)
+	}
+
+	// AuthContext should be set by mcp-auth
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set on failure")
+	}
+	if ctx.SharedContext.AuthContext.Authenticated {
+		t.Error("Expected AuthContext.Authenticated=false on failure")
+	}
+	if ctx.SharedContext.AuthContext.AuthType != "mcp/oauth" {
+		t.Errorf("Expected AuthType='mcp/oauth', got %q", ctx.SharedContext.AuthContext.AuthType)
+	}
+}
+
+func TestHandleAuthFailure_SetsAuthContext(t *testing.T) {
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(nil)
+
+	action := p.handleAuthFailure(ctx, 401, "json", "key managers not configured")
+
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", action)
+	}
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Authenticated {
+		t.Error("Expected Authenticated=false")
+	}
+	if ctx.SharedContext.AuthContext.AuthType != "mcp/oauth" {
+		t.Errorf("Expected AuthType='mcp/oauth', got %q", ctx.SharedContext.AuthContext.AuthType)
+	}
+}
+
+func TestMcpAuth_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
+	p := &McpAuthPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
+	ctx := createMockRequestContext(nil)
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthFailure(ctx, 401, "json", "key managers not configured")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}
+
+func TestOnRequest_Delegation_Success_SetsAuthContextAuthType(t *testing.T) {
+	privateKey, publicKey := generateRSATestKeys(t)
+	jwksServer := createMcpTestJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	token := createMcpTestToken(t, privateKey, map[string]interface{}{
+		"sub":   "user123",
+		"iss":   "https://issuer.example.com",
+		"scope": "read write",
+	})
+
+	p := &McpAuthPolicy{}
+	ctx := createMockRequestContext(map[string][]string{
+		"authorization": {fmt.Sprintf("Bearer %s", token)},
+	})
+	ctx.Method = "POST"
+	ctx.Path = "/api/resource"
+
+	params := map[string]any{
+		"headerName":          "Authorization",
+		"authHeaderScheme":    "Bearer",
+		"onFailureStatusCode": 401,
+		"errorMessageFormat":  "json",
+		"allowedAlgorithms":   []any{"RS256"},
+		"keyManagers": []any{
+			map[string]any{
+				"name":   "test-issuer",
+				"issuer": "https://issuer.example.com",
+				"jwks": map[string]any{
+					"remote": map[string]any{
+						"uri": jwksServer.URL + "/jwks.json",
+					},
+				},
+			},
+		},
+	}
+
+	action := p.OnRequest(ctx, params)
+
+	// Should NOT be an ImmediateResponse — jwt-auth succeeded
+	if _, ok := action.(policy.ImmediateResponse); ok {
+		t.Fatalf("Expected successful action (not ImmediateResponse), but got auth failure")
+	}
+
+	// AuthContext must be set and authenticated
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set on success")
+	}
+	if !ctx.SharedContext.AuthContext.Authenticated {
+		t.Error("Expected AuthContext.Authenticated=true on success")
+	}
+	// AuthType must be overridden to mcp/oauth by mcp-auth
+	if ctx.SharedContext.AuthContext.AuthType != "mcp/oauth" {
+		t.Errorf("Expected AuthType='mcp/oauth', got %q", ctx.SharedContext.AuthContext.AuthType)
+	}
+}
+
+// generateRSATestKeys creates a fresh RSA key pair for use in tests.
+func generateRSATestKeys(t *testing.T) (*rsa.PrivateKey, *rsa.PublicKey) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("Failed to generate RSA key: %v", err)
+	}
+	return privateKey, &privateKey.PublicKey
+}
+
+// createMcpTestToken creates a signed JWT with the given claims, valid for 1 hour.
+func createMcpTestToken(t *testing.T, privateKey *rsa.PrivateKey, claims map[string]interface{}) string {
+	t.Helper()
+	mapClaims := jwt.MapClaims{}
+	for k, v := range claims {
+		mapClaims[k] = v
+	}
+	mapClaims["exp"] = time.Now().Add(time.Hour).Unix()
+	mapClaims["iat"] = time.Now().Unix()
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, mapClaims)
+	token.Header["kid"] = "test-kid"
+	signed, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("Failed to sign token: %v", err)
+	}
+	return signed
+}
+
+// createMcpTestJWKSServer starts an httptest server that serves a JWKS for the given public key.
+func createMcpTestJWKSServer(t *testing.T, publicKey *rsa.PublicKey, kid string) *httptest.Server {
+	t.Helper()
+	nBytes := publicKey.N.Bytes()
+	eBytes := big.NewInt(int64(publicKey.E)).Bytes()
+	jwks := map[string]interface{}{
+		"keys": []interface{}{
+			map[string]interface{}{
+				"kty": "RSA",
+				"use": "sig",
+				"kid": kid,
+				"alg": "RS256",
+				"n":   base64.RawURLEncoding.EncodeToString(nBytes),
+				"e":   base64.RawURLEncoding.EncodeToString(eBytes),
+			},
+		},
+	}
+	jwksJSON, err := json.Marshal(jwks)
+	if err != nil {
+		t.Fatalf("Failed to marshal JWKS: %v", err)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(jwksJSON)
+	}))
 }

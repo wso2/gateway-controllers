@@ -36,6 +36,7 @@ const (
 	DefaultEmailEntityName    = "EMAIL"
 	DefaultPhoneEntityName    = "PHONE"
 	DefaultSSNEntityName      = "SSN"
+	DefaultJSONPath           = "$.messages[-1].content"
 	DefaultEmailRegex         = `(?i)\b[a-z0-9.!#$%&'*+/=?^_{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])\b`
 	DefaultPhoneRegex         = `(?:\+?1[-.\s]?)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[-.\s]?[2-9][0-9]{2}[-.\s]?[0-9]{4}\b`
 	DefaultSSNRegex           = `(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6(?:[0-57-9][0-9]|6[0-57-9])|[7-8][0-9]{2})[- ]?(?:0[1-9]|[1-9][0-9])[- ]?(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b`
@@ -73,7 +74,7 @@ func GetPolicy(
 // parseParams parses and validates parameters from map to struct.
 func parseParams(params map[string]interface{}) (PIIMaskingRegexPolicyParams, error) {
 	var result PIIMaskingRegexPolicyParams
-	result.JsonPath = "$.messages"
+	result.JsonPath = DefaultJSONPath
 	piiEntities := make(map[string]*regexp.Regexp)
 
 	// Extract customPIIEntities parameter if provided.

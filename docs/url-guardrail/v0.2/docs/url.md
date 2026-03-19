@@ -23,28 +23,42 @@ This policy requires only a single-level configuration where all parameters are 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `request` | ```URLGuardrailConfig``` object | No | - | Configuration for request-phase URL validation. Supports `jsonPath`, `onlyDNS`, `timeout`, and `showAssessment`. |
-| `response` | ```URLGuardrailConfig``` object | No | - | Configuration for response-phase URL validation. Supports `jsonPath`, `onlyDNS`, `timeout`, and `showAssessment`. |
+| `request` | object | No* | - | Configuration for request-phase URL validation. |
+| `response` | object | No* | - | Configuration for response-phase URL validation. |
 
-#### URLGuardrailConfig Configuration
+*At least one of `request` or `response` must be provided.
+
+#### Request Configuration
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `jsonPath` | string | No | `""` | JSONPath expression to extract a specific value from JSON payload. If empty, validates the entire payload as a string. |
+| `enabled` | boolean | No | `false` | Enables validation for the request flow. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from JSON payload. Set to `""` to validate the entire payload as a string. |
 | `onlyDNS` | boolean | No | `false` | If `true`, validates URLs only via DNS resolution (faster, less reliable). If `false`, validates URLs via HTTP HEAD request (slower, more reliable). |
-| `timeout` | integer | No | `3000` | Timeout in milliseconds for DNS lookup or HTTP HEAD request. Default is 3000ms (3 seconds). |
+| `timeout` | integer | No | `3000` | Timeout in milliseconds for DNS lookup or HTTP HEAD request. Minimum: 0. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information including invalid URLs in error responses. |
+
+#### Response Configuration
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `true` | Enables validation for the response flow. |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from JSON payload. Set to `""` to validate the entire payload as a string. |
+| `onlyDNS` | boolean | No | `false` | If `true`, validates URLs only via DNS resolution (faster, less reliable). If `false`, validates URLs via HTTP HEAD request (slower, more reliable). |
+| `timeout` | integer | No | `3000` | Timeout in milliseconds for DNS lookup or HTTP HEAD request. Minimum: 0. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information including invalid URLs in error responses. |
 
 #### JSONPath Support
 
 The guardrail supports JSONPath expressions to extract and validate specific fields within JSON payloads. Common examples:
 
+- `$.messages[-1].content` - Extracts content from the last message in a messages array (default for request)
+- `$.choices[0].message.content` - Extracts content from the first choice message (default for response)
 - `$.messages` - Extracts the `messages` field from the root object
 - `$.data.content` - Extracts nested content from `data.content`
 - `$.items[0].text` - Extracts text from the first item in an array
-- `$.messages[0].content` - Extracts content from the first message in a messages array
 
-If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
+Set `jsonPath` to `""` to validate the entire payload as a string.
 
 **Note:**
 
@@ -94,7 +108,8 @@ spec:
           methods: [POST]
           params:
             request:
-              jsonPath: "$.messages[0].content"
+              enabled: true
+              jsonPath: "$.messages[-1].content"
               onlyDNS: false
               timeout: 5000
 

@@ -7,6 +7,7 @@
 -- ARGV[5]: expiration (seconds)
 -- ARGV[6]: count (number of requests)
 -- ARGV[7]: clamp mode (1 = consume remaining on overflow, 0 = deny without consumption)
+-- ARGV[8]: force mode (1 = always consume full N regardless of limit or timing)
 
 local key = KEYS[1]
 local now = tonumber(ARGV[1])
@@ -16,6 +17,7 @@ local burst_capacity = tonumber(ARGV[4])
 local expiration = tonumber(ARGV[5])
 local count = tonumber(ARGV[6]) or 1
 local clamp = tonumber(ARGV[7]) == 1
+local force = tonumber(ARGV[8]) == 1
 
 -- Get current TAT (Theoretical Arrival Time)
 local tat = redis.call('GET', key)
@@ -51,7 +53,24 @@ if used_burst > 0 and used_burst <= burst_allowance then
     end
 end
 
-if now >= allow_at then
+if force then
+    -- Force consume: always record full cost regardless of limit or timing.
+    -- Used for post-response cost tracking where the upstream already processed the request.
+    consumed = count
+    new_tat = tat + (emission_interval * consumed)
+    if consumed > 0 then
+        local ttl_seconds = expiration
+        local debt_seconds = math.ceil((new_tat - now) / 1000000000)
+        if debt_seconds > ttl_seconds then
+            ttl_seconds = debt_seconds
+        end
+        redis.call('SET', key, new_tat, 'EX', ttl_seconds)
+    end
+    -- allowed only if within both timing and capacity constraints
+    if now >= allow_at and count <= remaining then
+        allowed = 1
+    end
+elseif now >= allow_at then
     consumed = count
     if consumed > remaining then
         if clamp then
@@ -72,24 +91,24 @@ if now >= allow_at then
     if consumed > 0 then
         redis.call('SET', key, new_tat, 'EX', expiration)
     end
-
-    -- Recalculate remaining after consuming
-    if new_tat < now then
-        remaining = burst_capacity
-    else
-        local used_burst = new_tat - now
-        if used_burst <= burst_allowance then
-            remaining = burst_capacity - math.ceil(used_burst / emission_interval)
-            if remaining < 0 then
-                remaining = 0
-            end
-        else
-            remaining = 0
-        end
-    end
 else
     -- Request denied by timing
     consumed = 0
+end
+
+-- Recalculate remaining after consuming
+if new_tat < now then
+    remaining = burst_capacity
+else
+    local used_burst_after = new_tat - now
+    if used_burst_after <= burst_allowance then
+        remaining = burst_capacity - math.ceil(used_burst_after / emission_interval)
+        if remaining < 0 then
+            remaining = 0
+        end
+    else
+        remaining = 0
+    end
 end
 
 if allowed == 0 then

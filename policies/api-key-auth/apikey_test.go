@@ -1,8 +1,6 @@
 package apikey
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -55,11 +53,11 @@ func TestAPIKeyPolicy_OnRequest_SuccessFromHeader(t *testing.T) {
 		"in":  "header",
 	})
 
-	if ctx.Metadata[MetadataKeyAuthSuccess] != true {
-		t.Fatalf("expected auth.success=true, got %v", ctx.Metadata[MetadataKeyAuthSuccess])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected AuthContext.Authenticated=true")
 	}
-	if ctx.Metadata[MetadataKeyAuthMethod] != "api-key" {
-		t.Fatalf("expected auth.method=api-key, got %v", ctx.Metadata[MetadataKeyAuthMethod])
+	if ctx.SharedContext.AuthContext.AuthType != "apikey" {
+		t.Fatalf("expected AuthType='apikey', got %q", ctx.SharedContext.AuthContext.AuthType)
 	}
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
@@ -78,8 +76,8 @@ func TestAPIKeyPolicy_OnRequest_SuccessFromQuery(t *testing.T) {
 		"in":  "query",
 	})
 
-	if ctx.Metadata[MetadataKeyAuthSuccess] != true {
-		t.Fatalf("expected auth.success=true, got %v", ctx.Metadata[MetadataKeyAuthSuccess])
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected AuthContext.Authenticated=true")
 	}
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
@@ -123,8 +121,8 @@ func TestAPIKeyPolicy_OnRequest_MissingOrInvalidConfig(t *testing.T) {
 			action := p.OnRequest(ctx, tt.params)
 			assertUnauthorizedJSON(t, action)
 
-			if ctx.Metadata[MetadataKeyAuthSuccess] != false {
-				t.Fatalf("expected auth.success=false, got %v", ctx.Metadata[MetadataKeyAuthSuccess])
+			if ctx.SharedContext.AuthContext == nil || ctx.SharedContext.AuthContext.Authenticated {
+				t.Fatalf("expected AuthContext.Authenticated=false")
 			}
 		})
 	}
@@ -325,25 +323,51 @@ func seedExternalAPIKey(t *testing.T, apiID, plainKey, operations string) {
 		ID:          "id-" + sanitizeTestName(t.Name()),
 		Name:        "name-" + sanitizeTestName(t.Name()),
 		DisplayName: "test-key",
-		APIKey:      plainKey,
+		APIKey:      apikeycommon.ComputeAPIKeyHash(plainKey),
 		APIId:       apiID,
 		Operations:  operations,
 		Status:      apikeycommon.Active,
 		Source:      "external",
-		IndexKey:    hashExternalIndexKey(plainKey),
 	}
 	if err := apikeycommon.GetAPIkeyStoreInstance().StoreAPIKey(apiID, key); err != nil {
 		t.Fatalf("failed to store API key: %v", err)
 	}
 }
 
-func hashExternalIndexKey(v string) string {
-	h := sha256.Sum256([]byte(strings.TrimSpace(v)))
-	return hex.EncodeToString(h[:])
-}
-
 func sanitizeTestName(v string) string {
 	v = strings.ReplaceAll(v, "/", "-")
 	v = strings.ReplaceAll(v, " ", "-")
 	return strings.ToLower(v)
+}
+
+func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnSuccess(t *testing.T) {
+	p := &APIKeyPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
+	ctx := newRequestContext(t, "GET", "/orders", nil, "api-1", "OrdersAPI", "v1", "/orders")
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthSuccess(ctx)
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
+}
+
+func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
+	p := &APIKeyPolicy{}
+	prior := &policy.AuthContext{Authenticated: true, AuthType: "other"}
+	ctx := newRequestContext(t, "GET", "/orders", nil, "api-1", "OrdersAPI", "v1", "/orders")
+	ctx.SharedContext.AuthContext = prior
+
+	p.handleAuthFailure(ctx, 401, "json", "Valid API key required", "invalid API key")
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("Expected AuthContext to be set")
+	}
+	if ctx.SharedContext.AuthContext.Previous != prior {
+		t.Errorf("Expected Previous to point to prior AuthContext, got %v", ctx.SharedContext.AuthContext.Previous)
+	}
 }

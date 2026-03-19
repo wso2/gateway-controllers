@@ -38,6 +38,12 @@ const (
 // LogMessagePolicy implements logging of request/response payloads and headers
 type LogMessagePolicy struct{}
 
+type flowConfig struct {
+	logPayload      bool
+	logHeaders      bool
+	excludedHeaders map[string]struct{}
+}
+
 var ins = &LogMessagePolicy{}
 
 func GetPolicy(
@@ -59,13 +65,10 @@ func (p *LogMessagePolicy) Mode() policy.ProcessingMode {
 
 // OnRequest logs the request message
 func (p *LogMessagePolicy) OnRequest(ctx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
-	// Extract response-specific parameters
-	logRequestPayload, _ := params["logRequestPayload"].(bool)
-	logRequestHeaders, _ := params["logRequestHeaders"].(bool)
-	excludedRequestHeaders, _ := params["excludedRequestHeaders"].(string)
+	config := p.parseFlowConfig(params, "request")
 
-	// Skip logging if both response payload and headers are disabled
-	if !logRequestPayload && !logRequestHeaders {
+	// Skip logging if both request payload and headers are disabled.
+	if !config.logPayload && !config.logHeaders {
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -77,32 +80,29 @@ func (p *LogMessagePolicy) OnRequest(ctx *policy.RequestContext, params map[stri
 		ResourcePath:  ctx.Path,
 	}
 
-	// Log payload if enabled
-	if logRequestPayload && ctx.Body != nil && ctx.Body.Present && len(ctx.Body.Content) > 0 {
+	// Log payload if enabled.
+	if config.logPayload && ctx.Body != nil && ctx.Body.Present && len(ctx.Body.Content) > 0 {
 		logRecord.Payload = string(ctx.Body.Content)
 	}
 
-	// Log headers if enabled
-	if logRequestHeaders {
-		logRecord.Headers = p.buildHeadersMap(ctx.Headers, excludedRequestHeaders)
+	// Log headers if enabled.
+	if config.logHeaders {
+		logRecord.Headers = p.buildHeadersMap(ctx.Headers, config.excludedHeaders)
 	}
 
-	// Log the message
+	// Log the message.
 	p.logMessage(logRecord)
 
-	// Continue with the request unchanged
+	// Continue with the request unchanged.
 	return policy.UpstreamRequestModifications{}
 }
 
 // OnResponse logs the response message
 func (p *LogMessagePolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
-	// Extract response-specific parameters
-	logResponsePayload, _ := params["logResponsePayload"].(bool)
-	logResponseHeaders, _ := params["logResponseHeaders"].(bool)
-	excludedResponseHeaders, _ := params["excludedResponseHeaders"].(string)
+	config := p.parseFlowConfig(params, "response")
 
-	// Skip logging if both response payload and headers are disabled
-	if !logResponsePayload && !logResponseHeaders {
+	// Skip logging if both response payload and headers are disabled.
+	if !config.logPayload && !config.logHeaders {
 		return policy.UpstreamResponseModifications{}
 	}
 
@@ -114,20 +114,20 @@ func (p *LogMessagePolicy) OnResponse(ctx *policy.ResponseContext, params map[st
 		ResourcePath:  ctx.RequestPath,
 	}
 
-	// Log payload if enabled
-	if logResponsePayload && ctx.ResponseBody != nil && ctx.ResponseBody.Present && len(ctx.ResponseBody.Content) > 0 {
+	// Log payload if enabled.
+	if config.logPayload && ctx.ResponseBody != nil && ctx.ResponseBody.Present && len(ctx.ResponseBody.Content) > 0 {
 		logRecord.Payload = string(ctx.ResponseBody.Content)
 	}
 
-	// Log headers if enabled
-	if logResponseHeaders {
-		logRecord.Headers = p.buildHeadersMap(ctx.ResponseHeaders, excludedResponseHeaders)
+	// Log headers if enabled.
+	if config.logHeaders {
+		logRecord.Headers = p.buildHeadersMap(ctx.ResponseHeaders, config.excludedHeaders)
 	}
 
-	// Log the message
+	// Log the message.
 	p.logMessage(logRecord)
 
-	// Continue with the response unchanged
+	// Continue with the response unchanged.
 	return policy.UpstreamResponseModifications{}
 }
 
@@ -143,6 +143,9 @@ type LogRecord struct {
 
 // getRequestID extracts request ID from request headers
 func (p *LogMessagePolicy) getRequestID(headers *policy.Headers) string {
+	if headers == nil {
+		return ErrMsgMissingReqID
+	}
 	if requestIDs := headers.Get(HeaderXRequestID); len(requestIDs) > 0 {
 		return requestIDs[0]
 	}
@@ -151,6 +154,9 @@ func (p *LogMessagePolicy) getRequestID(headers *policy.Headers) string {
 
 // getResponseRequestID extracts request ID from response headers
 func (p *LogMessagePolicy) getResponseRequestID(headers *policy.Headers) string {
+	if headers == nil {
+		return ErrMsgMissingReqID
+	}
 	if requestIDs := headers.Get(HeaderXRequestID); len(requestIDs) > 0 {
 		return requestIDs[0]
 	}
@@ -158,9 +164,11 @@ func (p *LogMessagePolicy) getResponseRequestID(headers *policy.Headers) string 
 }
 
 // buildHeadersMap builds a map of headers for logging, excluding sensitive ones
-func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers, excludedHeadersStr string) map[string]interface{} {
+func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers, excludedHeaders map[string]struct{}) map[string]interface{} {
 	headersMap := make(map[string]interface{})
-	excludedHeaders := p.parseExcludedHeaders(excludedHeadersStr)
+	if headers == nil {
+		return headersMap
+	}
 
 	headers.Iterate(func(name string, values []string) {
 		lowerName := strings.ToLower(name)
@@ -187,19 +195,59 @@ func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers, excludedHead
 	return headersMap
 }
 
-// parseExcludedHeaders parses the comma-separated excluded headers string
-func (p *LogMessagePolicy) parseExcludedHeaders(excludedHeadersStr string) map[string]struct{} {
+// parseFlowConfig parses flow configuration from request/response parameters.
+func (p *LogMessagePolicy) parseFlowConfig(params map[string]interface{}, flowName string) flowConfig {
+	cfg := flowConfig{
+		excludedHeaders: map[string]struct{}{},
+	}
+
+	flowRaw, found := params[flowName]
+	if !found || flowRaw == nil {
+		return cfg
+	}
+
+	flow, ok := flowRaw.(map[string]interface{})
+	if !ok {
+		return cfg
+	}
+
+	cfg.logPayload = p.parseBool(flow["payload"])
+	cfg.logHeaders = p.parseBool(flow["headers"])
+	cfg.excludedHeaders = p.parseExcludedHeaders(flow["excludeHeaders"])
+	return cfg
+}
+
+func (p *LogMessagePolicy) parseBool(raw interface{}) bool {
+	parsed, _ := raw.(bool)
+	return parsed
+}
+
+// parseExcludedHeaders parses a list of excluded header names.
+func (p *LogMessagePolicy) parseExcludedHeaders(excludedHeadersRaw interface{}) map[string]struct{} {
 	excludedHeaders := make(map[string]struct{})
 
-	if excludedHeadersStr == "" {
+	if excludedHeadersRaw == nil {
 		return excludedHeaders
 	}
 
-	headers := strings.Split(excludedHeadersStr, ",")
-	for _, header := range headers {
-		trimmed := strings.ToLower(strings.TrimSpace(header))
-		if trimmed != "" {
-			excludedHeaders[trimmed] = struct{}{}
+	switch headers := excludedHeadersRaw.(type) {
+	case []interface{}:
+		for _, headerRaw := range headers {
+			header, ok := headerRaw.(string)
+			if !ok {
+				continue
+			}
+			trimmed := strings.ToLower(strings.TrimSpace(header))
+			if trimmed != "" {
+				excludedHeaders[trimmed] = struct{}{}
+			}
+		}
+	case []string:
+		for _, header := range headers {
+			trimmed := strings.ToLower(strings.TrimSpace(header))
+			if trimmed != "" {
+				excludedHeaders[trimmed] = struct{}{}
+			}
 		}
 	}
 

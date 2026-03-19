@@ -29,10 +29,9 @@ import (
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
 
+
 const (
-	// Metadata keys for context storage
-	MetadataKeyAuthSuccess = "auth.success"
-	MetadataKeyAuthMethod  = "auth.method"
+	AuthType = "apikey"
 )
 
 // APIKeyPolicy implements API Key Authentication
@@ -184,14 +183,11 @@ func (p *APIKeyPolicy) handleAuthSuccess(ctx *policy.RequestContext) policy.Requ
 		"path", ctx.Path,
 	)
 
-	// Set metadata indicating successful authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = true
-	ctx.Metadata[MetadataKeyAuthMethod] = "api-key"
-
-	slog.Debug("API Key Auth Policy: Authentication metadata set",
-		"authSuccess", true,
-		"authMethod", "api-key",
-	)
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      AuthType,
+		Previous:      ctx.SharedContext.AuthContext,
+	}
 
 	// Continue to upstream with no modifications
 	return policy.UpstreamRequestModifications{}
@@ -217,9 +213,11 @@ func (p *APIKeyPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode 
 		"path", ctx.Path,
 	)
 
-	// Set metadata indicating failed authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = false
-	ctx.Metadata[MetadataKeyAuthMethod] = "api-key"
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: false,
+		AuthType:      AuthType,
+		Previous:      ctx.SharedContext.AuthContext,
+	}
 
 	headers := map[string]string{
 		"content-type": "application/json",

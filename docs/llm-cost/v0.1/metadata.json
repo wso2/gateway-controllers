@@ -1,0 +1,10 @@
+{
+  "name": "llm-cost",
+  "displayName": "LLM Cost",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Calculates the monetary cost of LLM API calls at response time and stores the result in SharedContext for use by downstream policies. Supports OpenAI, Anthropic, Gemini, and Mistral providers with automatic model pricing lookup."
+}

@@ -39,20 +39,16 @@ import (
 )
 
 const (
-	// Metadata keys for context storage
-	MetadataKeyAuthSuccess  = "auth.success"
-	MetadataKeyAuthMethod   = "auth.method"
-	MetadataKeyTokenClaims  = "auth.claims"
-	MetadataKeyIssuer       = "auth.issuer"
-	MetadataKeySubject      = "auth.subject"
-	MetadataValidatedClaims = "auth.validatedClaims"
-
-	// AuthContext key for user ID (used for analytics)
-	AuthContextKeyUserID = "x-wso2-user-id"
-
-	// Default claim to extract user ID from
-	DefaultUserIdClaim = "sub"
+	AuthType = "jwt"
 )
+
+// standardJWTClaims lists registered JWT claim names (RFC 7519) and common OAuth2 claims.
+// These are represented as typed fields on AuthContext and excluded from Properties.
+var standardJWTClaims = map[string]bool{
+	"iss": true, "sub": true, "aud": true,
+	"exp": true, "nbf": true, "iat": true, "jti": true,
+	"scope": true, "scp": true,
+}
 
 // JwtAuthPolicy implements JWT Authentication with JWKS support
 type JwtAuthPolicy struct {
@@ -389,8 +385,8 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 	userRequiredScopes := getStringArrayParam(params, "requiredScopes", []string{})
 	userRequiredClaims := getStringMapParam(params, "requiredClaims", map[string]string{})
 	userClaimMappings := getStringMapParam(params, "claimMappings", map[string]string{})
+	userIdClaim := getStringParam(params, "userIdClaim", "sub")
 	userAuthHeaderPrefix := getStringParam(params, "authHeaderPrefix", "")
-	userIdClaim := getStringParam(params, "userIdClaim", DefaultUserIdClaim)
 
 	slog.Debug("JWT Auth Policy: User configuration loaded",
 		"issuers", userIssuers,
@@ -399,7 +395,6 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 		"requiredClaimsCount", len(userRequiredClaims),
 		"claimMappingsCount", len(userClaimMappings),
 		"authHeaderPrefix", userAuthHeaderPrefix,
-		"userIdClaim", userIdClaim,
 	)
 
 	// Use user override if provided
@@ -462,12 +457,6 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 		)
 		return p.handleAuthFailure(ctx, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("token validation failed: %v", err))
 	}
-	// Store validated claims in metadata for authz policies to use
-	ctx.Metadata[MetadataValidatedClaims] = claims
-
-	// Store validated claims in metadata for authz policies to use
-	ctx.Metadata[MetadataValidatedClaims] = claims
-
 	slog.Debug("JWT Auth Policy: Token signature validated successfully")
 
 	// Note: Issuer validation is now done in validateTokenWithSignature when userIssuers is specified
@@ -552,7 +541,7 @@ func (p *JwtAuthPolicy) OnRequest(ctx *policy.RequestContext, params map[string]
 
 	slog.Debug("JWT Auth Policy: All validations passed, authentication successful")
 
-	// Authentication successful - apply claim mappings and set metadata
+	// Authentication successful - apply claim mappings and set AuthContext
 	return p.handleAuthSuccess(ctx, claims, userClaimMappings, userIdClaim)
 }
 
@@ -653,62 +642,50 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	// Determine which key managers to use
 	var applicableKeyManagers []*KeyManager
 	if len(userIssuers) > 0 {
-		// User specified issuers - these could be actual issuer values or key manager names
+		// User specified issuers - these could be actual issuer values or key manager names.
+		// Keep all compatible candidates in user-provided order for fallback verification.
 		slog.Debug("JWT Auth Policy: User-specified issuers provided",
 			"userIssuers", userIssuers,
 			"tokenIssuer", tokenIssuer,
 		)
 
-		// First, check if token issuer matches one of the user-specified issuers (actual issuer match)
-		var matchedIssuer string
+		seenKeyManagers := make(map[string]struct{})
 		for _, userIssuer := range userIssuers {
-			if tokenIssuer == userIssuer {
-				matchedIssuer = userIssuer
-				break
-			}
-		}
-
-		if matchedIssuer != "" {
-			// Token issuer matches a user-specified issuer, find the key manager
-			slog.Debug("JWT Auth Policy: Token issuer matches user-specified issuer",
-				"matchedIssuer", matchedIssuer,
-			)
-
-			// Find key manager by issuer field
-			for _, km := range keyManagers {
-				if km.Issuer == matchedIssuer {
-					applicableKeyManagers = append(applicableKeyManagers, km)
-					slog.Debug("JWT Auth Policy: Found key manager by issuer field",
+			// 1) Treat as key manager name.
+			if km, ok := keyManagers[userIssuer]; ok {
+				if km.Issuer == "" || km.Issuer == tokenIssuer {
+					if _, seen := seenKeyManagers[km.Name]; !seen {
+						applicableKeyManagers = append(applicableKeyManagers, km)
+						seenKeyManagers[km.Name] = struct{}{}
+					}
+					slog.Debug("JWT Auth Policy: Added key manager candidate by name",
 						"keyManager", km.Name,
-						"issuer", matchedIssuer,
+						"userIssuer", userIssuer,
+						"tokenIssuer", tokenIssuer,
+						"kmIssuer", km.Issuer,
 					)
-					break
+				} else {
+					slog.Debug("JWT Auth Policy: Key manager found by name but issuer mismatch",
+						"keyManager", km.Name,
+						"userIssuer", userIssuer,
+						"tokenIssuer", tokenIssuer,
+						"expectedIssuer", km.Issuer,
+					)
 				}
 			}
-		}
 
-		// If no key manager found by issuer match, try to find by key manager name
-		// (userIssuers might contain key manager names instead of actual issuers)
-		if len(applicableKeyManagers) == 0 {
-			for _, userIssuer := range userIssuers {
-				if km, ok := keyManagers[userIssuer]; ok {
-					// Found key manager by name
-					// Now verify: if the key manager has an issuer configured, token issuer must match it
-					// If no issuer configured on key manager, we accept the token
-					if km.Issuer == "" || km.Issuer == tokenIssuer {
+			// 2) Treat as actual issuer value.
+			if tokenIssuer == userIssuer {
+				for _, km := range keyManagers {
+					if km.Issuer == userIssuer {
+						if _, seen := seenKeyManagers[km.Name]; seen {
+							continue
+						}
 						applicableKeyManagers = append(applicableKeyManagers, km)
-						slog.Debug("JWT Auth Policy: Found key manager by name",
+						seenKeyManagers[km.Name] = struct{}{}
+						slog.Debug("JWT Auth Policy: Added key manager candidate by issuer value",
 							"keyManager", km.Name,
-							"userIssuer", userIssuer,
-							"tokenIssuer", tokenIssuer,
-							"kmIssuer", km.Issuer,
-						)
-						break
-					} else {
-						slog.Debug("JWT Auth Policy: Key manager found by name but issuer mismatch",
-							"keyManager", km.Name,
-							"tokenIssuer", tokenIssuer,
-							"expectedIssuer", km.Issuer,
+							"issuer", userIssuer,
 						)
 					}
 				}
@@ -796,6 +773,8 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 		)
 	}
 
+	parser := jwt.NewParser(jwt.WithLeeway(leeway))
+
 	// Try to verify signature with applicable key managers
 	var lastErr error
 	for _, km := range applicableKeyManagers {
@@ -816,7 +795,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 			slog.Debug("JWT Auth Policy: Attempting signature verification with local certificate",
 				"keyManager", km.Name,
 			)
-			verifiedToken, err := jwt.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 				return km.JWKS.Local.PublicKey, nil
 			})
 
@@ -879,7 +858,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					"kid", kid,
 				)
 				// Verify signature
-				verifiedToken, err := jwt.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 					return publicKey, nil
 				})
 
@@ -909,7 +888,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					slog.Debug("JWT Auth Policy: Trying key from JWKS",
 						"keyId", keyId,
 					)
-					verifiedToken, err := jwt.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
 						return publicKey, nil
 					})
 
@@ -957,6 +936,10 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		"retryCount", retryCount,
 		"retryInterval", retryInterval,
 	)
+
+	if retryCount < 0 {
+		return nil, fmt.Errorf("invalid jwks fetch retry count: %d", retryCount)
+	}
 
 	// Check cache first
 	p.cacheMutex.RLock()
@@ -1021,6 +1004,9 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 		"uri", remote.URI,
 		"lastError", lastErr,
 	)
+	if lastErr == nil {
+		return nil, fmt.Errorf("failed to fetch JWKS: no fetch attempts executed")
+	}
 	return nil, lastErr
 }
 
@@ -1169,19 +1155,22 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 func extractToken(authHeader, scheme string) string {
 	authHeader = strings.TrimSpace(authHeader)
 	if scheme != "" {
-		prefix := scheme + " "
-		if strings.HasPrefix(authHeader, prefix) {
-			return strings.TrimPrefix(authHeader, prefix)
+		parts := strings.Fields(authHeader)
+		if len(parts) == 2 && strings.EqualFold(parts[0], scheme) {
+			return parts[1]
 		}
 		// If scheme is specified but not found, return empty
 		return ""
 	}
 	// If no scheme specified, accept raw token or try to strip known schemes
-	if strings.Contains(authHeader, " ") {
-		parts := strings.SplitN(authHeader, " ", 2)
+	parts := strings.Fields(authHeader)
+	if len(parts) == 0 {
+		return ""
+	}
+	if len(parts) > 1 {
 		return parts[1]
 	}
-	return authHeader
+	return parts[0]
 }
 
 // parseRSAPublicKey parses RSA public key from modulus and exponent
@@ -1276,45 +1265,36 @@ func parseScopes(scopeClaim, scpClaim interface{}) []string {
 func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt.MapClaims, claimMappings map[string]string, userIdClaim string) policy.RequestAction {
 	slog.Debug("JWT Auth Policy: handleAuthSuccess called",
 		"claimMappingsCount", len(claimMappings),
-		"userIdClaim", userIdClaim,
 	)
 
-	// Set metadata indicating successful authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = true
-	ctx.Metadata[MetadataKeyAuthMethod] = "jwt"
-	ctx.Metadata[MetadataKeyTokenClaims] = claims
+	sub, _ := claims["sub"].(string)
+	iss, _ := claims["iss"].(string)
 
-	// Set standard metadata
-	if iss, ok := claims["iss"].(string); ok {
-		ctx.Metadata[MetadataKeyIssuer] = iss
-		slog.Debug("JWT Auth Policy: Set issuer metadata",
-			"issuer", iss,
-		)
-	}
-	if sub, ok := claims["sub"].(string); ok {
-		ctx.Metadata[MetadataKeySubject] = sub
-		slog.Debug("JWT Auth Policy: Set subject metadata",
-			"subject", sub,
-		)
-	}
-
-	// Extract user ID from the specified claim and set it in AuthContext for analytics
-	if userIdClaim != "" {
-		if claimValue, exists := claims[userIdClaim]; exists {
-			userId := claimValueToString(claimValue)
-			if userId != "" {
-				ctx.SharedContext.AuthContext[AuthContextKeyUserID] = userId
-				slog.Debug("JWT Auth Policy: Set user ID in AuthContext",
-					"claim", userIdClaim,
-					"userId", userId,
-				)
+	subject := sub
+	if userIdClaim != "" && userIdClaim != "sub" {
+		if v, ok := claims[userIdClaim]; ok {
+			candidate := strings.TrimSpace(claimValueToString(v))
+			if candidate != "" && candidate != "null" {
+				subject = candidate
 			}
-		} else {
-			slog.Debug("JWT Auth Policy: User ID claim not found or empty",
-				"claim", userIdClaim,
-			)
 		}
 	}
+
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      AuthType,
+		Subject:       subject,
+		Issuer:        iss,
+		Audience:      parseAudience(claims["aud"]),
+		Scopes:        buildScopesMap(claims),
+		Properties:    buildProperties(claims),
+		Previous:      ctx.SharedContext.AuthContext,
+	}
+
+	slog.Debug("JWT Auth Policy: AuthContext set",
+		"subject", subject,
+		"issuer", iss,
+	)
 
 	// Apply claim mappings as headers
 	modifications := policy.UpstreamRequestModifications{
@@ -1346,6 +1326,34 @@ func (p *JwtAuthPolicy) handleAuthSuccess(ctx *policy.RequestContext, claims jwt
 	return modifications
 }
 
+// buildScopesMap converts JWT scope/scp claims to a map[string]bool for AuthContext.Scopes.
+func buildScopesMap(claims jwt.MapClaims) map[string]bool {
+	scopes := parseScopes(claims["scope"], claims["scp"])
+	if len(scopes) == 0 {
+		return nil
+	}
+	result := make(map[string]bool, len(scopes))
+	for _, s := range scopes {
+		result[s] = true
+	}
+	return result
+}
+
+// buildProperties extracts non-standard claims into a map[string]string for AuthContext.Properties.
+func buildProperties(claims jwt.MapClaims) map[string]string {
+	var props map[string]string
+	for k, v := range claims {
+		if standardJWTClaims[k] {
+			continue
+		}
+		if props == nil {
+			props = make(map[string]string)
+		}
+		props[k] = claimValueToString(v)
+	}
+	return props
+}
+
 // OnResponse is not used by this policy (authentication is request-only)
 func (p *JwtAuthPolicy) OnResponse(ctx *policy.ResponseContext, params map[string]interface{}) policy.ResponseAction {
 	return nil // No response processing needed
@@ -1360,9 +1368,11 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 		"reason", reason,
 	)
 
-	// Set metadata indicating failed authentication
-	ctx.Metadata[MetadataKeyAuthSuccess] = false
-	ctx.Metadata[MetadataKeyAuthMethod] = "jwt"
+	ctx.SharedContext.AuthContext = &policy.AuthContext{
+		Authenticated: false,
+		AuthType:      AuthType,
+		Previous:      ctx.SharedContext.AuthContext,
+	}
 
 	headers := map[string]string{
 		"content-type": "application/json",
@@ -1373,6 +1383,8 @@ func (p *JwtAuthPolicy) handleAuthFailure(ctx *policy.RequestContext, statusCode
 	case "plain":
 		body = errorMessage
 		headers["content-type"] = "text/plain"
+	case "minimal":
+		body = "Unauthorized"
 	default: // json
 		errResponse := map[string]interface{}{
 			"error":   "Unauthorized",

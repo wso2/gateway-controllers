@@ -27,9 +27,11 @@ These parameters are configured per MCP Proxy by the API developer:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `tools` | `ToolRewriteConfig` array | No | List of tools to expose and optionally rewrite. When provided (non-empty), only these tools are included in `tools/list` responses. |
-| `resources` | `ResourceRewriteConfig` array | No | List of resources to expose and optionally rewrite. When provided (non-empty), only these resources are included in `resources/list` responses. |
-| `prompts` | `PromptRewriteConfig` array | No | List of prompts to expose and optionally rewrite. When provided (non-empty), only these prompts are included in `prompts/list` responses. |
+| `tools` | `ToolRewriteConfig` array | Conditional | List of tools to expose and optionally rewrite. Omit to allow all tools. Set `[]` to deny all tools. When provided with entries, only these tools are included in `tools/list` responses and unlisted `tools/call` requests are rejected. |
+| `resources` | `ResourceRewriteConfig` array | Conditional | List of resources to expose and optionally rewrite. Omit to allow all resources. Set `[]` to deny all resources. When provided with entries, only these resources are included in `resources/list` responses and unlisted `resources/read` requests are rejected. |
+| `prompts` | `PromptRewriteConfig` array | Conditional | List of prompts to expose and optionally rewrite. Omit to allow all prompts. Set `[]` to deny all prompts. When provided with entries, only these prompts are included in `prompts/list` responses and unlisted `prompts/get` requests are rejected. |
+
+> **Note**: At least one of `tools`, `resources`, or `prompts` must be specified.
 
 ### ToolRewriteConfig Configuration
 

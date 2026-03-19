@@ -1,0 +1,10 @@
+{
+  "name": "llm-cost-based-ratelimit",
+  "displayName": "LLM Cost Based Ratelimit",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. Reads pre-calculated costs from the llm-cost policy and blocks requests when configured spending budgets are exceeded within the defined time windows."
+}

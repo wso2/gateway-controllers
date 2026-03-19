@@ -30,18 +30,18 @@ These parameters are configured per-API/route by the API developer:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `statusCode` | integer | No | `200` | HTTP status code for the immediate response. |
-| `body` | string | No | `""` | Response body content returned to the client. |
-| `headers` | `HeaderObject` array | No | - | Response headers to include in the immediate response. |
+| `statusCode` | integer | No | `200` | HTTP status code for the immediate response. Valid range: 100-599. |
+| `body` | string | No | `""` | Response body content returned to the client. Maximum length: 1048576 characters. |
+| `headers` | array | No | `[]` | Array of response headers to include in the immediate response. |
 
-### HeaderObject Configuration
+### Headers Array Item
 
-Each `HeaderObject` in `headers` supports:
+Each item in `headers` supports:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Header name. Must match `^[a-zA-Z0-9-_]+$` and cannot be empty. |
-| `value` | string | Yes | Header value. |
+| `name` | string | Yes | Header name. Must match pattern `^[a-zA-Z0-9-_]+$`. Length: 1-256 characters. |
+| `value` | string | Yes | Header value. Maximum length: 8192 characters. |
 
 **Note:**
 

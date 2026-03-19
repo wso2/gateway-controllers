@@ -25,7 +25,7 @@ This policy requires configuration in both the API definition YAML and the LLM p
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `models` | `WeightedModel` array | Yes | - | List of models with weights for weighted round-robin distribution. Each model must have a `model` name and `weight`. |
-| `suspendDuration` | integer | No | `0` | Suspend duration in seconds for failed models. If set to 0, failed model knowledge is not persisted. Must be >= 0. |
+| `suspendDuration` | integer | No | `30` | Suspension time in seconds for failed models. Set to `0` to disable failed-model suspension tracking. Must be >= 0. |
 
 ### WeightedModel Configuration
 

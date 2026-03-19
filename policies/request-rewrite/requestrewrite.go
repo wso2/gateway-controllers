@@ -42,8 +42,6 @@ const (
 	queryActionAdd          = "ADD"
 	queryActionAppend       = "APPEND"
 	queryActionReplaceRegex = "REPLACEREGEXMATCH"
-
-	dynamicMetadataNamespace = "api_platform.policy_engine.envoy.filters.http.ext_proc"
 )
 
 var ins = &RequestRewritePolicy{}
@@ -143,10 +141,21 @@ func (p *RequestRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[
 	updatedRelativePath := relativePath
 	pathRewriteApplied := false
 	queryRewriteConfigured := cfg.QueryRewrite != nil
+	isFullPathReplacement := false
 
 	if cfg.PathRewrite != nil {
-		updatedRelativePath = applyPathRewrite(ctx, updatedRelativePath, cfg.PathRewrite)
-		pathRewriteApplied = updatedRelativePath != relativePath
+		rewriteType := strings.ToUpper(strings.TrimSpace(cfg.PathRewrite.Type))
+		if rewriteType == pathReplaceFull {
+			// ReplaceFullPath replaces the ENTIRE path, not just the relative portion
+			isFullPathReplacement = true
+			if cfg.PathRewrite.ReplaceFullPath != "" {
+				updatedRelativePath = cfg.PathRewrite.ReplaceFullPath
+				pathRewriteApplied = true
+			}
+		} else {
+			updatedRelativePath = applyPathRewrite(ctx, updatedRelativePath, cfg.PathRewrite)
+			pathRewriteApplied = updatedRelativePath != relativePath
+		}
 	}
 
 	if cfg.QueryRewrite != nil {
@@ -157,14 +166,21 @@ func (p *RequestRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[
 
 	finalPath := originalPath
 	if pathRewriteApplied || queryRewriteConfigured {
-		updatedPath := joinBaseAndRelative(basePrefix, updatedRelativePath)
+		var updatedPath string
+		if isFullPathReplacement {
+			// For full path replacement, use the replacement directly without rejoining with base
+			updatedPath = updatedRelativePath
+		} else {
+			updatedPath = joinBaseAndRelative(basePrefix, updatedRelativePath)
+		}
 		finalPath = buildPath(updatedPath, queryValues)
 	}
 
 	mods := policy.UpstreamRequestModifications{}
+
 	if finalPath != originalPath {
-		slog.Info("[Request Rewrite]: Rewriting path", "from", originalPath, "to", finalPath)
-		mods.SetHeaders = map[string]string{":path": finalPath}
+		slog.Info("[Request Rewrite]: Scheduling path rewrite", "from", originalPath, "to", finalPath)
+		mods.Path = &finalPath
 	}
 
 	method := strings.TrimSpace(cfg.MethodRewrite)
@@ -173,11 +189,7 @@ func (p *RequestRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[
 		if !isAllowedMethod(method) {
 			return configErrorResponse("Invalid methodRewrite value", fmt.Errorf("unsupported method: %s", method))
 		}
-		mods.DynamicMetadata = map[string]map[string]any{
-			dynamicMetadataNamespace: {
-				"request_transformation.target_method": method,
-			},
-		}
+		mods.Method = &method
 		slog.Info("[Request Rewrite]: Scheduling method rewrite", "method", method)
 	}
 

@@ -160,6 +160,10 @@ func parseCapabilityConfig(params map[string]any, capabilityType string) (Capabi
 				slog.Debug("MCP Rewrite Policy: Invalid field value", "capabilityType", capabilityType, "index", i, "field", "target", "error", "not a string")
 				return config, fmt.Errorf("%s[%d].target must be a string", capabilityType, i)
 			}
+			if strings.TrimSpace(targetStr) == "" {
+				slog.Debug("MCP Rewrite Policy: Invalid field value", "capabilityType", capabilityType, "index", i, "field", "target", "error", "not a non-empty string")
+				return config, fmt.Errorf("%s[%d].target must be a non-empty string", capabilityType, i)
+			}
 			target = targetStr
 		}
 
@@ -284,10 +288,6 @@ func (p *McpRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[stri
 		return nil
 	}
 
-	if len(config.Entries) == 0 {
-		return nil
-	}
-
 	paramsRaw, ok := requestPayload["params"].(map[string]any)
 	if !ok {
 		slog.Debug("MCP Rewrite Policy: Invalid request params", "capabilityType", capabilityType, "requestID", requestID, "error", "params not a map")
@@ -303,7 +303,14 @@ func (p *McpRewritePolicy) OnRequest(ctx *policy.RequestContext, params map[stri
 
 	entry, exists := config.Lookup[capabilityName]
 	if !exists {
-		return nil
+		slog.Debug("MCP Rewrite Policy: Capability blocked by policy", "capabilityType", capabilityType, "capabilityName", capabilityName, "requestID", requestID)
+		return p.buildRequestErrorResponse(
+			ctx,
+			403,
+			-32602,
+			fmt.Sprintf("MCP %s '%s' is not allowed", capabilityType, capabilityName),
+			requestID,
+		)
 	}
 
 	if entry.Target != "" && entry.Target != capabilityName {
@@ -457,18 +464,21 @@ func rewriteListItems(items []any, capabilityType string, config CapabilityConfi
 	changed := false
 
 	if len(config.Entries) == 0 {
-		return items, false
+		if len(items) == 0 {
+			return filtered, false
+		}
+		return filtered, true
 	}
 
 	for _, item := range items {
 		entry, ok := item.(map[string]any)
 		if !ok {
-			filtered = append(filtered, item)
+			changed = true
 			continue
 		}
 		key, ok := entry[keyField].(string)
 		if !ok || strings.TrimSpace(key) == "" {
-			filtered = append(filtered, item)
+			changed = true
 			continue
 		}
 
@@ -480,11 +490,6 @@ func rewriteListItems(items []any, capabilityType string, config CapabilityConfi
 			changed = true
 			continue
 		}
-
-		filtered = append(filtered, item)
-	}
-
-	if len(filtered) != len(items) {
 		changed = true
 	}
 

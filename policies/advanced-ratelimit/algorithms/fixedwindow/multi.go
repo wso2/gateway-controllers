@@ -110,6 +110,49 @@ func (m *MultiLimiter) ConsumeOrClampN(ctx context.Context, key string, n int64)
 	return mostRestrictive, nil
 }
 
+// ConsumeN always consumes N tokens against all policies, regardless of limits.
+// This is used for post-response cost extraction where the upstream has already
+// processed the request. Returns the most restrictive result.
+func (m *MultiLimiter) ConsumeN(ctx context.Context, key string, n int64) (*limiter.Result, error) {
+	if len(m.limiters) == 0 {
+		return nil, fmt.Errorf("no limiters configured")
+	}
+
+	var mostRestrictive *limiter.Result
+
+	for i, lim := range m.limiters {
+		// Create policy-specific key to separate window tracking
+		policyKey := fmt.Sprintf("%s:p%d", key, i)
+
+		var result *limiter.Result
+		var err error
+		if tracker, ok := lim.(limiter.CostTracker); ok {
+			result, err = tracker.ConsumeN(ctx, policyKey, n)
+		} else {
+			result, err = lim.ConsumeOrClampN(ctx, policyKey, n)
+			if err == nil && result.Consumed < n {
+				return nil, fmt.Errorf("limiter %d does not implement CostTracker and clamped consumption to %d (requested %d); cannot guarantee ConsumeN semantics", i, result.Consumed, n)
+			}
+		}
+		if err != nil {
+			return nil, fmt.Errorf("limiter %d failed: %w", i, err)
+		}
+
+		// Track the most restrictive result
+		if mostRestrictive == nil {
+			mostRestrictive = result
+		} else if !result.Allowed {
+			// If denied, this is more restrictive
+			mostRestrictive = result
+		} else if result.Remaining < mostRestrictive.Remaining {
+			// If fewer remaining, this is more restrictive
+			mostRestrictive = result
+		}
+	}
+
+	return mostRestrictive, nil
+}
+
 // GetAvailable returns the minimum available tokens across all policies
 func (m *MultiLimiter) GetAvailable(ctx context.Context, key string) (int64, error) {
 	if len(m.limiters) == 0 {

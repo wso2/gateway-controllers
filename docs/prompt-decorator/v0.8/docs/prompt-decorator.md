@@ -23,21 +23,17 @@ This policy requires only a single-level configuration where all parameters are 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `promptDecoratorConfig` | `PromptDecoratorConfig` (JSON string) | Yes | - | JSON string containing decoration configuration. Supports text decoration (`decoration` as a string) or chat decoration (`decoration` as an array of message objects). |
-| `jsonPath` | string | Yes | - | JSONPath expression to locate the field to decorate. Use `$.messages[0].content` for text decoration, or `$.messages` for chat decoration. |
+| `promptDecoratorConfig` | object | Yes | - | Specifies prompt decoration configuration. Provide exactly one of `text` or `messages`. |
+| `promptDecoratorConfig.text` | string | Conditional | - | Specifies text decoration applied when targeting a string prompt. Required if `messages` is not provided. |
+| `promptDecoratorConfig.messages` | array | Conditional | - | Specifies chat message decorations applied when targeting a messages array. Required if `text` is not provided. |
+| `jsonPath` | string | No | `""` | JSONPath expression used to locate the prompt segment to decorate. If omitted, defaults to `"$.messages[-1].content"` for `text` decorations and `"$.messages"` for `messages` decorations. |
 | `append` | boolean | No | `false` | If `true`, decoration is appended to the content. If `false`, decoration is prepended (default). |
 
-### PromptDecoratorConfig Configuration
+### PromptDecoratorConfig.messages Array Item
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `decoration` | string or `PromptMessage` array | Yes | Decoration content. Use a string for text decoration, or an array of `PromptMessage` objects for chat decoration. |
-
-### PromptMessage Configuration
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `role` | string | Yes | Role for chat decoration message (e.g., `system`, `user`, `assistant`). |
+| `role` | string | Yes | Role for the chat message. Valid values: `system`, `user`, `assistant`, `tool`. |
 | `content` | string | Yes | Message content to prepend or append in chat decoration mode. |
 
 #### JSONPath Support
@@ -96,7 +92,8 @@ spec:
         - path: /chat/completions
           methods: [POST]
           params:
-            promptDecoratorConfig: '{"decoration": "Summarize the following content in a concise, neutral, and professional tone. Structure the summary using bullet points if appropriate.\n\n"}'
+            promptDecoratorConfig:
+              text: "Summarize the following content in a concise, neutral, and professional tone. Structure the summary using bullet points if appropriate.\n\n"
             jsonPath: "$.messages[0].content"
             append: false
 ```
@@ -177,7 +174,10 @@ spec:
         - path: /chat/completions
           methods: [POST]
           params:
-            promptDecoratorConfig: '{"decoration": [{"role": "system", "content": "You are a helpful hotel booking receptionist for Azure Horizon Resort. Collect booking details: name, NIC, check-in time, staying duration (nights), and room type (single, double, suite). Ask one detail at a time in a friendly tone."}]}'
+            promptDecoratorConfig:
+              messages:
+                - role: system
+                  content: "You are a helpful hotel booking receptionist for Azure Horizon Resort. Collect booking details: name, NIC, check-in time, staying duration (nights), and room type (single, double, suite). Ask one detail at a time in a friendly tone."
             jsonPath: "$.messages"
             append: false
 ```
@@ -227,7 +227,8 @@ policies:
       - path: /chat/completions
         methods: [POST]
         params:
-          promptDecoratorConfig: '{"decoration": "\n\nPlease respond in JSON format."}'
+          promptDecoratorConfig:
+            text: "\n\nPlease respond in JSON format."
           jsonPath: "$.messages[-1].content"
           append: true
 ```
@@ -246,17 +247,12 @@ policies:
 
 **Mode 1: Text Prompt Decoration**
 
-Text decoration is used when the JSONPath targets a string field (e.g., `$.messages[0].content`). The decoration can be:
-- A simple string that gets prepended or appended to the content
-- An array of decoration objects (their content fields are concatenated with newlines)
+Text decoration is used when the JSONPath targets a string field (e.g., `$.messages[0].content`). Use the `text` field in `promptDecoratorConfig`:
 
 *Configuration Example:*
-```json
-{
-  "decoration": "Summarize the following content in a concise, neutral, and professional tone. Structure the summary using bullet points if appropriate.
-
-"
-}
+```yaml
+promptDecoratorConfig:
+  text: "Summarize the following content in a concise, neutral, and professional tone.\n\n"
 ```
 
 *Behavior:*
@@ -266,18 +262,14 @@ Text decoration is used when the JSONPath targets a string field (e.g., `$.messa
 
 **Mode 2: Chat Prompt Decoration**
 
-Chat decoration is used when the JSONPath targets an array field (e.g., `$.messages`). The decoration must be an array of message objects:
+Chat decoration is used when the JSONPath targets an array field (e.g., `$.messages`). Use the `messages` field in `promptDecoratorConfig`:
 
 *Configuration Example:*
-```json
-{
-  "decoration": [
-    {
-      "role": "system",
-      "content": "You are a helpful hotel booking receptionist for the imaginary hotel 'Azure Horizon Resort'. Your job is to collect all the necessary booking details from guests."
-    }
-  ]
-}
+```yaml
+promptDecoratorConfig:
+  messages:
+    - role: system
+      content: "You are a helpful hotel booking receptionist for the imaginary hotel 'Azure Horizon Resort'. Your job is to collect all the necessary booking details from guests."
 ```
 
 *Behavior:*
@@ -293,7 +285,7 @@ Chat decoration is used when the JSONPath targets an array field (e.g., `$.messa
 - JSONPath expressions must correctly identify the target field. Invalid paths will result in errors.
 - When decorating message arrays, ensure the target field is actually an array of message objects.
 - The `append: false` (default) means decoration is prepended. Set `append: true` to append decoration.
-- Decoration objects in chat mode must have both `role` and `content` fields; both are required.
+- Messages in chat mode must have both `role` and `content` fields; both are required.
+- Valid role values are: `system`, `user`, `assistant`, `tool`.
 - Negative array indices (e.g., `[-1]` for last element) are supported in JSONPath expressions.
-- When using text decoration with an array of decoration objects, their content fields are concatenated with newlines (`
-`).
+- If `jsonPath` is omitted, it defaults to `"$.messages[-1].content"` for `text` decorations and `"$.messages"` for `messages` decorations.
