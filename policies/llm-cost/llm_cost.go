@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	policy "github.com/wso2/api-platform/sdk/gateway/policy/v1alpha"
 )
@@ -44,22 +45,34 @@ type LLMCostPolicy struct {
 	pricingMap map[string]ModelPricing
 }
 
-// GetPolicy instantiates a new LLMCostPolicy. It loads the pricing database
-// from the pricing_file system parameter once at route-instantiation time.
+var (
+	instance     *LLMCostPolicy
+	instanceOnce sync.Once
+	instanceErr  error
+)
+
+// GetPolicy returns the singleton LLMCostPolicy instance. The pricing file is
+// loaded from disk exactly once for the lifetime of the process; every API and
+// route that attaches this policy receives the same shared instance.
 func GetPolicy(
 	_ policy.PolicyMetadata,
 	params map[string]interface{},
 ) (policy.Policy, error) {
-	pricingFile, _ := params["pricing_file"].(string)
-	if pricingFile == "" {
-		return nil, fmt.Errorf("llm-cost: pricing_file system parameter is required but not set")
-	}
-	pm, err := loadPricingFromFile(pricingFile)
-	if err != nil {
-		return nil, fmt.Errorf("llm-cost: failed to load pricing file %q: %w", pricingFile, err)
-	}
-	slog.Info("llm-cost: pricing map loaded", "path", pricingFile, "entries", len(pm))
-	return &LLMCostPolicy{pricingMap: pm}, nil
+	instanceOnce.Do(func() {
+		pricingFile, _ := params["pricing_file"].(string)
+		if pricingFile == "" {
+			instanceErr = fmt.Errorf("llm-cost: pricing_file system parameter is required but not set")
+			return
+		}
+		pm, err := loadPricingFromFile(pricingFile)
+		if err != nil {
+			instanceErr = fmt.Errorf("llm-cost: failed to load pricing file %q: %w", pricingFile, err)
+			return
+		}
+		slog.Info("llm-cost: pricing map loaded", "path", pricingFile, "entries", len(pm))
+		instance = &LLMCostPolicy{pricingMap: pm}
+	})
+	return instance, instanceErr
 }
 
 // Mode declares the SDK processing requirements:
