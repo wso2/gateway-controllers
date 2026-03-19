@@ -2,7 +2,7 @@
 title: "Overview"
 ---
 
-# Semantic Tool Filtering
+# Semantic Tool Filtering policy
 
 ## Overview
 The **Semantic Tool Filtering** policy dynamically filters the tools provided within an API request based on their semantic relevance to the user query. This policy extracts both the query and the tool definitions from the incoming payload, generates embeddings for the query, and performs a similarity search against the provided tools. It then replaces the original tools array with a filtered subset, optimizing the request before it reaches the LLM.
