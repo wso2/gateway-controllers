@@ -56,7 +56,7 @@ func TestSetStatusCodePolicy_OnResponseBody_Valid(t *testing.T) {
 func TestSetStatusCodePolicy_OnResponseBody_Float64Param(t *testing.T) {
 	p := &SetStatusCodePolicy{}
 
-	// JSON unmarshalling yields float64 for numbers
+	// JSON unmarshalling yields float64 for numbers; whole-number floats are accepted
 	params := map[string]interface{}{
 		"statusCode": float64(404),
 	}
@@ -70,6 +70,26 @@ func TestSetStatusCodePolicy_OnResponseBody_Float64Param(t *testing.T) {
 
 	if mods.StatusCode == nil || *mods.StatusCode != 404 {
 		t.Errorf("Expected StatusCode 404, got %v", mods.StatusCode)
+	}
+}
+
+func TestSetStatusCodePolicy_OnResponseBody_Float64FractionalParam(t *testing.T) {
+	p := &SetStatusCodePolicy{}
+
+	// Fractional float64 should be rejected
+	params := map[string]interface{}{
+		"statusCode": float64(200.9),
+	}
+
+	result := p.OnResponseBody(context.Background(), newResponseContext(200), params)
+
+	immediate, ok := result.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("Expected ImmediateResponse, got %T", result)
+	}
+
+	if immediate.StatusCode != 500 {
+		t.Errorf("Expected status 500 for fractional float64, got %d", immediate.StatusCode)
 	}
 }
 

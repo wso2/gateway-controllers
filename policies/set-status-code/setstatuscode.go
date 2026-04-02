@@ -68,7 +68,11 @@ func parseConfig(params map[string]interface{}) (*policyConfig, error) {
 	case int:
 		statusCode = v
 	case float64:
-		statusCode = int(v)
+		parsed := int(v)
+		if float64(parsed) != v {
+			return nil, fmt.Errorf("statusCode parameter must be an integer, got fractional value %v", v)
+		}
+		statusCode = parsed
 	default:
 		return nil, fmt.Errorf("statusCode parameter must be an integer")
 	}
