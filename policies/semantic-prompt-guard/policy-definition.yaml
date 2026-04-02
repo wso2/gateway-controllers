@@ -7,6 +7,7 @@ description: |
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
     jsonPath:
       type: string

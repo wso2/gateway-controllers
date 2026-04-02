@@ -5,6 +5,7 @@ description: |
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
     statusCode:
       type: integer

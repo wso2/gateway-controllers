@@ -5,6 +5,7 @@ description: |
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
     request:
       type: object

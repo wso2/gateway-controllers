@@ -6,6 +6,7 @@ description: |
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
     templates:
       type: array
