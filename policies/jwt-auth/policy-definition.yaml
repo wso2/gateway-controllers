@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.0.4
+version: v1.0.5
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -186,6 +186,34 @@ systemParameters:
       description: Interval between JWKS fetch retries, e.g., "2s".
       default: "2s"
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.jwksfetchretryinterval}"
+
+    tokenCacheEnabled:
+      type: boolean
+      description: >-
+        When true, successfully validated token claims are cached to skip repeated
+        signature verification for the same token. The algorithm check and expiry
+        re-validation still run on every cache hit.
+      default: true
+      "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.tokencacheenabled}"
+
+    tokenCacheTtl:
+      type: string
+      description: >-
+        Maximum time a validated token's claims are kept in the cache. The actual
+        TTL is capped to the token's own `exp` claim (plus leeway), so a cached
+        entry is never valid longer than the token itself. Use a duration string,
+        e.g. "5m".
+      default: "5m"
+      "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.tokencachettl}"
+
+    tokenCacheMaxSize:
+      type: integer
+      description: >-
+        Maximum number of tokens held in the validation cache. When the cache is
+        full, expired entries are swept first; if still full the incoming entry is
+        dropped. Set to 0 for an unlimited cache.
+      default: 15000
+      "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.tokencachemaxsize}"
 
     allowedAlgorithms:
       type: array

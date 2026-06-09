@@ -20,9 +20,11 @@ package jwtauth
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -31,6 +33,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -53,15 +56,23 @@ var standardJWTClaims = map[string]bool{
 
 // JwtAuthPolicy implements JWT Authentication with JWKS support
 type JwtAuthPolicy struct {
-	cacheMutex sync.RWMutex
-	cacheStore map[string]*CachedJWKS
-	cacheTTLs  map[string]time.Time
-	httpClient *http.Client
+	cacheMutex      sync.RWMutex
+	cacheStore      map[string]*CachedJWKS
+	cacheTTLs       map[string]time.Time
+	tokenCacheMutex sync.RWMutex
+	tokenCache      map[string]*CachedTokenEntry
+	httpClient      *http.Client
 }
 
 // CachedJWKS stores cached JWKS data
 type CachedJWKS struct {
 	Keys map[string]*rsa.PublicKey
+}
+
+// CachedTokenEntry stores a validated token's claims with an expiry time.
+type CachedTokenEntry struct {
+	Claims    jwt.MapClaims
+	ExpiresAt time.Time
 }
 
 // KeyManager represents a key manager with either remote JWKS or local certificate
@@ -110,6 +121,7 @@ type JWKSKey struct {
 var ins = &JwtAuthPolicy{
 	cacheStore: make(map[string]*CachedJWKS),
 	cacheTTLs:  make(map[string]time.Time),
+	tokenCache: make(map[string]*CachedTokenEntry),
 	httpClient: &http.Client{
 		Timeout: 5 * time.Second,
 	},
@@ -118,7 +130,7 @@ var ins = &JwtAuthPolicy{
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
 func GetPolicy(
 	metadata policy.PolicyMetadata,
-	params map[string]interface{},
+	params map[string]any,
 ) (policy.Policy, error) {
 	return ins, nil
 }
@@ -162,14 +174,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 		"allowedAlgorithms", allowedAlgorithms,
 	)
 
-	algorithmAllowed := false
-	for _, allowed := range allowedAlgorithms {
-		if alg == allowed {
-			algorithmAllowed = true
-			break
-		}
-	}
-	if !algorithmAllowed {
+	if !slices.Contains(allowedAlgorithms, alg) {
 		slog.Debug("JWT Auth Policy: Algorithm not in allowed list",
 			"tokenAlgorithm", alg,
 		)
@@ -382,7 +387,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 			slog.Debug("JWT Auth Policy: Attempting signature verification with local certificate",
 				"keyManager", km.Name,
 			)
-			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (any, error) {
 				return km.JWKS.Local.PublicKey, nil
 			})
 
@@ -445,7 +450,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					"kid", kid,
 				)
 				// Verify signature
-				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (any, error) {
 					return publicKey, nil
 				})
 
@@ -475,7 +480,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					slog.Debug("JWT Auth Policy: Trying key from JWKS",
 						"keyId", keyId,
 					)
-					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (interface{}, error) {
+					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, func(token *jwt.Token) (any, error) {
 						return publicKey, nil
 					})
 
@@ -811,11 +816,11 @@ func bytesToInt(b []byte) int {
 }
 
 // parseAudience parses audience claim which can be string or array
-func parseAudience(audClaim interface{}) []string {
+func parseAudience(audClaim any) []string {
 	if audStr, ok := audClaim.(string); ok {
 		return []string{audStr}
 	}
-	if audArr, ok := audClaim.([]interface{}); ok {
+	if audArr, ok := audClaim.([]any); ok {
 		var result []string
 		for _, a := range audArr {
 			if aStr, ok := a.(string); ok {
@@ -828,7 +833,7 @@ func parseAudience(audClaim interface{}) []string {
 }
 
 // parseScopes parses scope claim (space-delimited string or array)
-func parseScopes(scopeClaim, scpClaim interface{}) []string {
+func parseScopes(scopeClaim, scpClaim any) []string {
 	var scopes []string
 
 	// Check scope claim (space-delimited)
@@ -837,7 +842,7 @@ func parseScopes(scopeClaim, scpClaim interface{}) []string {
 	}
 
 	// Check scp claim (array)
-	if scpArr, ok := scpClaim.([]interface{}); ok {
+	if scpArr, ok := scpClaim.([]any); ok {
 		for _, s := range scpArr {
 			if sStr, ok := s.(string); ok {
 				scopes = append(scopes, sStr)
@@ -877,21 +882,21 @@ func buildProperties(claims jwt.MapClaims) map[string]string {
 }
 
 // Helper functions for type assertions
-func getString(v interface{}) string {
+func getString(v any) string {
 	if s, ok := v.(string); ok {
 		return s
 	}
 	return ""
 }
 
-func getBool(v interface{}) bool {
+func getBool(v any) bool {
 	if b, ok := v.(bool); ok {
 		return b
 	}
 	return false
 }
 
-func getBoolParam(params map[string]interface{}, key string, defaultValue bool) bool {
+func getBoolParam(params map[string]any, key string, defaultValue bool) bool {
 	if v, ok := params[key]; ok {
 		if b, ok := v.(bool); ok {
 			return b
@@ -900,7 +905,7 @@ func getBoolParam(params map[string]interface{}, key string, defaultValue bool) 
 	return defaultValue
 }
 
-func getStringParam(params map[string]interface{}, key, defaultValue string) string {
+func getStringParam(params map[string]any, key, defaultValue string) string {
 	if v, ok := params[key]; ok {
 		if s, ok := v.(string); ok {
 			return s
@@ -909,7 +914,7 @@ func getStringParam(params map[string]interface{}, key, defaultValue string) str
 	return defaultValue
 }
 
-func getIntParam(params map[string]interface{}, key string, defaultValue int) int {
+func getIntParam(params map[string]any, key string, defaultValue int) int {
 	if v, ok := params[key]; ok {
 		if i, ok := v.(int); ok {
 			return i
@@ -921,9 +926,9 @@ func getIntParam(params map[string]interface{}, key string, defaultValue int) in
 	return defaultValue
 }
 
-func getStringArrayParam(params map[string]interface{}, key string, defaultValue []string) []string {
+func getStringArrayParam(params map[string]any, key string, defaultValue []string) []string {
 	if v, ok := params[key]; ok {
-		if arr, ok := v.([]interface{}); ok {
+		if arr, ok := v.([]any); ok {
 			var result []string
 			for _, item := range arr {
 				if s, ok := item.(string); ok {
@@ -938,9 +943,9 @@ func getStringArrayParam(params map[string]interface{}, key string, defaultValue
 	return defaultValue
 }
 
-func getStringMapParam(params map[string]interface{}, key string, defaultValue map[string]string) map[string]string {
+func getStringMapParam(params map[string]any, key string, defaultValue map[string]string) map[string]string {
 	if v, ok := params[key]; ok {
-		if m, ok := v.(map[string]interface{}); ok {
+		if m, ok := v.(map[string]any); ok {
 			result := make(map[string]string)
 			for k, val := range m {
 				if s, ok := val.(string); ok {
@@ -955,7 +960,7 @@ func getStringMapParam(params map[string]interface{}, key string, defaultValue m
 	return defaultValue
 }
 
-func claimValueToString(v interface{}) string {
+func claimValueToString(v any) string {
 	switch val := v.(type) {
 	case string:
 		return val
@@ -1095,8 +1100,72 @@ func parsePublicKeyFromString(pemData string) (*rsa.PublicKey, error) {
 	return nil, fmt.Errorf("certificate data does not contain an RSA public key")
 }
 
+// tokenCacheKey returns a fixed-length SHA-256 hex key for the token.
+// Using a hash instead of the raw token string keeps map keys at 64 bytes regardless
+// of token size, saving ~30 MB of key storage at a 15 000-entry cache.
+func tokenCacheKey(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+// getCachedToken returns validated claims from the token cache if present and not expired.
+func (p *JwtAuthPolicy) getCachedToken(token string) (jwt.MapClaims, bool) {
+	key := tokenCacheKey(token)
+	p.tokenCacheMutex.RLock()
+	entry, ok := p.tokenCache[key]
+	p.tokenCacheMutex.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		p.invalidateCachedToken(token)
+		return nil, false
+	}
+	return entry.Claims, true
+}
+
+// invalidateCachedToken removes a token's entry from the cache.
+func (p *JwtAuthPolicy) invalidateCachedToken(token string) {
+	key := tokenCacheKey(token)
+	p.tokenCacheMutex.Lock()
+	delete(p.tokenCache, key)
+	p.tokenCacheMutex.Unlock()
+}
+
+// setCachedToken stores validated claims in the token cache.
+// The entry TTL is the minimum of the configured ttl and the token's own exp claim (plus leeway),
+// so a cached entry is never valid longer than the token itself.
+// When maxSize > 0 and the cache is full, expired entries are swept first; if still full, the
+// new entry is dropped rather than evicting live entries.
+func (p *JwtAuthPolicy) setCachedToken(token string, claims jwt.MapClaims, ttl time.Duration, leeway time.Duration, maxSize int) {
+	expiry := time.Now().Add(ttl)
+	if exp, ok := claims["exp"].(float64); ok {
+		if tokenExp := time.Unix(int64(exp), 0).Add(leeway); tokenExp.Before(expiry) {
+			expiry = tokenExp
+		}
+	}
+
+	p.tokenCacheMutex.Lock()
+	defer p.tokenCacheMutex.Unlock()
+
+	if maxSize > 0 && len(p.tokenCache) >= maxSize {
+		now := time.Now()
+		for k, v := range p.tokenCache {
+			if now.After(v.ExpiresAt) {
+				delete(p.tokenCache, k)
+			}
+		}
+		if len(p.tokenCache) >= maxSize {
+			slog.Debug("JWT Auth Policy: Token cache full, skipping cache store")
+			return
+		}
+	}
+
+	p.tokenCache[tokenCacheKey(token)] = &CachedTokenEntry{Claims: claims, ExpiresAt: expiry}
+}
+
 // OnRequestHeaders performs JWT validation in the request header phase.
-func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
+func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]any) policy.RequestHeaderAction {
 	slog.Debug("JWT Auth Policy: OnRequestHeaders started")
 
 	headerName := getStringParam(params, "headerName", "Authorization")
@@ -1111,6 +1180,9 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	jwksFetchRetryCount := getIntParam(params, "jwksFetchRetryCount", 3)
 	jwksFetchRetryIntervalStr := getStringParam(params, "jwksFetchRetryInterval", "2s")
 	validateIssuer := getBoolParam(params, "validateIssuer", true)
+	tokenCacheEnabled := getBoolParam(params, "tokenCacheEnabled", true)
+	tokenCacheTtlStr := getStringParam(params, "tokenCacheTtl", "5m")
+	tokenCacheMaxSize := getIntParam(params, "tokenCacheMaxSize", 15000)
 
 	slog.Debug("JWT Auth Policy: Configuration loaded",
 		"headerName", headerName,
@@ -1125,6 +1197,9 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		"jwksFetchRetryCount", jwksFetchRetryCount,
 		"jwksFetchRetryInterval", jwksFetchRetryIntervalStr,
 		"validateIssuer", validateIssuer,
+		"tokenCacheEnabled", tokenCacheEnabled,
+		"tokenCacheTtl", tokenCacheTtlStr,
+		"tokenCacheMaxSize", tokenCacheMaxSize,
 	)
 
 	leeway, err := time.ParseDuration(leewayStr)
@@ -1164,11 +1239,22 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		jwksFetchRetryInterval = 2 * time.Second
 	}
 
+	tokenCacheTtl, err := time.ParseDuration(tokenCacheTtlStr)
+	if err != nil {
+		slog.Debug("JWT Auth Policy: Failed to parse tokenCacheTtl duration, using default",
+			"tokenCacheTtlStr", tokenCacheTtlStr,
+			"error", err,
+			"defaultTokenCacheTtl", "5m",
+		)
+		tokenCacheTtl = 5 * time.Minute
+	}
+
 	slog.Debug("JWT Auth Policy: Parsed duration values",
 		"leeway", leeway,
 		"jwksCacheTtl", jwksCacheTtl,
 		"jwksFetchTimeout", jwksFetchTimeout,
 		"jwksFetchRetryInterval", jwksFetchRetryInterval,
+		"tokenCacheTtl", tokenCacheTtl,
 	)
 
 	keyManagersRaw, ok := params["keyManagers"]
@@ -1180,10 +1266,10 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	slog.Debug("JWT Auth Policy: Starting to parse key managers configuration")
 
 	keyManagers := make(map[string]*KeyManager)
-	keyManagersList, ok := keyManagersRaw.([]interface{})
+	keyManagersList, ok := keyManagersRaw.([]any)
 	if ok {
 		for _, km := range keyManagersList {
-			if kmMap, ok := km.(map[string]interface{}); ok {
+			if kmMap, ok := km.(map[string]any); ok {
 				name := getString(kmMap["name"])
 				issuer := getString(kmMap["issuer"])
 				if name == "" {
@@ -1197,9 +1283,9 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 				)
 
 				keyManager := &KeyManager{Name: name, Issuer: issuer}
-				if jwksRaw, ok := kmMap["jwks"].(map[string]interface{}); ok {
+				if jwksRaw, ok := kmMap["jwks"].(map[string]any); ok {
 					jwksConfig := &JWKSConfig{}
-					if remoteRaw, ok := jwksRaw["remote"].(map[string]interface{}); ok {
+					if remoteRaw, ok := jwksRaw["remote"].(map[string]any); ok {
 						uri := getString(remoteRaw["uri"])
 						certPath := getString(remoteRaw["certificatePath"])
 						skipTlsVerify := getBool(remoteRaw["skipTlsVerify"])
@@ -1235,7 +1321,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 							jwksConfig.Remote = remoteJWKS
 						}
 					}
-					if localRaw, ok := jwksRaw["local"].(map[string]interface{}); ok {
+					if localRaw, ok := jwksRaw["local"].(map[string]any); ok {
 						inline := getString(localRaw["inline"])
 						certPath := getString(localRaw["certificatePath"])
 
@@ -1356,6 +1442,9 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		"tokenLength", len(token),
 	)
 
+	// ParseUnverified always runs (cheap: base64 decode only, no crypto).
+	// Required here — before the cache check — so algorithm enforcement applies to cache hits too.
+	// Without this, a change to allowedAlgorithms would not take effect until cached entries expire.
 	unverifiedToken, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
 	if err != nil {
 		slog.Debug("JWT Auth Policy: Failed to parse token",
@@ -1370,16 +1459,59 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		"type", unverifiedToken.Header["typ"],
 	)
 
-	claims, err := p.validateTokenWithSignature(token, unverifiedToken, keyManagers, userIssuers, validateIssuer,
-		allowedAlgorithms, leeway, jwksCacheTtl, jwksFetchTimeout, jwksFetchRetryCount, jwksFetchRetryInterval)
-	if err != nil {
-		slog.Debug("JWT Auth Policy: Token validation failed",
-			"error", err,
-		)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("token validation failed: %v", err))
+	// Algorithm check always runs before cache lookup.
+	// Ensures that removing an algorithm from allowedAlgorithms takes effect immediately,
+	// not after the cache TTL drains.
+	alg, ok := unverifiedToken.Header["alg"].(string)
+	if !ok {
+		slog.Debug("JWT Auth Policy: Missing algorithm in token header")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "missing algorithm in token")
+	}
+	if !slices.Contains(allowedAlgorithms, alg) {
+		slog.Debug("JWT Auth Policy: Algorithm not in allowed list", "tokenAlgorithm", alg)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("algorithm '%s' not allowed", alg))
 	}
 
-	slog.Debug("JWT Auth Policy: Token signature validated successfully")
+	var claims jwt.MapClaims
+	if tokenCacheEnabled {
+		if cachedClaims, found := p.getCachedToken(token); found {
+			// Defense-in-depth exp re-check on cache hit.
+			// The cache TTL is already bounded by exp+leeway, but this guards against
+			// clock adjustments or future changes to the TTL calculation.
+			if exp, expOk := cachedClaims["exp"].(float64); expOk {
+				if time.Now().After(time.Unix(int64(exp), 0).Add(leeway)) {
+					slog.Debug("JWT Auth Policy: Cached token is expired, invalidating entry")
+					p.invalidateCachedToken(token)
+				} else {
+					slog.Debug("JWT Auth Policy: Token cache hit, skipping signature validation")
+					claims = cachedClaims
+				}
+			} else {
+				slog.Debug("JWT Auth Policy: Token cache hit, skipping signature validation")
+				claims = cachedClaims
+			}
+		}
+	}
+
+	if claims == nil {
+		claims, err = p.validateTokenWithSignature(token, unverifiedToken, keyManagers, userIssuers, validateIssuer,
+			allowedAlgorithms, leeway, jwksCacheTtl, jwksFetchTimeout, jwksFetchRetryCount, jwksFetchRetryInterval)
+		if err != nil {
+			slog.Debug("JWT Auth Policy: Token validation failed",
+				"error", err,
+			)
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("token validation failed: %v", err))
+		}
+
+		slog.Debug("JWT Auth Policy: Token signature validated successfully")
+
+		if tokenCacheEnabled {
+			p.setCachedToken(token, claims, tokenCacheTtl, leeway, tokenCacheMaxSize)
+			slog.Debug("JWT Auth Policy: Token cached",
+				"ttl", tokenCacheTtl,
+			)
+		}
+	}
 
 	if len(userAudiences) > 0 {
 		aud := parseAudience(claims["aud"])
@@ -1389,13 +1521,8 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		)
 		found := false
 		for _, userAud := range userAudiences {
-			for _, tokenAud := range aud {
-				if tokenAud == userAud {
-					found = true
-					break
-				}
-			}
-			if found {
+			if slices.Contains(aud, userAud) {
+				found = true
 				break
 			}
 		}
@@ -1415,14 +1542,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			"requiredScopes", userRequiredScopes,
 		)
 		for _, requiredScope := range userRequiredScopes {
-			found := false
-			for _, tokenScope := range scopes {
-				if tokenScope == requiredScope {
-					found = true
-					break
-				}
-			}
-			if !found {
+			if !slices.Contains(scopes, requiredScope) {
 				slog.Debug("JWT Auth Policy: Required scope not found",
 					"missingScope", requiredScope,
 					"tokenScopes", scopes,
@@ -1538,7 +1658,7 @@ func (p *JwtAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, s
 	case "minimal":
 		body = "Unauthorized"
 	default:
-		errResponse := map[string]interface{}{
+		errResponse := map[string]any{
 			"error":   "Unauthorized",
 			"message": errorMessage,
 		}

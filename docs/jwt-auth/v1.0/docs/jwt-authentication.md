@@ -13,6 +13,7 @@ The JWT Authentication policy validates JWT access tokens using one or more JWKS
 - Supports remote JWKS endpoints and local certificates
 - Configurable issuer, audience, scope, and claim validation
 - Claim-to-header mappings for downstream services
+- Token validation cache to skip repeated signature verification for the same token
 - Configurable JWKS cache and retry settings
 - Allowed signing algorithm allowlist
 - Authorization header scheme enforcement and clock skew tolerance
@@ -33,6 +34,9 @@ JWT Authentication requires two levels of configuration.
 | `jwksfetchtimeout` | string | No | `"5s"` | JWKS fetch timeout. |
 | `jwksfetchretrycount` | integer | No | `3` | JWKS fetch retry count. |
 | `jwksfetchretryinterval` | string | No | `"2s"` | JWKS fetch retry interval. |
+| `tokencacheenabled` | boolean | No | `true` | Cache validated token claims to skip repeated signature verification. Algorithm check and expiry re-validation still run on every cache hit. |
+| `tokencachettl` | string | No | `"5m"` | Maximum cache lifetime per token. The effective TTL is capped to the token's own `exp` claim so entries never outlive the token. |
+| `tokencachemaxsize` | integer | No | `15000` | Maximum number of cached tokens. When full, expired entries are swept first; if still full, the new entry is dropped. Set to `0` for unlimited. |
 | `allowedalgorithms` | array | No | `["RS256", "ES256"]` | Allowed JWT signing algorithms. |
 | `leeway` | string | No | `"30s"` | Clock skew allowance for exp/nbf. |
 | `authheaderscheme` | string | No | `"Bearer"` | Expected authorization scheme prefix. |
@@ -64,6 +68,9 @@ jwkscachettl = "5m"
 jwksfetchtimeout = "5s"
 jwksfetchretrycount = 3
 jwksfetchretryinterval = "2s"
+tokencacheenabled = true
+tokencachettl = "5m"
+tokencachemaxsize = 15000
 allowedalgorithms = ["RS256", "ES256"]
 leeway = "30s"
 authheaderscheme = "Bearer"
@@ -106,6 +113,22 @@ skipTlsVerify = false
 | `forwardToken` | boolean | No | If `true` (default), the JWT is forwarded to the upstream after successful validation. Set to `false` to strip the token header before proxying. |
 | `forwardedTokenHeader` | string | No | Header name used to forward the JWT to the upstream when `forwardToken` is `true`. Defaults to `x-forwarded-authorization`. If this differs from `headerName`, the original header is removed and the token is forwarded under this name instead. Has no effect when `forwardToken` is `false`. |
 
+
+#### Token Validation Cache
+
+When `tokencacheenabled` is `true` (the default), the gateway caches the validated claims of each unique token after its first successful verification. Subsequent requests carrying the same token return the cached claims directly, skipping the computationally expensive RSA signature verification and any remote JWKS network round-trip.
+
+**Security invariants preserved on every cache hit:**
+
+- **Algorithm check** — the token's signing algorithm is re-validated against `allowedalgorithms` on every request before the cache is consulted. Removing an algorithm from the allowlist takes effect immediately, even for tokens already in the cache.
+- **Expiry re-check** — the `exp` claim is re-evaluated on every cache hit as a defense-in-depth guard. A stale entry (e.g. caused by a clock adjustment) is evicted and the request falls back to full validation.
+- **Audience, scope, and required-claim checks** — these always run after the cache hit, so per-route policy constraints are always enforced.
+
+**Cache TTL:** Entries expire at `min(tokencachettl, token exp + leeway)`, so a cached entry is never valid longer than the token itself regardless of how large `tokencachettl` is set.
+
+**Cache eviction:** When the cache reaches `tokencachemaxsize`, expired entries are swept first. If the cache is still full after the sweep, the incoming entry is dropped silently (the request still succeeds via full validation; only future identical tokens lose the cache benefit).
+
+To disable the cache entirely — for example when tokens are short-lived and unique per-request, or when the deployment requires strict real-time revocation detection — set `tokencacheenabled = false`.
 
 **Note:**
 
@@ -315,3 +338,28 @@ spec:
             forwardToken: true
             forwardedTokenHeader: X-Backend-Authorization
 ```
+
+### Example 8: Token Cache Tuning
+
+The token validation cache is enabled by default and sized for up to 15 000 concurrent unique tokens. The example below shows how to tune the cache in `config.toml` for a deployment with a large number of active sessions or very short-lived tokens.
+
+**High-throughput deployment (many concurrent sessions):**
+
+```toml
+[policy_configurations.jwtauth_v1]
+# Keep the cache enabled but raise the cap to match the expected active session count.
+tokencacheenabled = true
+tokencachettl     = "10m"
+tokencachemaxsize = 50000
+```
+
+**Strict revocation semantics (disable cache):**
+
+When tokens can be revoked server-side and the deployment requires that revocations take effect within the next request, disable the token cache so every request performs a full signature verification.
+
+```toml
+[policy_configurations.jwtauth_v1]
+tokencacheenabled = false
+```
+
+> **Note:** Disabling the token cache increases CPU load proportionally to request throughput because RSA signature verification runs on every request. Consider adjusting `jwkscachettl` to ensure the JWKS keys are still cached to avoid a network round-trip on every request.

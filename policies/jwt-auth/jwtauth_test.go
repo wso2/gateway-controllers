@@ -35,6 +35,8 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1802,5 +1804,497 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 
 	if modifications.HeadersToSet["X-User-Role"] != "admin" {
 		t.Errorf("Expected X-User-Role='admin', got '%v'", modifications.HeadersToSet["X-User-Role"])
+	}
+}
+
+// ---- Token cache tests -------------------------------------------------------
+
+// newTestPolicy returns an isolated JwtAuthPolicy with empty caches.
+// Tests must use this instead of GetPolicy (which returns the shared singleton).
+func newTestPolicy() *JwtAuthPolicy {
+	return &JwtAuthPolicy{
+		cacheStore: make(map[string]*CachedJWKS),
+		cacheTTLs:  make(map[string]time.Time),
+		tokenCache: make(map[string]*CachedTokenEntry),
+		httpClient: &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+// createCountingJWKSServer wraps createJWKSServer with an atomic JWKS-hit counter.
+// Use the counter to verify how many times signature validation actually reached the JWKS endpoint.
+func createCountingJWKSServer(t *testing.T, publicKey *rsa.PublicKey, kid string) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	var count atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/jwks.json" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		count.Add(1)
+		nBytes := publicKey.N.Bytes()
+		nB64 := base64.RawURLEncoding.EncodeToString(nBytes)
+		eBytes := []byte{
+			byte((publicKey.E >> 24) & 0xFF),
+			byte((publicKey.E >> 16) & 0xFF),
+			byte((publicKey.E >> 8) & 0xFF),
+			byte(publicKey.E & 0xFF),
+		}
+		for len(eBytes) > 1 && eBytes[0] == 0 {
+			eBytes = eBytes[1:]
+		}
+		eB64 := base64.RawURLEncoding.EncodeToString(eBytes)
+		jwks := map[string]interface{}{
+			"keys": []map[string]interface{}{
+				{"kty": "RSA", "kid": kid, "use": "sig", "alg": "RS256", "n": nB64, "e": eB64},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(jwks); err != nil {
+			t.Logf("createCountingJWKSServer: encode error: %v", err)
+		}
+	}))
+	return server, &count
+}
+
+// cacheTestBaseParams returns a minimal-but-complete params map for token cache tests.
+// jwksCacheTtl defaults to 5 m; override to "0s" to disable JWKS caching and make
+// JWKS hit count equal to the number of full signature validations.
+func cacheTestBaseParams(jwksServerURL string) map[string]interface{} {
+	return map[string]interface{}{
+		"headerName":             "Authorization",
+		"authHeaderScheme":       "Bearer",
+		"allowedAlgorithms":      []interface{}{"RS256"},
+		"tokenCacheEnabled":      true,
+		"tokenCacheTtl":          "5m",
+		"tokenCacheMaxSize":      100,
+		"jwksCacheTtl":           "5m",
+		"jwksFetchTimeout":       "5s",
+		"jwksFetchRetryCount":    0,
+		"jwksFetchRetryInterval": "100ms",
+		"validateIssuer":         false,
+		"keyManagers": []interface{}{
+			map[string]interface{}{
+				"name": "test-km",
+				"jwks": map[string]interface{}{
+					"remote": map[string]interface{}{"uri": jwksServerURL + "/jwks.json"},
+				},
+			},
+		},
+	}
+}
+
+// TestTokenCache_CacheHit_SkipsSignatureValidation verifies that a second request with the
+// same token succeeds from cache even after the JWKS server is shut down, proving that the
+// signature validation step was skipped entirely.
+func TestTokenCache_CacheHit_SkipsSignatureValidation(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server, jwksHits := createCountingJWKSServer(t, publicKey, "test-kid")
+
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user1"})
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+
+	// First request: full validation, populates cache.
+	ctx1 := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	if action := p.OnRequestHeaders(context.Background(), ctx1, params); !ctx1.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("first request should succeed, got %T", action)
+	}
+	if jwksHits.Load() != 1 {
+		t.Fatalf("expected 1 JWKS fetch after first request, got %d", jwksHits.Load())
+	}
+
+	// Shut down JWKS server — subsequent requests must rely solely on the token cache.
+	server.Close()
+
+	ctx2 := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	action2 := p.OnRequestHeaders(context.Background(), ctx2, params)
+	if _, ok := action2.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("second request: expected cache hit success after server shutdown, got %T", action2)
+	}
+	if !ctx2.SharedContext.AuthContext.Authenticated {
+		t.Error("second request: expected Authenticated=true on cache hit")
+	}
+	if jwksHits.Load() != 1 {
+		t.Errorf("JWKS hit count should stay at 1 on cache hit, got %d", jwksHits.Load())
+	}
+}
+
+// TestTokenCache_Sequential_SameToken_UsesCache sends the same token multiple times in sequence
+// and verifies that only the first call performs signature validation (JWKS fetch).
+// JWKS caching is disabled so that JWKS hit count == signature validation count.
+func TestTokenCache_Sequential_SameToken_UsesCache(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server, jwksHits := createCountingJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user1"})
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+	params["jwksCacheTtl"] = "0s" // disable JWKS cache: JWKS hit == full validation
+
+	const calls = 5
+	for i := range calls {
+		ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+		action := p.OnRequestHeaders(context.Background(), ctx, params)
+		if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
+			t.Errorf("call %d: expected success, got %T", i+1, action)
+		}
+	}
+
+	// Only the first call should have hit the JWKS endpoint.
+	if jwksHits.Load() != 1 {
+		t.Errorf("expected 1 JWKS fetch (token cached after first call), got %d", jwksHits.Load())
+	}
+}
+
+// TestTokenCache_Disabled_DoesNotPopulateCache confirms the token is never stored when
+// tokenCacheEnabled=false.
+func TestTokenCache_Disabled_DoesNotPopulateCache(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server := createJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user1"})
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+	params["tokenCacheEnabled"] = false
+
+	ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	if action := p.OnRequestHeaders(context.Background(), ctx, params); !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected success, got %T", action)
+	}
+
+	p.tokenCacheMutex.RLock()
+	_, inCache := p.tokenCache[tokenCacheKey(token)]
+	p.tokenCacheMutex.RUnlock()
+	if inCache {
+		t.Error("token must not be stored when tokenCacheEnabled=false")
+	}
+}
+
+// TestTokenCache_Disabled_AlwaysValidates verifies that every request performs a full
+// signature validation when the token cache is disabled, by counting JWKS fetches.
+func TestTokenCache_Disabled_AlwaysValidates(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server, jwksHits := createCountingJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user1"})
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+	params["tokenCacheEnabled"] = false
+	params["jwksCacheTtl"] = "0s" // disable JWKS cache so each validation hits the server
+
+	const calls = 3
+	for range calls {
+		ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+		p.OnRequestHeaders(context.Background(), ctx, params)
+	}
+
+	if jwksHits.Load() != calls {
+		t.Errorf("expected %d JWKS fetches (no token cache, no JWKS cache), got %d", calls, jwksHits.Load())
+	}
+}
+
+// TestTokenCache_AlgorithmChange_RejectsOnCacheHit verifies that removing an algorithm from
+// allowedAlgorithms takes effect immediately, even for tokens already in the cache.
+// The algorithm check runs before cache lookup, so it cannot be bypassed.
+func TestTokenCache_AlgorithmChange_RejectsOnCacheHit(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server := createJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user1"})
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+	params["allowedAlgorithms"] = []interface{}{"RS256"}
+
+	// First call: RS256 allowed, token cached.
+	ctx1 := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	p.OnRequestHeaders(context.Background(), ctx1, params)
+	if !ctx1.SharedContext.AuthContext.Authenticated {
+		t.Fatal("first call should succeed with RS256 in allowedAlgorithms")
+	}
+
+	p.tokenCacheMutex.RLock()
+	_, inCache := p.tokenCache[tokenCacheKey(token)]
+	p.tokenCacheMutex.RUnlock()
+	if !inCache {
+		t.Fatal("token should be in cache after first successful call")
+	}
+
+	// Second call: RS256 removed — must be rejected before the cache is consulted.
+	params["allowedAlgorithms"] = []interface{}{"ES256"}
+	ctx2 := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	action2 := p.OnRequestHeaders(context.Background(), ctx2, params)
+
+	if _, ok := action2.(policy.ImmediateResponse); !ok {
+		t.Fatalf("expected ImmediateResponse after RS256 removed, got %T", action2)
+	}
+	if ctx2.SharedContext.AuthContext.Authenticated {
+		t.Error("expected Authenticated=false when algorithm is no longer allowed")
+	}
+}
+
+// TestTokenCache_ExpiredEntry_EvictedOnLookup inserts a cache entry whose ExpiresAt is in
+// the past and verifies it is evicted on the next lookup, causing full validation which
+// then also rejects the expired token.
+func TestTokenCache_ExpiredEntry_EvictedOnLookup(t *testing.T) {
+	privateKey, _ := generateTestKeys(t)
+
+	p := newTestPolicy()
+
+	pastExp := time.Now().Add(-2 * time.Minute)
+	token := createTestTokenWithExpiry(t, privateKey, map[string]interface{}{"sub": "user1"}, pastExp)
+
+	key := tokenCacheKey(token)
+	p.tokenCacheMutex.Lock()
+	p.tokenCache[key] = &CachedTokenEntry{
+		Claims:    jwt.MapClaims{"sub": "user1", "exp": float64(pastExp.Unix())},
+		ExpiresAt: time.Now().Add(-time.Second), // ExpiresAt already past
+	}
+	p.tokenCacheMutex.Unlock()
+
+	// JWKS URI is unreachable, but the exp check in validateTokenWithSignature fires
+	// before any JWKS fetch, so the request still fails with "token expired".
+	params := cacheTestBaseParams("http://127.0.0.1:19999")
+	params["leeway"] = "0s"
+
+	ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	action := p.OnRequestHeaders(context.Background(), ctx, params)
+
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("expected ImmediateResponse (expired token), got %T", action)
+	}
+
+	p.tokenCacheMutex.RLock()
+	_, stillPresent := p.tokenCache[key]
+	p.tokenCacheMutex.RUnlock()
+	if stillPresent {
+		t.Error("expired cache entry should have been evicted on lookup")
+	}
+}
+
+// TestTokenCache_DefenseInDepth_ExpiredClaimRejected simulates a clock-adjustment scenario:
+// the cache entry's ExpiresAt is still in the future, but the JWT exp claim itself has passed.
+// The defense-in-depth re-check inside OnRequestHeaders must catch this and invalidate the entry.
+func TestTokenCache_DefenseInDepth_ExpiredClaimRejected(t *testing.T) {
+	privateKey, _ := generateTestKeys(t)
+
+	p := newTestPolicy()
+
+	pastExp := time.Now().Add(-time.Minute)
+	token := createTestTokenWithExpiry(t, privateKey, map[string]interface{}{"sub": "user1"}, pastExp)
+
+	// ExpiresAt says "valid for another hour" but the JWT exp is 1 minute in the past.
+	key := tokenCacheKey(token)
+	p.tokenCacheMutex.Lock()
+	p.tokenCache[key] = &CachedTokenEntry{
+		Claims:    jwt.MapClaims{"sub": "user1", "exp": float64(pastExp.Unix())},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	p.tokenCacheMutex.Unlock()
+
+	params := cacheTestBaseParams("http://127.0.0.1:19999")
+	params["leeway"] = "0s"
+
+	ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	action := p.OnRequestHeaders(context.Background(), ctx, params)
+
+	if _, ok := action.(policy.ImmediateResponse); !ok {
+		t.Fatalf("expected ImmediateResponse (defense-in-depth exp check), got %T", action)
+	}
+	if ctx.SharedContext.AuthContext.Authenticated {
+		t.Error("expected Authenticated=false for stale cache entry caught by defense-in-depth")
+	}
+
+	p.tokenCacheMutex.RLock()
+	_, stillPresent := p.tokenCache[key]
+	p.tokenCacheMutex.RUnlock()
+	if stillPresent {
+		t.Error("stale cache entry should have been evicted by the defense-in-depth exp check")
+	}
+}
+
+// TestTokenCache_TTL_BoundedByTokenExp verifies that the cache entry expiry never exceeds
+// the token's own exp claim, regardless of how large tokenCacheTtl is configured.
+func TestTokenCache_TTL_BoundedByTokenExp(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server := createJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	shortExp := time.Now().Add(45 * time.Second)
+	token := createTestTokenWithExpiry(t, privateKey, map[string]interface{}{"sub": "user1"}, shortExp)
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+	params["tokenCacheTtl"] = "1h" // much longer than the token's exp
+	params["leeway"] = "0s"        // no leeway so the boundary is exactly shortExp
+
+	ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+	if action := p.OnRequestHeaders(context.Background(), ctx, params); !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected success, got %T", action)
+	}
+
+	p.tokenCacheMutex.RLock()
+	entry, ok := p.tokenCache[tokenCacheKey(token)]
+	p.tokenCacheMutex.RUnlock()
+	if !ok {
+		t.Fatal("token should be in cache")
+	}
+
+	const tolerance = 5 * time.Second
+	if entry.ExpiresAt.After(shortExp.Add(tolerance)) {
+		t.Errorf("cache entry expiry %v exceeds token exp %v (tolerance %v)",
+			entry.ExpiresAt, shortExp, tolerance)
+	}
+}
+
+// TestTokenCache_MaxSize_DropsEntryWhenFull verifies that when the cache is at capacity
+// with all live entries, a new entry is dropped rather than evicting live ones.
+func TestTokenCache_MaxSize_DropsEntryWhenFull(t *testing.T) {
+	privateKey, _ := generateTestKeys(t)
+
+	p := newTestPolicy()
+	const maxSize = 5
+
+	for i := range maxSize {
+		p.tokenCache[fmt.Sprintf("live-key-%d", i)] = &CachedTokenEntry{
+			Claims:    jwt.MapClaims{"sub": fmt.Sprintf("user%d", i)},
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+	}
+
+	newToken := createTestToken(t, privateKey, map[string]interface{}{"sub": "overflow"})
+	p.setCachedToken(
+		newToken,
+		jwt.MapClaims{"sub": "overflow", "exp": float64(time.Now().Add(time.Hour).Unix())},
+		time.Hour, 0, maxSize,
+	)
+
+	p.tokenCacheMutex.RLock()
+	_, present := p.tokenCache[tokenCacheKey(newToken)]
+	size := len(p.tokenCache)
+	p.tokenCacheMutex.RUnlock()
+
+	if present {
+		t.Error("new entry should be dropped when cache is full with live entries")
+	}
+	if size != maxSize {
+		t.Errorf("cache size should remain %d, got %d", maxSize, size)
+	}
+}
+
+// TestTokenCache_MaxSize_EvictsExpiredBeforeDropping verifies that when the cache is at
+// capacity but holds expired entries, those are swept first to make room for the new entry.
+func TestTokenCache_MaxSize_EvictsExpiredBeforeDropping(t *testing.T) {
+	privateKey, _ := generateTestKeys(t)
+
+	p := newTestPolicy()
+	const maxSize = 5
+
+	for i := range maxSize {
+		p.tokenCache[fmt.Sprintf("expired-key-%d", i)] = &CachedTokenEntry{
+			Claims:    jwt.MapClaims{"sub": fmt.Sprintf("user%d", i)},
+			ExpiresAt: time.Now().Add(-time.Second), // already expired
+		}
+	}
+
+	newToken := createTestToken(t, privateKey, map[string]interface{}{"sub": "new-user"})
+	p.setCachedToken(
+		newToken,
+		jwt.MapClaims{"sub": "new-user", "exp": float64(time.Now().Add(time.Hour).Unix())},
+		time.Hour, 0, maxSize,
+	)
+
+	p.tokenCacheMutex.RLock()
+	_, present := p.tokenCache[tokenCacheKey(newToken)]
+	p.tokenCacheMutex.RUnlock()
+	if !present {
+		t.Error("new entry should be stored after expired entries are swept")
+	}
+}
+
+// TestTokenCache_DifferentTokens_SeparateEntries verifies that distinct tokens produce
+// separate cache keys and are stored independently.
+func TestTokenCache_DifferentTokens_SeparateEntries(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server := createJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	tokenAlice := createTestToken(t, privateKey, map[string]interface{}{"sub": "alice"})
+	tokenBob := createTestToken(t, privateKey, map[string]interface{}{"sub": "bob"})
+
+	if tokenCacheKey(tokenAlice) == tokenCacheKey(tokenBob) {
+		t.Fatal("distinct tokens must produce distinct cache keys")
+	}
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+
+	for _, tok := range []string{tokenAlice, tokenBob} {
+		ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + tok}})
+		p.OnRequestHeaders(context.Background(), ctx, params)
+		if !ctx.SharedContext.AuthContext.Authenticated {
+			t.Errorf("token for %s should authenticate", tok[:20])
+		}
+	}
+
+	p.tokenCacheMutex.RLock()
+	_, hasAlice := p.tokenCache[tokenCacheKey(tokenAlice)]
+	_, hasBob := p.tokenCache[tokenCacheKey(tokenBob)]
+	p.tokenCacheMutex.RUnlock()
+
+	if !hasAlice {
+		t.Error("alice's token should be in cache")
+	}
+	if !hasBob {
+		t.Error("bob's token should be in cache")
+	}
+}
+
+// TestTokenCache_Concurrent_SameToken launches many goroutines simultaneously all sending
+// the same token and verifies there are no data races, no authentication failures, and the
+// token ends up in the cache.
+func TestTokenCache_Concurrent_SameToken(t *testing.T) {
+	privateKey, publicKey := generateTestKeys(t)
+	server := createJWKSServer(t, publicKey, "test-kid")
+	defer server.Close()
+
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user-concurrent"})
+
+	p := newTestPolicy()
+	params := cacheTestBaseParams(server.URL)
+
+	const goroutines = 30
+	var wg sync.WaitGroup
+	var failCount atomic.Int64
+
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := createMockRequestHeaderContext(map[string][]string{"authorization": {"Bearer " + token}})
+			if _, ok := p.OnRequestHeaders(context.Background(), ctx, params).(policy.UpstreamRequestHeaderModifications); !ok {
+				failCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := failCount.Load(); n > 0 {
+		t.Errorf("%d/%d concurrent requests failed", n, goroutines)
+	}
+
+	p.tokenCacheMutex.RLock()
+	_, inCache := p.tokenCache[tokenCacheKey(token)]
+	p.tokenCacheMutex.RUnlock()
+	if !inCache {
+		t.Error("token should be in cache after all concurrent requests complete")
 	}
 }
