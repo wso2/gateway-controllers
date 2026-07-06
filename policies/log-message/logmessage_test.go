@@ -133,9 +133,8 @@ func TestParseFlowConfig_ValidRequestConfig(t *testing.T) {
 
 	cfg := p.parseFlowConfig(map[string]interface{}{
 		"request": map[string]interface{}{
-			"payload":        true,
-			"headers":        true,
-			"excludeHeaders": toInterfaceSlice([]string{"Authorization", " X-API-Key "}),
+			"payload": true,
+			"headers": true,
 		},
 	}, "request")
 
@@ -145,12 +144,6 @@ func TestParseFlowConfig_ValidRequestConfig(t *testing.T) {
 	if !cfg.logHeaders {
 		t.Fatalf("expected logHeaders to be true")
 	}
-	if _, ok := cfg.excludedHeaders["authorization"]; !ok {
-		t.Fatalf("expected authorization in excluded headers")
-	}
-	if _, ok := cfg.excludedHeaders["x-api-key"]; !ok {
-		t.Fatalf("expected x-api-key in excluded headers")
-	}
 }
 
 func TestParseFlowConfig_InvalidTypesFallbackToDefaults(t *testing.T) {
@@ -159,60 +152,23 @@ func TestParseFlowConfig_InvalidTypesFallbackToDefaults(t *testing.T) {
 	cfg := p.parseFlowConfig(map[string]interface{}{
 		"request": "invalid",
 	}, "request")
-	if cfg.logPayload || cfg.logHeaders || len(cfg.excludedHeaders) != 0 {
+	if cfg.logPayload || cfg.logHeaders {
 		t.Fatalf("expected default config for invalid flow type, got %+v", cfg)
 	}
 
 	cfg = p.parseFlowConfig(map[string]interface{}{
 		"request": map[string]interface{}{
-			"payload":        "true",
-			"headers":        1,
-			"excludeHeaders": "Authorization",
+			"payload": "true",
+			"headers": 1,
 		},
 	}, "request")
-	if cfg.logPayload || cfg.logHeaders || len(cfg.excludedHeaders) != 0 {
+	if cfg.logPayload || cfg.logHeaders {
 		t.Fatalf("expected default values for invalid fields, got %+v", cfg)
 	}
 }
 
-func TestParseExcludedHeaders(t *testing.T) {
-	p := &LogMessagePolicy{}
 
-	t.Run("from interface slice", func(t *testing.T) {
-		result := p.parseExcludedHeaders([]interface{}{"Authorization", " x-api-key ", "", 7})
-		if len(result) != 2 {
-			t.Fatalf("expected 2 excluded headers, got %d", len(result))
-		}
-		if _, ok := result["authorization"]; !ok {
-			t.Fatalf("expected authorization to be excluded")
-		}
-		if _, ok := result["x-api-key"]; !ok {
-			t.Fatalf("expected x-api-key to be excluded")
-		}
-	})
-
-	t.Run("from string slice", func(t *testing.T) {
-		result := p.parseExcludedHeaders([]string{"Set-Cookie", " X-Token "})
-		if len(result) != 2 {
-			t.Fatalf("expected 2 excluded headers, got %d", len(result))
-		}
-		if _, ok := result["set-cookie"]; !ok {
-			t.Fatalf("expected set-cookie to be excluded")
-		}
-		if _, ok := result["x-token"]; !ok {
-			t.Fatalf("expected x-token to be excluded")
-		}
-	})
-
-	t.Run("invalid type", func(t *testing.T) {
-		result := p.parseExcludedHeaders("Authorization")
-		if len(result) != 0 {
-			t.Fatalf("expected empty result for invalid type, got %d", len(result))
-		}
-	})
-}
-
-func TestBuildHeadersMapV2_MasksAuthorizationAndExcludes(t *testing.T) {
+func TestBuildHeadersMapV2_MasksAuthorization(t *testing.T) {
 	p := &LogMessagePolicy{}
 	headers := createTestHeadersMulti(map[string][]string{
 		"Content-Type":  {"application/json"},
@@ -221,7 +177,7 @@ func TestBuildHeadersMapV2_MasksAuthorizationAndExcludes(t *testing.T) {
 		"X-Multi":       {"one", "two"},
 	})
 
-	result := p.buildHeadersMap(headers, map[string]struct{}{"x-api-key": {}})
+	result := p.buildHeadersMap(headers)
 
 	authValue, ok := getHeaderValue(result, "authorization")
 	if !ok {
@@ -231,8 +187,8 @@ func TestBuildHeadersMapV2_MasksAuthorizationAndExcludes(t *testing.T) {
 		t.Fatalf("expected authorization to be masked, got %v", authValue)
 	}
 
-	if _, ok := getHeaderValue(result, "x-api-key"); ok {
-		t.Fatalf("expected x-api-key to be excluded")
+	if _, ok := getHeaderValue(result, "x-api-key"); !ok {
+		t.Fatalf("expected x-api-key to be present (exclusion is via fields.exclude dotted paths)")
 	}
 
 	multiValue, ok := getHeaderValue(result, "x-multi")
@@ -250,7 +206,7 @@ func TestBuildHeadersMapV2_MasksAuthorizationAndExcludes(t *testing.T) {
 
 func TestBuildHeadersMapV2_NilHeaders(t *testing.T) {
 	p := &LogMessagePolicy{}
-	result := p.buildHeadersMap(nil, map[string]struct{}{})
+	result := p.buildHeadersMap(nil)
 	if len(result) != 0 {
 		t.Fatalf("expected empty map for nil headers, got %v", result)
 	}
@@ -320,8 +276,7 @@ func TestOnRequestHeaders_LogsHeaders(t *testing.T) {
 	records := captureLogRecords(t, func() {
 		result := p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{
 			"request": map[string]interface{}{
-				"headers":        true,
-				"excludeHeaders": toInterfaceSlice([]string{"x-api-key"}),
+				"headers": true,
 			},
 		})
 		if _, ok := result.(policy.UpstreamRequestHeaderModifications); !ok {
@@ -347,9 +302,6 @@ func TestOnRequestHeaders_LogsHeaders(t *testing.T) {
 	auth, ok := getHeaderValue(record.Headers, "authorization")
 	if !ok || auth != "***" {
 		t.Fatalf("expected masked authorization header, got %v", auth)
-	}
-	if _, ok := getHeaderValue(record.Headers, "x-api-key"); ok {
-		t.Fatalf("expected x-api-key to be excluded")
 	}
 	if traceValue, ok := getHeaderValue(record.Headers, "x-trace-header"); !ok || traceValue != "trace-abc" {
 		t.Fatalf("expected x-trace-header to be logged, got %v", traceValue)
@@ -495,8 +447,7 @@ func TestOnResponseHeaders_LogsHeaders(t *testing.T) {
 	records := captureLogRecords(t, func() {
 		result := p.OnResponseHeaders(context.Background(), ctx, map[string]interface{}{
 			"response": map[string]interface{}{
-				"headers":        true,
-				"excludeHeaders": toInterfaceSlice([]string{"set-cookie"}),
+				"headers": true,
 			},
 		})
 		if _, ok := result.(policy.DownstreamResponseHeaderModifications); !ok {
@@ -519,9 +470,6 @@ func TestOnResponseHeaders_LogsHeaders(t *testing.T) {
 		t.Fatalf("expected no payload in header phase log, got %q", record.Payload)
 	}
 
-	if _, ok := getHeaderValue(record.Headers, "set-cookie"); ok {
-		t.Fatalf("expected set-cookie to be excluded")
-	}
 	if token, ok := getHeaderValue(record.Headers, "x-internal-token"); !ok || token != "token-1" {
 		t.Fatalf("expected x-internal-token to be logged, got %v", token)
 	}
@@ -647,5 +595,360 @@ func TestOnResponseBody_LogsWithMissingRequestID(t *testing.T) {
 	}
 	if records[0].RequestID != ErrMsgMissingReqID {
 		t.Fatalf("expected fallback request id %s, got %s", ErrMsgMissingReqID, records[0].RequestID)
+	}
+}
+
+// ─── Access-log destination (per-API traffic-logging signal) ──────────────────
+
+// newAccessLogPolicy builds a log-message instance in traffic-logging mode via the
+// factory, asserting the enableTrafficLogging flag was parsed.
+func newAccessLogPolicy(t *testing.T) *LogMessagePolicy {
+	t.Helper()
+	inst, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		FieldNameEnableTrafficLogging: true,
+	})
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+	p, ok := inst.(*LogMessagePolicy)
+	if !ok {
+		t.Fatalf("expected *LogMessagePolicy, got %T", inst)
+	}
+	if !p.trafficLogging {
+		t.Fatalf("expected traffic-logging mode instance")
+	}
+	return p
+}
+
+// stampMarker runs OnRequestHeaders in traffic-logging mode and returns the parsed marker.
+func stampMarker(t *testing.T, p *LogMessagePolicy, params map[string]interface{}) trafficLogDirective {
+	t.Helper()
+	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{}, params)
+	mods, ok := action.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+	raw, ok := mods.AnalyticsMetadata[trafficLogMetadataKey]
+	if !ok {
+		t.Fatalf("expected %q in analytics metadata, got %v", trafficLogMetadataKey, mods.AnalyticsMetadata)
+	}
+	marker, ok := raw.(string)
+	if !ok {
+		t.Fatalf("expected marker to be a JSON string, got %T", raw)
+	}
+	var dir trafficLogDirective
+	if err := json.Unmarshal([]byte(marker), &dir); err != nil {
+		t.Fatalf("marker is not valid JSON: %v (%q)", err, marker)
+	}
+	return dir
+}
+
+func TestGetPolicy_EnableTrafficLoggingParsing(t *testing.T) {
+	cases := []struct {
+		name       string
+		params     map[string]interface{}
+		wantAccess bool
+	}{
+		{"default (absent)", map[string]interface{}{}, false},
+		{"explicit false", map[string]interface{}{FieldNameEnableTrafficLogging: false}, false},
+		{"explicit true", map[string]interface{}{FieldNameEnableTrafficLogging: true}, true},
+		{"non-bool ignored", map[string]interface{}{FieldNameEnableTrafficLogging: "true"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, err := GetPolicy(policy.PolicyMetadata{}, tc.params)
+			if err != nil {
+				t.Fatalf("GetPolicy failed: %v", err)
+			}
+			p := inst.(*LogMessagePolicy)
+			if p.trafficLogging != tc.wantAccess {
+				t.Fatalf("trafficLogging = %v, want %v", p.trafficLogging, tc.wantAccess)
+			}
+		})
+	}
+}
+
+func TestMode_AccessLog(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	got := p.Mode()
+	want := policy.ProcessingMode{
+		RequestHeaderMode:  policy.HeaderModeProcess,
+		RequestBodyMode:    policy.BodyModeSkip,
+		ResponseHeaderMode: policy.HeaderModeSkip,
+		ResponseBodyMode:   policy.BodyModeSkip,
+	}
+	if got != want {
+		t.Fatalf("access-log mode: got %+v, want %+v", got, want)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_StampsMarkerAndDoesNotLogInline(t *testing.T) {
+	p := newAccessLogPolicy(t)
+
+	var dir trafficLogDirective
+	records := captureLogRecords(t, func() {
+		dir = stampMarker(t, p, map[string]interface{}{
+			"request": map[string]interface{}{
+				"payload": false,
+				"headers": true,
+			},
+			"response": map[string]interface{}{
+				"payload": true,
+			},
+		})
+	})
+
+	// Access-log mode must not emit any inline slog line.
+	if len(records) != 0 {
+		t.Fatalf("expected no inline logs in access-log mode, got %d", len(records))
+	}
+
+	if dir.Request == nil || dir.Request.Payload || !dir.Request.Headers {
+		t.Fatalf("unexpected request directive: %+v", dir.Request)
+	}
+	if dir.Response == nil || !dir.Response.Payload || dir.Response.Headers {
+		t.Fatalf("unexpected response directive: %+v", dir.Response)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_RequestOnlyOmitsResponse(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		"request": map[string]interface{}{"headers": true},
+	})
+	if dir.Request == nil || !dir.Request.Headers {
+		t.Fatalf("expected request directive, got %+v", dir.Request)
+	}
+	if dir.Response != nil {
+		t.Fatalf("expected response omitted, got %+v", dir.Response)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_EmptyParamsStillStamps(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{})
+	if dir.Request != nil || dir.Response != nil {
+		t.Fatalf("expected no flows for empty params, got %+v", dir)
+	}
+	if dir.Fields != nil {
+		t.Fatalf("expected no fields selection for empty params, got %+v", dir.Fields)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_FieldsOnly(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		"fields": map[string]interface{}{
+			"only": []interface{}{"latencies", " target ", "properties.requestHeaders", "", 7},
+		},
+	})
+	if dir.Fields == nil {
+		t.Fatalf("expected fields selection in marker")
+	}
+	want := []string{"latencies", "target", "properties.requestHeaders"}
+	if len(dir.Fields.Only) != len(want) {
+		t.Fatalf("expected only %v, got %v", want, dir.Fields.Only)
+	}
+	for i, n := range want {
+		if dir.Fields.Only[i] != n {
+			t.Fatalf("only[%d] = %q, want %q (full: %v)", i, dir.Fields.Only[i], n, dir.Fields.Only)
+		}
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_FieldsExclude(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		"fields": map[string]interface{}{
+			"exclude": []interface{}{"properties.requestBody", "properties.responseBody"},
+		},
+	})
+	if dir.Fields == nil {
+		t.Fatalf("expected fields selection in marker")
+	}
+	want := []string{"properties.requestBody", "properties.responseBody"}
+	if len(dir.Fields.Exclude) != len(want) {
+		t.Fatalf("expected exclude %v, got %v", want, dir.Fields.Exclude)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_FieldsEmptyOmitted(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		"fields": map[string]interface{}{"only": []interface{}{}, "exclude": []interface{}{}},
+	})
+	if dir.Fields != nil {
+		t.Fatalf("expected fields omitted when both empty, got %+v", dir.Fields)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_MaskedHeadersInMarker(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		FieldNameMaskedHeaders: toInterfaceSlice([]string{"X-Token", " Authorization "}),
+	})
+	if len(dir.MaskedHeaders) != 2 {
+		t.Fatalf("expected 2 masked headers in marker, got %v", dir.MaskedHeaders)
+	}
+	// Values must be normalized to lower-case.
+	if dir.MaskedHeaders[0] != "x-token" || dir.MaskedHeaders[1] != "authorization" {
+		t.Fatalf("expected normalized lower-case names, got %v", dir.MaskedHeaders)
+	}
+}
+
+func TestOnRequestHeaders_AccessLog_MaskedHeadersAbsentOmitted(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{})
+	if dir.MaskedHeaders != nil {
+		t.Fatalf("expected maskedHeaders absent when not configured, got %v", dir.MaskedHeaders)
+	}
+}
+
+// ─── Labels ($ctx resolution) ─────────────────────────────────────────────────
+
+// ctxWithAuth builds a request-header context with headers and an authenticated
+// AuthContext for exercising $ctx resolution.
+func ctxWithAuth() *policy.RequestHeaderContext {
+	return &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{
+			APIName:       "PetStore",
+			APIVersion:    "v1.0.0",
+			APIKind:       policy.APIKindRestApi,
+			APIContext:    "/petstore",
+			OperationPath: "/pets/{id}",
+			ProjectID:     "proj-7",
+			RequestID:     "req-abc",
+			AuthContext: &policy.AuthContext{
+				Authenticated: true,
+				Authorized:    true,
+				AuthType:      "jwt",
+				Subject:       "alice",
+				Issuer:        "https://idp.example",
+				CredentialID:  "client-123",
+				TokenId:       "jti-42",
+				Audience:      []string{"aud1", "aud2"},
+				Scopes:        map[string]bool{"write": true, "read": true},
+				Properties:    map[string]string{"tenant": "acme"},
+			},
+		},
+		Headers:   createTestHeaders(map[string]string{"x-tenant-id": "t-9"}),
+		Path:      "/pets",
+		Method:    "GET",
+		Authority: "api.example.com",
+		Scheme:    "https",
+		Vhost:     "default",
+	}
+}
+
+func TestResolveContextValue(t *testing.T) {
+	reqCtx := ctxWithAuth()
+	cases := []struct {
+		name   string
+		in     string
+		want   string
+		wantOK bool
+	}{
+		{"literal passthrough", "plain-value", "plain-value", true},
+		{"request.method", "$ctx:request.method", "GET", true},
+		{"request.path", "$ctx:request.path", "/pets", true},
+		{"request.header present", "$ctx:request.header.x-tenant-id", "t-9", true},
+		{"request.header case-insensitive", "$ctx:request.header.X-Tenant-Id", "t-9", true},
+		{"request.header missing", "$ctx:request.header.x-absent", "", false},
+		{"request.authority", "$ctx:request.authority", "api.example.com", true},
+		{"request.scheme", "$ctx:request.scheme", "https", true},
+		{"request.vhost", "$ctx:request.vhost", "default", true},
+		{"request.id", "$ctx:request.id", "req-abc", true},
+		{"api.name", "$ctx:api.name", "PetStore", true},
+		{"api.version", "$ctx:api.version", "v1.0.0", true},
+		{"api.context", "$ctx:api.context", "/petstore", true},
+		{"api.kind", "$ctx:api.kind", "RestApi", true},
+		{"api.operation_path", "$ctx:api.operation_path", "/pets/{id}", true},
+		{"project.id", "$ctx:project.id", "proj-7", true},
+		{"auth.subject", "$ctx:auth.subject", "alice", true},
+		{"auth.type", "$ctx:auth.type", "jwt", true},
+		{"auth.credential_id", "$ctx:auth.credential_id", "client-123", true},
+		{"auth.token_id", "$ctx:auth.token_id", "jti-42", true},
+		{"auth.issuer", "$ctx:auth.issuer", "https://idp.example", true},
+		{"auth.authenticated", "$ctx:auth.authenticated", "true", true},
+		{"auth.audience joined", "$ctx:auth.audience", "aud1,aud2", true},
+		{"auth.scopes sorted", "$ctx:auth.scopes", "read write", true},
+		{"auth.property case-sensitive", "$ctx:auth.property.tenant", "acme", true},
+		{"auth.property missing", "$ctx:auth.property.nope", "", false},
+		{"unknown var", "$ctx:does.not.exist", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := resolveContextValue(tc.in, reqCtx)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("resolveContextValue(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestResolveContextValue_NilAuthSkipped(t *testing.T) {
+	reqCtx := &policy.RequestHeaderContext{SharedContext: &policy.SharedContext{}}
+	if _, ok := resolveContextValue("$ctx:auth.subject", reqCtx); ok {
+		t.Fatalf("expected auth.* to be unresolved when AuthContext is nil")
+	}
+}
+
+func TestStampMarker_Labels(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	action := p.OnRequestHeaders(context.Background(), ctxWithAuth(), map[string]interface{}{
+		"request": map[string]interface{}{"headers": true},
+		"labels": map[string]interface{}{
+			"who":        "$ctx:auth.subject",          // resolves
+			"tenant":     "$ctx:auth.property.tenant",  // resolves (case-sensitive key)
+			"authType":   "$ctx:auth.type",             // resolves
+			"env":        "prod",                       // literal
+			"missing":    "$ctx:request.header.x-none", // unresolved -> skipped
+			"retryCount": 3,                            // non-string literal passthrough
+		},
+	})
+	mods := action.(policy.UpstreamRequestHeaderModifications)
+	var dir trafficLogDirective
+	if err := json.Unmarshal([]byte(mods.AnalyticsMetadata[trafficLogMetadataKey].(string)), &dir); err != nil {
+		t.Fatalf("marker not valid JSON: %v", err)
+	}
+
+	if dir.Labels["who"] != "alice" {
+		t.Errorf("who = %v, want alice", dir.Labels["who"])
+	}
+	if dir.Labels["tenant"] != "acme" {
+		t.Errorf("tenant = %v, want acme", dir.Labels["tenant"])
+	}
+	if dir.Labels["authType"] != "jwt" {
+		t.Errorf("authType = %v, want jwt", dir.Labels["authType"])
+	}
+	if dir.Labels["env"] != "prod" {
+		t.Errorf("env = %v, want prod", dir.Labels["env"])
+	}
+	if _, present := dir.Labels["missing"]; present {
+		t.Errorf("unresolved $ctx ref should be skipped, got %v", dir.Labels["missing"])
+	}
+	// JSON round-trips numbers as float64.
+	if v, ok := dir.Labels["retryCount"].(float64); !ok || v != 3 {
+		t.Errorf("retryCount = %v (%T), want 3", dir.Labels["retryCount"], dir.Labels["retryCount"])
+	}
+}
+
+func TestStampMarker_LabelsOmittedWhenEmpty(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	// No labels param at all.
+	dir := stampMarker(t, p, map[string]interface{}{"request": map[string]interface{}{"headers": true}})
+	if dir.Labels != nil {
+		t.Fatalf("expected properties omitted, got %+v", dir.Labels)
+	}
+	// All references unresolvable -> nothing survives -> omitted.
+	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{SharedContext: &policy.SharedContext{}}, map[string]interface{}{
+		"request": map[string]interface{}{"headers": true},
+		"labels":  map[string]interface{}{"who": "$ctx:auth.subject"},
+	})
+	mods := action.(policy.UpstreamRequestHeaderModifications)
+	var dir2 trafficLogDirective
+	_ = json.Unmarshal([]byte(mods.AnalyticsMetadata[trafficLogMetadataKey].(string)), &dir2)
+	if dir2.Labels != nil {
+		t.Fatalf("expected properties omitted when nothing resolves, got %+v", dir2.Labels)
 	}
 }

@@ -1,12 +1,98 @@
 name: log-message
-version: v1.0.2
+version: v1.1.0
 description: |
   Log request and response payloads and headers for observability without changing traffic.
+  By default logs inline in real time during mediation via the gateway logs, including
+  per-chunk streaming. Set enableTrafficLogging: true to instead opt the API into stdout
+  traffic logging, where the traffic-logging publisher emits a single JSON line per request
+  enriched with access-log-derived latencies (requires traffic logging to be enabled).
 
 parameters:
   type: object
   additionalProperties: false
   properties:
+    enableTrafficLogging:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      default: false
+      description: >-
+        When true, opt this API into stdout traffic logging: the traffic-logging publisher
+        emits a single enriched JSON line (with latencies) per request after the response
+        completes; it requires [traffic_logging] to be enabled, and its request/response
+        parameters filter/mask what the collector captured (they cannot enable capture the
+        collector did not perform). When false (default), log inline in real time during
+        mediation via the gateway logs, including per-chunk streaming.
+    
+    labels:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: >-
+        (enableTrafficLogging only) Extra key→value pairs attached to every emitted log
+        line under "labels" — useful for filtering and querying logs by environment,
+        tenant, or any request attribute. Example:
+        `request_id: "$ctx:request.id"`, `env: production`.
+        String values prefixed with "$ctx:" are resolved from the request context at
+        request time. Available references:
+        request.path, request.method, request.authority, request.scheme, request.vhost,
+        request.id, request.header.<name>; api.id, api.name, api.version, api.context,
+        api.kind, api.operation_path; project.id; and (require an earlier auth policy)
+        auth.subject, auth.type, auth.issuer, auth.credential_id, auth.token_id,
+        auth.authenticated, auth.authorized, auth.audience, auth.scopes, auth.property.<claim>.
+        Non-resolvable references are skipped; non-string values are logged as-is.
+      default: {}
+      additionalProperties: {}
+
+    maskedHeaders:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        (enableTrafficLogging only) Header names (case-insensitive) whose values are
+        redacted with "****" in the emitted log line. Merged with the global
+        masked_headers list from config.toml — either source is sufficient to mask a header.
+      items:
+        type: string
+        minLength: 1
+        maxLength: 256
+      uniqueItems: true
+      default: []
+
+    fields:
+      type: object
+      x-wso2-policy-advanced-param: true
+      additionalProperties: false
+      description: >-
+        (enableTrafficLogging only) Control which fields appear in the emitted line.
+        When set, this is authoritative over field presence — the request/response
+        payload/headers toggles are ignored (global header masking still applies).
+        Names are top-level keys (e.g. "latencies", "target", "requestHeaders", "labels")
+        or dotted sub-key paths within map fields (e.g. "requestHeaders.authorization",
+        "labels.env") to include/exclude individual headers. Set either "only" or "exclude",
+        not both.
+      properties:
+        only:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: >-
+            Keep exactly these fields and drop everything else. Use when you want
+            a minimal log line with specific fields.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          uniqueItems: true
+          default: []
+        exclude:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: >-
+            Drop these fields and keep everything else. Use when you want the full
+            log line minus a few noisy or sensitive fields.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          uniqueItems: true
+          default: []
     request:
       type: object
       x-wso2-policy-advanced-param: false
@@ -23,16 +109,6 @@ parameters:
           x-wso2-policy-advanced-param: false
           default: false
           description: Log request headers.
-        excludeHeaders:
-          type: array
-          x-wso2-policy-advanced-param: true
-          description: Exclude request headers from logs.
-          items:
-            type: string
-            minLength: 1
-            maxLength: 256
-          uniqueItems: true
-          default: []
     response:
       type: object
       x-wso2-policy-advanced-param: false
@@ -49,16 +125,6 @@ parameters:
           x-wso2-policy-advanced-param: false
           default: false
           description: Log response headers.
-        excludeHeaders:
-          type: array
-          x-wso2-policy-advanced-param: true
-          description: Exclude response headers from logs.
-          items:
-            type: string
-            minLength: 1
-            maxLength: 256
-          uniqueItems: true
-          default: []
   anyOf:
     - required: [ request ]
     - required: [ response ]

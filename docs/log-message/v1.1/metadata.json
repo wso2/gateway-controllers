@@ -1,0 +1,14 @@
+{
+  "name": "log-message",
+  "displayName": "Log Message",
+  "version": "1.1",
+  "provider": "WSO2",
+  "categories": [
+    "Logging",
+    "Analytics & Monitoring",
+    "MCP",
+    "WebSub",
+    "WebBroker"
+  ],
+  "description": "This policy provides the capability to log the payload and headers of a request/response.\nSupports two destinations: \"inline\" (default) logs in real time during mediation, including per-chunk streaming; \"access-log\" opts the API into stdout traffic logging, where the traffic-logging publisher emits a single JSON line per request enriched with access-log-derived latencies (requires the collector and traffic logging to be enabled).\nSupports separate configuration for request and response flows."
+}

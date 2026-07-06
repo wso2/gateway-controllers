@@ -21,6 +21,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"sort"
+	"strconv"
 	"strings"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -34,28 +36,112 @@ const (
 	MediationFlowRequest  = "REQUEST"
 	MediationFlowResponse = "RESPONSE"
 	MediationFlowFault    = "FAULT"
+
+	// FieldNameEnableTrafficLogging is the boolean parameter selecting the logging
+	// mode. When false (default), the policy logs inline during mediation via slog,
+	// in real time and including per-chunk streaming — with no dependency on the
+	// gateway collector or analytics pipeline. When true, it instead opts the API
+	// into stdout traffic logging: the policy stamps a marker and the gateway's
+	// traffic-logging publisher emits a single JSON line on the Envoy access-log
+	// side, enriched with access-log-derived latencies. Requires [traffic_logging]
+	// to be enabled.
+	FieldNameEnableTrafficLogging = "enableTrafficLogging"
+
+	// FieldNameLabels is the object parameter holding extra key→value pairs to add
+	// to the emitted traffic-log line under "labels" (traffic-logging mode only).
+	// String values prefixed with ctxPrefix are resolved from the request context
+	// at request time; other values are passed through as-is.
+	FieldNameLabels = "labels"
+
+	// FieldNameMaskedHeaders is the array parameter listing additional header names
+	// (case-insensitive) whose values should be redacted in the emitted log line.
+	// These are merged with the global masked_headers list from config.toml; either
+	// source alone is sufficient.
+	FieldNameMaskedHeaders = "maskedHeaders"
+
+	// ctxPrefix marks a customProperties value as a context-variable reference to be
+	// resolved at request time (mirrors the backend-jwt policy's customClaims).
+	ctxPrefix = "$ctx:"
+
+	// trafficLogMetadataKey is the analytics-metadata key under which the
+	// traffic-logging marker is carried to the traffic-logging publisher. It must
+	// match the key the policy-engine reads in prepareAnalyticEvent.
+	trafficLogMetadataKey = "traffic_log"
 )
 
-// LogMessagePolicy implements logging of request/response payloads and headers
-type LogMessagePolicy struct{}
-
-type flowConfig struct {
-	logPayload      bool
-	logHeaders      bool
-	excludedHeaders map[string]struct{}
+// LogMessagePolicy implements logging of request/response payloads and headers.
+// It operates in one of two modes (see the enableTrafficLogging parameter):
+// inline (default; real-time slog during mediation) or traffic-logging (per-API
+// opt-in signal for the stdout traffic-logging publisher, which adds latencies).
+type LogMessagePolicy struct {
+	// trafficLogging is true when enableTrafficLogging = true. In that mode the
+	// policy is a lightweight signal: it stamps a marker in the request-header
+	// phase and emits nothing inline.
+	trafficLogging bool
 }
 
-var ins = &LogMessagePolicy{}
+type flowConfig struct {
+	logPayload bool
+	logHeaders bool
+}
+
+// flowDirective is the per-flow presentation config carried in the traffic-logging
+// marker. Field names/tags mirror the policy-engine's TrafficLogDirective so the
+// marshaled JSON round-trips.
+type flowDirective struct {
+	Payload bool `json:"payload"`
+	Headers bool `json:"headers"`
+}
+
+// fieldsDirective selects which fields appear in the emitted line (traffic-logging
+// mode). Exactly one of Only or Exclude should be set. When set, this is
+// authoritative over field presence: the per-flow payload/headers toggles are
+// ignored (excludeHeaders still applies). Names are top-level keys
+// (e.g. "requestHeaders", "labels", "latencies").
+type fieldsDirective struct {
+	Only    []string `json:"only,omitempty"`
+	Exclude []string `json:"exclude,omitempty"`
+}
+
+// trafficLogDirective is the full marker payload (traffic-logging mode).
+type trafficLogDirective struct {
+	Request  *flowDirective   `json:"request,omitempty"`
+	Response *flowDirective   `json:"response,omitempty"`
+	Fields   *fieldsDirective `json:"fields,omitempty"`
+	// Labels holds resolved label values (context references already expanded at
+	// request time). The publisher emits them as a top-level "labels" object.
+	Labels map[string]any `json:"labels,omitempty"`
+	// MaskedHeaders lists lower-cased header names whose values are redacted in
+	// the emitted log line. Merged with the global masked_headers config at publish time.
+	MaskedHeaders []string `json:"maskedHeaders,omitempty"`
+}
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
+// The enableTrafficLogging parameter is read here so Mode() can reflect it:
+// traffic-logging mode needs only the request-header phase (no body buffering),
+// while inline mode processes headers and streams bodies.
 func GetPolicy(
 	metadata policy.PolicyMetadata,
 	params map[string]interface{},
 ) (policy.Policy, error) {
-	return ins, nil
+	enabled, _ := params[FieldNameEnableTrafficLogging].(bool)
+	return &LogMessagePolicy{
+		trafficLogging: enabled,
+	}, nil
 }
 
 func (p *LogMessagePolicy) Mode() policy.ProcessingMode {
+	if p.trafficLogging {
+		// Signal mode: the marker is static per-API config, so stamping it once in
+		// the request-header phase is sufficient. Skip all body/response phases to
+		// avoid any buffering overhead.
+		return policy.ProcessingMode{
+			RequestHeaderMode:  policy.HeaderModeProcess,
+			RequestBodyMode:    policy.BodyModeSkip,
+			ResponseHeaderMode: policy.HeaderModeSkip,
+			ResponseBodyMode:   policy.BodyModeSkip,
+		}
+	}
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeProcess,
 		RequestBodyMode:    policy.BodyModeStream,
@@ -76,24 +162,18 @@ type LogRecord struct {
 
 // parseFlowConfig parses flow configuration from request/response parameters.
 func (p *LogMessagePolicy) parseFlowConfig(params map[string]interface{}, flowName string) flowConfig {
-	cfg := flowConfig{
-		excludedHeaders: map[string]struct{}{},
-	}
-
 	flowRaw, found := params[flowName]
 	if !found || flowRaw == nil {
-		return cfg
+		return flowConfig{}
 	}
-
 	flow, ok := flowRaw.(map[string]interface{})
 	if !ok {
-		return cfg
+		return flowConfig{}
 	}
-
-	cfg.logPayload = p.parseBool(flow["payload"])
-	cfg.logHeaders = p.parseBool(flow["headers"])
-	cfg.excludedHeaders = p.parseExcludedHeaders(flow["excludeHeaders"])
-	return cfg
+	return flowConfig{
+		logPayload: p.parseBool(flow["payload"]),
+		logHeaders: p.parseBool(flow["headers"]),
+	}
 }
 
 func (p *LogMessagePolicy) parseBool(raw interface{}) bool {
@@ -101,37 +181,262 @@ func (p *LogMessagePolicy) parseBool(raw interface{}) bool {
 	return parsed
 }
 
-// parseExcludedHeaders parses a list of excluded header names.
-func (p *LogMessagePolicy) parseExcludedHeaders(excludedHeadersRaw interface{}) map[string]struct{} {
-	excludedHeaders := make(map[string]struct{})
 
-	if excludedHeadersRaw == nil {
-		return excludedHeaders
+// stampTrafficLogMarker (traffic-logging mode) returns the analytics-metadata marker
+// that opts this API into stdout traffic logging. The gateway's traffic-logging
+// publisher reads the marker off the Envoy access-log entry and emits the
+// enriched (latency-bearing) line; this policy emits nothing inline. The marker
+// is always stamped when enableTrafficLogging is true — its presence
+// is the opt-in signal — with the parsed per-flow config as its value.
+func (p *LogMessagePolicy) stampTrafficLogMarker(reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
+	dir := trafficLogDirective{
+		Request:       buildFlowDirective(params, "request"),
+		Response:      buildFlowDirective(params, "response"),
+		Fields:        buildFieldsDirective(params),
+		Labels:        buildLabels(reqCtx, params),
+		MaskedHeaders: buildMaskedHeaders(params),
+	}
+	marker, err := json.Marshal(dir)
+	if err != nil {
+		// Should not happen for this fixed shape; fall back to an empty opt-in
+		// marker so logging still occurs for the API.
+		slog.Error("log-message: failed to marshal traffic-log directive", "error", err)
+		marker = []byte("{}")
+	}
+	return policy.UpstreamRequestHeaderModifications{
+		AnalyticsMetadata: map[string]any{
+			trafficLogMetadataKey: string(marker),
+		},
+	}
+}
+
+// buildLabels resolves the labels param into a flat map for the traffic-log marker.
+// String values prefixed with ctxPrefix are resolved from the request context
+// (unresolvable references are skipped); other values pass through unchanged.
+// Returns nil when nothing usable is configured so the marker omits the field.
+func buildLabels(reqCtx *policy.RequestHeaderContext, params map[string]interface{}) map[string]any {
+	raw, found := params[FieldNameLabels]
+	if !found || raw == nil {
+		return nil
+	}
+	m, ok := raw.(map[string]interface{})
+	if !ok || len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for key, val := range m {
+		if strings.TrimSpace(key) == "" {
+			continue
+		}
+		s, isStr := val.(string)
+		if !isStr {
+			// Non-string literals (numbers, booleans) pass through as-is.
+			out[key] = val
+			continue
+		}
+		resolved, ok := resolveContextValue(s, reqCtx)
+		if !ok {
+			slog.Debug("log-message: skipping custom property — context variable not resolvable",
+				"property", key, "ref", s)
+			continue
+		}
+		out[key] = resolved
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// resolveContextValue expands a customProperties value. A value without ctxPrefix is a
+// literal and returned unchanged. A "$ctx:<ref>" value is resolved from the request
+// context; the boolean is false when the reference cannot be resolved (the caller skips
+// it). Fixed accessor names are matched case-insensitively; auth.property.<key> preserves
+// the original key case (Properties keys are case-sensitive). auth.* references require an
+// earlier auth policy to have populated the shared AuthContext.
+func resolveContextValue(value string, reqCtx *policy.RequestHeaderContext) (string, bool) {
+	if !strings.HasPrefix(value, ctxPrefix) {
+		return value, true
+	}
+	ref := strings.TrimPrefix(value, ctxPrefix)
+	variable := strings.ToLower(ref)
+
+	switch {
+	case variable == "request.path":
+		return reqCtx.Path, true
+	case variable == "request.method":
+		return reqCtx.Method, true
+	case variable == "request.authority":
+		return reqCtx.Authority, true
+	case variable == "request.scheme":
+		return reqCtx.Scheme, true
+	case variable == "request.vhost":
+		return reqCtx.Vhost, true
+	case variable == "request.id":
+		return reqCtx.RequestID, true
+	case strings.HasPrefix(variable, "request.header."):
+		name := strings.TrimPrefix(variable, "request.header.")
+		vals := reqCtx.Headers.Get(name)
+		if len(vals) == 0 {
+			return "", false
+		}
+		return vals[0], true
+	case variable == "api.id":
+		return reqCtx.APIId, true
+	case variable == "api.name":
+		return reqCtx.APIName, true
+	case variable == "api.version":
+		return reqCtx.APIVersion, true
+	case variable == "api.context":
+		return reqCtx.APIContext, true
+	case variable == "api.kind":
+		return string(reqCtx.APIKind), true
+	case variable == "api.operation_path":
+		return reqCtx.OperationPath, true
+	case variable == "project.id":
+		return reqCtx.ProjectID, true
 	}
 
-	switch headers := excludedHeadersRaw.(type) {
-	case []interface{}:
-		for _, headerRaw := range headers {
-			header, ok := headerRaw.(string)
-			if !ok {
-				continue
+	if strings.HasPrefix(variable, "auth.") {
+		authCtx := reqCtx.AuthContext
+		if authCtx == nil {
+			return "", false
+		}
+		switch {
+		case variable == "auth.subject":
+			return authCtx.Subject, true
+		case variable == "auth.type":
+			return authCtx.AuthType, true
+		case variable == "auth.issuer":
+			return authCtx.Issuer, true
+		case variable == "auth.credential_id":
+			return authCtx.CredentialID, true
+		case variable == "auth.token_id":
+			return authCtx.TokenId, authCtx.TokenId != ""
+		case variable == "auth.authenticated":
+			return strconv.FormatBool(authCtx.Authenticated), true
+		case variable == "auth.authorized":
+			return strconv.FormatBool(authCtx.Authorized), true
+		case variable == "auth.audience":
+			if len(authCtx.Audience) == 0 {
+				return "", false
 			}
-			trimmed := strings.ToLower(strings.TrimSpace(header))
-			if trimmed != "" {
-				excludedHeaders[trimmed] = struct{}{}
+			return strings.Join(authCtx.Audience, ","), true
+		case variable == "auth.scopes":
+			if len(authCtx.Scopes) == 0 {
+				return "", false
+			}
+			return joinScopes(authCtx.Scopes), true
+		case strings.HasPrefix(variable, "auth.property."):
+			propKey := ref[len("auth.property."):]
+			val, ok := authCtx.Properties[propKey]
+			return val, ok
+		}
+	}
+
+	return "", false
+}
+
+// joinScopes renders a scope set as a space-separated string in a stable (sorted)
+// order so log lines are deterministic.
+func joinScopes(scopes map[string]bool) string {
+	names := make([]string, 0, len(scopes))
+	for name := range scopes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, " ")
+}
+
+// buildFlowDirective extracts a flow ("request" or "response") sub-object into a
+// flowDirective, returning nil when the flow is absent or not an object so the
+// marshaled marker omits flows the user did not configure.
+func buildFlowDirective(params map[string]interface{}, flowName string) *flowDirective {
+	raw, found := params[flowName]
+	if !found || raw == nil {
+		return nil
+	}
+	flow, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return &flowDirective{
+		Payload: parseBoolValue(flow["payload"]),
+		Headers: parseBoolValue(flow["headers"]),
+	}
+}
+
+func parseBoolValue(raw interface{}) bool {
+	parsed, _ := raw.(bool)
+	return parsed
+}
+
+// buildFieldsDirective extracts the optional `fields` selection from params. It
+// returns nil when absent, malformed, or when no names are given (an empty
+// selection is treated as "no projection").
+func buildFieldsDirective(params map[string]interface{}) *fieldsDirective {
+	raw, found := params["fields"]
+	if !found || raw == nil {
+		return nil
+	}
+	f, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	only := parseNameList(f["only"])
+	exclude := parseNameList(f["exclude"])
+	if len(only) == 0 && len(exclude) == 0 {
+		return nil
+	}
+	return &fieldsDirective{
+		Only:    only,
+		Exclude: exclude,
+	}
+}
+
+// buildMaskedHeaders parses the maskedHeaders param, normalizing each name to
+// lower-case so the publisher can do case-insensitive matching cheaply. Returns
+// nil when the param is absent or empty.
+func buildMaskedHeaders(params map[string]interface{}) []string {
+	raw, found := params[FieldNameMaskedHeaders]
+	if !found || raw == nil {
+		return nil
+	}
+	names := parseNameList(raw) // trims whitespace, drops empty strings
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	for _, h := range names {
+		out = append(out, strings.ToLower(h))
+	}
+	return out
+}
+
+// parseNameList parses a list of field names, trimming whitespace but preserving
+// case (they match JSON keys). Tolerates []interface{} and []string.
+func parseNameList(raw interface{}) []string {
+	var out []string
+	add := func(s string) {
+		if t := strings.TrimSpace(s); t != "" {
+			out = append(out, t)
+		}
+	}
+	switch v := raw.(type) {
+	case []interface{}:
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				add(s)
 			}
 		}
 	case []string:
-		for _, header := range headers {
-			trimmed := strings.ToLower(strings.TrimSpace(header))
-			if trimmed != "" {
-				excludedHeaders[trimmed] = struct{}{}
-			}
+		for _, s := range v {
+			add(s)
 		}
 	}
-
-	return excludedHeaders
+	return out
 }
+
 
 // logMessage logs the structured log record using slog at INFO level
 func (p *LogMessagePolicy) logMessage(record LogRecord) {
@@ -144,8 +449,14 @@ func (p *LogMessagePolicy) logMessage(record LogRecord) {
 	slog.Info(string(logData))
 }
 
-// OnRequestHeaders logs request headers in the header phase.
+// OnRequestHeaders logs request headers in the header phase (inline mode), or —
+// in traffic-logging mode — stamps the traffic-log marker and returns, emitting
+// nothing inline.
 func (p *LogMessagePolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
+	if p.trafficLogging {
+		return p.stampTrafficLogMarker(reqCtx, params)
+	}
+
 	config := p.parseFlowConfig(params, "request")
 
 	if !config.logHeaders {
@@ -157,7 +468,7 @@ func (p *LogMessagePolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		RequestID:     p.getRequestID(reqCtx.Headers),
 		HTTPMethod:    reqCtx.Method,
 		ResourcePath:  reqCtx.Path,
-		Headers:       p.buildHeadersMap(reqCtx.Headers, config.excludedHeaders),
+		Headers:       p.buildHeadersMap(reqCtx.Headers),
 	}
 
 	p.logMessage(logRecord)
@@ -178,7 +489,7 @@ func (p *LogMessagePolicy) OnResponseHeaders(ctx context.Context, respCtx *polic
 		RequestID:     p.getResponseRequestIDv2(respCtx.ResponseHeaders),
 		HTTPMethod:    respCtx.RequestMethod,
 		ResourcePath:  respCtx.RequestPath,
-		Headers:       p.buildHeadersMap(respCtx.ResponseHeaders, config.excludedHeaders),
+		Headers:       p.buildHeadersMap(respCtx.ResponseHeaders),
 	}
 
 	p.logMessage(logRecord)
@@ -334,8 +645,8 @@ func (p *LogMessagePolicy) getResponseRequestIDv2(headers *policy.Headers) strin
 	return ErrMsgMissingReqID
 }
 
-// buildHeadersMap builds a map of headers for logging, excluding sensitive ones
-func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers, excludedHeaders map[string]struct{}) map[string]interface{} {
+// buildHeadersMap builds a map of headers for logging, masking authorization by default.
+func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers) map[string]interface{} {
 	headersMap := make(map[string]interface{})
 	if headers == nil {
 		return headersMap
@@ -343,11 +654,6 @@ func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers, excludedHead
 
 	headers.Iterate(func(name string, values []string) {
 		lowerName := strings.ToLower(name)
-
-		// Skip excluded headers
-		if _, excluded := excludedHeaders[lowerName]; excluded {
-			return // continue iteration
-		}
 
 		// Mask authorization header by default
 		if lowerName == "authorization" {
