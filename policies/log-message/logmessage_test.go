@@ -167,7 +167,6 @@ func TestParseFlowConfig_InvalidTypesFallbackToDefaults(t *testing.T) {
 	}
 }
 
-
 func TestBuildHeadersMapV2_MasksAuthorization(t *testing.T) {
 	p := &LogMessagePolicy{}
 	headers := createTestHeadersMulti(map[string][]string{
@@ -804,7 +803,7 @@ func TestOnRequestHeaders_AccessLog_MaskedHeadersAbsentOmitted(t *testing.T) {
 	}
 }
 
-// ─── Labels ($ctx resolution) ─────────────────────────────────────────────────
+// ─── Properties ($ctx resolution) ─────────────────────────────────────────────
 
 // ctxWithAuth builds a request-header context with headers and an authenticated
 // AuthContext for exercising $ctx resolution.
@@ -893,11 +892,11 @@ func TestResolveContextValue_NilAuthSkipped(t *testing.T) {
 	}
 }
 
-func TestStampMarker_Labels(t *testing.T) {
+func TestStampMarker_Properties(t *testing.T) {
 	p := newAccessLogPolicy(t)
 	action := p.OnRequestHeaders(context.Background(), ctxWithAuth(), map[string]interface{}{
 		"request": map[string]interface{}{"headers": true},
-		"labels": map[string]interface{}{
+		"properties": map[string]interface{}{
 			"who":        "$ctx:auth.subject",          // resolves
 			"tenant":     "$ctx:auth.property.tenant",  // resolves (case-sensitive key)
 			"authType":   "$ctx:auth.type",             // resolves
@@ -912,43 +911,43 @@ func TestStampMarker_Labels(t *testing.T) {
 		t.Fatalf("marker not valid JSON: %v", err)
 	}
 
-	if dir.Labels["who"] != "alice" {
-		t.Errorf("who = %v, want alice", dir.Labels["who"])
+	if dir.Properties["who"] != "alice" {
+		t.Errorf("who = %v, want alice", dir.Properties["who"])
 	}
-	if dir.Labels["tenant"] != "acme" {
-		t.Errorf("tenant = %v, want acme", dir.Labels["tenant"])
+	if dir.Properties["tenant"] != "acme" {
+		t.Errorf("tenant = %v, want acme", dir.Properties["tenant"])
 	}
-	if dir.Labels["authType"] != "jwt" {
-		t.Errorf("authType = %v, want jwt", dir.Labels["authType"])
+	if dir.Properties["authType"] != "jwt" {
+		t.Errorf("authType = %v, want jwt", dir.Properties["authType"])
 	}
-	if dir.Labels["env"] != "prod" {
-		t.Errorf("env = %v, want prod", dir.Labels["env"])
+	if dir.Properties["env"] != "prod" {
+		t.Errorf("env = %v, want prod", dir.Properties["env"])
 	}
-	if _, present := dir.Labels["missing"]; present {
-		t.Errorf("unresolved $ctx ref should be skipped, got %v", dir.Labels["missing"])
+	if _, present := dir.Properties["missing"]; present {
+		t.Errorf("unresolved $ctx ref should be skipped, got %v", dir.Properties["missing"])
 	}
 	// JSON round-trips numbers as float64.
-	if v, ok := dir.Labels["retryCount"].(float64); !ok || v != 3 {
-		t.Errorf("retryCount = %v (%T), want 3", dir.Labels["retryCount"], dir.Labels["retryCount"])
+	if v, ok := dir.Properties["retryCount"].(float64); !ok || v != 3 {
+		t.Errorf("retryCount = %v (%T), want 3", dir.Properties["retryCount"], dir.Properties["retryCount"])
 	}
 }
 
-func TestStampMarker_LabelsOmittedWhenEmpty(t *testing.T) {
+func TestStampMarker_PropertiesOmittedWhenEmpty(t *testing.T) {
 	p := newAccessLogPolicy(t)
-	// No labels param at all.
+	// No properties param at all.
 	dir := stampMarker(t, p, map[string]interface{}{"request": map[string]interface{}{"headers": true}})
-	if dir.Labels != nil {
-		t.Fatalf("expected properties omitted, got %+v", dir.Labels)
+	if dir.Properties != nil {
+		t.Fatalf("expected properties omitted, got %+v", dir.Properties)
 	}
 	// All references unresolvable -> nothing survives -> omitted.
 	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{SharedContext: &policy.SharedContext{}}, map[string]interface{}{
-		"request": map[string]interface{}{"headers": true},
-		"labels":  map[string]interface{}{"who": "$ctx:auth.subject"},
+		"request":    map[string]interface{}{"headers": true},
+		"properties": map[string]interface{}{"who": "$ctx:auth.subject"},
 	})
 	mods := action.(policy.UpstreamRequestHeaderModifications)
 	var dir2 trafficLogDirective
 	_ = json.Unmarshal([]byte(mods.AnalyticsMetadata[trafficLogMetadataKey].(string)), &dir2)
-	if dir2.Labels != nil {
-		t.Fatalf("expected properties omitted when nothing resolves, got %+v", dir2.Labels)
+	if dir2.Properties != nil {
+		t.Fatalf("expected properties omitted when nothing resolves, got %+v", dir2.Properties)
 	}
 }

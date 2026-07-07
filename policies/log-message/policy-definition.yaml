@@ -23,12 +23,12 @@ parameters:
         collector did not perform). When false (default), log inline in real time during
         mediation via the gateway logs, including per-chunk streaming.
     
-    labels:
+    properties:
       type: object
       x-wso2-policy-advanced-param: false
       description: >-
         (enableTrafficLogging only) Extra key→value pairs attached to every emitted log
-        line under "labels" — useful for filtering and querying logs by environment,
+        line under "properties" — useful for filtering and querying logs by environment,
         tenant, or any request attribute. Example:
         `request_id: "$ctx:request.id"`, `env: production`.
         String values prefixed with "$ctx:" are resolved from the request context at
@@ -64,9 +64,9 @@ parameters:
         (enableTrafficLogging only) Control which fields appear in the emitted line.
         When set, this is authoritative over field presence — the request/response
         payload/headers toggles are ignored (global header masking still applies).
-        Names are top-level keys (e.g. "latencies", "target", "requestHeaders", "labels")
+        Names are top-level keys (e.g. "latencies", "target", "requestHeaders", "properties")
         or dotted sub-key paths within map fields (e.g. "requestHeaders.authorization",
-        "labels.env") to include/exclude individual headers. Set either "only" or "exclude",
+        "properties.env") to include/exclude individual headers. Set either "only" or "exclude",
         not both.
       properties:
         only:

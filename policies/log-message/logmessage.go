@@ -47,11 +47,11 @@ const (
 	// to be enabled.
 	FieldNameEnableTrafficLogging = "enableTrafficLogging"
 
-	// FieldNameLabels is the object parameter holding extra key→value pairs to add
-	// to the emitted traffic-log line under "labels" (traffic-logging mode only).
+	// FieldNameProperties is the object parameter holding extra key→value pairs to add
+	// to the emitted traffic-log line under "properties" (traffic-logging mode only).
 	// String values prefixed with ctxPrefix are resolved from the request context
 	// at request time; other values are passed through as-is.
-	FieldNameLabels = "labels"
+	FieldNameProperties = "properties"
 
 	// FieldNameMaskedHeaders is the array parameter listing additional header names
 	// (case-insensitive) whose values should be redacted in the emitted log line.
@@ -59,7 +59,7 @@ const (
 	// source alone is sufficient.
 	FieldNameMaskedHeaders = "maskedHeaders"
 
-	// ctxPrefix marks a customProperties value as a context-variable reference to be
+	// ctxPrefix marks a property value as a context-variable reference to be
 	// resolved at request time (mirrors the backend-jwt policy's customClaims).
 	ctxPrefix = "$ctx:"
 
@@ -97,7 +97,7 @@ type flowDirective struct {
 // mode). Exactly one of Only or Exclude should be set. When set, this is
 // authoritative over field presence: the per-flow payload/headers toggles are
 // ignored (excludeHeaders still applies). Names are top-level keys
-// (e.g. "requestHeaders", "labels", "latencies").
+// (e.g. "requestHeaders", "properties", "latencies").
 type fieldsDirective struct {
 	Only    []string `json:"only,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
@@ -108,9 +108,9 @@ type trafficLogDirective struct {
 	Request  *flowDirective   `json:"request,omitempty"`
 	Response *flowDirective   `json:"response,omitempty"`
 	Fields   *fieldsDirective `json:"fields,omitempty"`
-	// Labels holds resolved label values (context references already expanded at
-	// request time). The publisher emits them as a top-level "labels" object.
-	Labels map[string]any `json:"labels,omitempty"`
+	// Properties holds resolved property values (context references already expanded
+	// at request time). The publisher emits them as a top-level "properties" object.
+	Properties map[string]any `json:"properties,omitempty"`
 	// MaskedHeaders lists lower-cased header names whose values are redacted in
 	// the emitted log line. Merged with the global masked_headers config at publish time.
 	MaskedHeaders []string `json:"maskedHeaders,omitempty"`
@@ -181,7 +181,6 @@ func (p *LogMessagePolicy) parseBool(raw interface{}) bool {
 	return parsed
 }
 
-
 // stampTrafficLogMarker (traffic-logging mode) returns the analytics-metadata marker
 // that opts this API into stdout traffic logging. The gateway's traffic-logging
 // publisher reads the marker off the Envoy access-log entry and emits the
@@ -193,7 +192,7 @@ func (p *LogMessagePolicy) stampTrafficLogMarker(reqCtx *policy.RequestHeaderCon
 		Request:       buildFlowDirective(params, "request"),
 		Response:      buildFlowDirective(params, "response"),
 		Fields:        buildFieldsDirective(params),
-		Labels:        buildLabels(reqCtx, params),
+		Properties:    buildProperties(reqCtx, params),
 		MaskedHeaders: buildMaskedHeaders(params),
 	}
 	marker, err := json.Marshal(dir)
@@ -210,12 +209,12 @@ func (p *LogMessagePolicy) stampTrafficLogMarker(reqCtx *policy.RequestHeaderCon
 	}
 }
 
-// buildLabels resolves the labels param into a flat map for the traffic-log marker.
-// String values prefixed with ctxPrefix are resolved from the request context
+// buildProperties resolves the properties param into a flat map for the traffic-log
+// marker. String values prefixed with ctxPrefix are resolved from the request context
 // (unresolvable references are skipped); other values pass through unchanged.
 // Returns nil when nothing usable is configured so the marker omits the field.
-func buildLabels(reqCtx *policy.RequestHeaderContext, params map[string]interface{}) map[string]any {
-	raw, found := params[FieldNameLabels]
+func buildProperties(reqCtx *policy.RequestHeaderContext, params map[string]interface{}) map[string]any {
+	raw, found := params[FieldNameProperties]
 	if !found || raw == nil {
 		return nil
 	}
@@ -236,7 +235,7 @@ func buildLabels(reqCtx *policy.RequestHeaderContext, params map[string]interfac
 		}
 		resolved, ok := resolveContextValue(s, reqCtx)
 		if !ok {
-			slog.Debug("log-message: skipping custom property — context variable not resolvable",
+			slog.Debug("log-message: skipping property — context variable not resolvable",
 				"property", key, "ref", s)
 			continue
 		}
@@ -248,7 +247,7 @@ func buildLabels(reqCtx *policy.RequestHeaderContext, params map[string]interfac
 	return out
 }
 
-// resolveContextValue expands a customProperties value. A value without ctxPrefix is a
+// resolveContextValue expands a property value. A value without ctxPrefix is a
 // literal and returned unchanged. A "$ctx:<ref>" value is resolved from the request
 // context; the boolean is false when the reference cannot be resolved (the caller skips
 // it). Fixed accessor names are matched case-insensitively; auth.property.<key> preserves
@@ -436,7 +435,6 @@ func parseNameList(raw interface{}) []string {
 	}
 	return out
 }
-
 
 // logMessage logs the structured log record using slog at INFO level
 func (p *LogMessagePolicy) logMessage(record LogRecord) {
