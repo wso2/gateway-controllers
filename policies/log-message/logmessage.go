@@ -83,6 +83,10 @@ type LogMessagePolicy struct {
 type flowConfig struct {
 	logPayload bool
 	logHeaders bool
+	// excludedHeaders is the set of lower-cased header names to omit entirely from
+	// inline logs (inline mode only). In traffic-logging mode header exclusion is
+	// driven by the fields selection, not this list.
+	excludedHeaders map[string]struct{}
 }
 
 // flowDirective is the per-flow presentation config carried in the traffic-logging
@@ -96,8 +100,10 @@ type flowDirective struct {
 // fieldsDirective selects which fields appear in the emitted line (traffic-logging
 // mode). Exactly one of Only or Exclude should be set. When set, this is
 // authoritative over field presence: the per-flow payload/headers toggles are
-// ignored (excludeHeaders still applies). Names are top-level keys
-// (e.g. "requestHeaders", "properties", "latencies").
+// ignored. Names are top-level keys (e.g. "requestHeaders", "properties",
+// "latencies") or dotted paths (e.g. "request.header.<name>") — in traffic-logging
+// mode this is also how individual headers are excluded (the inline-only
+// excludeHeaders param has no effect here).
 type fieldsDirective struct {
 	Only    []string `json:"only,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
@@ -162,23 +168,59 @@ type LogRecord struct {
 
 // parseFlowConfig parses flow configuration from request/response parameters.
 func (p *LogMessagePolicy) parseFlowConfig(params map[string]interface{}, flowName string) flowConfig {
+	cfg := flowConfig{excludedHeaders: map[string]struct{}{}}
+
 	flowRaw, found := params[flowName]
 	if !found || flowRaw == nil {
-		return flowConfig{}
+		return cfg
 	}
 	flow, ok := flowRaw.(map[string]interface{})
 	if !ok {
-		return flowConfig{}
+		return cfg
 	}
-	return flowConfig{
-		logPayload: p.parseBool(flow["payload"]),
-		logHeaders: p.parseBool(flow["headers"]),
-	}
+	cfg.logPayload = p.parseBool(flow["payload"])
+	cfg.logHeaders = p.parseBool(flow["headers"])
+	cfg.excludedHeaders = p.parseExcludedHeaders(flow["excludeHeaders"])
+	return cfg
 }
 
 func (p *LogMessagePolicy) parseBool(raw interface{}) bool {
 	parsed, _ := raw.(bool)
 	return parsed
+}
+
+// parseExcludedHeaders parses the inline-mode excludeHeaders list into a set of
+// lower-cased header names (whitespace-trimmed, empties dropped). Tolerates both
+// []interface{} and []string; any other type yields an empty set. Distinct from
+// parseNameList, which preserves case for traffic-logging field-name matching.
+func (p *LogMessagePolicy) parseExcludedHeaders(excludedHeadersRaw interface{}) map[string]struct{} {
+	excludedHeaders := make(map[string]struct{})
+	if excludedHeadersRaw == nil {
+		return excludedHeaders
+	}
+
+	switch headers := excludedHeadersRaw.(type) {
+	case []interface{}:
+		for _, headerRaw := range headers {
+			header, ok := headerRaw.(string)
+			if !ok {
+				continue
+			}
+			trimmed := strings.ToLower(strings.TrimSpace(header))
+			if trimmed != "" {
+				excludedHeaders[trimmed] = struct{}{}
+			}
+		}
+	case []string:
+		for _, header := range headers {
+			trimmed := strings.ToLower(strings.TrimSpace(header))
+			if trimmed != "" {
+				excludedHeaders[trimmed] = struct{}{}
+			}
+		}
+	}
+
+	return excludedHeaders
 }
 
 // stampTrafficLogMarker (traffic-logging mode) returns the analytics-metadata marker
@@ -466,7 +508,7 @@ func (p *LogMessagePolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		RequestID:     p.getRequestID(reqCtx.Headers),
 		HTTPMethod:    reqCtx.Method,
 		ResourcePath:  reqCtx.Path,
-		Headers:       p.buildHeadersMap(reqCtx.Headers),
+		Headers:       p.buildHeadersMap(reqCtx.Headers, config.excludedHeaders),
 	}
 
 	p.logMessage(logRecord)
@@ -487,7 +529,7 @@ func (p *LogMessagePolicy) OnResponseHeaders(ctx context.Context, respCtx *polic
 		RequestID:     p.getResponseRequestIDv2(respCtx.ResponseHeaders),
 		HTTPMethod:    respCtx.RequestMethod,
 		ResourcePath:  respCtx.RequestPath,
-		Headers:       p.buildHeadersMap(respCtx.ResponseHeaders),
+		Headers:       p.buildHeadersMap(respCtx.ResponseHeaders, config.excludedHeaders),
 	}
 
 	p.logMessage(logRecord)
@@ -643,8 +685,9 @@ func (p *LogMessagePolicy) getResponseRequestIDv2(headers *policy.Headers) strin
 	return ErrMsgMissingReqID
 }
 
-// buildHeadersMap builds a map of headers for logging, masking authorization by default.
-func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers) map[string]interface{} {
+// buildHeadersMap builds a map of headers for logging, excluding the configured
+// headers entirely and masking authorization by default.
+func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers, excludedHeaders map[string]struct{}) map[string]interface{} {
 	headersMap := make(map[string]interface{})
 	if headers == nil {
 		return headersMap
@@ -652,6 +695,11 @@ func (p *LogMessagePolicy) buildHeadersMap(headers *policy.Headers) map[string]i
 
 	headers.Iterate(func(name string, values []string) {
 		lowerName := strings.ToLower(name)
+
+		// Skip excluded headers
+		if _, excluded := excludedHeaders[lowerName]; excluded {
+			return // continue iteration
+		}
 
 		// Mask authorization header by default
 		if lowerName == "authorization" {

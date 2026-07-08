@@ -133,8 +133,9 @@ func TestParseFlowConfig_ValidRequestConfig(t *testing.T) {
 
 	cfg := p.parseFlowConfig(map[string]interface{}{
 		"request": map[string]interface{}{
-			"payload": true,
-			"headers": true,
+			"payload":        true,
+			"headers":        true,
+			"excludeHeaders": toInterfaceSlice([]string{"Authorization", " X-API-Key "}),
 		},
 	}, "request")
 
@@ -144,6 +145,12 @@ func TestParseFlowConfig_ValidRequestConfig(t *testing.T) {
 	if !cfg.logHeaders {
 		t.Fatalf("expected logHeaders to be true")
 	}
+	if _, ok := cfg.excludedHeaders["authorization"]; !ok {
+		t.Fatalf("expected authorization in excluded headers")
+	}
+	if _, ok := cfg.excludedHeaders["x-api-key"]; !ok {
+		t.Fatalf("expected x-api-key in excluded headers")
+	}
 }
 
 func TestParseFlowConfig_InvalidTypesFallbackToDefaults(t *testing.T) {
@@ -152,22 +159,60 @@ func TestParseFlowConfig_InvalidTypesFallbackToDefaults(t *testing.T) {
 	cfg := p.parseFlowConfig(map[string]interface{}{
 		"request": "invalid",
 	}, "request")
-	if cfg.logPayload || cfg.logHeaders {
+	if cfg.logPayload || cfg.logHeaders || len(cfg.excludedHeaders) != 0 {
 		t.Fatalf("expected default config for invalid flow type, got %+v", cfg)
 	}
 
 	cfg = p.parseFlowConfig(map[string]interface{}{
 		"request": map[string]interface{}{
-			"payload": "true",
-			"headers": 1,
+			"payload":        "true",
+			"headers":        1,
+			"excludeHeaders": "Authorization",
 		},
 	}, "request")
-	if cfg.logPayload || cfg.logHeaders {
+	if cfg.logPayload || cfg.logHeaders || len(cfg.excludedHeaders) != 0 {
 		t.Fatalf("expected default values for invalid fields, got %+v", cfg)
 	}
 }
 
-func TestBuildHeadersMapV2_MasksAuthorization(t *testing.T) {
+func TestParseExcludedHeaders(t *testing.T) {
+	p := &LogMessagePolicy{}
+
+	t.Run("from interface slice", func(t *testing.T) {
+		result := p.parseExcludedHeaders([]interface{}{"Authorization", " x-api-key ", "", 7})
+		if len(result) != 2 {
+			t.Fatalf("expected 2 excluded headers, got %d", len(result))
+		}
+		if _, ok := result["authorization"]; !ok {
+			t.Fatalf("expected authorization to be excluded")
+		}
+		if _, ok := result["x-api-key"]; !ok {
+			t.Fatalf("expected x-api-key to be excluded")
+		}
+	})
+
+	t.Run("from string slice", func(t *testing.T) {
+		result := p.parseExcludedHeaders([]string{"Set-Cookie", " X-Token "})
+		if len(result) != 2 {
+			t.Fatalf("expected 2 excluded headers, got %d", len(result))
+		}
+		if _, ok := result["set-cookie"]; !ok {
+			t.Fatalf("expected set-cookie to be excluded")
+		}
+		if _, ok := result["x-token"]; !ok {
+			t.Fatalf("expected x-token to be excluded")
+		}
+	})
+
+	t.Run("invalid type", func(t *testing.T) {
+		result := p.parseExcludedHeaders("Authorization")
+		if len(result) != 0 {
+			t.Fatalf("expected empty result for invalid type, got %d", len(result))
+		}
+	})
+}
+
+func TestBuildHeadersMapV2_MasksAuthorizationAndExcludes(t *testing.T) {
 	p := &LogMessagePolicy{}
 	headers := createTestHeadersMulti(map[string][]string{
 		"Content-Type":  {"application/json"},
@@ -176,7 +221,7 @@ func TestBuildHeadersMapV2_MasksAuthorization(t *testing.T) {
 		"X-Multi":       {"one", "two"},
 	})
 
-	result := p.buildHeadersMap(headers)
+	result := p.buildHeadersMap(headers, map[string]struct{}{"x-api-key": {}})
 
 	authValue, ok := getHeaderValue(result, "authorization")
 	if !ok {
@@ -186,8 +231,8 @@ func TestBuildHeadersMapV2_MasksAuthorization(t *testing.T) {
 		t.Fatalf("expected authorization to be masked, got %v", authValue)
 	}
 
-	if _, ok := getHeaderValue(result, "x-api-key"); !ok {
-		t.Fatalf("expected x-api-key to be present (exclusion is via fields.exclude dotted paths)")
+	if _, ok := getHeaderValue(result, "x-api-key"); ok {
+		t.Fatalf("expected x-api-key to be excluded")
 	}
 
 	multiValue, ok := getHeaderValue(result, "x-multi")
@@ -205,7 +250,7 @@ func TestBuildHeadersMapV2_MasksAuthorization(t *testing.T) {
 
 func TestBuildHeadersMapV2_NilHeaders(t *testing.T) {
 	p := &LogMessagePolicy{}
-	result := p.buildHeadersMap(nil)
+	result := p.buildHeadersMap(nil, map[string]struct{}{})
 	if len(result) != 0 {
 		t.Fatalf("expected empty map for nil headers, got %v", result)
 	}
@@ -275,7 +320,8 @@ func TestOnRequestHeaders_LogsHeaders(t *testing.T) {
 	records := captureLogRecords(t, func() {
 		result := p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{
 			"request": map[string]interface{}{
-				"headers": true,
+				"headers":        true,
+				"excludeHeaders": toInterfaceSlice([]string{"x-api-key"}),
 			},
 		})
 		if _, ok := result.(policy.UpstreamRequestHeaderModifications); !ok {
@@ -301,6 +347,9 @@ func TestOnRequestHeaders_LogsHeaders(t *testing.T) {
 	auth, ok := getHeaderValue(record.Headers, "authorization")
 	if !ok || auth != "***" {
 		t.Fatalf("expected masked authorization header, got %v", auth)
+	}
+	if _, ok := getHeaderValue(record.Headers, "x-api-key"); ok {
+		t.Fatalf("expected x-api-key to be excluded")
 	}
 	if traceValue, ok := getHeaderValue(record.Headers, "x-trace-header"); !ok || traceValue != "trace-abc" {
 		t.Fatalf("expected x-trace-header to be logged, got %v", traceValue)
@@ -446,7 +495,8 @@ func TestOnResponseHeaders_LogsHeaders(t *testing.T) {
 	records := captureLogRecords(t, func() {
 		result := p.OnResponseHeaders(context.Background(), ctx, map[string]interface{}{
 			"response": map[string]interface{}{
-				"headers": true,
+				"headers":        true,
+				"excludeHeaders": toInterfaceSlice([]string{"set-cookie"}),
 			},
 		})
 		if _, ok := result.(policy.DownstreamResponseHeaderModifications); !ok {
@@ -469,6 +519,9 @@ func TestOnResponseHeaders_LogsHeaders(t *testing.T) {
 		t.Fatalf("expected no payload in header phase log, got %q", record.Payload)
 	}
 
+	if _, ok := getHeaderValue(record.Headers, "set-cookie"); ok {
+		t.Fatalf("expected set-cookie to be excluded")
+	}
 	if token, ok := getHeaderValue(record.Headers, "x-internal-token"); !ok || token != "token-1" {
 		t.Fatalf("expected x-internal-token to be logged, got %v", token)
 	}

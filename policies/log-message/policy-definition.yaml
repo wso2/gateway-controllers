@@ -22,7 +22,7 @@ parameters:
         parameters filter/mask what the collector captured (they cannot enable capture the
         collector did not perform). When false (default), log inline in real time during
         mediation via the gateway logs, including per-chunk streaming.
-    
+
     properties:
       type: object
       x-wso2-policy-advanced-param: false
@@ -68,6 +68,8 @@ parameters:
         or dotted sub-key paths within map fields (e.g. "requestHeaders.authorization",
         "properties.env") to include/exclude individual headers. Set either "only" or "exclude",
         not both.
+      not:
+        required: [only, exclude]
       properties:
         only:
           type: array
@@ -109,6 +111,20 @@ parameters:
           x-wso2-policy-advanced-param: false
           default: false
           description: Log request headers.
+        excludeHeaders:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: >-
+            Exclude request headers from inline logs when request.headers is enabled
+            (case-insensitive; matched headers are omitted entirely). Inline mode only —
+            in enableTrafficLogging mode, exclude headers via the fields param instead
+            (e.g. fields.exclude: [request.header.<name>]).
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          uniqueItems: true
+          default: []
     response:
       type: object
       x-wso2-policy-advanced-param: false
@@ -125,6 +141,20 @@ parameters:
           x-wso2-policy-advanced-param: false
           default: false
           description: Log response headers.
+        excludeHeaders:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: >-
+            Exclude response headers from inline logs when response.headers is enabled
+            (case-insensitive; matched headers are omitted entirely). Inline mode only —
+            in enableTrafficLogging mode, exclude headers via the fields param instead
+            (e.g. fields.exclude: [response.header.<name>]).
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          uniqueItems: true
+          default: []
   anyOf:
     - required: [ request ]
     - required: [ response ]
