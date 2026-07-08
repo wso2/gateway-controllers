@@ -26,9 +26,9 @@ is produced:
 - **Two modes**: real-time inline logging (default), or traffic-logging enrichment with
   latencies (`enableTrafficLogging: true`).
 - **Configurable logging**: control payload and header logging independently per flow.
-- **Header handling**: `Authorization` is masked by default; in inline mode `excludeHeaders`
-  omits additional headers per flow; in traffic-logging mode header exclusion is done via
-  `fields`.
+- **Header handling**: `Authorization` is masked by default; `excludeHeaders` omits additional
+  headers per flow (works in both modes); in traffic-logging mode `maskedHeaders` redacts
+  header values and `fields` further shapes the line.
 - **Streaming support (inline)**: logs streaming (SSE) chunks independently as they arrive.
 - **Traffic-logging enrichment**: in `enableTrafficLogging` mode the emitted line includes
   latencies, response code, timestamp, IP, and sizes — fields inline logging cannot see.
@@ -44,11 +44,11 @@ is produced:
 | `request` | object | No* | - | Configuration for request logging. |
 | `request.payload` | boolean | No | `false` | Log the request payload. In traffic-logging mode this includes the payload only if the collector captured it. |
 | `request.headers` | boolean | No | `false` | Log the request headers. In traffic-logging mode this includes headers only if the collector captured them. |
-| `request.excludeHeaders` | array | No | `[]` | **(inline only)** Header names to exclude from request logging when `request.headers` is enabled. Case-insensitive; matched headers are omitted entirely. In traffic-logging mode, exclude headers via `fields` instead. |
+| `request.excludeHeaders` | array | No | `[]` | Header names to exclude from request logging when `request.headers` is enabled (works in both modes). Case-insensitive; matched headers are omitted entirely (use `maskedHeaders` to redact the value instead). |
 | `response` | object | No* | - | Configuration for response logging. |
 | `response.payload` | boolean | No | `false` | Log the response payload (see `request.payload` for traffic-logging semantics). |
 | `response.headers` | boolean | No | `false` | Log the response headers (see `request.headers` for traffic-logging semantics). |
-| `response.excludeHeaders` | array | No | `[]` | **(inline only)** Header names to exclude from response logging when `response.headers` is enabled. Case-insensitive; matched headers are omitted entirely. In traffic-logging mode, exclude headers via `fields` instead. |
+| `response.excludeHeaders` | array | No | `[]` | Header names to exclude from response logging when `response.headers` is enabled (works in both modes). Case-insensitive; matched headers are omitted entirely (use `maskedHeaders` to redact the value instead). |
 | `fields` | object | No | - | **(traffic-logging only)** Explicit selection of which fields appear in the emitted line. When set, it is **authoritative** over field presence (see [Field selection](#field-selection-traffic-logging-only)). |
 | `fields.only` | array | No | `[]` | Keep exactly these field names and drop everything else. Set either `only` or `exclude`, not both. |
 | `fields.exclude` | array | No | `[]` | Drop these field names and keep the rest. Set either `only` or `exclude`, not both. |
@@ -56,7 +56,7 @@ is produced:
 | `maskedHeaders` | array | No | `[]` | **(traffic-logging only)** Header names (case-insensitive) whose values are redacted with `****` in the emitted line. Merged with the global `[traffic_logging].masked_headers`. |
 
 Field names for `fields.only`/`fields.exclude` are top-level keys (e.g. `latencies`, `target`,
-`application`) or dotted paths (e.g. `properties.requestHeaders`, `request.header.<name>`).
+`application`) or dotted sub-key paths (e.g. `requestHeaders.authorization`, `properties.env`).
 
 *At least one of `request` or `response` must be provided.
 
@@ -118,8 +118,7 @@ spec:
 ### Example 2: Traffic-logging mode (enriched with latencies)
 
 Emit one JSON line per request via the traffic-logging publisher, including latencies.
-Requires `[collector]` and `[traffic_logging]` enabled (see Prerequisites). Header exclusion
-in this mode is done via `fields` (not `excludeHeaders`):
+Requires `[collector]` and `[traffic_logging]` enabled (see Prerequisites):
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1alpha1
@@ -141,11 +140,10 @@ spec:
         request:
           payload: true
           headers: true
+          excludeHeaders:
+            - X-API-Key
         response:
           headers: true
-        fields:
-          exclude:
-            - request.header.x-api-key
   operations:
     - method: GET
       path: /items
@@ -206,9 +204,9 @@ spec:
 3. **Emitted with latencies.** The traffic-logging publisher reads the marker back: its
    presence gates emission (APIs without it are skipped) and its value shapes the line.
    Because emission is at access-log time, the line includes the Envoy-derived latencies.
-4. **Shaping.** Headers/payloads not requested are omitted, the `fields` selection is applied
-   (including any dotted header paths in `fields.exclude`), and the `maskedHeaders` param plus
-   the gateway-wide `[traffic_logging].masked_headers` are redacted to `****`.
+4. **Shaping.** Headers/payloads not requested are omitted, per-flow `excludeHeaders` are
+   dropped, the `maskedHeaders` param plus the gateway-wide `[traffic_logging].masked_headers`
+   are redacted to `****`, and any `fields` selection is applied last.
 
 #### Latency fields (traffic-logging mode)
 
@@ -226,18 +224,19 @@ metadata, latencies, timing, client info, and the requested headers/payloads). U
 to control exactly which fields are printed. Set **either** `fields.only` **or**
 `fields.exclude`, not both:
 
-- `fields.only` keeps exactly the listed names and drops everything else.
+- `fields.only` keeps exactly the listed names and drops everything else. (If both `only` and
+  `exclude` are somehow set, `only` takes precedence.)
 - `fields.exclude` drops the listed names and keeps the rest.
-- Names are **top-level keys** (`api`, `operation`, `target`, `application`, `subscription`,
-  `latencies`, `metaInfo`, `proxyResponseCode`, `requestTimestamp`, `userAgentHeader`,
-  `userIp`, `properties`) or **dotted paths** (`properties.requestHeaders`,
-  `properties.responseHeaders`, `properties.request_payload`, `properties.response_payload`,
-  `request.header.<name>`, …). Naming the whole `properties` key keeps all of its subkeys;
-  a dotted header path removes/keeps just that header.
+- Names are **top-level keys** of the emitted line (`timestamp`, `correlationId`, `status`,
+  `api`, `operation`, `target`, `application`, `client`, `latencies`, `requestHeaders`,
+  `responseHeaders`, `requestBody`, `responseBody`, `properties`) or **dotted sub-key paths**
+  within the map fields (`requestHeaders.<name>`, `responseHeaders.<name>`,
+  `properties.<key>`). Naming the whole `requestHeaders` key keeps all of its subkeys; a
+  dotted header path removes/keeps just that header.
 - **`fields` is authoritative over presence.** When set, the `request`/`response`
-  `payload`/`headers` toggles are ignored — `fields` alone decides what appears. The
-  `maskedHeaders` param and the global `masked_headers` still apply to header *values* that
-  survive the selection.
+  `payload`/`headers` toggles are ignored — `fields` alone decides what appears. Per-flow
+  `excludeHeaders`, the `maskedHeaders` param, and the global `masked_headers` still apply to
+  headers that survive the selection.
 
 ```yaml
 policies:
@@ -249,12 +248,12 @@ policies:
         only:
           - latencies
           - target
-          - properties.requestHeaders
+          - requestHeaders
 ```
 
-The line above contains only `latencies`, `target`, and `properties.requestHeaders` (with
-`authorization` masked). To drop a single header instead, use
-`fields.exclude: [request.header.x-api-key]`.
+The line above contains only `latencies`, `target`, and `requestHeaders` (with `authorization`
+masked). To drop a single header from the line, use `fields.exclude: [requestHeaders.x-api-key]`
+or, more simply, `request.excludeHeaders: [x-api-key]`.
 
 #### Properties (traffic-logging only)
 
@@ -287,9 +286,7 @@ earlier auth policy) `auth.subject`, `auth.type`, `auth.issuer`, `auth.credentia
 3. **No real-time/streaming in traffic-logging mode** — the line is emitted once after the
    response. Use inline mode for real-time and per-chunk streaming logs.
 4. **Inline memory buffering** — inline payload logging buffers bodies in memory.
-5. **`excludeHeaders` is inline-only** — in traffic-logging mode use `fields` (dotted header
-   paths) and `maskedHeaders` for per-header handling.
-6. **Fixed field shape** — which fields appear is selectable via `fields` (traffic-logging
+5. **Fixed field shape** — which fields appear is selectable via `fields` (traffic-logging
    mode), but the JSON structure/nesting of each field is not customizable.
 
 ## Notes
@@ -297,10 +294,11 @@ earlier auth policy) `auth.subject`, `auth.type`, `auth.issuer`, `auth.credentia
 **Sensitive data**
 
 Exclude authentication/confidential headers and evaluate payload sensitivity before logging.
-In inline mode `Authorization` is masked by default and `excludeHeaders` omits additional
-headers per flow; in traffic-logging mode redaction is driven by the `maskedHeaders` param
-plus `[traffic_logging].masked_headers`, and headers can be dropped via `fields`. Control log
-access, transmission, and retention in line with data-privacy regulations (e.g. GDPR, CCPA).
+`Authorization` is masked by default, and `excludeHeaders` omits additional headers per flow
+in both modes. In traffic-logging mode, `maskedHeaders` (plus the global
+`[traffic_logging].masked_headers`) redacts header values, and `fields` further shapes the
+line. Control log access, transmission, and retention in line with data-privacy regulations
+(e.g. GDPR, CCPA).
 
 **Performance**
 

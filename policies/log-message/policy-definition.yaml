@@ -115,10 +115,10 @@ parameters:
           type: array
           x-wso2-policy-advanced-param: true
           description: >-
-            Exclude request headers from inline logs when request.headers is enabled
-            (case-insensitive; matched headers are omitted entirely). Inline mode only —
-            in enableTrafficLogging mode, exclude headers via the fields param instead
-            (e.g. fields.exclude: [request.header.<name>]).
+            Exclude request headers when request.headers is enabled (case-insensitive;
+            matched headers are omitted entirely, not redacted). Works in both inline and
+            enableTrafficLogging modes. To redact a header value instead of dropping it,
+            use maskedHeaders.
           items:
             type: string
             minLength: 1
@@ -145,10 +145,10 @@ parameters:
           type: array
           x-wso2-policy-advanced-param: true
           description: >-
-            Exclude response headers from inline logs when response.headers is enabled
-            (case-insensitive; matched headers are omitted entirely). Inline mode only —
-            in enableTrafficLogging mode, exclude headers via the fields param instead
-            (e.g. fields.exclude: [response.header.<name>]).
+            Exclude response headers when response.headers is enabled (case-insensitive;
+            matched headers are omitted entirely, not redacted). Works in both inline and
+            enableTrafficLogging modes. To redact a header value instead of dropping it,
+            use maskedHeaders.
           items:
             type: string
             minLength: 1

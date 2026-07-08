@@ -95,15 +95,21 @@ type flowConfig struct {
 type flowDirective struct {
 	Payload bool `json:"payload"`
 	Headers bool `json:"headers"`
+	// ExcludeHeaders lists lower-cased header names dropped entirely from this
+	// flow's headers in the emitted line. It is orthogonal to Fields and to
+	// masking: it always applies when headers are present, matches
+	// case-insensitively, and removes the header rather than redacting it.
+	ExcludeHeaders []string `json:"excludeHeaders,omitempty"`
 }
 
 // fieldsDirective selects which fields appear in the emitted line (traffic-logging
 // mode). Exactly one of Only or Exclude should be set. When set, this is
 // authoritative over field presence: the per-flow payload/headers toggles are
 // ignored. Names are top-level keys (e.g. "requestHeaders", "properties",
-// "latencies") or dotted paths (e.g. "request.header.<name>") — in traffic-logging
-// mode this is also how individual headers are excluded (the inline-only
-// excludeHeaders param has no effect here).
+// "latencies") or dotted sub-key paths within map fields (e.g.
+// "requestHeaders.authorization", "properties.env"). To drop a single header,
+// prefer the per-flow excludeHeaders param, which is case-insensitive and works
+// in both inline and traffic-logging modes.
 type fieldsDirective struct {
 	Only    []string `json:"only,omitempty"`
 	Exclude []string `json:"exclude,omitempty"`
@@ -402,9 +408,26 @@ func buildFlowDirective(params map[string]interface{}, flowName string) *flowDir
 		return nil
 	}
 	return &flowDirective{
-		Payload: parseBoolValue(flow["payload"]),
-		Headers: parseBoolValue(flow["headers"]),
+		Payload:        parseBoolValue(flow["payload"]),
+		Headers:        parseBoolValue(flow["headers"]),
+		ExcludeHeaders: parseLowerNameList(flow["excludeHeaders"]),
 	}
+}
+
+// parseLowerNameList parses a header-name list into a lower-cased []string
+// (whitespace-trimmed, empties dropped), returning nil when nothing usable is
+// present so the marshaled marker omits the field. Used for excludeHeaders in
+// the traffic-logging marker; matching in the publisher is case-insensitive.
+func parseLowerNameList(raw interface{}) []string {
+	names := parseNameList(raw) // trims whitespace, drops empty strings
+	if len(names) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		out = append(out, strings.ToLower(n))
+	}
+	return out
 }
 
 func parseBoolValue(raw interface{}) bool {

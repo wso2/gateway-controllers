@@ -856,6 +856,43 @@ func TestOnRequestHeaders_AccessLog_MaskedHeadersAbsentOmitted(t *testing.T) {
 	}
 }
 
+// Per-flow excludeHeaders are carried in the marker (lower-cased) so the publisher
+// can drop them in traffic-logging mode, mirroring the inline excludeHeaders param.
+func TestOnRequestHeaders_AccessLog_ExcludeHeadersInMarker(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		"request": map[string]interface{}{
+			"headers":        true,
+			"excludeHeaders": toInterfaceSlice([]string{"X-Secret", " Authorization "}),
+		},
+		"response": map[string]interface{}{
+			"headers":        true,
+			"excludeHeaders": toInterfaceSlice([]string{"Set-Cookie"}),
+		},
+	})
+	if dir.Request == nil || len(dir.Request.ExcludeHeaders) != 2 {
+		t.Fatalf("expected 2 request excludeHeaders, got %+v", dir.Request)
+	}
+	// Values must be trimmed and normalized to lower-case.
+	if dir.Request.ExcludeHeaders[0] != "x-secret" || dir.Request.ExcludeHeaders[1] != "authorization" {
+		t.Fatalf("expected normalized lower-case names, got %v", dir.Request.ExcludeHeaders)
+	}
+	if dir.Response == nil || len(dir.Response.ExcludeHeaders) != 1 || dir.Response.ExcludeHeaders[0] != "set-cookie" {
+		t.Fatalf("expected response excludeHeaders [set-cookie], got %+v", dir.Response)
+	}
+}
+
+// A flow without excludeHeaders omits the field from the marker entirely.
+func TestOnRequestHeaders_AccessLog_ExcludeHeadersAbsentOmitted(t *testing.T) {
+	p := newAccessLogPolicy(t)
+	dir := stampMarker(t, p, map[string]interface{}{
+		"request": map[string]interface{}{"headers": true},
+	})
+	if dir.Request == nil || dir.Request.ExcludeHeaders != nil {
+		t.Fatalf("expected excludeHeaders absent when not configured, got %+v", dir.Request)
+	}
+}
+
 // ─── Properties ($ctx resolution) ─────────────────────────────────────────────
 
 // ctxWithAuth builds a request-header context with headers and an authenticated
