@@ -10,5 +10,5 @@
     "WebSub",
     "WebBroker"
   ],
-  "description": "This policy provides the capability to log the payload and headers of a request/response.\nBy default (enableTrafficLogging: false) it logs inline in real time during mediation, including per-chunk streaming. Set enableTrafficLogging: true to instead opt the API into stdout traffic logging, where the traffic-logging publisher emits a single JSON line per request enriched with access-log-derived latencies (requires the collector and traffic logging to be enabled).\nSupports separate configuration for request and response flows."
+  "description": "Logs request/response payloads and headers inline in real time by default, or emits a single latency-enriched line per request in an optional stdout traffic-logging mode.\nBy default (enableTrafficLogging: false) it logs inline in real time during mediation, including per-chunk streaming. Set enableTrafficLogging: true to instead opt the API into stdout traffic logging, where the traffic-logging publisher emits a single JSON line per request enriched with access-log-derived latencies (requires the collector and traffic logging to be enabled).\nSupports separate configuration for request and response flows."
 }
