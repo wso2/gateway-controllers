@@ -1036,7 +1036,9 @@ func TestStampMarker_PropertiesOmittedWhenEmpty(t *testing.T) {
 	})
 	mods := action.(policy.UpstreamRequestHeaderModifications)
 	var dir2 trafficLogDirective
-	_ = json.Unmarshal([]byte(mods.AnalyticsMetadata[trafficLogMetadataKey].(string)), &dir2)
+	if err := json.Unmarshal([]byte(mods.AnalyticsMetadata[trafficLogMetadataKey].(string)), &dir2); err != nil {
+		t.Fatalf("marker not valid JSON: %v", err)
+	}
 	if dir2.Properties != nil {
 		t.Fatalf("expected properties omitted when nothing resolves, got %+v", dir2.Properties)
 	}
