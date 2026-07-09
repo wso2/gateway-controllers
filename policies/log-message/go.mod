@@ -4,7 +4,7 @@ go 1.26.2
 
 require (
 	github.com/wso2/api-platform/sdk/core v0.2.16
-	google.golang.org/protobuf v1.34.2
+	google.golang.org/protobuf v1.36.11
 )
 
 require (
