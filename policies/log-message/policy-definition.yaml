@@ -31,13 +31,26 @@ parameters:
         line under "properties" — useful for filtering and querying logs by environment,
         tenant, or any request attribute. Example:
         `request_id: "$ctx:request.id"`, `env: production`.
-        String values prefixed with "$ctx:" are resolved from the request context at
-        request time. Available references:
-        request.path, request.method, request.authority, request.scheme, request.vhost,
-        request.id, request.header.<name>; api.id, api.name, api.version, api.context,
-        api.kind, api.operation_path; project.id; and (require an earlier auth policy)
-        auth.subject, auth.type, auth.issuer, auth.credential_id, auth.token_id,
-        auth.authenticated, auth.authorized, auth.audience, auth.scopes, auth.property.<claim>.
+        String values prefixed with "$ctx:" are evaluated as a CEL (Common Expression
+        Language) expression against the request context at request time — anything
+        from a bare reference (`$ctx:request.id`) to arithmetic, string ops, and
+        conditionals (`$ctx:auth.authenticated ? auth.subject : "anonymous"`) or list/map
+        macros (`$ctx:"admin" in auth.scopes`). The `ext.Strings()` CEL extension library
+        (join, split, replace, trim, quote, …) is available. The result keeps its native
+        CEL type (string/bool/number/list/map) in the emitted line; a compile or
+        evaluation failure (undeclared variable, missing map/list key, or an auth.*
+        reference when no auth policy ran) causes that property to be silently omitted.
+        Available variables: request.path, request.method, request.authority,
+        request.scheme, request.vhost, request.id, request.header (map, e.g.
+        request.header['x-request-id'][0] — keys are always lower-case), request.metadata
+        (map of dynamic keys set by other policies for inter-policy communication — the
+        one variable here whose keys are not a fixed set, e.g.
+        request.metadata['some_key_a_custom_policy_set']); api.id, api.name,
+        api.version, api.context, api.kind, api.operation_path; project.id; and (bound only
+        when an earlier auth policy ran) auth.subject, auth.type, auth.issuer,
+        auth.credential_id, auth.token_id, auth.authenticated, auth.authorized,
+        auth.audience (list), auth.scopes (sorted list), auth.property (map, case-sensitive
+        keys, e.g. auth.property['tenant']).
         Non-resolvable references are skipped; non-string values are logged as-is.
       default: {}
       additionalProperties: {}

@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -893,10 +894,10 @@ func TestOnRequestHeaders_AccessLog_ExcludeHeadersAbsentOmitted(t *testing.T) {
 	}
 }
 
-// ─── Properties ($ctx resolution) ─────────────────────────────────────────────
+// ─── Properties ($ctx CEL resolution) ─────────────────────────────────────────
 
 // ctxWithAuth builds a request-header context with headers and an authenticated
-// AuthContext for exercising $ctx resolution.
+// AuthContext for exercising $ctx CEL evaluation.
 func ctxWithAuth() *policy.RequestHeaderContext {
 	return &policy.RequestHeaderContext{
 		SharedContext: &policy.SharedContext{
@@ -907,6 +908,11 @@ func ctxWithAuth() *policy.RequestHeaderContext {
 			OperationPath: "/pets/{id}",
 			ProjectID:     "proj-7",
 			RequestID:     "req-abc",
+			Metadata: map[string]interface{}{
+				"risk_score":    42,
+				"flagged":       true,
+				"custom_policy": "geo-fence",
+			},
 			AuthContext: &policy.AuthContext{
 				Authenticated: true,
 				Authorized:    true,
@@ -929,56 +935,104 @@ func ctxWithAuth() *policy.RequestHeaderContext {
 	}
 }
 
-func TestResolveContextValue(t *testing.T) {
+func TestEvaluateProperty(t *testing.T) {
 	reqCtx := ctxWithAuth()
+	evaluator, err := GetCELEvaluator()
+	if err != nil {
+		t.Fatalf("GetCELEvaluator() error: %v", err)
+	}
+	evalCtx := buildPropertyEvalContext(reqCtx)
+
 	cases := []struct {
-		name   string
-		in     string
-		want   string
-		wantOK bool
+		name string
+		expr string
+		want interface{}
 	}{
-		{"literal passthrough", "plain-value", "plain-value", true},
-		{"request.method", "$ctx:request.method", "GET", true},
-		{"request.path", "$ctx:request.path", "/pets", true},
-		{"request.header present", "$ctx:request.header.x-tenant-id", "t-9", true},
-		{"request.header case-insensitive", "$ctx:request.header.X-Tenant-Id", "t-9", true},
-		{"request.header missing", "$ctx:request.header.x-absent", "", false},
-		{"request.authority", "$ctx:request.authority", "api.example.com", true},
-		{"request.scheme", "$ctx:request.scheme", "https", true},
-		{"request.vhost", "$ctx:request.vhost", "default", true},
-		{"request.id", "$ctx:request.id", "req-abc", true},
-		{"api.name", "$ctx:api.name", "PetStore", true},
-		{"api.version", "$ctx:api.version", "v1.0.0", true},
-		{"api.context", "$ctx:api.context", "/petstore", true},
-		{"api.kind", "$ctx:api.kind", "RestApi", true},
-		{"api.operation_path", "$ctx:api.operation_path", "/pets/{id}", true},
-		{"project.id", "$ctx:project.id", "proj-7", true},
-		{"auth.subject", "$ctx:auth.subject", "alice", true},
-		{"auth.type", "$ctx:auth.type", "jwt", true},
-		{"auth.credential_id", "$ctx:auth.credential_id", "client-123", true},
-		{"auth.token_id", "$ctx:auth.token_id", "jti-42", true},
-		{"auth.issuer", "$ctx:auth.issuer", "https://idp.example", true},
-		{"auth.authenticated", "$ctx:auth.authenticated", "true", true},
-		{"auth.audience joined", "$ctx:auth.audience", "aud1,aud2", true},
-		{"auth.scopes sorted", "$ctx:auth.scopes", "read write", true},
-		{"auth.property case-sensitive", "$ctx:auth.property.tenant", "acme", true},
-		{"auth.property missing", "$ctx:auth.property.nope", "", false},
-		{"unknown var", "$ctx:does.not.exist", "", false},
+		{"request.method", "request.method", "GET"},
+		{"request.path", "request.path", "/pets"},
+		{"request.header present (lowercase key)", "request.header['x-tenant-id'][0]", "t-9"},
+		{"request.header missing errors", "request.header['x-absent']", nil}, // no such key -> error
+		{"request.authority", "request.authority", "api.example.com"},
+		{"request.scheme", "request.scheme", "https"},
+		{"request.vhost", "request.vhost", "default"},
+		{"request.id", "request.id", "req-abc"},
+		{"api.name", "api.name", "PetStore"},
+		{"api.version", "api.version", "v1.0.0"},
+		{"api.context", "api.context", "/petstore"},
+		{"api.kind", "api.kind", "RestApi"},
+		{"api.operation_path", "api.operation_path", "/pets/{id}"},
+		{"project.id", "project.id", "proj-7"},
+		{"auth.subject", "auth.subject", "alice"},
+		{"auth.type", "auth.type", "jwt"},
+		{"auth.credential_id", "auth.credential_id", "client-123"},
+		{"auth.token_id", "auth.token_id", "jti-42"},
+		{"auth.issuer", "auth.issuer", "https://idp.example"},
+		{"auth.authenticated (native bool)", "auth.authenticated", true},
+		{"auth.audience (native list)", "auth.audience", []interface{}{"aud1", "aud2"}},
+		{"auth.audience joined via ext.Strings", `auth.audience.join(",")`, "aud1,aud2"},
+		{"auth.scopes (native, sorted list)", "auth.scopes", []interface{}{"read", "write"}},
+		{"auth.scopes membership test", `"read" in auth.scopes`, true},
+		{"auth.property bracket access", "auth.property['tenant']", "acme"},
+		{"auth.property missing errors", "auth.property['nope']", nil}, // no such key -> error
+		{"conditional expression", `auth.authenticated ? auth.subject : "anonymous"`, "alice"},
+		{"string concatenation", `request.method + " " + request.path`, "GET /pets"},
+		{"undeclared variable errors", "does.not.exist", nil},
+		// `in` works for map key-presence with ANY key, including hyphenated header names —
+		// unlike has(), which only accepts a dot-select argument (see next two cases).
+		{"header presence via in (hyphenated key)", `'x-tenant-id' in request.header`, true},
+		{"header absence via in", `'x-absent' in request.header`, false},
+		// request.metadata is the dynamic-key escape hatch: arbitrary keys set by
+		// whatever other policy ran earlier, not knowable ahead of time — unlike every
+		// other variable here, which names a fixed SDK field.
+		{"request.metadata string value", `request.metadata['custom_policy']`, "geo-fence"},
+		// Numbers convert to float64 (via structpb, mirroring JSON's lack of an int/float
+		// distinction) regardless of the Go type stored in Metadata — consistent with how
+		// a plain int literal in "properties" round-trips through JSON marshaling too.
+		{"request.metadata numeric value", `request.metadata['risk_score']`, float64(42)},
+		{"request.metadata bool value", `request.metadata['flagged']`, true},
+		{"request.metadata missing key errors", `request.metadata['nope']`, nil},
+		{"request.metadata key presence via in", `'risk_score' in request.metadata`, true},
+		{"has() works for simple dot-accessible keys", `has(auth.property.tenant)`, true},
+		{"has() rejects bracket indexing", `has(request.header['x-tenant-id'])`, nil}, // compile error
+		{"has() rejects hyphenated dot-select", `has(request.header.x-tenant-id)`, nil}, // compile error (hyphen = subtraction)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := resolveContextValue(tc.in, reqCtx)
-			if got != tc.want || ok != tc.wantOK {
-				t.Fatalf("resolveContextValue(%q) = (%q, %v), want (%q, %v)", tc.in, got, ok, tc.want, tc.wantOK)
+			got, err := evaluator.EvaluateProperty(tc.expr, evalCtx)
+			if tc.want == nil {
+				if err == nil {
+					t.Fatalf("EvaluateProperty(%q) = (%v, nil), want an error", tc.expr, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EvaluateProperty(%q) unexpected error: %v", tc.expr, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("EvaluateProperty(%q) = %#v (%T), want %#v (%T)", tc.expr, got, got, tc.want, tc.want)
 			}
 		})
 	}
 }
 
-func TestResolveContextValue_NilAuthSkipped(t *testing.T) {
+// TestBuildPropertyEvalContext_NilAuthOmitsAuthVars documents the mechanism
+// that makes auth.* references "unresolvable" when no auth policy ran: rather
+// than binding zero values, the auth.* keys are absent from the evaluation
+// context entirely, so any expression touching them fails with an unbound
+// variable error (see createPropertyExtractionEnv's comment).
+func TestBuildPropertyEvalContext_NilAuthOmitsAuthVars(t *testing.T) {
 	reqCtx := &policy.RequestHeaderContext{SharedContext: &policy.SharedContext{}}
-	if _, ok := resolveContextValue("$ctx:auth.subject", reqCtx); ok {
-		t.Fatalf("expected auth.* to be unresolved when AuthContext is nil")
+	evalCtx := buildPropertyEvalContext(reqCtx)
+	if _, present := evalCtx["auth.subject"]; present {
+		t.Fatalf("expected auth.* keys absent from eval context when AuthContext is nil")
+	}
+
+	evaluator, err := GetCELEvaluator()
+	if err != nil {
+		t.Fatalf("GetCELEvaluator() error: %v", err)
+	}
+	if _, err := evaluator.EvaluateProperty("auth.subject", evalCtx); err == nil {
+		t.Fatalf("expected auth.subject to fail evaluation when AuthContext is nil")
 	}
 }
 
@@ -987,12 +1041,12 @@ func TestStampMarker_Properties(t *testing.T) {
 	action := p.OnRequestHeaders(context.Background(), ctxWithAuth(), map[string]interface{}{
 		"request": map[string]interface{}{"headers": true},
 		"properties": map[string]interface{}{
-			"who":        "$ctx:auth.subject",          // resolves
-			"tenant":     "$ctx:auth.property.tenant",  // resolves (case-sensitive key)
-			"authType":   "$ctx:auth.type",             // resolves
-			"env":        "prod",                       // literal
-			"missing":    "$ctx:request.header.x-none", // unresolved -> skipped
-			"retryCount": 3,                            // non-string literal passthrough
+			"who":        "$ctx:auth.subject",             // resolves
+			"tenant":     "$ctx:auth.property['tenant']",   // resolves (case-sensitive key)
+			"authType":   "$ctx:auth.type",                // resolves
+			"env":        "prod",                          // literal
+			"missing":    "$ctx:request.header['x-none']", // unresolved -> skipped
+			"retryCount": 3,                                // non-string literal passthrough
 		},
 	})
 	mods := action.(policy.UpstreamRequestHeaderModifications)

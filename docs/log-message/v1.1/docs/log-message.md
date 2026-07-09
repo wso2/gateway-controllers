@@ -52,7 +52,7 @@ is produced:
 | `fields` | object | No | - | **(traffic-logging only)** Explicit selection of which fields appear in the emitted line. When set, it is **authoritative** over field presence (see [Field selection](#field-selection-traffic-logging-only)). |
 | `fields.only` | array | No | `[]` | Keep exactly these field names and drop everything else. Set either `only` or `exclude`, not both. |
 | `fields.exclude` | array | No | `[]` | Drop these field names and keep the rest. Set either `only` or `exclude`, not both. |
-| `properties` | object | No | `{}` | **(traffic-logging only)** Extra key→value pairs attached under `properties` in the emitted line. String values prefixed with `$ctx:` are resolved from the request context (see [Properties](#properties-traffic-logging-only)); other values pass through. |
+| `properties` | object | No | `{}` | **(traffic-logging only)** Extra key→value pairs attached under `properties` in the emitted line. String values prefixed with `$ctx:` are evaluated as a CEL expression against the request context (see [Properties](#properties-traffic-logging-only)); other values pass through. |
 | `maskedHeaders` | array | No | `[]` | **(traffic-logging only)** Header names (case-insensitive) whose values are redacted with `****` in the emitted line. Merged with the global `[traffic_logging].masked_headers`. |
 
 Field names for `fields.only`/`fields.exclude` are top-level keys (e.g. `latencies`, `target`,
@@ -80,6 +80,41 @@ alone is not enough:
 ```yaml
 - name: log-message
   gomodule: github.com/wso2/gateway-controllers/policies/log-message@v1
+```
+
+### Policy ordering
+
+List `log-message` first in the API/operation's `policies:` array, ahead of authentication,
+rate-limiting, or any other policy that can reject the request with an immediate response
+(e.g. 401, 403, 429).
+
+Policies execute in declared order, phase by phase. If a policy short-circuits the request with
+an immediate response, no later-listed policy runs — including `log-message`, whose logging
+(inline mode) and traffic-log marker (traffic-logging mode) are both produced in the
+request-header phase. Ordering `log-message` after a rejecting policy means rejected requests
+produce no log entry at all, which is typically the opposite of what's wanted for failed
+logins, rate-limit rejections, and similar signals.
+
+The engine preserves request-header-phase analytics metadata (including the traffic-log marker)
+from policies that ran *before* a short-circuit, so a preceding `log-message` still produces a
+line for the rejected request, carrying the final status code. This only covers policies that
+already ran, which is why `log-message` must be listed first to benefit from it.
+
+**Exception:** `auth.*` properties (see [Properties](#properties-traffic-logging-only)) require
+an auth policy to run first — the opposite ordering. There is no arrangement that satisfies
+both; choose based on whether complete rejection coverage or `auth.*` enrichment matters more
+for a given API.
+
+```yaml
+policies:
+  - name: log-message
+    version: v1
+    params:
+      enableTrafficLogging: true
+      request:
+        headers: true
+  - name: jwt-auth
+    version: v1
 ```
 
 ## Reference Scenarios
@@ -257,26 +292,47 @@ or, more simply, `request.excludeHeaders: [x-api-key]`.
 
 #### Properties (traffic-logging only)
 
-`properties` adds extra key→value pairs under `properties` in the emitted line — useful for
-filtering/querying logs by environment, tenant, or any request attribute. String values
-prefixed with `$ctx:` are resolved from the request context at request time; other values
-(including non-strings) pass through as-is. Non-resolvable references are skipped.
+`properties` attaches key→value pairs to the emitted line, for filtering or querying logs by
+environment, tenant, or request attribute. Non-string values, and strings without a `$ctx:`
+prefix, pass through as literals. A `$ctx:`-prefixed string is evaluated as a CEL (Common
+Expression Language) expression against the request context, and the result keeps its native
+type (string, bool, number, list, map) in the emitted line. A failed compile or evaluation —
+an undeclared variable, a missing map/list key, or an `auth.*` reference before any auth
+policy ran — omits that property; it does not fail the request.
 
 ```yaml
-params:
-  enableTrafficLogging: true
-  properties:
-    env: production                 # literal
-    request_id: "$ctx:request.id"   # resolved from context
-    subject: "$ctx:auth.subject"    # requires an earlier auth policy
+properties:
+  env: production
+  request_id: "$ctx:request.id"
+  subject: "$ctx:auth.authenticated ? auth.subject : \"anonymous\""
+  tenant: "$ctx:request.header['x-tenant-id'][0]"
+  is_admin: "$ctx:\"admin\" in auth.scopes"
 ```
 
-Available `$ctx:` references: `request.path`, `request.method`, `request.authority`,
-`request.scheme`, `request.vhost`, `request.id`, `request.header.<name>`; `api.id`, `api.name`,
-`api.version`, `api.context`, `api.kind`, `api.operation_path`; `project.id`; and (require an
-earlier auth policy) `auth.subject`, `auth.type`, `auth.issuer`, `auth.credential_id`,
-`auth.token_id`, `auth.authenticated`, `auth.authorized`, `auth.audience`, `auth.scopes`,
-`auth.property.<claim>`.
+Available variables:
+
+| Variable | Type | Notes |
+|----------|------|-------|
+| `request.path`, `request.method`, `request.authority`, `request.scheme`, `request.vhost`, `request.id` | string | |
+| `request.header` | map(string, list(string)) | Lower-case keys, bracket-indexed, e.g. `request.header['x-request-id'][0]`. |
+| `request.metadata` | map(string, dyn) | Arbitrary keys set by earlier policies (`SharedContext.Metadata`) — the only variable here without a fixed key set. |
+| `api.id`, `api.name`, `api.version`, `api.context`, `api.kind`, `api.operation_path` | string | |
+| `project.id` | string | |
+| `auth.subject`, `auth.type`, `auth.issuer`, `auth.credential_id`, `auth.token_id` | string | Bound only if an earlier auth policy ran. |
+| `auth.authenticated`, `auth.authorized` | bool | Bound only if an earlier auth policy ran. |
+| `auth.audience` | list(string) | Bound only if an earlier auth policy ran. |
+| `auth.scopes` | list(string), sorted | Bound only if an earlier auth policy ran. |
+| `auth.property` | map(string, string) | Case-sensitive keys, bracket-indexed, e.g. `auth.property['tenant']`. Bound only if an earlier auth policy ran. |
+
+The [`ext.Strings()`](https://pkg.go.dev/github.com/google/cel-go/ext#Strings) library
+(`join`, `split`, `replace`, `trim`, `quote`, …) and standard CEL macros (`in`, `.exists()`,
+`.all()`, `.map()`, `.filter()`) are available for the map/list variables above. Prefer `in`
+over `has()` for presence checks: `has()` only accepts dot-select syntax, so it rejects bracket
+indexing and any key containing a hyphen — which rules it out for header names in practice.
+
+> `auth.*` variables require an earlier auth policy in the chain, which conflicts with
+> [Policy ordering](#policy-ordering)'s recommendation to list `log-message` first. See that
+> section for the tradeoff.
 
 ## Limitations
 
@@ -288,6 +344,8 @@ earlier auth policy) `auth.subject`, `auth.type`, `auth.issuer`, `auth.credentia
 4. **Inline memory buffering** — inline payload logging buffers bodies in memory.
 5. **Fixed field shape** — which fields appear is selectable via `fields` (traffic-logging
    mode), but the JSON structure/nesting of each field is not customizable.
+6. **Order-sensitive within the policy chain** — a rejecting policy listed before `log-message`
+   prevents it from running for that request. See [Policy ordering](#policy-ordering).
 
 ## Notes
 

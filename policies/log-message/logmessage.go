@@ -21,8 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
-	"sort"
-	"strconv"
 	"strings"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -258,9 +256,12 @@ func (p *LogMessagePolicy) stampTrafficLogMarker(reqCtx *policy.RequestHeaderCon
 }
 
 // buildProperties resolves the properties param into a flat map for the traffic-log
-// marker. String values prefixed with ctxPrefix are resolved from the request context
-// (unresolvable references are skipped); other values pass through unchanged.
-// Returns nil when nothing usable is configured so the marker omits the field.
+// marker. String values prefixed with ctxPrefix are evaluated as CEL expressions
+// against the request context (see cel_evaluator.go) — a compile or evaluation
+// failure (including an undeclared variable, or an auth.* reference when no auth
+// policy ran) is treated as "not resolvable" and the property is skipped; other
+// values pass through unchanged. Returns nil when nothing usable is configured so
+// the marker omits the field.
 func buildProperties(reqCtx *policy.RequestHeaderContext, params map[string]interface{}) map[string]any {
 	raw, found := params[FieldNameProperties]
 	if !found || raw == nil {
@@ -270,21 +271,42 @@ func buildProperties(reqCtx *policy.RequestHeaderContext, params map[string]inte
 	if !ok || len(m) == 0 {
 		return nil
 	}
+
+	var evaluator *CELEvaluator
+	var evalCtx map[string]interface{}
+	var evaluatorErr error
+
 	out := make(map[string]any, len(m))
 	for key, val := range m {
 		if strings.TrimSpace(key) == "" {
 			continue
 		}
 		s, isStr := val.(string)
-		if !isStr {
-			// Non-string literals (numbers, booleans) pass through as-is.
+		if !isStr || !strings.HasPrefix(s, ctxPrefix) {
+			// Non-$ctx: literals (numbers, booleans, plain strings) pass through as-is.
 			out[key] = val
 			continue
 		}
-		resolved, ok := resolveContextValue(s, reqCtx)
-		if !ok {
-			slog.Debug("log-message: skipping property — context variable not resolvable",
-				"property", key, "ref", s)
+
+		// Lazily initialize the evaluator/context — only pay for it when at
+		// least one property actually needs CEL evaluation.
+		if evalCtx == nil && evaluatorErr == nil {
+			evaluator, evaluatorErr = GetCELEvaluator()
+			if evaluatorErr == nil {
+				evalCtx = buildPropertyEvalContext(reqCtx)
+			}
+		}
+		if evaluatorErr != nil {
+			slog.Error("log-message: CEL evaluator unavailable; skipping $ctx: property",
+				"property", key, "error", evaluatorErr)
+			continue
+		}
+
+		expression := strings.TrimPrefix(s, ctxPrefix)
+		resolved, err := evaluator.EvaluateProperty(expression, evalCtx)
+		if err != nil {
+			slog.Debug("log-message: skipping property — CEL expression not resolvable",
+				"property", key, "expression", expression, "error", err)
 			continue
 		}
 		out[key] = resolved
@@ -293,106 +315,6 @@ func buildProperties(reqCtx *policy.RequestHeaderContext, params map[string]inte
 		return nil
 	}
 	return out
-}
-
-// resolveContextValue expands a property value. A value without ctxPrefix is a
-// literal and returned unchanged. A "$ctx:<ref>" value is resolved from the request
-// context; the boolean is false when the reference cannot be resolved (the caller skips
-// it). Fixed accessor names are matched case-insensitively; auth.property.<key> preserves
-// the original key case (Properties keys are case-sensitive). auth.* references require an
-// earlier auth policy to have populated the shared AuthContext.
-func resolveContextValue(value string, reqCtx *policy.RequestHeaderContext) (string, bool) {
-	if !strings.HasPrefix(value, ctxPrefix) {
-		return value, true
-	}
-	ref := strings.TrimPrefix(value, ctxPrefix)
-	variable := strings.ToLower(ref)
-
-	switch {
-	case variable == "request.path":
-		return reqCtx.Path, true
-	case variable == "request.method":
-		return reqCtx.Method, true
-	case variable == "request.authority":
-		return reqCtx.Authority, true
-	case variable == "request.scheme":
-		return reqCtx.Scheme, true
-	case variable == "request.vhost":
-		return reqCtx.Vhost, true
-	case variable == "request.id":
-		return reqCtx.RequestID, true
-	case strings.HasPrefix(variable, "request.header."):
-		name := strings.TrimPrefix(variable, "request.header.")
-		vals := reqCtx.Headers.Get(name)
-		if len(vals) == 0 {
-			return "", false
-		}
-		return vals[0], true
-	case variable == "api.id":
-		return reqCtx.APIId, true
-	case variable == "api.name":
-		return reqCtx.APIName, true
-	case variable == "api.version":
-		return reqCtx.APIVersion, true
-	case variable == "api.context":
-		return reqCtx.APIContext, true
-	case variable == "api.kind":
-		return string(reqCtx.APIKind), true
-	case variable == "api.operation_path":
-		return reqCtx.OperationPath, true
-	case variable == "project.id":
-		return reqCtx.ProjectID, true
-	}
-
-	if strings.HasPrefix(variable, "auth.") {
-		authCtx := reqCtx.AuthContext
-		if authCtx == nil {
-			return "", false
-		}
-		switch {
-		case variable == "auth.subject":
-			return authCtx.Subject, true
-		case variable == "auth.type":
-			return authCtx.AuthType, true
-		case variable == "auth.issuer":
-			return authCtx.Issuer, true
-		case variable == "auth.credential_id":
-			return authCtx.CredentialID, true
-		case variable == "auth.token_id":
-			return authCtx.TokenId, authCtx.TokenId != ""
-		case variable == "auth.authenticated":
-			return strconv.FormatBool(authCtx.Authenticated), true
-		case variable == "auth.authorized":
-			return strconv.FormatBool(authCtx.Authorized), true
-		case variable == "auth.audience":
-			if len(authCtx.Audience) == 0 {
-				return "", false
-			}
-			return strings.Join(authCtx.Audience, ","), true
-		case variable == "auth.scopes":
-			if len(authCtx.Scopes) == 0 {
-				return "", false
-			}
-			return joinScopes(authCtx.Scopes), true
-		case strings.HasPrefix(variable, "auth.property."):
-			propKey := ref[len("auth.property."):]
-			val, ok := authCtx.Properties[propKey]
-			return val, ok
-		}
-	}
-
-	return "", false
-}
-
-// joinScopes renders a scope set as a space-separated string in a stable (sorted)
-// order so log lines are deterministic.
-func joinScopes(scopes map[string]bool) string {
-	names := make([]string, 0, len(scopes))
-	for name := range scopes {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return strings.Join(names, " ")
 }
 
 // buildFlowDirective extracts a flow ("request" or "response") sub-object into a
