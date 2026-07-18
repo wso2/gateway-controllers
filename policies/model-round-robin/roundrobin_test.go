@@ -410,3 +410,377 @@ func baseRRModels() []interface{} {
 		map[string]interface{}{"model": "gpt-35"},
 	}
 }
+
+func TestModelRoundRobinPolicy_StickyKey_ParseValidation(t *testing.T) {
+	// 1. Invalid stickyKey type
+	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       "not-an-object",
+	})
+	if err == nil || !strings.Contains(err.Error(), "'stickyKey' must be an object") {
+		t.Fatalf("expected 'stickyKey must be an object' error, got %v", err)
+	}
+
+	// 2. Missing location
+	_, err = GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "'stickyKey.location' is required") {
+		t.Fatalf("expected 'stickyKey.location is required' error, got %v", err)
+	}
+
+	// 3. Invalid location value
+	_, err = GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "invalid-loc"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "'stickyKey.location' must be one of") {
+		t.Fatalf("expected 'location must be one of' error, got %v", err)
+	}
+
+	// 4. Missing identifier when location is header
+	_, err = GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "'stickyKey.identifier' is required when location is 'header'") {
+		t.Fatalf("expected 'identifier is required' error, got %v", err)
+	}
+
+	// 5. Success with location 'ip' without identifier
+	_, err = GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "ip"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error parsing valid stickyKey: %v", err)
+	}
+}
+
+func TestModelRoundRobinPolicy_StickyKey_HeaderRouting(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header", "identifier": "x-session-id"},
+	})
+
+	// Use same session ID multiple times -> must always route to same model
+	sessionID := "user-session-abc"
+	ctx1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"x-session-id": {sessionID}}),
+	}
+	action1 := p.OnRequestHeaders(context.Background(), ctx1, nil)
+	mods1 := mustRRRequestHeaderMods(t, action1)
+	selectedModel1 := mods1.HeadersToSet["x-model"]
+
+	for i := 0; i < 5; i++ {
+		ctx2 := &policy.RequestHeaderContext{
+			SharedContext: rrSharedContext(),
+			Headers:       policy.NewHeaders(map[string][]string{"x-session-id": {sessionID}}),
+		}
+		action2 := p.OnRequestHeaders(context.Background(), ctx2, nil)
+		mods2 := mustRRRequestHeaderMods(t, action2)
+		selectedModel2 := mods2.HeadersToSet["x-model"]
+		if selectedModel1 != selectedModel2 {
+			t.Fatalf("expected same model %s, but got %s on call %d", selectedModel1, selectedModel2, i)
+		}
+	}
+}
+
+func TestModelRoundRobinPolicy_StickyKey_FallbackTiers(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header", "identifier": "x-session-id", "fallbackToAuth": true, "fallbackToIP": true},
+	})
+
+	// 1. Missing custom session-id but has Authorization token -> should be sticky on Authorization token
+	authToken := "Bearer 12345"
+	ctx1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"authorization": {authToken}}),
+	}
+	action1 := p.OnRequestHeaders(context.Background(), ctx1, nil)
+	mods1 := mustRRRequestHeaderMods(t, action1)
+	selectedModel1 := mods1.HeadersToSet["x-model"]
+
+	ctx2 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"authorization": {authToken}}),
+	}
+	action2 := p.OnRequestHeaders(context.Background(), ctx2, nil)
+	mods2 := mustRRRequestHeaderMods(t, action2)
+	selectedModel2 := mods2.HeadersToSet["x-model"]
+
+	if selectedModel1 != selectedModel2 {
+		t.Fatalf("expected sticky routing on fallback authorization header: %s vs %s", selectedModel1, selectedModel2)
+	}
+
+	// 2. Missing custom session-id & Authorization header but has Client IP -> should be sticky on IP
+	clientIP := "203.0.113.195"
+	ctxIP1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"x-forwarded-for": {clientIP}}),
+	}
+	actionIP1 := p.OnRequestHeaders(context.Background(), ctxIP1, nil)
+	modsIP1 := mustRRRequestHeaderMods(t, actionIP1)
+	selectedModelIP1 := modsIP1.HeadersToSet["x-model"]
+
+	ctxIP2 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"x-forwarded-for": {clientIP}}),
+	}
+	actionIP2 := p.OnRequestHeaders(context.Background(), ctxIP2, nil)
+	modsIP2 := mustRRRequestHeaderMods(t, actionIP2)
+	selectedModelIP2 := modsIP2.HeadersToSet["x-model"]
+
+	if selectedModelIP1 != selectedModelIP2 {
+		t.Fatalf("expected sticky routing on fallback IP address: %s vs %s", selectedModelIP1, selectedModelIP2)
+	}
+
+	// 3. Missing everything -> should fall back to sequential round-robin and generate a gateway session ID
+	ctxRR1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{}),
+	}
+	actionRR1 := p.OnRequestHeaders(context.Background(), ctxRR1, nil)
+	modsRR1 := mustRRRequestHeaderMods(t, actionRR1)
+	selectedModelRR1 := modsRR1.HeadersToSet["x-model"]
+
+	// Verify a gateway session ID was generated
+	if genID, ok := ctxRR1.Metadata[MetadataKeyGeneratedSessionID]; !ok || genID == "" {
+		t.Fatalf("expected a gateway-generated session ID in metadata when no session key is present")
+	}
+
+	ctxRR2 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{}),
+	}
+	actionRR2 := p.OnRequestHeaders(context.Background(), ctxRR2, nil)
+	modsRR2 := mustRRRequestHeaderMods(t, actionRR2)
+	selectedModelRR2 := modsRR2.HeadersToSet["x-model"]
+
+	if selectedModelRR1 == selectedModelRR2 {
+		t.Fatalf("expected fallback round-robin sequential distribution, but got same model: %s", selectedModelRR1)
+	}
+}
+
+func TestModelRoundRobinPolicy_StickyKey_RehashingFailover(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(), // "gpt-4" and "gpt-35"
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header", "identifier": "x-session-id"},
+	})
+
+	sessionID := "user-session-failover"
+	
+	// Determine which model is selected for this session ID
+	ctx1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"x-session-id": {sessionID}}),
+	}
+	action1 := p.OnRequestHeaders(context.Background(), ctx1, nil)
+	mods1 := mustRRRequestHeaderMods(t, action1)
+	firstModel := mods1.HeadersToSet["x-model"]
+
+	// Now suspend the selected model
+	p.suspendedModels[firstModel] = time.Now().Add(5 * time.Minute)
+
+	// Make the request again -> it must failover and select the other model
+	ctx2 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"x-session-id": {sessionID}}),
+	}
+	action2 := p.OnRequestHeaders(context.Background(), ctx2, nil)
+	mods2 := mustRRRequestHeaderMods(t, action2)
+	failoverModel := mods2.HeadersToSet["x-model"]
+
+	if failoverModel == firstModel {
+		t.Fatalf("expected failover to a different model, but got the suspended model %s", firstModel)
+	}
+	if failoverModel == "" {
+		t.Fatalf("expected to route to healthy model, got empty")
+	}
+}
+
+func TestModelRoundRobinPolicy_StickyKey_PayloadRouting(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "payload", "identifier": "$.model"},
+		"stickyKey":       map[string]interface{}{"location": "payload", "identifier": "$.session_id"},
+	})
+
+	// First request header phase (should not select the model yet)
+	shared1 := rrSharedContext()
+	headerCtx1 := &policy.RequestHeaderContext{SharedContext: shared1}
+	p.OnRequestHeaders(context.Background(), headerCtx1, nil)
+
+	if shared1.Metadata[MetadataKeySelectedModel] != nil {
+		t.Fatalf("expected model selection to be deferred during OnRequestHeaders")
+	}
+
+	// First request body phase -> extracts key from body, hashes, selects model, writes to body
+	bodyCtx1 := &policy.RequestContext{
+		SharedContext: shared1,
+		Body:          &policy.Body{Content: []byte(`{"session_id":"sess-123","model":"original"}`), Present: true},
+	}
+	action1 := p.OnRequestBody(context.Background(), bodyCtx1, nil)
+	mods1 := mustRRRequestMods(t, action1)
+	got1 := decodeJSONMapRR(t, mods1.Body)
+	selectedModel1 := got1["model"].(string)
+
+	// Repeat with same session ID -> must map to the same model
+	for i := 0; i < 3; i++ {
+		sharedLoop := rrSharedContext()
+		headerCtxLoop := &policy.RequestHeaderContext{SharedContext: sharedLoop}
+		p.OnRequestHeaders(context.Background(), headerCtxLoop, nil)
+
+		bodyCtxLoop := &policy.RequestContext{
+			SharedContext: sharedLoop,
+			Body:          &policy.Body{Content: []byte(`{"session_id":"sess-123","model":"original"}`), Present: true},
+		}
+		actionLoop := p.OnRequestBody(context.Background(), bodyCtxLoop, nil)
+		modsLoop := mustRRRequestMods(t, actionLoop)
+		gotLoop := decodeJSONMapRR(t, modsLoop.Body)
+		selectedModelLoop := gotLoop["model"].(string)
+
+		if selectedModel1 != selectedModelLoop {
+			t.Fatalf("expected same model %s, but got %s for payload-based session on call %d", selectedModel1, selectedModelLoop, i)
+		}
+	}
+}
+
+func TestModelRoundRobinPolicy_GatewayGeneratedSessionID_RoundTrip(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header", "identifier": "x-session-id"},
+	})
+
+	// Step 1: Send request without session ID -> should get a generated ID
+	ctx1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{}),
+	}
+	action1 := p.OnRequestHeaders(context.Background(), ctx1, nil)
+	mods1 := mustRRRequestHeaderMods(t, action1)
+	selectedModel1 := mods1.HeadersToSet["x-model"]
+
+	generatedID, ok := ctx1.Metadata[MetadataKeyGeneratedSessionID].(string)
+	if !ok || generatedID == "" {
+		t.Fatalf("expected a gateway-generated session ID, got none")
+	}
+
+	// Verify the generated ID has the correct format (_M<index>)
+	if _, isGW := isGatewayGeneratedID(generatedID); !isGW {
+		t.Fatalf("generated ID %q does not match gateway format", generatedID)
+	}
+
+	// Step 2: Send the generated session ID back -> should route to the same model
+	for i := 0; i < 5; i++ {
+		ctx2 := &policy.RequestHeaderContext{
+			SharedContext: rrSharedContext(),
+			Headers:       policy.NewHeaders(map[string][]string{"x-session-id": {generatedID}}),
+		}
+		action2 := p.OnRequestHeaders(context.Background(), ctx2, nil)
+		mods2 := mustRRRequestHeaderMods(t, action2)
+		selectedModel2 := mods2.HeadersToSet["x-model"]
+
+		if selectedModel1 != selectedModel2 {
+			t.Fatalf("expected gateway-generated ID to route to %s, but got %s on call %d", selectedModel1, selectedModel2, i)
+		}
+
+		// Verify no new session ID is generated when the client sends one
+		if _, hasNewID := ctx2.Metadata[MetadataKeyGeneratedSessionID]; hasNewID {
+			t.Fatalf("should not generate a new session ID when client sends a gateway-generated one")
+		}
+	}
+}
+
+func TestModelRoundRobinPolicy_GatewayGeneratedSessionID_ResponseHeader(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header", "identifier": "x-session-id"},
+	})
+
+	// Send request without session ID
+	shared := rrSharedContext()
+	ctx1 := &policy.RequestHeaderContext{
+		SharedContext: shared,
+		Headers:       policy.NewHeaders(map[string][]string{}),
+	}
+	p.OnRequestHeaders(context.Background(), ctx1, nil)
+
+	generatedID, ok := shared.Metadata[MetadataKeyGeneratedSessionID].(string)
+	if !ok || generatedID == "" {
+		t.Fatalf("expected a generated session ID in metadata")
+	}
+
+	// Simulate OnResponseHeaders -> should return the generated ID in response header
+	respCtx := &policy.ResponseHeaderContext{
+		SharedContext:  shared,
+		ResponseStatus: 200,
+	}
+	respAction := p.OnResponseHeaders(context.Background(), respCtx, nil)
+	respMods, ok := respAction.(policy.DownstreamResponseHeaderModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseHeaderModifications, got %T", respAction)
+	}
+	if respMods.HeadersToSet == nil {
+		t.Fatalf("expected response headers to be set with generated session ID")
+	}
+	if respMods.HeadersToSet["x-session-id"] != generatedID {
+		t.Fatalf("expected response header x-session-id=%s, got %s", generatedID, respMods.HeadersToSet["x-session-id"])
+	}
+}
+
+func TestModelRoundRobinPolicy_FallbacksDisabledByDefault(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":          baseRRModels(),
+		"requestModel":    map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":       map[string]interface{}{"location": "header", "identifier": "x-session-id"},
+	})
+
+	// Send request with Authorization header but no session ID
+	// With fallbacks disabled, the auth header should NOT be used for stickiness
+	ctx1 := &policy.RequestHeaderContext{
+		SharedContext: rrSharedContext(),
+		Headers:       policy.NewHeaders(map[string][]string{"authorization": {"Bearer token123"}}),
+	}
+	p.OnRequestHeaders(context.Background(), ctx1, nil)
+
+	// Should have generated a gateway session ID (fell back to round-robin)
+	if _, ok := ctx1.Metadata[MetadataKeyGeneratedSessionID]; !ok {
+		t.Fatalf("expected gateway-generated session ID when fallbacks are disabled and no session key is sent")
+	}
+}
+
+func TestIsGatewayGeneratedID(t *testing.T) {
+	tests := []struct {
+		sessionID string
+		wantIndex int
+		wantOK    bool
+	}{
+		{"abc123_M0", 0, true},
+		{"abc123_M1", 1, true},
+		{"abc123_M12", 12, true},
+		{"user-session-abc", 0, false},     // no suffix
+		{"_M1", 0, false},                  // no prefix before _M
+		{"abc_Mxyz", 0, false},             // non-numeric after _M
+		{"", 0, false},                      // empty
+	}
+	for _, tt := range tests {
+		idx, ok := isGatewayGeneratedID(tt.sessionID)
+		if ok != tt.wantOK || idx != tt.wantIndex {
+			t.Errorf("isGatewayGeneratedID(%q) = (%d, %v), want (%d, %v)", tt.sessionID, idx, ok, tt.wantIndex, tt.wantOK)
+		}
+	}
+}

@@ -20,11 +20,15 @@ package modelroundrobin
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log/slog"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -35,10 +39,12 @@ import (
 
 const (
 	// Metadata keys for context storage
-	MetadataKeySelectedModel    = "model_roundrobin.selected_model"
-	MetadataKeyOriginalModel    = "model_roundrobin.original_model"
-	MetadataKeyHeadersProcessed = "model_roundrobin.headers_processed"
-	DefaultSuspendDuration      = 30
+	MetadataKeySelectedModel      = "model_roundrobin.selected_model"
+	MetadataKeyOriginalModel      = "model_roundrobin.original_model"
+	MetadataKeyHeadersProcessed   = "model_roundrobin.headers_processed"
+	MetadataKeyGeneratedSessionID = "model_roundrobin.generated_session_id"
+	DefaultSuspendDuration        = 30
+	GatewayStickyPrefix           = "_M"
 )
 
 // ModelRoundRobinPolicyParams holds the parsed policy parameters
@@ -46,6 +52,7 @@ type ModelRoundRobinPolicyParams struct {
 	Models          []ModelConfig
 	SuspendDuration int
 	RequestModel    RequestModelConfig
+	StickyKey       *StickyKeyConfig
 }
 
 // ModelConfig represents a single model configuration
@@ -57,6 +64,14 @@ type ModelConfig struct {
 type RequestModelConfig struct {
 	Location   string
 	Identifier string
+}
+
+// StickyKeyConfig holds the session stickiness configuration
+type StickyKeyConfig struct {
+	Location       string
+	Identifier     string
+	FallbackToAuth bool
+	FallbackToIP   bool
 }
 
 // ModelRoundRobinPolicy implements round-robin load balancing for AI models
@@ -209,6 +224,72 @@ func parseParams(params map[string]interface{}) (ModelRoundRobinPolicyParams, er
 	}
 	result.RequestModel.Identifier = identifierStr
 
+	// Parse stickyKey if provided (optional)
+	if stickyKeyRaw, ok := params["stickyKey"]; ok {
+		stickyKeyMap, ok := stickyKeyRaw.(map[string]interface{})
+		if !ok {
+			return result, fmt.Errorf("'stickyKey' must be an object")
+		}
+
+		var stickyKeyConfig StickyKeyConfig
+
+		// Parse location (required)
+		location, ok := stickyKeyMap["location"]
+		if !ok {
+			return result, fmt.Errorf("'stickyKey.location' is required")
+		}
+
+		locationStr, ok := location.(string)
+		if !ok {
+			return result, fmt.Errorf("'stickyKey.location' must be a string")
+		}
+
+		validStickyLocations := map[string]bool{
+			"header":     true,
+			"queryParam": true,
+			"payload":    true,
+			"ip":         true,
+		}
+		if !validStickyLocations[locationStr] {
+			return result, fmt.Errorf("'stickyKey.location' must be one of: header, queryParam, payload, ip")
+		}
+		stickyKeyConfig.Location = locationStr
+
+		// Parse identifier (required if location is not ip)
+		if locationStr != "ip" {
+			identifier, ok := stickyKeyMap["identifier"]
+			if !ok {
+				return result, fmt.Errorf("'stickyKey.identifier' is required when location is '%s'", locationStr)
+			}
+
+			identifierStr, ok := identifier.(string)
+			if !ok {
+				return result, fmt.Errorf("'stickyKey.identifier' must be a string")
+			}
+
+			if len(identifierStr) == 0 {
+				return result, fmt.Errorf("'stickyKey.identifier' must have a minimum length of 1")
+			}
+			stickyKeyConfig.Identifier = identifierStr
+		}
+
+		// Parse fallbackToAuth (optional, defaults to false)
+		if fallbackToAuth, ok := stickyKeyMap["fallbackToAuth"]; ok {
+			if val, ok := fallbackToAuth.(bool); ok {
+				stickyKeyConfig.FallbackToAuth = val
+			}
+		}
+
+		// Parse fallbackToIP (optional, defaults to false)
+		if fallbackToIP, ok := stickyKeyMap["fallbackToIP"]; ok {
+			if val, ok := fallbackToIP.(bool); ok {
+				stickyKeyConfig.FallbackToIP = val
+			}
+		}
+
+		result.StickyKey = &stickyKeyConfig
+	}
+
 	return result, nil
 }
 
@@ -263,6 +344,181 @@ func (p *ModelRoundRobinPolicy) selectNextAvailableModel(models []ModelConfig) *
 	return nil
 }
 
+// getSessionKey extracts the sticky key from header, query param, payload, or client IP.
+// Fallbacks to Authorization header and client IP are only applied if explicitly enabled.
+func (p *ModelRoundRobinPolicy) getSessionKey(headers *policy.Headers, path string, body []byte) string {
+	if p.params.StickyKey == nil {
+		return ""
+	}
+
+	loc := p.params.StickyKey.Location
+	ident := p.params.StickyKey.Identifier
+
+	var val string
+	switch loc {
+	case "header":
+		if headers != nil {
+			vals := headers.Get(ident)
+			if len(vals) > 0 {
+				val = vals[0]
+			}
+		}
+	case "queryParam":
+		decodedPath, err := url.PathUnescape(path)
+		if err == nil {
+			parts := strings.Split(decodedPath, "?")
+			if len(parts) == 2 {
+				values, err := url.ParseQuery(parts[1])
+				if err == nil && len(values[ident]) > 0 {
+					val = values[ident][0]
+				}
+			}
+		}
+	case "payload":
+		if len(body) > 0 {
+			if strVal, err := utils.ExtractStringValueFromJsonpath(body, ident); err == nil {
+				val = strVal
+			}
+		}
+	case "ip":
+		if headers != nil {
+			if xff := headers.Get("x-forwarded-for"); len(xff) > 0 && xff[0] != "" {
+				ips := strings.Split(xff[0], ",")
+				if len(ips) > 0 {
+					val = strings.TrimSpace(ips[0])
+				}
+			}
+			if val == "" {
+				if xri := headers.Get("x-real-ip"); len(xri) > 0 && xri[0] != "" {
+					val = xri[0]
+				}
+			}
+		}
+	}
+
+	// Fallback Tier 1: Authorization header (only if enabled)
+	if val == "" && p.params.StickyKey.FallbackToAuth && headers != nil {
+		if auth := headers.Get("authorization"); len(auth) > 0 && auth[0] != "" {
+			val = auth[0]
+		}
+	}
+
+	// Fallback Tier 2: Client IP (only if enabled)
+	if val == "" && p.params.StickyKey.FallbackToIP && headers != nil {
+		if xff := headers.Get("x-forwarded-for"); len(xff) > 0 && xff[0] != "" {
+			ips := strings.Split(xff[0], ",")
+			if len(ips) > 0 {
+				val = strings.TrimSpace(ips[0])
+			}
+		}
+		if val == "" {
+			if xri := headers.Get("x-real-ip"); len(xri) > 0 && xri[0] != "" {
+				val = xri[0]
+			}
+		}
+	}
+
+	return val
+}
+
+// selectStickyModel selects a model stickily using stateless consistent hashing.
+// If the selected model is suspended, it performs re-hashing with incremented attempts.
+func (p *ModelRoundRobinPolicy) selectStickyModel(sessionKey string, models []ModelConfig) *ModelConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	totalModels := len(models)
+
+	attempt := 0
+	for attempt < totalModels {
+		hasher := fnv.New32a()
+		hasher.Write([]byte(fmt.Sprintf("%s_%d", sessionKey, attempt)))
+		hashVal := hasher.Sum32()
+
+		index := int(hashVal % uint32(totalModels))
+		selectedModel := models[index]
+		modelName := selectedModel.Model
+
+		// Check if model is suspended
+		if suspendedUntil, ok := p.suspendedModels[modelName]; ok {
+			if now.Before(suspendedUntil) {
+				attempt++
+				continue
+			}
+			delete(p.suspendedModels, modelName)
+		}
+
+		return &selectedModel
+	}
+
+	return nil
+}
+
+// isGatewayGeneratedID checks if a session ID was generated by the gateway
+// and extracts the model index. Returns (index, true) if gateway-generated.
+func isGatewayGeneratedID(sessionID string) (int, bool) {
+	idx := strings.LastIndex(sessionID, GatewayStickyPrefix)
+	if idx == -1 || idx == 0 {
+		return 0, false
+	}
+	suffix := sessionID[idx+len(GatewayStickyPrefix):]
+	modelIndex, err := strconv.Atoi(suffix)
+	if err != nil {
+		return 0, false
+	}
+	return modelIndex, true
+}
+
+// generateGatewaySessionID creates a new session ID with the model index encoded.
+// Format: <random-hex>_M<index> (e.g., "a1b2c3d4e5f67890_M1")
+func generateGatewaySessionID(modelIndex int) string {
+	b := make([]byte, 8)
+	rand.Read(b)
+	return hex.EncodeToString(b) + GatewayStickyPrefix + strconv.Itoa(modelIndex)
+}
+
+// selectModelByIndex selects a model by its index, skipping suspended models.
+// If the model at the given index is suspended, it tries the next model in order.
+func (p *ModelRoundRobinPolicy) selectModelByIndex(modelIndex int, models []ModelConfig) *ModelConfig {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	totalModels := len(models)
+
+	if modelIndex < 0 || modelIndex >= totalModels {
+		return nil
+	}
+
+	for attempt := 0; attempt < totalModels; attempt++ {
+		idx := (modelIndex + attempt) % totalModels
+		selectedModel := models[idx]
+		modelName := selectedModel.Model
+
+		if suspendedUntil, ok := p.suspendedModels[modelName]; ok {
+			if now.Before(suspendedUntil) {
+				continue
+			}
+			delete(p.suspendedModels, modelName)
+		}
+
+		return &selectedModel
+	}
+
+	return nil
+}
+
+// getModelIndex returns the index of a model in the models list.
+func (p *ModelRoundRobinPolicy) getModelIndex(modelName string) int {
+	for i, m := range p.params.Models {
+		if m.Model == modelName {
+			return i
+		}
+	}
+	return 0
+}
+
 // OnRequestHeaders selects the next model and applies the modification for header/queryParam/pathParam
 // locations in the request header phase. For payload location, the model is pre-selected and
 // stored in metadata for OnRequest to apply to the body.
@@ -270,8 +526,39 @@ func (p *ModelRoundRobinPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 	location := p.params.RequestModel.Location
 	identifier := p.params.RequestModel.Identifier
 
-	// Select next available model in round-robin fashion
-	selectedModel := p.selectNextAvailableModel(p.params.Models)
+	// Defer selection to body phase if session stickiness key is located in the payload
+	if p.params.StickyKey != nil && p.params.StickyKey.Location == "payload" {
+		reqCtx.Metadata[MetadataKeyHeadersProcessed] = true
+		return policy.UpstreamRequestHeaderModifications{}
+	}
+
+	var selectedModel *ModelConfig
+	if p.params.StickyKey != nil {
+		sessionKey := p.getSessionKey(reqCtx.Headers, reqCtx.Path, nil)
+		if sessionKey != "" {
+			// Check if this is a gateway-generated session ID
+			if modelIndex, ok := isGatewayGeneratedID(sessionKey); ok {
+				selectedModel = p.selectModelByIndex(modelIndex, p.params.Models)
+			} else {
+				// User-provided session ID: use consistent hashing
+				selectedModel = p.selectStickyModel(sessionKey, p.params.Models)
+			}
+		}
+	}
+
+	// Fallback to standard round-robin and generate a gateway session ID
+	if selectedModel == nil {
+		selectedModel = p.selectNextAvailableModel(p.params.Models)
+		// If stickyKey is configured and we fell back to round-robin,
+		// generate a gateway session ID for the client
+		if selectedModel != nil && p.params.StickyKey != nil {
+			modelIndex := p.getModelIndex(selectedModel.Model)
+			generatedID := generateGatewaySessionID(modelIndex)
+			reqCtx.Metadata[MetadataKeyGeneratedSessionID] = generatedID
+			slog.Debug("ModelRoundRobin: generated gateway session ID", "sessionID", generatedID, "model", selectedModel.Model)
+		}
+	}
+
 	if selectedModel == nil {
 		return policy.ImmediateResponse{
 			StatusCode: 503,
@@ -316,7 +603,22 @@ func (p *ModelRoundRobinPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 }
 
 // OnResponseHeaders suspends a model in the response header phase when an error is detected.
+// It also returns the gateway-generated session ID to the client in a response header.
 func (p *ModelRoundRobinPolicy) OnResponseHeaders(ctx context.Context, respCtx *policy.ResponseHeaderContext, params map[string]interface{}) policy.ResponseHeaderAction {
+	responseHeaders := map[string]string{}
+
+	// Return generated session ID to client
+	if generatedID, ok := respCtx.Metadata[MetadataKeyGeneratedSessionID]; ok {
+		if idStr, ok := generatedID.(string); ok && idStr != "" {
+			headerName := "X-Gateway-Session-ID"
+			if p.params.StickyKey != nil && p.params.StickyKey.Location == "header" {
+				headerName = p.params.StickyKey.Identifier
+			}
+			responseHeaders[headerName] = idStr
+			slog.Debug("ModelRoundRobin: returning generated session ID", "header", headerName, "sessionID", idStr)
+		}
+	}
+
 	if respCtx.ResponseStatus >= 500 || respCtx.ResponseStatus == 429 {
 		selectedModel := ""
 		if model, ok := respCtx.Metadata[MetadataKeySelectedModel]; ok {
@@ -331,6 +633,12 @@ func (p *ModelRoundRobinPolicy) OnResponseHeaders(ctx context.Context, respCtx *
 			slog.Debug("ModelRoundRobin: OnResponseHeaders suspended model", "model", selectedModel, "duration", p.params.SuspendDuration)
 		}
 	}
+
+	if len(responseHeaders) > 0 {
+		return policy.DownstreamResponseHeaderModifications{
+			HeadersToSet: responseHeaders,
+		}
+	}
 	return policy.DownstreamResponseHeaderModifications{}
 }
 
@@ -343,17 +651,48 @@ func (p *ModelRoundRobinPolicy) OnRequestBody(ctx context.Context, reqCtx *polic
 		return policy.UpstreamRequestModifications{}
 	}
 
-	selectedModel, _ := reqCtx.Metadata[MetadataKeySelectedModel].(string)
-	if selectedModel == "" {
-		return policy.UpstreamRequestModifications{}
-	}
-
 	if reqCtx.Body == nil || reqCtx.Body.Content == nil {
 		return policy.ImmediateResponse{
 			StatusCode: 400,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(`{"error":"Request body is empty."}`),
 		}
+	}
+
+	selectedModel, _ := reqCtx.Metadata[MetadataKeySelectedModel].(string)
+	if selectedModel == "" {
+		var selectedModelConfig *ModelConfig
+		if p.params.StickyKey != nil {
+			sessionKey := p.getSessionKey(reqCtx.Headers, reqCtx.Path, reqCtx.Body.Content)
+			if sessionKey != "" {
+				// Check if this is a gateway-generated session ID
+				if modelIndex, ok := isGatewayGeneratedID(sessionKey); ok {
+					selectedModelConfig = p.selectModelByIndex(modelIndex, p.params.Models)
+				} else {
+					// User-provided session ID: use consistent hashing
+					selectedModelConfig = p.selectStickyModel(sessionKey, p.params.Models)
+				}
+			}
+		}
+		if selectedModelConfig == nil {
+			selectedModelConfig = p.selectNextAvailableModel(p.params.Models)
+			// If stickyKey is configured and we fell back to round-robin,
+			// generate a gateway session ID for the client
+			if selectedModelConfig != nil && p.params.StickyKey != nil {
+				modelIndex := p.getModelIndex(selectedModelConfig.Model)
+				generatedID := generateGatewaySessionID(modelIndex)
+				reqCtx.Metadata[MetadataKeyGeneratedSessionID] = generatedID
+			}
+		}
+		if selectedModelConfig == nil {
+			return policy.ImmediateResponse{
+				StatusCode: 503,
+				Headers:    map[string]string{"Content-Type": "application/json"},
+				Body:       []byte(`{"error": "All models are currently unavailable"}`),
+			}
+		}
+		selectedModel = selectedModelConfig.Model
+		reqCtx.Metadata[MetadataKeySelectedModel] = selectedModel
 	}
 
 	var payloadData map[string]interface{}
