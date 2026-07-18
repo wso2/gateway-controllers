@@ -1,0 +1,117 @@
+name: intelligent-model-routing
+version: v1.0.0
+description: |
+  Routes AI/LLM requests to different models using LLM-powered classification.
+  An LLM analyzes each incoming request against user-defined routing rules (each
+  with a name and context description) and selects the best-matching model.
+  Effective for short keyword-style queries where semantic embeddings may not
+  capture intent reliably.
+
+parameters:
+  type: object
+  properties:
+    contentPath:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        JSONPath expression to extract the user request text from the
+        request payload for classification.
+      default: "$.messages[-1].content"
+    routingRules:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        List of routing rules. Each rule defines a name, a context
+        description for the LLM, and the target model to route to.
+      items:
+        type: object
+        properties:
+          name:
+            type: string
+            description: |
+              A label for this rule (e.g. "Weather Information", "Coding Questions").
+              The LLM uses this name to identify the matched rule.
+            minLength: 1
+          context:
+            type: string
+            description: |
+              Plain-language description of the types of requests this rule
+              should handle. The LLM reads this when classifying requests.
+            minLength: 1
+          model:
+            type: string
+            description: Target AI model name to route matching requests to.
+            minLength: 1
+        required:
+          - name
+          - context
+          - model
+      minItems: 1
+    defaultModel:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        The model to use when no routing rule matches the user request
+        or when the LLM returns NONE.
+      minLength: 1
+  required:
+    - routingRules
+    - defaultModel
+
+systemParameters:
+  type: object
+  properties:
+    llmProvider:
+      type: string
+      description: |
+        LLM provider type for classification: "OPENAI" or "AZURE_OPENAI"
+      enum:
+        - OPENAI
+        - AZURE_OPENAI
+      "wso2/defaultValue": "${config.policy_configurations.intelligent_model_routing_v1.llm_provider}"
+    llmEndpoint:
+      type: string
+      description: |
+        Endpoint URL for the LLM chat completions API.
+        For OpenAI: "https://api.openai.com/v1/chat/completions"
+        For Azure OpenAI: Azure OpenAI chat completions endpoint URL
+      minLength: 1
+      "wso2/defaultValue": "${config.policy_configurations.intelligent_model_routing_v1.llm_provider_endpoint}"
+    llmModel:
+      type: string
+      description: |
+        LLM model name for classification (e.g. "gpt-4o-mini").
+        Not required for Azure OpenAI (deployment name is in the endpoint URL).
+      "wso2/defaultValue": "${config.policy_configurations.intelligent_model_routing_v1.llm_provider_model}"
+    llmApiKey:
+      type: string
+      description: |
+        API key for the LLM service.
+      minLength: 1
+      "wso2/defaultValue": "${config.policy_configurations.intelligent_model_routing_v1.llm_provider_api_key}"
+    requestModel:
+      type: object
+      description: |
+        Specifies where the model name appears in the request so the policy
+        can replace it with the selected model.
+      properties:
+        location:
+          type: string
+          enum:
+            - payload
+            - header
+            - queryParam
+            - pathParam
+        identifier:
+          type: string
+          description: |
+            JSONPath (for payload) or header/param name identifying the
+            model field.
+      required:
+        - location
+        - identifier
+  required:
+    - llmProvider
+    - llmEndpoint
+    - llmApiKey
+    - requestModel

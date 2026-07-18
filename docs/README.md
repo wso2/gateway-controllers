@@ -31,19 +31,22 @@ All available policies, sorted alphabetically.
 | Policy | Categories | Description |
 |--------|------------|-------------|
 | [Analytics Header Filter](./analytics-header-filter/v1.0/docs/analytics-header-filter.md) | Logging, Analytics & Monitoring | The Analytics Header Filter policy allows you to control which request and response headers are included in analytics data using allow or deny modes. |
-| [API Key Auth](./api-key-auth/v1.0/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
+| [API Key Auth](./api-key-auth/v1.2/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
+| [AWS Authentication](./aws-authentication/v0.10/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |
 | [AWS Bedrock Guardrail](./aws-bedrock-guardrail/v1.0/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against AWS Bedrock Guardrails. |
 | [Azure Content Safety Content Moderation](./azure-content-safety-content-moderation/v1.0/docs/azure-content-safety.md) | Guardrails, AI | Validates request or response body content against Azure Content Safety API for content moderation. |
+| [Backend JWT](./backend-jwt/v1.0/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
 | [Basic Auth](./basic-auth/v1.0/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
 | [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
 | [Granite Guardian Prompt Injection](./granite-guardian-prompt-injection/v0.9/docs/granite-guardian-prompt-injection.md) | Guardrails, AI | Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B. |
 | [Host Rewrite](./host-rewrite/v1.0/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
+| [Intelligent Model Routing](./intelligent-model-routing/v1.0/docs/intelligent-model-routing.md) | AI | Routes AI/LLM requests to different models using LLM-powered classification. |
 | [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.0/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
-| [JWT Auth](./jwt-auth/v1.0/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens using one or more JWKS providers (key managers). |
+| [JWT Auth](./jwt-auth/v1.2/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
 | [LLM Cost](./llm-cost/v1.0/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time and stores the result in SharedContext for use by downstream policies. |
 | [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.0/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
 | [Log Message](./log-message/v1.0/docs/log-message.md) | Logging, Analytics & Monitoring, MCP, WebSub, WebBroker | This policy provides the capability to log the payload and headers of a request/response. |
@@ -55,17 +58,21 @@ All available policies, sorted alphabetically.
 | [Model Round Robin](./model-round-robin/v1.0/docs/model-round-robin.md) | AI | Implements round-robin load balancing for AI models. |
 | [Model Weighted Round Robin](./model-weighted-round-robin/v1.0/docs/model-weighted-round-robin.md) | AI | Implements weighted round-robin load balancing for AI models. |
 | [NeMo Guard Content Safety](./nvidia-nemoguard-content-safety/v0.9/docs/nvidia-nemoguard-content-safety.md) | Guardrails, AI | Validates request and/or response content using NVIDIA NeMo Guard (llama-3.1-nemoguard-8b-content-safety). |
+| [Opaque Token Auth](./opaque-token-auth/v1.0/docs/opaque-token-authentication.md) | Security, AI | Validates opaque OAuth 2.0 access tokens via RFC 7662 token introspection. |
+| [OpenAI to Bedrock Transformer](./openai-to-bedrock-transformer/v0.9/docs/openai-to-bedrock-transformer.md) | AI | Translates OpenAI Chat Completions requests into AWS Bedrock Converse format and rewrites non-streaming and streaming Bedrock responses back into OpenAI-compatible JSON or Server-Sent Events. |
 | [PII Masking Regex](./pii-masking-regex/v1.0/docs/pii-masking-regex.md) | Guardrails, AI | Masks or redacts Personally Identifiable Information (PII) from request/response bodies using regex patterns. |
 | [Prompt Compressor](./prompt-compressor/v0.9/docs/prompt-compressor.md) | AI | Compresses selected prompt text in JSON request bodies before upstream LLM calls. |
 | [Prompt Decorator](./prompt-decorator/v1.0/docs/prompt-decorator.md) | AI | Dynamically modifies the prompt by applying custom decorations using a configured strategy. |
 | [Prompt Template](./prompt-template/v1.0/docs/prompt-template.md) | AI | Dynamically modifies the prompt by applying custom templates using a configured strategy. |
-| [Rate Limit - Advanced](./advanced-ratelimit/v1.0/docs/advanced-ratelimit.md) | Security, AI | Rate limiting policy supporting multiple algorithms (GCRA, Fixed Window), multi-dimensional quotas, weighted rate limiting, flexible key extraction, and both in-memory and Redis backends. |
+| [Rate Limit - Advanced](./advanced-ratelimit/v1.1/docs/advanced-ratelimit.md) | Security, AI | Rate limiting policy supporting multiple algorithms (GCRA, Fixed Window), multi-dimensional quotas, weighted rate limiting, flexible key extraction, and in-memory, Redis, and Redis-local-async backends. |
 | [Rate Limit - Basic](./basic-ratelimit/v1.0/docs/basic-ratelimit.md) | Security, AI | Simple request rate limiting policy that limits the number of requests per time window. |
+| [Redirect](./redirect/v0.9/docs/redirect.md) | Transformation | Issues an HTTP redirect to the client without forwarding the request to the upstream backend (Gateway-API RequestRedirect semantics). |
 | [Regex Guardrail](./regex-guardrail/v1.0/docs/regex.md) | Guardrails, AI | Validates request or response body content against a regular expression pattern. |
 | [Remove Headers](./remove-headers/v1.0/docs/remove-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to remove headers from either the request or the response. |
 | [Request Rewrite](./request-rewrite/v1.0/docs/request-rewrite.md) | Transformation | Rewrites incoming requests by updating path, query parameters, and/or HTTP method before forwarding to upstream services. |
 | [Respond](./respond/v1.0/docs/respond.md) | AI | Returns an immediate response to the client without forwarding the request to the upstream backend. |
 | [Semantic Cache](./semantic-cache/v1.0/docs/semantic-caching.md) | AI | Implements semantic caching for LLM responses using vector similarity search. |
+| [Semantic Model Routing](./semantic-model-routing/v1.0/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
 | [Semantic Prompt Guard](./semantic-prompt-guard/v1.0/docs/semantic-prompt-guard.md) | Guardrails, AI | Blocks or allows prompts based on semantic similarity to configured allow/deny phrase embeddings. |
 | [Semantic Tool Filtering](./semantic-tool-filtering/v1.0/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
 | [Sentence Count Guardrail](./sentence-count-guardrail/v1.0/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
