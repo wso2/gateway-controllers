@@ -119,7 +119,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestHeaders(
 	reqCtx *policy.RequestHeaderContext,
 	_ map[string]interface{},
 ) policy.RequestHeaderAction {
-	vals := reqCtx.Headers.Get(p.signatureHeader)
+	vals := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers).Get(p.signatureHeader)
 	if len(vals) == 0 {
 		slog.Debug("WebSubHMACAuth: signature header absent",
 			"header", p.signatureHeader,
@@ -141,8 +141,10 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 		"apiId", reqCtx.APIId,
 		"signatureHeader", p.signatureHeader,
 	)
-	// Retrieve signature header value.
-	sigVals := reqCtx.Headers.Get(p.signatureHeader)
+	// Retrieve signature header value from the downstream snapshot so
+	// the HMAC is verified against what the client actually sent, not a value a
+	// peer policy may have rewritten during the header phase.
+	sigVals := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers).Get(p.signatureHeader)
 	if len(sigVals) == 0 {
 		return p.immediateRequestUnauthorized("missing signature header: " + p.signatureHeader)
 	}

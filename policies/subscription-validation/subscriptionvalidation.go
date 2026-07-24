@@ -221,7 +221,11 @@ func (p *SubscriptionValidationPolicy) OnRequestHeaders(ctx context.Context, req
 	}
 
 	if reqCtx.Headers != nil {
-		headerValues := reqCtx.Headers.Get(p.cfg.SubscriptionKeyHeader)
+		// Extract the subscription credential from the downstream snapshot
+		// so the entitlement decision is made against what the client
+		// actually sent, not a value a peer policy rewrote in the header phase.
+		ds := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers)
+		headerValues := ds.Get(p.cfg.SubscriptionKeyHeader)
 		if len(headerValues) > 0 {
 			token := strings.TrimSpace(headerValues[0])
 			if token != "" {
@@ -236,10 +240,13 @@ func (p *SubscriptionValidationPolicy) OnRequestHeaders(ctx context.Context, req
 			}
 		}
 		if p.cfg.SubscriptionKeyCookie != "" {
-			if token := getCookieValue(reqCtx.Headers, p.cfg.SubscriptionKeyCookie); token != "" {
+			if token := getCookieValue(ds, p.cfg.SubscriptionKeyCookie); token != "" {
 				block, subscription := p.validateByToken(apiID, token)
 				if block == nil {
 					writeSubscriptionMetadata(reqCtx.SharedContext, subscription)
+					// The Cookie header is read from the live set here (not the
+					// snapshot) because the result is used to rewrite the cookie
+					// forwarded upstream — mutations must act on live headers.
 					cookieValues := reqCtx.Headers.Get("Cookie")
 					updated, removed := stripCookie(cookieValues, p.cfg.SubscriptionKeyCookie)
 					if removed {

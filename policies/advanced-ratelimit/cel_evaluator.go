@@ -178,15 +178,15 @@ func (e *CELEvaluator) EvaluateResponseCostExpression(expression string, respCtx
 // cost extraction from a v1alpha2 ResponseContext.
 func buildResponseCostEvalContext(respCtx *policy.ResponseContext) map[string]interface{} {
 	requestHeaders := make(map[string][]string)
-	if respCtx.RequestHeaders != nil {
-		respCtx.RequestHeaders.Iterate(func(key string, values []string) {
+	if reqHdrs := getDownstreamHeaders(respCtx.Downstream, respCtx.RequestHeaders); reqHdrs != nil {
+		reqHdrs.Iterate(func(key string, values []string) {
 			requestHeaders[key] = values
 		})
 	}
 
 	responseHeaders := make(map[string][]string)
-	if respCtx.ResponseHeaders != nil {
-		respCtx.ResponseHeaders.Iterate(func(key string, values []string) {
+	if respHdrs := getUpstreamHeaders(respCtx.Upstream, respCtx.ResponseHeaders); respHdrs != nil {
+		respHdrs.Iterate(func(key string, values []string) {
 			responseHeaders[key] = values
 		})
 	}
@@ -231,10 +231,12 @@ func buildResponseCostEvalContext(respCtx *policy.ResponseContext) map[string]in
 }
 
 func buildKeyEvalContext(reqCtx *policy.RequestContext, routeName string) map[string]interface{} {
-	// Convert headers to map[string][]string for CEL
+	// Convert headers to map[string][]string for CEL. Use the downstream
+	// snapshot so the rate-limit key reflects what the client actually sent, not a
+	// value a peer policy rewrote during the header phase.
 	headers := make(map[string][]string)
-	if reqCtx.Headers != nil {
-		reqCtx.Headers.Iterate(func(key string, values []string) {
+	if hdrs := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers); hdrs != nil {
+		hdrs.Iterate(func(key string, values []string) {
 			headers[key] = values
 		})
 	}
@@ -261,10 +263,12 @@ func buildKeyEvalContext(reqCtx *policy.RequestContext, routeName string) map[st
 }
 
 func buildRequestCostEvalContext(reqCtx *policy.RequestContext) map[string]interface{} {
-	// Convert headers to map[string][]string for CEL
+	// Convert headers to map[string][]string for CEL. Use the downstream
+	// snapshot so cost extraction reflects what the client actually sent, not a
+	// value a peer policy rewrote during the header phase.
 	headers := make(map[string][]string)
-	if reqCtx.Headers != nil {
-		reqCtx.Headers.Iterate(func(key string, values []string) {
+	if hdrs := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers); hdrs != nil {
+		hdrs.Iterate(func(key string, values []string) {
 			headers[key] = values
 		})
 	}

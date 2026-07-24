@@ -379,10 +379,15 @@ func (p *McpAclListPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.Req
 		return policy.UpstreamRequestModifications{}
 	}
 
-	requestPayload, _, _, err := parseRequestPayload(reqCtx.Body.Content, isEventStream(reqCtx.Headers))
+	// Read Content-Type and the session id (used for error responses) from the
+	// downstream snapshot so gating and its diagnostics reflect what
+	// the client actually sent, not a value a peer policy rewrote during the
+	// header phase.
+	ds := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers)
+	requestPayload, _, _, err := parseRequestPayload(reqCtx.Body.Content, isEventStream(ds))
 	if err != nil {
 		slog.Debug("MCP ACL List Policy: Failed to parse MCP request", "error", err, "path", reqCtx.Path)
-		return p.buildRequestErrorResponse(reqCtx.Headers, 400, -32700, "Invalid JSON", nil)
+		return p.buildRequestErrorResponse(ds, 400, -32700, "Invalid JSON", nil)
 	}
 
 	requestID := requestPayload["id"]
@@ -411,19 +416,19 @@ func (p *McpAclListPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.Req
 	paramsRaw, ok := requestPayload["params"].(map[string]any)
 	if !ok {
 		slog.Debug("MCP ACL List Policy: Invalid request params", "capabilityType", capabilityType, "requestID", requestID, "error", "params not a map")
-		return p.buildRequestErrorResponse(reqCtx.Headers, 400, -32602, "Invalid MCP request params", requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32602, "Invalid MCP request params", requestID)
 	}
 
 	paramKey := getParamKey(capabilityType)
 	capabilityName, _ := paramsRaw[paramKey].(string)
 	if strings.TrimSpace(capabilityName) == "" {
 		slog.Debug("MCP ACL List Policy: Missing capability name", "capabilityType", capabilityType, "requestID", requestID, "paramKey", paramKey)
-		return p.buildRequestErrorResponse(reqCtx.Headers, 400, -32602, fmt.Sprintf("Missing MCP %s name", capabilityType), requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32602, fmt.Sprintf("Missing MCP %s name", capabilityType), requestID)
 	}
 
 	if !isAllowedByAcl(config, capabilityName) {
 		slog.Debug("MCP ACL List Policy: Capability denied by policy", "capabilityType", capabilityType, "capabilityName", capabilityName, "requestID", requestID)
-		return p.buildRequestErrorResponse(reqCtx.Headers, 400, -32000, "MCP capability not allowed", requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32000, "MCP capability not allowed", requestID)
 	}
 
 	return policy.UpstreamRequestModifications{}
@@ -456,7 +461,7 @@ func (p *McpAclListPolicy) OnResponseBody(ctx context.Context, respCtx *policy.R
 		return nil
 	}
 
-	if isEventStream(respCtx.ResponseHeaders) {
+	if isEventStream(getUpstreamHeaders(respCtx.Upstream, respCtx.ResponseHeaders)) {
 		events := parseEventStream(respCtx.ResponseBody.Content)
 		updated := false
 		for i, event := range events {

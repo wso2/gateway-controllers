@@ -147,17 +147,21 @@ func getStringArrayParam(params map[string]any, key string, defaultValue []strin
 
 // OnRequestHeaders handles CORS in the request header phase.
 func (p *CorsPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]any) policy.RequestHeaderAction {
+	// Base the Origin / preflight decision on the downstream snapshot so
+	// a peer policy that rewrites Origin during the header phase cannot change the
+	// CORS verdict for what the client actually sent.
+	ds := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers)
 	if strings.EqualFold(reqCtx.Method, "options") {
 		slog.Debug("CORS: Preflight request detected in header phase; handling preflight")
-		return p.handlePreflightHeaders(reqCtx.Headers)
+		return p.handlePreflightHeaders(ds)
 	}
-	corsHeaders, ok := p.handleNonPreflightHeaders(reqCtx.Headers)
+	corsHeaders, ok := p.handleNonPreflightHeaders(ds)
 	if ok {
 		slog.Debug("CORS: Adding CORS headers to non-preflight request")
 		reqCtx.Metadata["cors_headers"] = corsHeaders
 	} else {
 		slog.Debug("CORS: No CORS headers to add for non-preflight request")
-		if reqCtx.Headers.Has("Origin") {
+		if ds.Has("Origin") {
 			reqCtx.Metadata["cors_strip"] = true
 		}
 	}

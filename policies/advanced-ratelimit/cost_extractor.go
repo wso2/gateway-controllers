@@ -221,10 +221,11 @@ func (e *CostExtractor) extractFromResponseCEL(respCtx *policy.ResponseContext, 
 }
 
 func (e *CostExtractor) extractFromResponseHeader(respCtx *policy.ResponseContext, headerName string) (float64, bool) {
-	if respCtx.ResponseHeaders == nil {
+	headers := getUpstreamHeaders(respCtx.Upstream, respCtx.ResponseHeaders)
+	if headers == nil {
 		return 0, false
 	}
-	values := respCtx.ResponseHeaders.Get(strings.ToLower(headerName))
+	values := headers.Get(strings.ToLower(headerName))
 	if len(values) == 0 || values[0] == "" {
 		return 0, false
 	}
@@ -284,7 +285,7 @@ func (e *CostExtractor) extractFromRequestSource(reqCtx *policy.RequestContext, 
 }
 
 func (e *CostExtractor) extractFromRequestHeader(reqCtx *policy.RequestContext, headerName string) (float64, bool) {
-	return extractCostFromHeaders(reqCtx.Headers, headerName)
+	return extractCostFromHeaders(getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers), headerName)
 }
 
 // extractCostFromHeaders parses a numeric cost value from the named header.
@@ -326,7 +327,7 @@ func (e *CostExtractor) ExtractRequestHeaderOnlyCost(reqCtx *policy.RequestHeade
 		if source.Type != CostSourceRequestHeader {
 			continue
 		}
-		val, ok := extractCostFromHeaders(reqCtx.Headers, source.Key)
+		val, ok := extractCostFromHeaders(getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers), source.Key)
 		if ok {
 			found = true
 			total += val * source.Multiplier

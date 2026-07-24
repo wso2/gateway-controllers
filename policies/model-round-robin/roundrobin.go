@@ -286,8 +286,10 @@ func (p *ModelRoundRobinPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 
 	switch location {
 	case "header":
-		if reqCtx.Headers != nil {
-			values := reqCtx.Headers.Get(identifier)
+		// Capture the ORIGINAL client model from the downstream snapshot
+		// so metadata records what the client actually sent.
+		if h := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers); h != nil {
+			values := h.Get(identifier)
 			if len(values) > 0 && values[0] != "" {
 				reqCtx.Metadata[MetadataKeyOriginalModel] = values[0]
 			}

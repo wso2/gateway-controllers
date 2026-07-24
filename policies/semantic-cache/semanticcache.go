@@ -457,7 +457,10 @@ func (p *SemanticCachePolicy) processResponseBody(respCtx *policy.ResponseContex
 	var responseData map[string]interface{}
 	if err := json.Unmarshal(content, &responseData); err != nil {
 		// If the body is not valid JSON, check if it is a buffered SSE stream
-		if isSSEResponse(respCtx.ResponseHeaders) || isSSEContent(string(content)) {
+		// Detect SSE from the upstream snapshot so response assembly reflects the
+		// Content-Type the upstream actually returned, not a value a peer policy
+		// rewrote during the response header phase.
+		if isSSEResponse(getUpstreamHeaders(respCtx.Upstream, respCtx.ResponseHeaders)) || isSSEContent(string(content)) {
 			assembled, sseErr := assembleSSEResponse(string(content), p.streamingJsonPath)
 			if sseErr != nil {
 				slog.Info("SemanticCache: Failed to reassemble SSE response for caching", "error", sseErr)

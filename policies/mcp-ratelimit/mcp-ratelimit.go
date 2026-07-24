@@ -160,7 +160,7 @@ func (p *McpRateLimitPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.R
 	method, capType, capName, requestID, err := p.identifyCapability(reqCtx)
 	if err != nil {
 		slog.Debug("MCP RateLimit Policy: failed to parse MCP request", "error", err)
-		return p.buildJsonRpcError(reqCtx.Headers, 400, -32700, "Invalid MCP request body", nil)
+		return p.buildJsonRpcError(getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers), 400, -32700, "Invalid MCP request body", nil)
 	}
 	if method == "" {
 		return policy.UpstreamRequestModifications{}
@@ -212,7 +212,7 @@ func (p *McpRateLimitPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.R
 				"section", p.entries[m.entryIdx].section,
 				"rule", p.entries[m.entryIdx].name,
 				"capabilityID", m.capabilityID)
-			return p.rewriteRateLimitedResponse(reqCtx.Headers, immediate, requestID)
+			return p.rewriteRateLimitedResponse(getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers), immediate, requestID)
 		}
 	}
 
@@ -275,7 +275,7 @@ func (p *McpRateLimitPolicy) OnResponseHeaders(ctx context.Context, respCtx *pol
 // text/event-stream-wrapped envelopes.
 func (p *McpRateLimitPolicy) identifyCapability(reqCtx *policy.RequestContext) (method, capType, capName string, requestID json.RawMessage, err error) {
 	body := reqCtx.Body.Content
-	if isEventStream(reqCtx.Headers) {
+	if isEventStream(getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers)) {
 		body = extractFirstSseJSON(body)
 		if len(body) == 0 {
 			return "", "", "", nil, fmt.Errorf("no JSON payload found in event stream")
@@ -495,6 +495,7 @@ func synthesizeHeaderContext(reqCtx *policy.RequestContext) *policy.RequestHeade
 		Authority:     reqCtx.Authority,
 		Scheme:        reqCtx.Scheme,
 		Vhost:         reqCtx.Vhost,
+		Downstream:    reqCtx.Downstream,
 	}
 }
 

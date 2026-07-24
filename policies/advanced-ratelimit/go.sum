@@ -32,8 +32,8 @@ github.com/stretchr/testify v1.7.1/go.mod h1:6Fq8oRcR53rry900zMqJjRRixrwX3KX962/
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
 github.com/stretchr/testify v1.8.1 h1:w7B6lhMri9wdJUVmEZPGGhZzrYTPvgJArz7wNPgYKsk=
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
-github.com/wso2/api-platform/sdk/core v0.2.4 h1:dwwe7QROmf1HIeCqhfiv82/34n6oAe2b0hazYljpPS0=
-github.com/wso2/api-platform/sdk/core v0.2.4/go.mod h1:vgNVzR16g9k5cun3VXZ7wDg8UGbPxsVU2TW8EbRCv0o=
+github.com/wso2/api-platform/sdk/core v0.3.1 h1:D9esKYiddfsut22j+JtdkjnysVJH+5qh7UqWCHjsV5Q=
+github.com/wso2/api-platform/sdk/core v0.3.1/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
 github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=
 github.com/yuin/gopher-lua v1.1.1/go.mod h1:GBR0iDaNXjAgGg9zfCvksxSRnQx76gclCIb7kdAd1Pw=
 golang.org/x/exp v0.0.0-20260112195511-716be5621a96 h1:Z/6YuSHTLOHfNFdb8zVZomZr7cqNgTJvA8+Qz75D8gU=

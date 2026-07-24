@@ -843,7 +843,7 @@ func resolveClaimValue(value string, reqCtx *policy.RequestHeaderContext) (strin
 		return reqCtx.Scheme, true
 	case strings.HasPrefix(variable, "request.header."):
 		name := strings.TrimPrefix(variable, "request.header.")
-		vals := reqCtx.Headers.Get(name)
+		vals := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers).Get(name)
 		if len(vals) == 0 {
 			return "", false
 		}

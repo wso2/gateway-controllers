@@ -1,5 +1,5 @@
 module github.com/wso2/gateway-controllers/policies/subscription-validation
 
-go 1.26.1
+go 1.26.2
 
-require github.com/wso2/api-platform/sdk/core v0.2.12
+require github.com/wso2/api-platform/sdk/core v0.3.1

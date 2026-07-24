@@ -439,7 +439,9 @@ func matchHeader(reqCtx *policy.RequestHeaderContext, matcher headerMatcher) boo
 	}
 
 	matchType := strings.ToUpper(strings.TrimSpace(matcher.Type))
-	values := reqCtx.Headers.Get(name)
+	// Evaluate the match condition against the downstream snapshot so
+	// the rewrite decision is based on what the client actually sent.
+	values := getDownstreamHeaders(reqCtx.Downstream, reqCtx.Headers).Get(name)
 
 	switch matchType {
 	case matchTypePresent:
