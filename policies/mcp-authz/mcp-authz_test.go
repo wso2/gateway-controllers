@@ -627,3 +627,74 @@ func TestGetPolicy_NewFormat_ResourceRule(t *testing.T) {
 	ctx = createMockContext("POST", "/mcp", body, authenticatedAuthCtx(map[string]bool{"other": true}, "a", "", nil, nil))
 	assertForbidden(t, authz.OnRequestBody(context.Background(), ctx, map[string]any{}))
 }
+
+// ---- TypedProperties (structured claim) matching ----
+
+// A multi-valued (array) custom claim carried in AuthContext.TypedProperties is matched as a set —
+// the fix for the flattened-Properties limitation. The value keeps its native []interface{} type,
+// exactly as jwt-auth stores it from the parsed token.
+func TestOnRequest_Claims_MultiValuedClaimViaTypedProperties(t *testing.T) {
+	p := &McpAuthzPolicy{Rules: []Rule{{
+		Attribute: Attribute{Type: "tool", Name: "my-tool"},
+		Claims:    ClaimConstraints{AllOf: []ClaimMatcher{{Claim: "roles", Values: []string{"admin"}}}},
+	}}}
+
+	// "admin" is one element of the token's roles array → authorized.
+	allowed := &policy.AuthContext{
+		Authenticated:   true,
+		AuthType:        "jwt",
+		TypedProperties: map[string]interface{}{"roles": []interface{}{"developer", "admin"}},
+	}
+	assertAllowed(t, run(p, allowed))
+
+	// roles present but "admin" not among them → denied.
+	denied := &policy.AuthContext{
+		Authenticated:   true,
+		AuthType:        "jwt",
+		TypedProperties: map[string]interface{}{"roles": []interface{}{"developer", "viewer"}},
+	}
+	assertForbidden(t, run(p, denied))
+}
+
+// A scalar custom claim carried in TypedProperties (native string) is matched directly.
+func TestOnRequest_Claims_ScalarClaimViaTypedProperties(t *testing.T) {
+	p := &McpAuthzPolicy{Rules: []Rule{{
+		Attribute: Attribute{Type: "tool", Name: "my-tool"},
+		Claims:    ClaimConstraints{AllOf: []ClaimMatcher{{Claim: "department", Values: []string{"platform"}}}},
+	}}}
+	authCtx := &policy.AuthContext{
+		Authenticated:   true,
+		AuthType:        "jwt",
+		TypedProperties: map[string]interface{}{"department": "platform"},
+	}
+	assertAllowed(t, run(p, authCtx))
+}
+
+// When TypedProperties is absent (e.g., an auth policy that doesn't populate it), matching falls
+// back to the flattened Properties string — preserving the previous behavior.
+func TestOnRequest_Claims_FallsBackToProperties(t *testing.T) {
+	p := &McpAuthzPolicy{Rules: []Rule{{
+		Attribute: Attribute{Type: "tool", Name: "my-tool"},
+		Claims:    ClaimConstraints{AllOf: []ClaimMatcher{{Claim: "department", Values: []string{"platform"}}}},
+	}}}
+	// No TypedProperties; scalar claim in Properties → matches via fallback.
+	authCtx := &policy.AuthContext{
+		Authenticated: true,
+		AuthType:      "jwt",
+		Properties:    map[string]string{"department": "platform"},
+	}
+	assertAllowed(t, run(p, authCtx))
+}
+
+// ---- Rule must define at least one authorization condition ----
+
+// A rule with only a name (no claims/scopes/requiredClaims/requiredScopes) is rejected: an
+// unconditional rule would grant access to anyone and defeat the policy's purpose.
+func TestGetPolicy_RuleWithoutAnyCondition_IsRejected(t *testing.T) {
+	_, err := GetPolicy(policy.PolicyMetadata{}, toolsParam([]any{
+		map[string]any{"name": "my-tool"},
+	}))
+	if err == nil {
+		t.Fatal("expected GetPolicy to reject a rule with no scopes/claims condition, got nil error")
+	}
+}

@@ -1435,6 +1435,27 @@ func buildProperties(claims jwt.MapClaims) map[string]string {
 	return props
 }
 
+// buildTypedProperties extracts non-standard claims into a map[string]interface{}, preserving each
+// claim's native type (string, []interface{}, map[string]interface{}, etc.) so downstream policies
+// (e.g. mcp-authz) can match array-valued claims as sets or process structured data. Unlike
+// buildProperties, it does not flatten values into a serialized string.
+func buildTypedProperties(claims jwt.MapClaims) map[string]interface{} {
+	var out map[string]interface{}
+	for k, v := range claims {
+		if standardJWTClaims[k] {
+			continue
+		}
+		if v == nil {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]interface{})
+		}
+		out[k] = v
+	}
+	return out
+}
+
 // Helper functions for type assertions
 func getString(v interface{}) string {
 	if s, ok := v.(string); ok {
@@ -2185,16 +2206,17 @@ func (p *JwtAuthPolicy) handleAuthSuccessHeaders(shared *policy.SharedContext, c
 	}
 
 	shared.AuthContext = &policy.AuthContext{
-		Authenticated: true,
-		AuthType:      AuthType,
-		Subject:       subject,
-		Issuer:        iss,
-		Audience:      parseAudience(claims["aud"]),
-		Scopes:        buildScopesMap(scopes),
-		Properties:    buildProperties(claims),
-		TokenId:       jti,
-		CredentialID:  credential_id,
-		Previous:      shared.AuthContext,
+		Authenticated:   true,
+		AuthType:        AuthType,
+		Subject:         subject,
+		Issuer:          iss,
+		Audience:        parseAudience(claims["aud"]),
+		Scopes:          buildScopesMap(scopes),
+		Properties:      buildProperties(claims),
+		TypedProperties: buildTypedProperties(claims),
+		TokenId:         jti,
+		CredentialID:    credential_id,
+		Previous:        shared.AuthContext,
 	}
 
 	modifications := policy.UpstreamRequestHeaderModifications{

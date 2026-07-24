@@ -694,7 +694,8 @@ func (p *McpAuthzPolicy) checkClaims(cc ClaimConstraints, authCtx *policy.AuthCo
 }
 
 // claimMatcherMatches reports whether the AuthContext value for the matcher's claim is one of its
-// values. sub/iss/aud are read from the typed fields; any other claim from Properties.
+// values. sub/iss/aud are read from the typed fields; any other claim prefers the structured
+// TypedProperties (so array-valued claims match as sets) and falls back to the flattened Properties.
 func claimMatcherMatches(m ClaimMatcher, authCtx *policy.AuthContext) bool {
 	if len(m.Values) == 0 {
 		return false
@@ -716,10 +717,60 @@ func claimMatcherMatches(m ClaimMatcher, authCtx *policy.AuthContext) bool {
 		}
 		return false
 	default:
+		// Prefer the typed claim value (set intersection); this correctly handles array-valued
+		// custom claims. Fall back to the flattened Properties string for auth policies that do
+		// not populate TypedProperties.
+		if raw, ok := authCtx.TypedProperties[m.Claim]; ok {
+			for _, tv := range typedValueStrings(raw) {
+				if want[tv] {
+					return true
+				}
+			}
+			return false
+		}
 		if authCtx.Properties == nil {
 			return false
 		}
 		return want[authCtx.Properties[m.Claim]]
+	}
+}
+
+// typedValueToString renders a scalar typed claim value as a string, matching how jwt-auth flattens
+// values into Properties (numbers as integers, bools as true/false, anything else as JSON).
+func typedValueToString(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case float64:
+		return strconv.FormatInt(int64(val), 10)
+	case bool:
+		return strconv.FormatBool(val)
+	default:
+		b, _ := json.Marshal(val)
+		return string(b)
+	}
+}
+
+// typedValueStrings renders a typed claim value (as stored in AuthContext.TypedProperties) as a slice
+// of strings: a scalar becomes one element, an array becomes many. Blank results are dropped so an
+// empty or nil value never matches (fail-closed).
+func typedValueStrings(v interface{}) []string {
+	switch val := v.(type) {
+	case nil:
+		return nil
+	case []interface{}:
+		var out []string
+		for _, item := range val {
+			if s := typedValueToString(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		if s := typedValueToString(v); s != "" {
+			return []string{s}
+		}
+		return nil
 	}
 }
 
