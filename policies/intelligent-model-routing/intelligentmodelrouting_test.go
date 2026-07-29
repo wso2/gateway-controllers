@@ -287,6 +287,42 @@ func TestParseParams_InvalidRequestModelLocation(t *testing.T) {
 	}
 }
 
+// Only the payload location is implemented. header, queryParam and pathParam previously
+// passed validation and then silently never routed, so they must now be rejected.
+func TestParseParams_UnimplementedRequestModelLocationsRejected(t *testing.T) {
+	for _, location := range []string{"header", "queryParam", "pathParam"} {
+		t.Run(location, func(t *testing.T) {
+			params := map[string]interface{}{
+				"routingRules": []interface{}{
+					map[string]interface{}{
+						"name":    "Coding",
+						"context": "Code related",
+						"model":   "gpt-4o-mini",
+					},
+				},
+				"defaultModel": "gpt-4o",
+				"llmProvider":  "OPENAI",
+				"llmEndpoint":  "https://api.openai.com/v1/chat/completions",
+				"llmModel":     "gpt-4o-mini",
+				"llmApiKey":    "sk-test-key",
+				"requestModel": map[string]interface{}{
+					"location":   location,
+					"identifier": "x-model",
+				},
+			}
+
+			p := &IntelligentModelRoutingPolicy{httpClient: &http.Client{}}
+			err := parseParams(params, p)
+			if err == nil {
+				t.Fatalf("expected %q to be rejected, but parsing succeeded", location)
+			}
+			if !strings.Contains(err.Error(), "must be 'payload'") {
+				t.Fatalf("unexpected error message for %q: %v", location, err)
+			}
+		})
+	}
+}
+
 // --- Prompt Construction Tests ---
 
 func TestBuildClassificationPrompt_SingleRule(t *testing.T) {

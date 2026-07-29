@@ -99,14 +99,10 @@ systemParameters:
           type: string
           enum:
             - payload
-            - header
-            - queryParam
-            - pathParam
         identifier:
           type: string
           description: |
-            JSONPath (for payload) or header/param name identifying the
-            model field.
+            JSONPath identifying the model field in the request body.
       required:
         - location
         - identifier

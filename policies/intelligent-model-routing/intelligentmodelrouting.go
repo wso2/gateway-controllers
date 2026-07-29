@@ -521,11 +521,15 @@ func parseRequestModelConfig(params map[string]interface{}, p *IntelligentModelR
 		return fmt.Errorf("'requestModel.location' is required")
 	}
 
+	// Only the payload location is implemented: this policy runs entirely in the request
+	// body phase and modifyRequestModel rewrites the model inside the JSON body. Accepting
+	// header, queryParam or pathParam here would deploy successfully and then silently
+	// never route, so those values are rejected at configuration time.
 	validLocations := map[string]bool{
-		"payload": true, "header": true, "queryParam": true, "pathParam": true,
+		"payload": true,
 	}
 	if !validLocations[location] {
-		return fmt.Errorf("'requestModel.location' must be one of: payload, header, queryParam, pathParam")
+		return fmt.Errorf("'requestModel.location' must be 'payload'")
 	}
 	p.requestModel.Location = location
 

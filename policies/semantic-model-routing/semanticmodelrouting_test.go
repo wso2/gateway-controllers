@@ -211,6 +211,38 @@ func TestFindBestRoute_SkipsRoutesWithNoEmbeddings(t *testing.T) {
 
 // --- Parameter Parsing Tests ---
 
+// Only the payload location is implemented, and the rejection message must say so rather
+// than listing locations that are not actually accepted.
+func TestParseParams_UnimplementedRequestModelLocationsRejected(t *testing.T) {
+	for _, location := range []string{"header", "queryParam", "pathParam", "invalid_location"} {
+		t.Run(location, func(t *testing.T) {
+			params := map[string]interface{}{
+				"routes": []interface{}{
+					map[string]interface{}{
+						"model":          "gpt-4o-mini",
+						"utterances":     []interface{}{"write code"},
+						"scorethreshold": 0.85,
+					},
+				},
+				"defaultModel": "gpt-4o",
+				"requestModel": map[string]interface{}{
+					"location":   location,
+					"identifier": "x-model",
+				},
+			}
+
+			p := &SemanticModelRoutingPolicy{}
+			err := parseParams(params, p)
+			if err == nil {
+				t.Fatalf("expected %q to be rejected, but parsing succeeded", location)
+			}
+			if !strings.Contains(err.Error(), "must be 'payload'") {
+				t.Fatalf("error message must state the only supported location, got: %v", err)
+			}
+		})
+	}
+}
+
 func TestParseParams_ValidConfig(t *testing.T) {
 	params := map[string]interface{}{
 		"contentPath": "$.messages[-1].content",

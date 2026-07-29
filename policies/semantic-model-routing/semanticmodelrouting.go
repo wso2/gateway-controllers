@@ -525,11 +525,12 @@ func parseRequestModelConfig(params map[string]interface{}, p *SemanticModelRout
 		return fmt.Errorf("'requestModel.location' is required")
 	}
 
+	// Only the payload location is implemented; see modifyRequestModel.
 	validLocations := map[string]bool{
 		"payload": true,
 	}
 	if !validLocations[location] {
-		return fmt.Errorf("'requestModel.location' must be one of: payload, header, queryParam, pathParam")
+		return fmt.Errorf("'requestModel.location' must be 'payload'")
 	}
 	p.requestModel.Location = location
 
