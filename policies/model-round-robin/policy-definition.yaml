@@ -30,6 +30,36 @@ parameters:
         Set to 0 to disable failed-model suspension tracking.
       minimum: 0
       default: 30
+    stickyKey:
+      type: object
+      x-wso2-policy-advanced-param: true
+      description: |
+        Specifies the configuration for session stickiness.
+        When a client sends a session key, requests are routed stickily using consistent hashing.
+        When no session key is found, the gateway generates a session ID (with the model index
+        encoded) and returns it to the client in a response header for subsequent requests.
+      properties:
+        location:
+          type: string
+          description: Specifies where the sticky key is located (header, queryParam, payload, or ip).
+          enum: [header, queryParam, payload, ip]
+        identifier:
+          type: string
+          description: Specifies the header name, query param name, or JSONPath depending on the location.
+        fallbackToAuth:
+          type: boolean
+          description: |
+            Enable fallback to Authorization header hashing if the configured sticky key
+            is missing from the request. Disabled by default.
+          default: false
+        fallbackToIP:
+          type: boolean
+          description: |
+            Enable fallback to client IP hashing if the configured sticky key and
+            Authorization header are both missing. Disabled by default.
+          default: false
+      required:
+        - location
   required:
     - models
 
