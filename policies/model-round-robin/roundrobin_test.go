@@ -765,22 +765,112 @@ func TestModelRoundRobinPolicy_FallbacksDisabledByDefault(t *testing.T) {
 
 func TestIsGatewayGeneratedID(t *testing.T) {
 	tests := []struct {
+		name      string
 		sessionID string
 		wantIndex int
 		wantOK    bool
 	}{
-		{"abc123_M0", 0, true},
-		{"abc123_M1", 1, true},
-		{"abc123_M12", 12, true},
-		{"user-session-abc", 0, false},     // no suffix
-		{"_M1", 0, false},                  // no prefix before _M
-		{"abc_Mxyz", 0, false},             // non-numeric after _M
-		{"", 0, false},                      // empty
+		// Genuine gateway IDs: 16 hex characters, "_M", then a non-negative index.
+		{"valid index 0", "0123456789abcdef_M0", 0, true},
+		{"valid index 1", "a1b2c3d4e5f67890_M1", 1, true},
+		{"valid multi-digit index", "0123456789abcdef_M12", 12, true},
+
+		// User-supplied keys that must NOT be mistaken for gateway IDs.
+		{"short prefix", "abc123_M0", 0, false},
+		{"human session key", "alice_M1", 0, false},
+		{"non-hex prefix", "zzzzzzzzzzzzzzzz_M1", 0, false},
+		{"prefix too long", "0123456789abcdef00_M1", 0, false},
+		{"negative index", "0123456789abcdef_M-1", 0, false},
+
+		{"no suffix", "user-session-abc", 0, false},
+		{"no prefix before _M", "_M1", 0, false},
+		{"non-numeric after _M", "0123456789abcdef_Mxyz", 0, false},
+		{"empty", "", 0, false},
 	}
 	for _, tt := range tests {
-		idx, ok := isGatewayGeneratedID(tt.sessionID)
-		if ok != tt.wantOK || idx != tt.wantIndex {
-			t.Errorf("isGatewayGeneratedID(%q) = (%d, %v), want (%d, %v)", tt.sessionID, idx, ok, tt.wantIndex, tt.wantOK)
+		t.Run(tt.name, func(t *testing.T) {
+			idx, ok := isGatewayGeneratedID(tt.sessionID)
+			if ok != tt.wantOK || idx != tt.wantIndex {
+				t.Errorf("isGatewayGeneratedID(%q) = (%d, %v), want (%d, %v)",
+					tt.sessionID, idx, ok, tt.wantIndex, tt.wantOK)
+			}
+		})
+	}
+}
+
+// Generated IDs must always be recognised by the matching parser.
+func TestGatewaySessionID_GenerateParseRoundTrip(t *testing.T) {
+	for wantIndex := 0; wantIndex < 5; wantIndex++ {
+		id := generateGatewaySessionID(wantIndex)
+		gotIndex, ok := isGatewayGeneratedID(id)
+		if !ok {
+			t.Fatalf("generateGatewaySessionID(%d) produced %q, which isGatewayGeneratedID rejected",
+				wantIndex, id)
 		}
+		if gotIndex != wantIndex {
+			t.Fatalf("round trip for %q: got index %d, want %d", id, gotIndex, wantIndex)
+		}
+	}
+}
+
+// A user-supplied session key that merely resembles the gateway format must be routed by
+// consistent hashing, not by the index embedded in the key.
+func TestStickyKey_UserKeyResemblingGatewayIDIsHashed(t *testing.T) {
+	p := mustGetRRPolicy(t, map[string]interface{}{
+		"models":       baseRRModels(),
+		"requestModel": map[string]interface{}{"location": "header", "identifier": "x-model"},
+		"stickyKey":    map[string]interface{}{"location": "header", "identifier": "x-session"},
+	})
+
+	if _, ok := isGatewayGeneratedID("alice_M1"); ok {
+		t.Fatalf("'alice_M1' must not be treated as a gateway-generated ID")
+	}
+
+	// Consistent hashing must still be stable across repeated requests.
+	var first string
+	for i := 0; i < 4; i++ {
+		shared := rrSharedContext()
+		headers := policy.NewHeaders(map[string][]string{"x-session": {"alice_M1"}})
+		p.OnRequestHeaders(context.Background(),
+			&policy.RequestHeaderContext{SharedContext: shared, Headers: headers}, nil)
+
+		selected, _ := shared.Metadata[MetadataKeySelectedModel].(string)
+		if selected == "" {
+			t.Fatalf("call %d: expected a model to be selected", i)
+		}
+		if i == 0 {
+			first = selected
+		} else if selected != first {
+			t.Fatalf("call %d: sticky routing changed from %s to %s", i, first, selected)
+		}
+	}
+}
+
+// A payload sticky key requires a payload requestModel location. Any other combination
+// would leave the request unrouted, so it must be rejected at configuration time.
+func TestStickyKey_PayloadRequiresPayloadRequestModel(t *testing.T) {
+	for _, loc := range []string{"header", "queryParam", "pathParam"} {
+		t.Run(loc, func(t *testing.T) {
+			_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+				"models":       baseRRModels(),
+				"requestModel": map[string]interface{}{"location": loc, "identifier": "x-model"},
+				"stickyKey":    map[string]interface{}{"location": "payload", "identifier": "$.session_id"},
+			})
+			if err == nil {
+				t.Fatalf("expected an error for stickyKey.location=payload with requestModel.location=%s", loc)
+			}
+			if !strings.Contains(err.Error(), "requires 'requestModel.location' to be 'payload'") {
+				t.Fatalf("unexpected error message: %v", err)
+			}
+		})
+	}
+
+	// The supported combination must still be accepted.
+	if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"models":       baseRRModels(),
+		"requestModel": map[string]interface{}{"location": "payload", "identifier": "$.model"},
+		"stickyKey":    map[string]interface{}{"location": "payload", "identifier": "$.session_id"},
+	}); err != nil {
+		t.Fatalf("payload/payload combination must remain valid, got: %v", err)
 	}
 }
