@@ -18,7 +18,6 @@
 package piimaskingregex
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -43,6 +42,11 @@ const (
 	DefaultEmailRegex         = `(?i)\b[a-z0-9.!#$%&'*+/=?^_{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])\b`
 	DefaultPhoneRegex         = `(?:\+?1[-.\s]?)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[-.\s]?[2-9][0-9]{2}[-.\s]?[0-9]{4}\b`
 	DefaultSSNRegex           = `(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6(?:[0-57-9][0-9]|6[0-57-9])|[7-8][0-9]{2})[- ]?(?:0[1-9]|[1-9][0-9])[- ]?(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b`
+
+	// metadataKeyAccJSONBody accumulates a non-SSE (plain JSON) response body
+	// across streaming chunks so the full body can be restored and emitted once
+	// at end of stream. See OnResponseBodyChunk.
+	metadataKeyAccJSONBody = "piimaskingregex:acc_json_body"
 
 	// SSE constants for streaming responses
 	sseDataPrefix  = "data: "
@@ -79,7 +83,6 @@ func GetPolicy(
 
 	return p, nil
 }
-
 
 // Mode returns the processing mode for the PII masking regex policy.
 func (p *PIIMaskingRegexPolicy) Mode() policy.ProcessingMode {
@@ -482,7 +485,16 @@ func (p *PIIMaskingRegexPolicy) NeedsMoreResponseData(accumulated []byte) bool {
 	s := string(accumulated)
 
 	if !isSSEChunk(s) {
-		return !json.Valid(bytes.TrimSpace(accumulated))
+		// Non-SSE (plain JSON) body delivered over chunked transfer. Restoration
+		// must rewrite placeholders anywhere in the body, so we buffer the whole
+		// body ourselves in OnResponseBodyChunk (via respCtx.Metadata) and emit
+		// the restored body at EndOfStream. Returning false hands us every chunk
+		// directly, matching the streaming contract the other response policies
+		// use (see regex-guardrail / word-count-guardrail). The previous
+		// json.Valid gate here relied on kernel-level accumulation that did not
+		// deliver the complete body as a single chunk, truncating the response to
+		// an early fragment.
+		return false
 	}
 
 	content, openBracketDataLineIdx, totalDataLines := extractSSEDeltaContentTracked(s)
@@ -512,9 +524,12 @@ func (p *PIIMaskingRegexPolicy) OnResponseBodyChunk(ctx context.Context, respCtx
 	if p.params.RedactPII {
 		return policy.ForwardResponseChunk{}
 	}
-	if chunk == nil || len(chunk.Chunk) == 0 {
+	if chunk == nil {
 		return policy.ForwardResponseChunk{}
 	}
+	// Note: unlike validate-only policies we do NOT early-return on an empty
+	// chunk, because an empty EndOfStream sentinel is the signal to flush a body
+	// we have been accumulating below.
 
 	maskedPII, exists := respCtx.Metadata[MetadataKeyPIIEntities]
 	if !exists {
@@ -535,7 +550,24 @@ func (p *PIIMaskingRegexPolicy) OnResponseBodyChunk(ctx context.Context, respCtx
 	if isSSEChunk(chunkStr) {
 		return p.restoreSSEChunk(chunkStr, restoreMap)
 	}
-	return p.restoreJSONChunk(chunkStr, restoreMap)
+
+	// Non-SSE (plain JSON) body over chunked transfer. A placeholder can span a
+	// chunk boundary and restoration rewrites the whole body, so we cannot
+	// forward chunks as they arrive. Accumulate across chunks and emit the
+	// restored body exactly once, at EndOfStream. Intermediate chunks emit
+	// nothing ([]byte{} = suppress this flush; nil would pass the raw,
+	// still-masked bytes through).
+	if respCtx.Metadata == nil {
+		respCtx.Metadata = make(map[string]interface{})
+	}
+	prev, _ := respCtx.Metadata[metadataKeyAccJSONBody].(string)
+	full := prev + chunkStr
+	if !chunk.EndOfStream {
+		respCtx.Metadata[metadataKeyAccJSONBody] = full
+		return policy.ForwardResponseChunk{Body: []byte{}}
+	}
+	delete(respCtx.Metadata, metadataKeyAccJSONBody)
+	return policy.ForwardResponseChunk{Body: []byte(p.restoreJSONBytes(full, restoreMap))}
 }
 
 // ─── SSE / Streaming helpers ─────────────────────────────────────────────────
@@ -693,13 +725,23 @@ func updateDeltaContentInLine(line, newContent string) string {
 // Placeholders are replaced directly in the raw JSON bytes so that key order,
 // whitespace, and any trailing newline from the LLM are preserved exactly.
 func (p *PIIMaskingRegexPolicy) restoreJSONChunk(chunkStr string, maskedMap map[string]string) policy.ForwardResponseChunk {
-	result := chunkStr
+	result := p.restoreJSONBytes(chunkStr, maskedMap)
+	if result == chunkStr {
+		return policy.ForwardResponseChunk{}
+	}
+	return policy.ForwardResponseChunk{Body: []byte(result)}
+}
+
+// restoreJSONBytes replaces every placeholder with its original value directly in
+// the raw JSON string, preserving key order, whitespace, and any trailing
+// newline. Replacements are JSON-encoded so special characters (", \, etc.) stay
+// correctly escaped. Returns the input unchanged when no placeholder is present.
+func (p *PIIMaskingRegexPolicy) restoreJSONBytes(s string, maskedMap map[string]string) string {
+	result := s
 	for placeholder, original := range maskedMap {
 		if !strings.Contains(result, placeholder) {
 			continue
 		}
-		// JSON-encode the replacement so special characters (", \, etc.) are
-		// properly escaped. Strip the surrounding quotes that json.Marshal adds.
 		encodedBytes, err := json.Marshal(original)
 		if err != nil {
 			continue
@@ -707,10 +749,7 @@ func (p *PIIMaskingRegexPolicy) restoreJSONChunk(chunkStr string, maskedMap map[
 		escapedOriginal := string(encodedBytes[1 : len(encodedBytes)-1])
 		result = strings.ReplaceAll(result, placeholder, escapedOriginal)
 	}
-	if result == chunkStr {
-		return policy.ForwardResponseChunk{}
-	}
-	return policy.ForwardResponseChunk{Body: []byte(result)}
+	return result
 }
 
 // restoreInChoices parses a JSON string, restores PII placeholders in
