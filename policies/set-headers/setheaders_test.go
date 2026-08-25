@@ -382,6 +382,61 @@ func TestSetHeadersPolicy_BothRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestSetHeadersPolicy_BodyPhase(t *testing.T) {
+	params := map[string]interface{}{
+		"request": map[string]interface{}{
+			"phase": "body",
+			"headers": []interface{}{
+				map[string]interface{}{"name": "Authorization", "value": "Bearer provider-secret"},
+			},
+		},
+	}
+	raw, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := raw.(*SetHeadersPolicy)
+	if p.Mode().RequestBodyMode != policy.BodyModeBuffer {
+		t.Fatalf("body mode = %v, want buffer", p.Mode().RequestBodyMode)
+	}
+	if err := p.Validate(params); err != nil {
+		t.Fatal(err)
+	}
+	headerMods := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{}, params).(policy.UpstreamRequestHeaderModifications)
+	if len(headerMods.HeadersToSet) != 0 {
+		t.Fatalf("body-phase headers were applied during header phase: %v", headerMods.HeadersToSet)
+	}
+	bodyMods := p.OnRequestBody(context.Background(), &policy.RequestContext{}, params).(policy.UpstreamRequestModifications)
+	if bodyMods.HeadersToSet["authorization"] != "Bearer provider-secret" {
+		t.Fatalf("body-phase header missing: %v", bodyMods.HeadersToSet)
+	}
+}
+
+func TestSetHeadersPolicy_DefaultRemainsHeaderPhase(t *testing.T) {
+	raw, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw.Mode().RequestBodyMode != policy.BodyModeSkip {
+		t.Fatalf("default request body mode = %v, want skip", raw.Mode().RequestBodyMode)
+	}
+}
+
+func TestSetHeadersPolicy_RejectsInvalidRequestPhase(t *testing.T) {
+	p := &SetHeadersPolicy{}
+	err := p.Validate(map[string]interface{}{
+		"request": map[string]interface{}{
+			"phase": "request_body",
+			"headers": []interface{}{
+				map[string]interface{}{"name": "Authorization", "value": "secret"},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "request.phase must be either 'header' or 'body'") {
+		t.Fatalf("expected invalid request phase error, got %v", err)
+	}
+}
+
 func TestSetHeadersPolicy_EmptyHeadersList(t *testing.T) {
 	p := &SetHeadersPolicy{}
 	ctx := &policy.RequestHeaderContext{
