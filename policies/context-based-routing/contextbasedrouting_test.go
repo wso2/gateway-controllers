@@ -67,6 +67,22 @@ func TestProcessingModeBuffersOnlyRequestBody(t *testing.T) {
 	}
 }
 
+func TestBodyRequestModelLocationIsNormalizedToPayload(t *testing.T) {
+	params := testParams()
+	params["requestModel"] = map[string]interface{}{
+		"location":   "body",
+		"identifier": "$.model",
+	}
+
+	parsed, err := parseConfig(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.RequestModel.Location != "payload" {
+		t.Fatalf("request model location = %q, want payload", parsed.RequestModel.Location)
+	}
+}
+
 func TestRoutesByEstimatedInputTokens(t *testing.T) {
 	raw, err := GetPolicy(policy.PolicyMetadata{}, testParams())
 	if err != nil {

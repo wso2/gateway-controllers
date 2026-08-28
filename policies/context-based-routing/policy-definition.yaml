@@ -116,7 +116,7 @@ systemParameters:
       properties:
         location:
           type: string
-          enum: [payload, header, queryParam, pathParam]
+          enum: [payload, body, header, queryParam, pathParam]
         identifier:
           type: string
           minLength: 1
