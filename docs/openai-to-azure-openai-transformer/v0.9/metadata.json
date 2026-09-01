@@ -4,7 +4,8 @@
   "version": "0.9",
   "provider": "WSO2",
   "categories": [
-    "AI"
+    "AI",
+    "Transformation"
   ],
   "description": "Routes OpenAI Chat Completions requests to an Azure OpenAI upstream by rewriting the request path with the deployment id and api-version query parameter. The request body passes through unchanged, since Azure OpenAI is wire-compatible with the OpenAI Chat Completions API. Supports both routed (multi-provider) and unconditional (single-provider) execution modes."
 }

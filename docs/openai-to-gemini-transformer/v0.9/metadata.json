@@ -4,7 +4,8 @@
   "version": "0.9",
   "provider": "WSO2",
   "categories": [
-    "AI"
+    "AI",
+    "Transformation"
   ],
   "description": "Translates OpenAI Chat Completions requests into the Google Gemini generateContent API format and rewrites non-streaming and streaming Gemini responses back into OpenAI-compatible JSON or Chat Completions Server-Sent Events. Supports system prompts, multi-modal image input, tool/function calling, and both routed (multi-provider) and unconditional (single-provider) execution modes."
 }
