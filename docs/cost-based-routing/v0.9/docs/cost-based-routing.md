@@ -135,7 +135,7 @@ parameters:
           duration: 24h
 ```
 
-After the last route is exhausted, the second configuration returns:
+After the last route is exhausted, this configuration returns:
 
 ```http
 HTTP/1.1 429 Too Many Requests

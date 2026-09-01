@@ -23,12 +23,13 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"os"
 	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 	"github.com/wso2/gateway-controllers/policies/advanced-ratelimit/limiter"
 )
@@ -209,22 +210,48 @@ func TestGCRAAlgorithmRoutesToFallbackWhenSpent(t *testing.T) {
 
 func redisParams(t *testing.T, backend string) map[string]interface{} {
 	t.Helper()
-	server := miniredis.RunT(t)
-	host, port, err := net.SplitHostPort(server.Addr())
+
+	addr := os.Getenv("REDIS_TEST_ADDR")
+	if addr == "" {
+		addr = "localhost:6379"
+	}
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		t.Fatalf("could not parse the miniredis address: %v", err)
+		t.Fatalf("invalid REDIS_TEST_ADDR %q: %v", addr, err)
 	}
 	portNumber, err := strconv.Atoi(port)
 	if err != nil {
-		t.Fatalf("could not parse the miniredis port: %v", err)
+		t.Fatalf("invalid Redis port %q: %v", port, err)
 	}
+
+	client := redis.NewClient(&redis.Options{
+		Addr:        addr,
+		DialTimeout: 300 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		_ = client.Close()
+		t.Skipf("no Redis reachable at %s (set REDIS_TEST_ADDR or start the repository Redis service): %v", addr, err)
+	}
+
+	prefix := fmt.Sprintf("cbr-test:%s:%d:", t.Name(), time.Now().UnixNano())
+	t.Cleanup(func() {
+		cleanupCtx := context.Background()
+		iter := client.Scan(cleanupCtx, 0, prefix+"*", 0).Iterator()
+		for iter.Next(cleanupCtx) {
+			_ = client.Del(cleanupCtx, iter.Val()).Err()
+		}
+		_ = client.Close()
+	})
 
 	params := validParams()
 	params["backend"] = backend
 	params["redis"] = map[string]interface{}{
 		"host":      host,
 		"port":      portNumber,
-		"keyPrefix": "cbr-test:" + t.Name() + ":",
+		"keyPrefix": prefix,
 	}
 	return params
 }
@@ -394,10 +421,9 @@ func TestParseReportedCost(t *testing.T) {
 			wantOK:   true,
 		},
 		{
-			name:     "float cost without a status",
+			name:     "cost without a status",
 			metadata: map[string]interface{}{metadataLLMCost: 1.25},
-			wantCost: 1.25,
-			wantOK:   true,
+			wantOK:   false,
 		},
 		{
 			name: "not calculated",
@@ -413,7 +439,15 @@ func TestParseReportedCost(t *testing.T) {
 		{name: "NaN", metadata: map[string]interface{}{metadataLLMCost: math.NaN()}, wantOK: false},
 		{name: "infinite", metadata: map[string]interface{}{metadataLLMCost: math.Inf(1)}, wantOK: false},
 		{name: "wrong type", metadata: map[string]interface{}{metadataLLMCost: []string{"1"}}, wantOK: false},
-		{name: "zero", metadata: map[string]interface{}{metadataLLMCost: "0"}, wantCost: 0, wantOK: true},
+		{
+			name: "calculated zero",
+			metadata: map[string]interface{}{
+				metadataLLMCost:       "0",
+				metadataLLMCostStatus: llmCostStatusCalculated,
+			},
+			wantCost: 0,
+			wantOK:   true,
+		},
 	}
 
 	for _, tt := range tests {

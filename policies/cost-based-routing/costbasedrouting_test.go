@@ -419,14 +419,14 @@ func TestExhaustedRequestedPayloadModelFallsBackToBestAvailableRoute(t *testing.
 	p := newPolicy(t, params)
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
-	bodyAction := requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`))
+	requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`))
 	if got := metadata[metadataSelectedRoute]; got != "economy" {
 		t.Fatalf("first selected route = %v, want economy", got)
 	}
 	completeResponse(p, metadata, "6.0", llmCostStatusCalculated)
 
 	_, metadata = requestHeaders(p, "/chat/completions", nil)
-	bodyAction = requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`))
+	bodyAction := requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`))
 	mods := bodyMods(t, bodyAction)
 	if got := metadata[metadataSelectedRoute]; got != "premium" {
 		t.Fatalf("fallback route = %v, want premium", got)

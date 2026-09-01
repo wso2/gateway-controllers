@@ -284,7 +284,7 @@ func parseReportedCost(metadata map[string]interface{}) (float64, string, bool) 
 			status = value
 		}
 	}
-	if status != "" && status != llmCostStatusCalculated {
+	if status != llmCostStatusCalculated {
 		return 0, status, false
 	}
 
