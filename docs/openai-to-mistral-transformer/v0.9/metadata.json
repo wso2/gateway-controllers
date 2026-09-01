@@ -4,7 +4,8 @@
   "version": "0.9",
   "provider": "WSO2",
   "categories": [
-    "AI"
+    "AI",
+    "Transformation"
   ],
   "description": "Adapts OpenAI Chat Completions requests for Mistral-compatible upstreams by pinning the model, stripping OpenAI fields Mistral rejects, and rewriting the request path. Mistral already emits OpenAI-shaped responses, so responses are normalised and passed back in OpenAI shape. Supports both routed (multi-provider) and unconditional (single-provider) execution modes."
 }
