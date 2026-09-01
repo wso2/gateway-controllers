@@ -1,0 +1,334 @@
+name: cost-based-routing
+version: v0.9.0
+displayName: Cost-Based Routing
+description: |
+  Routes LLM requests through independently budgeted model targets. By default,
+  when the client's requested model exactly matches a configured route, that
+  route is tried first. If it is exhausted, or the requested model is not
+  configured, routes are tried from the top in configured order, for example
+  premium, balanced, then economy. If every configured route budget is exhausted,
+  onExhausted decides whether the request uses the default target or receives
+  HTTP 429. The exact cost of a request is
+  only known after the model responds, so the selected route's budget is checked
+  against previously recorded spending and charged afterwards from the cost
+  published by the llm-cost system policy. A request may therefore overshoot its
+  selected route's budget slightly; its response is still returned normally and
+  the following request moves to the next available route. A route becomes
+  eligible again when its budget window resets. Cost accounting is finalized
+  only for responses that reach end of stream; the gateway policy SDK currently
+  provides no callback for a stream aborted before that point.
+
+parameters:
+  type: object
+  additionalProperties: false
+  x-wso2-policy-property-order: [routes, respectRequestedModel, onExhausted, default, consumerBased]
+  required:
+    - routes
+  properties:
+    routes:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        Ordered model routes. The first route with remaining budget is selected.
+        Example order: premium, balanced, economy. Each route has its own
+        independent budget limits.
+      minItems: 1
+      maxItems: 10
+      items:
+        type: object
+        additionalProperties: false
+        x-wso2-policy-property-order: [target, budgetLimits, name]
+        required:
+          - target
+          - budgetLimits
+        properties:
+          target:
+            type: object
+            additionalProperties: false
+            description: Model and optional additional provider selected while this route has budget.
+            required:
+              - model
+            properties:
+              model:
+                type: string
+                description: Model name written into the upstream request.
+                minLength: 1
+              provider:
+                type: string
+                description: |
+                  Optional additional-provider alias. Must match an LlmProxy
+                  additionalProviders[].as value, or the provider id when `as`
+                  is absent. When omitted, the LLM proxy's primary/default
+                  provider is used.
+                minLength: 1
+
+          budgetLimits:
+            type: array
+            description: |
+              Spending caps for this route. Multiple windows can be configured
+              (for example $2 per hour and $20 per day); the route is considered
+              exhausted as soon as the strictest window runs out.
+            minItems: 1
+            maxItems: 10
+            items:
+              type: object
+              additionalProperties: false
+              required:
+                - amount
+                - duration
+              properties:
+                amount:
+                  type: number
+                  description: Maximum spend in US dollars within the time window.
+                  minimum: 0.000001
+                  maximum: 1000000
+                duration:
+                  type: string
+                  description: |
+                    Budget reset window. Use duration values such as "1h" for
+                    hourly, "24h" for daily, "168h" for weekly, or "720h" for
+                    roughly 30 days.
+                  pattern: "^(([0-9]+(\\.[0-9]*)?|\\.[0-9]+)(ns|us|µs|ms|s|m|h))+$"
+
+          name:
+            type: string
+            description: |
+              Optional human-readable route name used in diagnostics, for
+              example premium, balanced, or economy. Names must be unique.
+            minLength: 1
+
+    respectRequestedModel:
+      type: boolean
+      x-wso2-policy-advanced-param: false
+      description: |
+        When enabled, if the model requested by the client exactly matches a
+        routes[].target.model value, that route is tried first. If its budget
+        is exhausted, the policy falls back to the first available route from
+        the top of the configured list. If the requested model is not
+        configured, normal top-to-bottom routing is used. When disabled, the
+        client-requested model does not affect route selection and routes are
+        always tried from the top.
+      default: true
+
+    onExhausted:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        What to do when every configured route budget is exhausted. Choose
+        "default" to route to the default target, or "reject" to return HTTP
+        429 without calling an upstream model. When omitted, "default" is used
+        for backward compatibility.
+      enum: ["default", "reject"]
+      default: "default"
+
+    default:
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: |
+        Model served when every configured route budget is exhausted and
+        onExhausted is "default". Its cost is not charged against any route
+        budget. This field may be omitted when onExhausted is "reject".
+      required:
+        - model
+      properties:
+        model:
+          type: string
+          description: Model name written into the upstream request.
+          minLength: 1
+        provider:
+          type: string
+          description: |
+            Optional additional-provider alias. Must match an LlmProxy
+            additionalProviders[].as value, or the provider id when `as` is
+            absent. When omitted, the LLM proxy's primary/default provider is
+            used.
+          minLength: 1
+
+    consumerBased:
+      type: boolean
+      x-wso2-policy-advanced-param: false
+      description: |
+        When true, each application gets an independent budget, identified by
+        the x-wso2-application-id metadata key set by the authentication
+        policies. Requests without an application id share a single "default"
+        budget rather than bypassing the budget. When false (default), each
+        configured route gets one shared budget for the whole API route.
+      default: false
+
+  allOf:
+    - if:
+        properties:
+          onExhausted:
+            const: "default"
+      then:
+        required:
+          - default
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  required:
+    - requestModel
+  properties:
+    requestModel:
+      type: object
+      additionalProperties: false
+      description: |
+        Provider-template location of the model in the upstream request. The
+        selected model is written to this location.
+      required:
+        - location
+        - identifier
+      properties:
+        location:
+          type: string
+          description: |
+            Where the model lives in the request. "body" is accepted as a
+            backwards-compatible alias for "payload".
+          enum: [payload, body, header, queryParam, pathParam]
+        identifier:
+          type: string
+          description: |
+            JSONPath for payload (for example "$.model"), header name, query
+            parameter name, or a regular expression with a capture group
+            selecting the model segment for pathParam.
+          minLength: 1
+
+    costScaleFactor:
+      type: integer
+      description: |
+        Scale factor for converting dollar amounts to internal integer units.
+        The budget counters are int64, so unscaled costs below $1 would truncate
+        to zero. Both the configured limits and the recorded costs are scaled by
+        this factor.
+
+        Example values:
+        - 1000000000 (default): Nano-dollars. $1.00 = 1,000,000,000 units. Precision to 9 decimal places.
+        - 1000000: Micro-dollars. $1.00 = 1,000,000 units. Precision to 6 decimal places.
+        - 1000: Milli-dollars. $1.00 = 1,000 units. Precision to 3 decimal places.
+        - 100: Cents. $1.00 = 100 units. Precision to 2 decimal places.
+      minimum: 1
+      default: 1000000000
+      "wso2/defaultValue": "${config.policy_configurations.llm_cost_ratelimit_v1.cost_scale_factor}"
+
+    algorithm:
+      type: string
+      description: |
+        Budget accounting algorithm:
+        - fixed-window (default): a hard "$N per window" budget that resets as a
+          whole when the window rolls over. This matches the intended product
+          behaviour of this policy.
+        - gcra: replenishes capacity gradually over the window rather than
+          resetting at a boundary, so the primary model recovers progressively
+          instead of all at once.
+      enum: ["fixed-window", "gcra"]
+      default: "fixed-window"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.algorithm}"
+
+    backend:
+      type: string
+      description: |
+        Budget storage backend. 'memory' keeps per-instance counters and suits
+        development or a single gateway replica. 'redis' shares the budget
+        across all gateway replicas and is recommended for distributed
+        deployments. 'redis-local-async' is accepted for configuration
+        compatibility; this policy's budget query and charge are synchronous, so
+        it behaves like 'redis'.
+      enum: ["memory", "redis", "redis-local-async"]
+      default: "memory"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.backend}"
+
+    redis:
+      type: object
+      description: Redis configuration (used when backend=redis or backend=redis-local-async)
+      additionalProperties: false
+      properties:
+        host:
+          type: string
+          default: "localhost"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.host}"
+        port:
+          type: integer
+          default: 6379
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.port}"
+        password:
+          type: string
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.password}"
+        username:
+          type: string
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.username}"
+        db:
+          type: integer
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.db}"
+        keyPrefix:
+          type: string
+          default: "ratelimit:v1:"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.key_prefix}"
+        failureMode:
+          type: string
+          description: |
+            Behaviour when the budget store cannot be reached. 'open' keeps
+            serving on the primary target and logs the failure. 'closed' returns
+            503 rather than routing on an unknown budget state. Neither mode
+            reports a storage failure as budget exhaustion.
+          enum: ["open", "closed"]
+          default: "open"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.failure_mode}"
+        connectionTimeout:
+          type: string
+          default: "5s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.connection_timeout}"
+        readTimeout:
+          type: string
+          default: "3s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.read_timeout}"
+        writeTimeout:
+          type: string
+          default: "3s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.write_timeout}"
+        poolSize:
+          type: integer
+          description: |
+            Redis connection pool size for the shared client. 0 = go-redis
+            default (10 × GOMAXPROCS). One pool is shared per distinct Redis
+            endpoint config.
+          minimum: 0
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.pool_size}"
+
+    memory:
+      type: object
+      description: In-memory storage configuration (only used when backend=memory)
+      additionalProperties: false
+      properties:
+        cleanupInterval:
+          type: string
+          default: "5m"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.memory.cleanup_interval}"
+
+    local:
+      type: object
+      description: Configures the local-first hot path when backend is redis-local-async.
+      additionalProperties: false
+      properties:
+        syncInterval:
+          type: string
+          default: "50ms"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.sync_interval}"
+        flushWorkers:
+          type: integer
+          minimum: 0
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.flush_workers}"
+        maxPipelineCommands:
+          type: integer
+          minimum: 0
+          default: 5000
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.max_pipeline_commands}"
+        maxLocalEntries:
+          type: integer
+          minimum: 0
+          default: 100000
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.max_local_entries}"

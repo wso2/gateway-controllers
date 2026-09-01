@@ -1,0 +1,10 @@
+{
+  "name": "cost-based-routing",
+  "displayName": "Cost-Based Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Honors a configured client-requested model while its budget remains, then falls back through ordered model budgets and either uses a default target or returns HTTP 429."
+}
