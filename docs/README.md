@@ -47,7 +47,7 @@ All available policies, sorted alphabetically.
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.0/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
 | [JWT Auth](./jwt-auth/v1.3/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
-| [LLM Cost](./llm-cost/v1.1/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time and stores the result in SharedContext for use by downstream policies. |
+| [LLM Cost](./llm-cost/v2.0/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. |
 | [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.0/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
 | [LLM Header Router](./llm-header-router/v0.9/docs/llm-header-router.md) | AI | Selects an LLM provider for OpenAI Chat Completions requests using a configurable request header. |
 | [Log Message](./log-message/v1.0/docs/log-message.md) | Logging, Analytics & Monitoring, MCP, WebSub, WebBroker | This policy provides the capability to log the payload and headers of a request/response. |

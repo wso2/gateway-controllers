@@ -1,0 +1,10 @@
+{
+  "name": "llm-cost",
+  "displayName": "LLM Cost",
+  "version": "2.0",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. Token counts, model name, and service tier for a provider are declared in the template rather than added to the policy."
+}
