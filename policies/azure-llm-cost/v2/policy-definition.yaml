@@ -1,0 +1,73 @@
+name: azure-llm-cost
+version: v2.0.0
+description: |
+  Calculates the cost of Azure OpenAI and Azure AI Foundry calls from the token
+  usage in the response, and stores it in SharedContext as "x-llm-cost" (USD).
+  The cost is never returned to the client as a response header.
+
+  Runs in the response phase only. If the model or its price cannot be
+  determined, the request is recorded as unpriced and is never blocked.
+
+  Azure identifies models by deployment, and most endpoints report the
+  deployment name rather than the model. List your deployments below so each one
+  can be priced. Chat completions is the exception: it reports the real model
+  name, so it is priced correctly on its own.
+
+  Azure OpenAI models and Azure AI Foundry's own models are priced from separate
+  entries in the pricing file. A Foundry resource can serve both, so the right
+  entries are chosen per request; no setting is needed.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    modelMappings:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        Your Azure deployments: the model each one runs, and its deployment
+        type. Used to look up the price.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - deployment
+          - model
+        properties:
+          deployment:
+            type: string
+            description: Your Azure deployment name (for example, my-4o-mini).
+            minLength: 1
+          model:
+            type: string
+            description: The model it runs (for example, gpt-4o-mini).
+            minLength: 1
+          region:
+            type: string
+            enum:
+              - global-standard
+              - us
+              - eu
+              - apac
+              - regional
+            default: global-standard
+            description: |
+              The deployment type, which sets the price tier. Global Standard is
+              Azure's default. Choose us, eu or apac for a Data Zone deployment,
+              or regional for a single-region one. Ignored for Azure AI
+              Foundry's own models, applied to the Azure OpenAI models it hosts.
+  required:
+    - modelMappings
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    pricing_file:
+      type: string
+      description: >
+        Path to the model pricing file shipped with the gateway. This is the
+        same file the llm-cost policy uses. Gateway admins can override it in
+        config.toml.
+      "wso2/defaultValue": "${config.policy_configurations.azure_llm_cost_v2.pricing_file}"
