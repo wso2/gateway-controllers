@@ -49,7 +49,7 @@ List every deployment the route can reach. `region` sits on each entry rather th
 #### Sample System Configuration
 
 ```toml
-[policy_configurations.azure_llm_cost_v0]
+[policy_configurations.azure_llm_cost_v1]
 pricing_file = "/etc/policy-engine/llm-pricing/model_prices.json"
 ```
 
@@ -59,7 +59,7 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
 
 ```yaml
 - name: azure-llm-cost
-  gomodule: github.com/wso2/gateway-controllers/policies/azure-llm-cost@v0
+  gomodule: github.com/wso2/gateway-controllers/policies/azure-llm-cost@v1
 ```
 
 ## Reference Scenarios
@@ -91,7 +91,7 @@ spec:
         methods: [POST]
   operationPolicies:
     - name: azure-llm-cost
-      version: v0
+      version: v1
       paths:
         - path: /chat/completions
           methods: [POST]
@@ -141,7 +141,7 @@ operationPolicies:
             - amount: 10
               duration: "24h"
   - name: azure-llm-cost
-    version: v0
+    version: v1
     paths:
       - path: /chat/completions
         methods: [POST]
