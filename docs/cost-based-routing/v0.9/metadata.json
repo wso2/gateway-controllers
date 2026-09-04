@@ -1,0 +1,10 @@
+{
+  "name": "cost-based-routing",
+  "displayName": "Cost-Based Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping."
+}
