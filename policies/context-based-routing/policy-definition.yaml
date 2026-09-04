@@ -14,9 +14,10 @@ parameters:
   type: object
   additionalProperties: false
   required:
-    - routes
+    - modelMappings
   properties:
-    routes:
+    modelMappings:
+      title: Model Mappings
       type: array
       x-wso2-policy-advanced-param: false
       description: |
@@ -28,9 +29,10 @@ parameters:
         additionalProperties: false
         required:
           - maxTokens
-          - target
+          - model
         properties:
           name:
+            title: Rule Name
             type: string
             description: Optional human-readable name for the route.
             minLength: 1
@@ -42,24 +44,28 @@ parameters:
             type: integer
             description: Exclusive upper input-token boundary.
             minimum: 1
-          target:
+          model:
+            title: Model
             type: object
             additionalProperties: false
             description: Model and optional additional provider selected for this range.
             required:
-              - model
+              - modelName
             properties:
-              model:
+              modelName:
+                title: Model Name
                 type: string
                 description: Model name written to the upstream request.
                 minLength: 1
-              provider:
+              providerName:
+                title: Provider Name
                 type: string
                 description: |
                   Optional additional-provider alias. When omitted, the LLM
                   proxy's primary provider is used.
                 minLength: 1
     fallback:
+      title: Fallback
       type: object
       additionalProperties: false
       x-wso2-policy-advanced-param: true
@@ -68,13 +74,15 @@ parameters:
         matches. When omitted, the client's original model and provider are
         left unchanged.
       required:
-        - model
+        - modelName
       properties:
-        model:
+        modelName:
+          title: Model Name
           type: string
           description: Fallback model name written to the upstream request.
           minLength: 1
-        provider:
+        providerName:
+          title: Provider Name
           type: string
           description: |
             Optional additional-provider alias. When omitted, the LLM proxy's

@@ -59,15 +59,15 @@ func parseConfig(params map[string]interface{}) (config, error) {
 		InputJSONPaths: append([]string(nil), defaultInputJSONPaths...),
 	}
 
-	routesRaw, ok := params["routes"].([]interface{})
+	routesRaw, ok := configField(params, "modelMappings", "routes").([]interface{})
 	if !ok || len(routesRaw) == 0 {
-		return result, fmt.Errorf("'routes' must be a non-empty array")
+		return result, fmt.Errorf("'modelMappings' must be a non-empty array")
 	}
 	result.Routes = make([]tokenRange, 0, len(routesRaw))
 	for i, raw := range routesRaw {
 		item, ok := raw.(map[string]interface{})
 		if !ok {
-			return result, fmt.Errorf("'routes[%d]' must be an object", i)
+			return result, fmt.Errorf("'modelMappings[%d]' must be an object", i)
 		}
 		route, err := parseRange(item, i)
 		if err != nil {
@@ -195,7 +195,7 @@ func parseRange(item map[string]interface{}, index int) (tokenRange, error) {
 	if raw, ok := item["name"]; ok {
 		name, ok := raw.(string)
 		if !ok || strings.TrimSpace(name) == "" {
-			return result, fmt.Errorf("'routes[%d].name' must be a non-empty string", index)
+			return result, fmt.Errorf("'modelMappings[%d].name' must be a non-empty string", index)
 		}
 		result.Name = strings.TrimSpace(name)
 	}
@@ -203,25 +203,29 @@ func parseRange(item map[string]interface{}, index int) (tokenRange, error) {
 	if raw, ok := item["minTokens"]; ok {
 		value, err := integerValue(raw)
 		if err != nil || value < 0 {
-			return result, fmt.Errorf("'routes[%d].minTokens' must be a non-negative integer", index)
+			return result, fmt.Errorf("'modelMappings[%d].minTokens' must be a non-negative integer", index)
 		}
 		result.MinTokens = &value
 	}
 	if raw, ok := item["maxTokens"]; ok {
 		value, err := integerValue(raw)
 		if err != nil || value < 1 {
-			return result, fmt.Errorf("'routes[%d].maxTokens' must be a positive integer", index)
+			return result, fmt.Errorf("'modelMappings[%d].maxTokens' must be a positive integer", index)
 		}
 		result.MaxTokens = &value
 	}
 	if result.MaxTokens == nil {
-		return result, fmt.Errorf("'routes[%d].maxTokens' is required", index)
+		return result, fmt.Errorf("'modelMappings[%d].maxTokens' is required", index)
 	}
 	if result.MinTokens != nil && result.MaxTokens != nil && *result.MinTokens >= *result.MaxTokens {
-		return result, fmt.Errorf("'routes[%d].minTokens' must be less than maxTokens", index)
+		return result, fmt.Errorf("'modelMappings[%d].minTokens' must be less than maxTokens", index)
 	}
 
-	parsedTarget, err := parseTarget(item["target"], fmt.Sprintf("routes[%d].target", index))
+	rawModel, exists := item["model"]
+	if !exists {
+		rawModel = configField(item, "models", "target")
+	}
+	parsedTarget, err := parseTarget(rawModel, fmt.Sprintf("modelMappings[%d].model", index))
 	if err != nil {
 		return result, err
 	}
@@ -234,15 +238,15 @@ func parseTarget(raw interface{}, field string) (target, error) {
 	if !ok {
 		return target{}, fmt.Errorf("'%s' must be an object", field)
 	}
-	model, ok := item["model"].(string)
+	model, ok := configField(item, "modelName", "model").(string)
 	if !ok || strings.TrimSpace(model) == "" {
-		return target{}, fmt.Errorf("'%s.model' must be a non-empty string", field)
+		return target{}, fmt.Errorf("'%s.modelName' must be a non-empty string", field)
 	}
 	result := target{Model: strings.TrimSpace(model)}
-	if rawProvider, exists := item["provider"]; exists {
+	if rawProvider := configField(item, "providerName", "provider"); rawProvider != nil || hasConfigField(item, "providerName", "provider") {
 		provider, ok := rawProvider.(string)
 		if !ok || strings.TrimSpace(provider) == "" {
-			return target{}, fmt.Errorf("'%s.provider' must be a non-empty string", field)
+			return target{}, fmt.Errorf("'%s.providerName' must be a non-empty string", field)
 		}
 		result.Provider = strings.TrimSpace(provider)
 	}
@@ -271,7 +275,7 @@ func validateNonOverlappingRanges(routes []tokenRange) error {
 	for i := range routes {
 		for j := i + 1; j < len(routes); j++ {
 			if rangesOverlap(routes[i], routes[j]) {
-				return fmt.Errorf("'routes[%d]' overlaps 'routes[%d]'", i, j)
+				return fmt.Errorf("'modelMappings[%d]' overlaps 'modelMappings[%d]'", i, j)
 			}
 		}
 	}
@@ -294,4 +298,19 @@ func rangesOverlap(left, right tokenRange) bool {
 		rightMax = *right.MaxTokens
 	}
 	return leftMin < rightMax && rightMin < leftMax
+}
+
+// configField prefers the canonical field, including invalid values, so a legacy
+// alias cannot hide a malformed canonical configuration.
+func configField(item map[string]interface{}, canonical, legacy string) interface{} {
+	if value, exists := item[canonical]; exists {
+		return value
+	}
+	return item[legacy]
+}
+
+func hasConfigField(item map[string]interface{}, canonical, legacy string) bool {
+	_, canonicalExists := item[canonical]
+	_, legacyExists := item[legacy]
+	return canonicalExists || legacyExists
 }

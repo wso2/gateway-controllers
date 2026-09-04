@@ -17,27 +17,27 @@ import (
 func testParams() map[string]interface{} {
 	return map[string]interface{}{
 		"charsPerToken": float64(1),
-		"routes": []interface{}{
+		"modelMappings": []interface{}{
 			map[string]interface{}{
 				"name":      "small",
 				"maxTokens": float64(14),
-				"target": map[string]interface{}{
-					"model": "small-model",
+				"model": map[string]interface{}{
+					"modelName": "small-model",
 				},
 			},
 			map[string]interface{}{
 				"name":      "large",
 				"minTokens": float64(14),
 				"maxTokens": float64(1000),
-				"target": map[string]interface{}{
-					"model":    "large-model",
-					"provider": "provider-b",
+				"model": map[string]interface{}{
+					"modelName":    "large-model",
+					"providerName": "provider-b",
 				},
 			},
 		},
 		"fallback": map[string]interface{}{
-			"model":    "fallback-model",
-			"provider": "provider-c",
+			"modelName":    "fallback-model",
+			"providerName": "provider-c",
 		},
 		"requestModel": map[string]interface{}{
 			"location":   "payload",
@@ -176,11 +176,11 @@ func TestUnsupportedInputWithoutFallbackPreservesRequest(t *testing.T) {
 
 func TestNoMatchUsesFallbackOrPreservesOriginal(t *testing.T) {
 	params := testParams()
-	params["routes"] = []interface{}{
+	params["modelMappings"] = []interface{}{
 		map[string]interface{}{
 			"minTokens": float64(100),
 			"maxTokens": float64(200),
-			"target":    map[string]interface{}{"model": "huge-model"},
+			"model":     map[string]interface{}{"modelName": "huge-model"},
 		},
 	}
 	raw, err := GetPolicy(policy.PolicyMetadata{}, params)
@@ -208,15 +208,15 @@ func TestNoMatchUsesFallbackOrPreservesOriginal(t *testing.T) {
 
 func TestRejectsOverlappingRanges(t *testing.T) {
 	params := testParams()
-	params["routes"] = []interface{}{
+	params["modelMappings"] = []interface{}{
 		map[string]interface{}{
 			"maxTokens": float64(20),
-			"target":    map[string]interface{}{"model": "a"},
+			"model":     map[string]interface{}{"modelName": "a"},
 		},
 		map[string]interface{}{
 			"minTokens": float64(10),
 			"maxTokens": float64(30),
-			"target":    map[string]interface{}{"model": "b"},
+			"model":     map[string]interface{}{"modelName": "b"},
 		},
 	}
 	if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
@@ -393,10 +393,10 @@ func TestCustomInputJSONPaths(t *testing.T) {
 
 func TestMaxTokensIsRequiredAndMissingMinStartsAtZero(t *testing.T) {
 	params := testParams()
-	params["routes"] = []interface{}{
+	params["modelMappings"] = []interface{}{
 		map[string]interface{}{
 			"maxTokens": float64(20),
-			"target":    map[string]interface{}{"model": "under-limit"},
+			"model":     map[string]interface{}{"modelName": "under-limit"},
 		},
 	}
 	raw, err := GetPolicy(policy.PolicyMetadata{}, params)
@@ -413,13 +413,47 @@ func TestMaxTokensIsRequiredAndMissingMinStartsAtZero(t *testing.T) {
 		t.Fatalf("missing minTokens should cover input from zero: %#v", payload)
 	}
 
-	params["routes"] = []interface{}{
+	params["modelMappings"] = []interface{}{
 		map[string]interface{}{
 			"minTokens": float64(20),
-			"target":    map[string]interface{}{"model": "missing-max"},
+			"model":     map[string]interface{}{"modelName": "missing-max"},
 		},
 	}
 	if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil || !strings.Contains(err.Error(), "maxTokens' is required") {
 		t.Fatalf("expected required maxTokens error, got %v", err)
+	}
+}
+
+func TestLegacyConfigurationAliases(t *testing.T) {
+	params := testParams()
+	mappings := params["modelMappings"].([]interface{})
+	params["routes"] = mappings
+	delete(params, "modelMappings")
+	targets := []map[string]interface{}{params["fallback"].(map[string]interface{})}
+	for _, raw := range mappings {
+		item := raw.(map[string]interface{})
+		item["target"] = item["model"]
+		delete(item, "model")
+		targets = append(targets, item["target"].(map[string]interface{}))
+	}
+	for _, item := range targets {
+		item["model"] = item["modelName"]
+		delete(item, "modelName")
+		if value, exists := item["providerName"]; exists {
+			item["provider"] = value
+			delete(item, "providerName")
+		}
+	}
+	parsed, err := parseConfig(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Routes[1].Target.Model != "large-model" || parsed.Routes[1].Target.Provider != "provider-b" || parsed.Fallback.Model != "fallback-model" || parsed.Fallback.Provider != "provider-c" {
+		t.Fatalf("legacy aliases changed selection: %+v", parsed)
+	}
+	// An explicitly invalid canonical value must not silently use the legacy one.
+	params["modelMappings"] = nil
+	if _, err := parseConfig(params); err == nil {
+		t.Fatal("accepted invalid canonical mappings")
 	}
 }
