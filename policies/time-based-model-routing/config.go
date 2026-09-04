@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package timebasedrouting
+package timebasedmodelrouting
 
 import (
 	"fmt"

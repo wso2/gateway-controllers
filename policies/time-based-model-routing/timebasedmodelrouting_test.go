@@ -3,7 +3,7 @@
  * Licensed under the Apache License, Version 2.0.
  */
 
-package timebasedrouting
+package timebasedmodelrouting
 
 import (
 	"context"
@@ -72,7 +72,7 @@ func TestProcessingModeBuffersOnlyRequestBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mode := raw.(*TimeBasedRoutingPolicy).Mode()
+	mode := raw.(*TimeBasedModelRoutingPolicy).Mode()
 	if mode.RequestBodyMode != policy.BodyModeBuffer ||
 		mode.ResponseHeaderMode != policy.HeaderModeSkip ||
 		mode.ResponseBodyMode != policy.BodyModeSkip {
@@ -87,7 +87,7 @@ func TestRoutesByConfiguredTimezone(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := requestContext(`{"model":"client-model","messages":[{"role":"user","content":"hello"}]}`)
-	action := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
+	action := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
 	mods, ok := action.(policy.UpstreamRequestModifications)
 	if !ok {
 		t.Fatalf("expected modifications, got %T", action)
@@ -117,7 +117,7 @@ func TestNoMatchUsesDefaultOrPreservesOriginal(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := requestContext(`{"model":"client-model"}`)
-	mods := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
+	mods := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
 	var payload map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &payload); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestNoMatchUsesDefaultOrPreservesOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mods = raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), requestContext(`{"model":"client-model"}`), nil).(policy.UpstreamRequestModifications)
+	mods = raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), requestContext(`{"model":"client-model"}`), nil).(policy.UpstreamRequestModifications)
 	if mods.Body != nil || mods.UpstreamName != nil {
 		t.Fatalf("expected unchanged request, got %#v", mods)
 	}
@@ -159,7 +159,7 @@ func TestOvernightScheduleMatchesAcrossMidnight(t *testing.T) {
 		t.Run(now, func(t *testing.T) {
 			fixedNow(t, now)
 			ctx := requestContext(`{"model":"client-model"}`)
-			mods := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
+			mods := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
 			var payload map[string]interface{}
 			if err := json.Unmarshal(mods.Body, &payload); err != nil {
 				t.Fatal(err)
@@ -191,7 +191,7 @@ func TestOvernightScheduleWithDaysUsesStartDay(t *testing.T) {
 
 	fixedNow(t, "2026-08-29T20:00:00Z") // Sunday 01:30 in Asia/Colombo, from Saturday's window.
 	ctx := requestContext(`{"model":"client-model"}`)
-	mods := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
+	mods := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
 	var payload map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &payload); err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestOvernightScheduleWithDaysUsesStartDay(t *testing.T) {
 
 	fixedNow(t, "2026-08-30T20:00:00Z") // Monday 01:30 in Asia/Colombo, not Saturday's window.
 	ctx = requestContext(`{"model":"client-model"}`)
-	mods = raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
+	mods = raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
 	if err := json.Unmarshal(mods.Body, &payload); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestDaysRestrictSchedule(t *testing.T) {
 
 	fixedNow(t, "2026-08-31T05:00:00Z") // Monday 10:30 in Asia/Colombo.
 	ctx := requestContext(`{"model":"client-model"}`)
-	mods := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
+	mods := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
 	var payload map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &payload); err != nil {
 		t.Fatal(err)
@@ -242,7 +242,7 @@ func TestDaysRestrictSchedule(t *testing.T) {
 
 	fixedNow(t, "2026-08-30T05:00:00Z") // Sunday 10:30 in Asia/Colombo.
 	ctx = requestContext(`{"model":"client-model"}`)
-	mods = raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
+	mods = raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil).(policy.UpstreamRequestModifications)
 	if err := json.Unmarshal(mods.Body, &payload); err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +339,7 @@ func TestRewritesEveryRequestModelLocation(t *testing.T) {
 			}
 			ctx := requestContext(`{"model":"client-model","prompt":"short"}`)
 			ctx.Path = tt.path
-			action := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
+			action := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
 			mods, ok := action.(policy.UpstreamRequestModifications)
 			if !ok {
 				t.Fatalf("expected modifications, got %#v", action)
@@ -361,7 +361,7 @@ func TestQueryRewriteFailureDoesNotPublishRoutingMetadata(t *testing.T) {
 	}
 	ctx := requestContext(`{"model":"client-model"}`)
 	ctx.Path = "/invoke?model=%zz"
-	action := raw.(*TimeBasedRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
+	action := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
 	response, ok := action.(policy.ImmediateResponse)
 	if !ok || response.StatusCode != 400 {
 		t.Fatalf("expected 400 response, got %#v", action)

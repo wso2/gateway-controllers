@@ -1,11 +1,11 @@
 ---
 title: "Overview"
 ---
-# Time-Based Routing
+# Time-Based Model Routing
 
 ## Overview
 
-The Time-Based Routing policy routes an LLM request to a configured model and
+The Time-Based Model Routing policy routes an LLM request to a configured model and
 optional provider according to the gateway's current time in a configured
 timezone. Schedules are evaluated in order. Their start time is inclusive and
 their end time is exclusive.
@@ -83,14 +83,14 @@ following values to `SharedContext.Metadata` for downstream policies:
 
 | Key | Description |
 |---|---|
-| `time_based_routing.selected_model` | Selected upstream model. |
-| `time_based_routing.selected_provider` | Selected provider alias, or an empty string when the primary provider is used. |
-| `time_based_routing.selected_route` | Configured schedule name, generated `schedule-N` name, or `default` when the fallback is selected. |
-| `time_based_routing.selected_time` | Local selection time in `HH:MM` format. |
+| `time_based_model_routing.selected_model` | Selected upstream model. |
+| `time_based_model_routing.selected_provider` | Selected provider alias, or an empty string when the primary provider is used. |
+| `time_based_model_routing.selected_route` | Configured schedule name, generated `schedule-N` name, or `default` when the fallback is selected. |
+| `time_based_model_routing.selected_time` | Local selection time in `HH:MM` format. |
 | `selected_provider` | Provider routing key, set only when the selected target specifies a provider. |
 
 If no schedule matches and no default is configured, the policy does not add
-time-based routing metadata.
+time-based model routing metadata.
 
 ## Validation and matching rules
 

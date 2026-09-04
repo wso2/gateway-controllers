@@ -83,7 +83,7 @@ All available policies, sorted alphabetically.
 | [Sentence Count Guardrail](./sentence-count-guardrail/v1.0/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
 | [Set Headers](./set-headers/v1.1/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
 | [Subscription Validation](./subscription-validation/v1.0/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
-| [Time-Based Routing](./time-based-routing/v0.9/docs/time-based-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
+| [Time-Based Model Routing](./time-based-model-routing/v0.9/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
 | [Token Based Ratelimit](./token-based-ratelimit/v1.0/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
 | [URL Guardrail](./url-guardrail/v1.0/docs/url.md) | Guardrails, AI | Validates URLs found in request or response body content. |
 | [WebSub HMAC Auth](./websub-hmac-auth/v1.0/docs/websub-hmac-auth.md) | Security, WebSub | Validates HMAC signatures on incoming WebSub hub event notification requests. |

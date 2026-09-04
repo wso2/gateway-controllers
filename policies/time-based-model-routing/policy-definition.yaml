@@ -1,6 +1,6 @@
-name: time-based-routing
+name: time-based-model-routing
 version: v0.9.0
-displayName: Time-Based Routing
+displayName: Time-Based Model Routing
 description: |
   Routes an LLM request to a configured model and optional provider according
   to the gateway's current time in a configured timezone. Time windows use

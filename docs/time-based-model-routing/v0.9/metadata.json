@@ -1,6 +1,6 @@
 {
-  "name": "time-based-routing",
-  "displayName": "Time-Based Routing",
+  "name": "time-based-model-routing",
+  "displayName": "Time-Based Model Routing",
   "version": "0.9",
   "provider": "WSO2",
   "categories": [

@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-package timebasedrouting
+package timebasedmodelrouting
 
 import (
 	"context"
@@ -31,16 +31,16 @@ import (
 )
 
 const (
-	metadataSelectedModel    = "time_based_routing.selected_model"
-	metadataSelectedProvider = "time_based_routing.selected_provider"
-	metadataSelectedRoute    = "time_based_routing.selected_route"
-	metadataSelectedTime     = "time_based_routing.selected_time"
+	metadataSelectedModel    = "time_based_model_routing.selected_model"
+	metadataSelectedProvider = "time_based_model_routing.selected_provider"
+	metadataSelectedRoute    = "time_based_model_routing.selected_route"
+	metadataSelectedTime     = "time_based_model_routing.selected_time"
 	metadataProviderRouting  = "selected_provider"
 )
 
 var nowFunc = time.Now
 
-type TimeBasedRoutingPolicy struct {
+type TimeBasedModelRoutingPolicy struct {
 	config config
 }
 
@@ -49,10 +49,10 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
-	return &TimeBasedRoutingPolicy{config: parsed}, nil
+	return &TimeBasedModelRoutingPolicy{config: parsed}, nil
 }
 
-func (p *TimeBasedRoutingPolicy) Mode() policy.ProcessingMode {
+func (p *TimeBasedModelRoutingPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
 		RequestBodyMode:    policy.BodyModeBuffer,
@@ -61,7 +61,7 @@ func (p *TimeBasedRoutingPolicy) Mode() policy.ProcessingMode {
 	}
 }
 
-func (p *TimeBasedRoutingPolicy) OnRequestBody(_ context.Context, reqCtx *policy.RequestContext, _ map[string]interface{}) policy.RequestAction {
+func (p *TimeBasedModelRoutingPolicy) OnRequestBody(_ context.Context, reqCtx *policy.RequestContext, _ map[string]interface{}) policy.RequestAction {
 	selected, routeName, selectedTime, ok := p.selectTarget(nowFunc())
 	if !ok {
 		return policy.UpstreamRequestModifications{}
@@ -86,7 +86,7 @@ func (p *TimeBasedRoutingPolicy) OnRequestBody(_ context.Context, reqCtx *policy
 	return p.applyTarget(reqCtx, payload, selected, routeName, selectedTime)
 }
 
-func (p *TimeBasedRoutingPolicy) selectTarget(now time.Time) (target, string, time.Time, bool) {
+func (p *TimeBasedModelRoutingPolicy) selectTarget(now time.Time) (target, string, time.Time, bool) {
 	local := now.In(p.config.Timezone)
 	minute := local.Hour()*60 + local.Minute()
 	for i, item := range p.config.Schedules {
@@ -114,7 +114,7 @@ func (s schedule) matches(day time.Weekday, minute int) bool {
 	return false
 }
 
-func (p *TimeBasedRoutingPolicy) applyTarget(
+func (p *TimeBasedModelRoutingPolicy) applyTarget(
 	reqCtx *policy.RequestContext,
 	payload map[string]interface{},
 	selected target,
