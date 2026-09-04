@@ -1,0 +1,10 @@
+{
+  "name": "intelligent-model-routing",
+  "displayName": "Intelligent Model Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Routes AI/LLM requests to different models using LLM-powered classification.\nAn LLM analyzes each incoming request against user-defined routing rules (each with a name and context description) and selects the best-matching model.\nEffective for categorizing requests by topic or intent (e.g., coding questions, creative writing, customer support) and routing each to the most suitable model.\nWhen no rule matches, requests fall back to a configurable default model.\n\nNote: This policy requires an LLM provider (OpenAI or Azure OpenAI) to be configured for classification.\nRoutes can optionally select an additional provider, with a configurable default provider for fallback."
+}

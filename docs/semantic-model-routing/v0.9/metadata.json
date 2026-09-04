@@ -1,0 +1,10 @@
+{
+  "name": "semantic-model-routing",
+  "displayName": "Semantic Model Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances.\nAt startup, embeddings are precomputed for all configured utterances. At request time, an embedding is generated for the incoming prompt and compared using cosine similarity.\nIf the similarity score meets a configurable threshold, the request is routed to the matching model. Otherwise it falls back to a default model.\nEffective for short keyword-style queries where utterance examples closely match expected user phrasing.\n\nNote: This policy requires an embedding provider (OpenAI, Mistral, or Azure OpenAI) to be configured.\nRoutes can optionally select an additional provider, with a configurable default provider for fallback."
+}

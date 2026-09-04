@@ -43,10 +43,10 @@ func TestParseParams_ValidConfig(t *testing.T) {
 			},
 		},
 		"defaultModel": "gpt-4o",
-		"llmProvider":   "OPENAI",
-		"llmEndpoint":   "https://api.openai.com/v1/chat/completions",
-		"llmModel":      "gpt-4o-mini",
-		"llmApiKey":     "sk-test-key",
+		"llmProvider":  "OPENAI",
+		"llmEndpoint":  "https://api.openai.com/v1/chat/completions",
+		"llmModel":     "gpt-4o-mini",
+		"llmApiKey":    "sk-test-key",
 		"requestModel": map[string]interface{}{
 			"location":   "payload",
 			"identifier": "$.model",
@@ -431,7 +431,7 @@ func TestValidateAndSelectModel_ExactMatch(t *testing.T) {
 		defaultModel: "default-model",
 	}
 
-	result := p.validateAndSelectModel("Coding")
+	result := p.validateAndSelectTarget("Coding").Model
 	if result != "gpt-4o-mini" {
 		t.Errorf("Expected 'gpt-4o-mini', got %q", result)
 	}
@@ -447,7 +447,7 @@ func TestValidateAndSelectModel_CaseInsensitive(t *testing.T) {
 
 	testCases := []string{"coding", "CODING", "CoDiNg"}
 	for _, tc := range testCases {
-		result := p.validateAndSelectModel(tc)
+		result := p.validateAndSelectTarget(tc).Model
 		if result != "gpt-4o-mini" {
 			t.Errorf("Case-insensitive match failed for %q: expected 'gpt-4o-mini', got %q", tc, result)
 		}
@@ -462,13 +462,13 @@ func TestValidateAndSelectModel_NONE(t *testing.T) {
 		defaultModel: "default-model",
 	}
 
-	result := p.validateAndSelectModel("NONE")
+	result := p.validateAndSelectTarget("NONE").Model
 	if result != "default-model" {
 		t.Errorf("Expected 'default-model' for NONE response, got %q", result)
 	}
 
 	// Case-insensitive NONE
-	result = p.validateAndSelectModel("none")
+	result = p.validateAndSelectTarget("none").Model
 	if result != "default-model" {
 		t.Errorf("Expected 'default-model' for 'none' response, got %q", result)
 	}
@@ -482,7 +482,7 @@ func TestValidateAndSelectModel_EmptyResponse(t *testing.T) {
 		defaultModel: "default-model",
 	}
 
-	result := p.validateAndSelectModel("")
+	result := p.validateAndSelectTarget("").Model
 	if result != "default-model" {
 		t.Errorf("Expected 'default-model' for empty response, got %q", result)
 	}
@@ -497,7 +497,7 @@ func TestValidateAndSelectModel_WhitespaceResponse(t *testing.T) {
 	}
 
 	// Response with whitespace around the rule name should still match
-	result := p.validateAndSelectModel("  Coding  ")
+	result := p.validateAndSelectTarget("  Coding  ").Model
 	if result != "gpt-4o-mini" {
 		t.Errorf("Expected 'gpt-4o-mini' for whitespace-padded response, got %q", result)
 	}
@@ -511,7 +511,7 @@ func TestValidateAndSelectModel_NoMatch(t *testing.T) {
 		defaultModel: "default-model",
 	}
 
-	result := p.validateAndSelectModel("UnknownRule")
+	result := p.validateAndSelectTarget("UnknownRule").Model
 	if result != "default-model" {
 		t.Errorf("Expected 'default-model' for unknown rule, got %q", result)
 	}

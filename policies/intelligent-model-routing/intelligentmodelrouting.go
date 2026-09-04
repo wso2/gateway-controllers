@@ -56,9 +56,10 @@ const (
 // RoutingRule represents a single routing rule configuration.
 // Maps to IntelligentModelRoutingConfigDTO.RoutingRuleDTO in Java.
 type RoutingRule struct {
-	Name    string // Rule name (label for classification, e.g. "Weather Information")
-	Context string // Plain-language description of what requests this rule handles
-	Model   string // Target AI model name to route to
+	Provider string // Optional additional-provider alias; empty preserves the current upstream.
+	Name     string // Rule name (label for classification, e.g. "Weather Information")
+	Context  string // Plain-language description of what requests this rule handles
+	Model    string // Target AI model name to route to
 }
 
 // RequestModelConfig holds the configuration for where the model name lives in the request.
@@ -78,12 +79,13 @@ type LLMClientConfig struct {
 
 // IntelligentModelRoutingPolicy implements LLM-based request classification and model routing.
 type IntelligentModelRoutingPolicy struct {
-	routingRules []RoutingRule
-	defaultModel string
-	contentPath  string
-	requestModel RequestModelConfig
-	llmConfig    LLMClientConfig
-	httpClient   *http.Client
+	defaultProvider string
+	routingRules    []RoutingRule
+	defaultModel    string
+	contentPath     string
+	requestModel    RequestModelConfig
+	llmConfig       LLMClientConfig
+	httpClient      *http.Client
 }
 
 // GetPolicy is the v1alpha2 factory entry point. It parses configuration,
@@ -145,8 +147,8 @@ func (p *IntelligentModelRoutingPolicy) OnRequestBody(
 	}
 
 	if len(content) == 0 {
-		slog.Debug("IntelligentModelRouting: Request body is empty, using default model")
-		return p.modifyRequestModel(content, p.defaultModel)
+		slog.Debug("IntelligentModelRouting: Request body is empty, preserving current upstream")
+		return policy.UpstreamRequestModifications{}
 	}
 
 	// Extract user text from body using JSONPath
@@ -156,7 +158,7 @@ func (p *IntelligentModelRoutingPolicy) OnRequestBody(
 		if err != nil {
 			slog.Debug("IntelligentModelRouting: JSONPath extraction failed, using default model",
 				"contentPath", p.contentPath, "error", err)
-			return p.modifyRequestModel(content, p.defaultModel)
+			return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 		}
 		userText = extracted
 	} else {
@@ -165,7 +167,7 @@ func (p *IntelligentModelRoutingPolicy) OnRequestBody(
 
 	if strings.TrimSpace(userText) == "" {
 		slog.Debug("IntelligentModelRouting: Extracted text is empty, using default model")
-		return p.modifyRequestModel(content, p.defaultModel)
+		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
 	// Build classification prompt and call LLM
@@ -173,22 +175,22 @@ func (p *IntelligentModelRoutingPolicy) OnRequestBody(
 	llmResponse, err := p.callLLM(ctx, ClassificationSystemPrompt, userPrompt)
 	if err != nil {
 		slog.Debug("IntelligentModelRouting: LLM call failed, using default model", "error", err)
-		return p.modifyRequestModel(content, p.defaultModel)
+		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
 	// Validate and match LLM response against routing rules
-	selectedModel := p.validateAndSelectModel(llmResponse)
-	return p.modifyRequestModel(content, selectedModel)
+	selected := p.validateAndSelectTarget(llmResponse)
+	return p.modifyRequestModel(reqCtx, content, selected)
 }
 
-// validateAndSelectModel validates the LLM response and returns the model to route to.
+// validateAndSelectTarget validates the LLM response and returns the model and provider to route to.
 // Replicates the exact logic from Java's validateResponse() + selectEndpointForRouteRule().
-func (p *IntelligentModelRoutingPolicy) validateAndSelectModel(response string) string {
+func (p *IntelligentModelRoutingPolicy) validateAndSelectTarget(response string) modelTarget {
 	cleanResponse := strings.TrimSpace(response)
 
 	if cleanResponse == "" || strings.EqualFold(cleanResponse, NoneResponse) {
 		slog.Debug("IntelligentModelRouting: LLM returned empty or NONE, using default model")
-		return p.defaultModel
+		return p.defaultTarget()
 	}
 
 	// Case-insensitive match against routing rule names
@@ -197,48 +199,75 @@ func (p *IntelligentModelRoutingPolicy) validateAndSelectModel(response string) 
 		if strings.EqualFold(rule.Name, cleanResponse) {
 			slog.Debug("IntelligentModelRouting: Route rule matched",
 				"rule", rule.Name, "model", rule.Model)
-			return rule.Model
+			return modelTarget{Model: rule.Model, Provider: rule.Provider}
 		}
 	}
 
 	slog.Debug("IntelligentModelRouting: No route rule matched LLM response, using default model",
 		"llmResponse", cleanResponse)
-	return p.defaultModel
+	return p.defaultTarget()
 }
 
-// modifyRequestModel modifies the request body to set the selected model name.
-// For payload location, it uses JSONPath to set the model in the body.
-// This follows the same pattern as model-round-robin and model-weighted-round-robin.
-func (p *IntelligentModelRoutingPolicy) modifyRequestModel(content []byte, selectedModel string) policy.RequestAction {
+// modelTarget keeps destination selection atomic, including fallback routing.
+type modelTarget struct {
+	Model    string
+	Provider string
+}
+
+func (p *IntelligentModelRoutingPolicy) defaultTarget() modelTarget {
+	return modelTarget{Model: p.defaultModel, Provider: p.defaultProvider}
+}
+
+// modifyRequestModel rewrites the model and selects the named upstream in the
+// same action. Empty or invalid payloads keep the no-op behavior so a provider
+// never receives a model that failed to be rewritten.
+func (p *IntelligentModelRoutingPolicy) modifyRequestModel(reqCtx *policy.RequestContext, content []byte, selected modelTarget) policy.RequestAction {
+	mods := policy.UpstreamRequestModifications{}
 	if p.requestModel.Location != "payload" || len(content) == 0 {
-		// For non-payload locations (header, queryParam, pathParam), we would need
-		// OnRequestHeaders which is not used in this policy. For now, we only
-		// support payload-based model routing which is the most common for AI APIs.
-		slog.Debug("IntelligentModelRouting: Selected model", "model", selectedModel)
-		return policy.UpstreamRequestModifications{}
+		return mods
 	}
-
 	var payloadData map[string]interface{}
-	if err := json.Unmarshal(content, &payloadData); err != nil {
+	if err := json.Unmarshal(content, &payloadData); err != nil || payloadData == nil {
 		slog.Debug("IntelligentModelRouting: Failed to parse request body JSON", "error", err)
-		return policy.UpstreamRequestModifications{}
+		return mods
 	}
-
-	if err := utils.SetValueAtJSONPath(payloadData, p.requestModel.Identifier, selectedModel); err != nil {
-		slog.Debug("IntelligentModelRouting: Failed to set model in request body",
-			"identifier", p.requestModel.Identifier, "error", err)
-		return policy.UpstreamRequestModifications{}
+	if err := utils.SetValueAtJSONPath(payloadData, p.requestModel.Identifier, selected.Model); err != nil {
+		slog.Debug("IntelligentModelRouting: Failed to set model in request body", "error", err)
+		return mods
 	}
-
 	updatedPayload, err := json.Marshal(payloadData)
 	if err != nil {
 		slog.Debug("IntelligentModelRouting: Failed to serialize updated body", "error", err)
-		return policy.UpstreamRequestModifications{}
+		return mods
 	}
+	mods.Body = updatedPayload
 
-	slog.Debug("IntelligentModelRouting: Modified request body model",
-		"model", selectedModel, "identifier", p.requestModel.Identifier)
-	return policy.UpstreamRequestModifications{Body: updatedPayload}
+	// This engine-level key lets subsequent conditional auth and protocol
+	// transformers identify the same provider as the named upstream override.
+	// An omitted provider leaves prior routing metadata and the upstream intact.
+	if selected.Provider != "" {
+		providerName := selected.Provider
+		mods.UpstreamName = &providerName
+		if reqCtx.Metadata == nil {
+			reqCtx.Metadata = make(map[string]interface{})
+		}
+		reqCtx.Metadata["selected_provider"] = providerName
+	}
+	return mods
+}
+
+// parseOptionalProvider accepts an additional-provider alias, not a provider
+// type enum. Empty or omitted values preserve existing upstream selection.
+func parseOptionalProvider(params map[string]interface{}, key, field string) (string, error) {
+	raw, exists := params[key]
+	if !exists {
+		return "", nil
+	}
+	provider, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("'%s' must be a string", field)
+	}
+	return strings.TrimSpace(provider), nil
 }
 
 // buildClassificationPrompt constructs the LLM classification prompt from routing rules
@@ -308,8 +337,8 @@ func buildPromptComponents(rules []RoutingRule) (string, string) {
 
 // chatCompletionRequest is the request body for the LLM chat completions API.
 type chatCompletionRequest struct {
-	Model    string              `json:"model,omitempty"`
-	Messages []chatMessage       `json:"messages"`
+	Model    string        `json:"model,omitempty"`
+	Messages []chatMessage `json:"messages"`
 }
 
 type chatMessage struct {
@@ -430,6 +459,12 @@ func parseParams(params map[string]interface{}, p *IntelligentModelRoutingPolicy
 	}
 	p.defaultModel = defaultModel
 
+	defaultProvider, err := parseOptionalProvider(params, "defaultProvider", "defaultProvider")
+	if err != nil {
+		return err
+	}
+	p.defaultProvider = defaultProvider
+
 	// Parse LLM provider config (system parameters)
 	if err := parseLLMConfig(params, p); err != nil {
 		return err
@@ -464,6 +499,12 @@ func parseRoutingRule(ruleMap map[string]interface{}, index int) (RoutingRule, e
 		return rule, fmt.Errorf("'routingRules[%d].model' is required and must be a non-empty string", index)
 	}
 	rule.Model = model
+
+	provider, err := parseOptionalProvider(ruleMap, "provider", fmt.Sprintf("routingRules[%d].provider", index))
+	if err != nil {
+		return rule, err
+	}
+	rule.Provider = provider
 
 	return rule, nil
 }

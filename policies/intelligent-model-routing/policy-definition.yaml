@@ -1,5 +1,5 @@
 name: intelligent-model-routing
-version: v1.0.0
+version: v0.9.0
 description: |
   Routes AI/LLM requests to different models using LLM-powered classification.
   An LLM analyzes each incoming request against user-defined routing rules (each
@@ -38,6 +38,12 @@ parameters:
               Plain-language description of the types of requests this rule
               should handle. The LLM reads this when classifying requests.
             minLength: 1
+          provider:
+            type: string
+            description: |
+              Optional destination provider. Use the LlmProxy additionalProviders[].as
+              alias, or provider id when as is absent. Empty or omitted preserves
+              the current upstream (normally the primary provider).
           model:
             type: string
             description: Target AI model name to route matching requests to.
@@ -47,6 +53,13 @@ parameters:
           - context
           - model
       minItems: 1
+    defaultProvider:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Optional destination provider used with defaultModel on fallback.
+        Uses the same alias rules as each route's provider. It is not inherited
+        by matched routes that omit provider.
     defaultModel:
       type: string
       x-wso2-policy-advanced-param: false
