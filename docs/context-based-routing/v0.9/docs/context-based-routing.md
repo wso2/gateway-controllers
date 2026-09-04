@@ -82,7 +82,3 @@ For local development, add the policy module to the gateway build configuration:
 - name: context-based-routing
   filePath: ./dev-policies/context-based-routing
 ```
-
-Existing configurations using `routes`, `target` (or `models`), inner `model`, and `provider` remain
-accepted by the runtime as legacy aliases. New configurations use the fields
-shown above; canonical fields take precedence when both names are supplied.

@@ -423,37 +423,3 @@ func TestMaxTokensIsRequiredAndMissingMinStartsAtZero(t *testing.T) {
 		t.Fatalf("expected required maxTokens error, got %v", err)
 	}
 }
-
-func TestLegacyConfigurationAliases(t *testing.T) {
-	params := testParams()
-	mappings := params["modelMappings"].([]interface{})
-	params["routes"] = mappings
-	delete(params, "modelMappings")
-	targets := []map[string]interface{}{params["fallback"].(map[string]interface{})}
-	for _, raw := range mappings {
-		item := raw.(map[string]interface{})
-		item["target"] = item["model"]
-		delete(item, "model")
-		targets = append(targets, item["target"].(map[string]interface{}))
-	}
-	for _, item := range targets {
-		item["model"] = item["modelName"]
-		delete(item, "modelName")
-		if value, exists := item["providerName"]; exists {
-			item["provider"] = value
-			delete(item, "providerName")
-		}
-	}
-	parsed, err := parseConfig(params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if parsed.Routes[1].Target.Model != "large-model" || parsed.Routes[1].Target.Provider != "provider-b" || parsed.Fallback.Model != "fallback-model" || parsed.Fallback.Provider != "provider-c" {
-		t.Fatalf("legacy aliases changed selection: %+v", parsed)
-	}
-	// An explicitly invalid canonical value must not silently use the legacy one.
-	params["modelMappings"] = nil
-	if _, err := parseConfig(params); err == nil {
-		t.Fatal("accepted invalid canonical mappings")
-	}
-}

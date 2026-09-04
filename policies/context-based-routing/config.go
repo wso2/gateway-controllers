@@ -59,7 +59,7 @@ func parseConfig(params map[string]interface{}) (config, error) {
 		InputJSONPaths: append([]string(nil), defaultInputJSONPaths...),
 	}
 
-	routesRaw, ok := configField(params, "modelMappings", "routes").([]interface{})
+	routesRaw, ok := params["modelMappings"].([]interface{})
 	if !ok || len(routesRaw) == 0 {
 		return result, fmt.Errorf("'modelMappings' must be a non-empty array")
 	}
@@ -221,11 +221,7 @@ func parseRange(item map[string]interface{}, index int) (tokenRange, error) {
 		return result, fmt.Errorf("'modelMappings[%d].minTokens' must be less than maxTokens", index)
 	}
 
-	rawModel, exists := item["model"]
-	if !exists {
-		rawModel = configField(item, "models", "target")
-	}
-	parsedTarget, err := parseTarget(rawModel, fmt.Sprintf("modelMappings[%d].model", index))
+	parsedTarget, err := parseTarget(item["model"], fmt.Sprintf("modelMappings[%d].model", index))
 	if err != nil {
 		return result, err
 	}
@@ -238,12 +234,12 @@ func parseTarget(raw interface{}, field string) (target, error) {
 	if !ok {
 		return target{}, fmt.Errorf("'%s' must be an object", field)
 	}
-	model, ok := configField(item, "modelName", "model").(string)
+	model, ok := item["modelName"].(string)
 	if !ok || strings.TrimSpace(model) == "" {
 		return target{}, fmt.Errorf("'%s.modelName' must be a non-empty string", field)
 	}
 	result := target{Model: strings.TrimSpace(model)}
-	if rawProvider := configField(item, "providerName", "provider"); rawProvider != nil || hasConfigField(item, "providerName", "provider") {
+	if rawProvider, exists := item["providerName"]; exists {
 		provider, ok := rawProvider.(string)
 		if !ok || strings.TrimSpace(provider) == "" {
 			return target{}, fmt.Errorf("'%s.providerName' must be a non-empty string", field)
@@ -298,19 +294,4 @@ func rangesOverlap(left, right tokenRange) bool {
 		rightMax = *right.MaxTokens
 	}
 	return leftMin < rightMax && rightMin < leftMax
-}
-
-// configField prefers the canonical field, including invalid values, so a legacy
-// alias cannot hide a malformed canonical configuration.
-func configField(item map[string]interface{}, canonical, legacy string) interface{} {
-	if value, exists := item[canonical]; exists {
-		return value
-	}
-	return item[legacy]
-}
-
-func hasConfigField(item map[string]interface{}, canonical, legacy string) bool {
-	_, canonicalExists := item[canonical]
-	_, legacyExists := item[legacy]
-	return canonicalExists || legacyExists
 }
