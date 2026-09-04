@@ -2,61 +2,59 @@ name: cost-based-routing
 version: v0.9.0
 displayName: Cost-Based Routing
 description: |
-  Routes LLM requests through independently budgeted model targets. By default,
-  when the client's requested model exactly matches a configured route, that
-  route is tried first. If it is exhausted, or the requested model is not
-  configured, routes are tried from the top in configured order, for example
-  premium, balanced, then economy. If every configured route budget is exhausted,
-  onExhausted decides whether the request uses the default target or receives
-  HTTP 429. The exact cost of a request is
-  only known after the model responds, so the selected route's budget is checked
-  against previously recorded spending and charged afterwards from the cost
-  published by the llm-cost system policy. A request may therefore overshoot its
-  selected route's budget slightly; its response is still returned normally and
-  the following request moves to the next available route. A route becomes
-  eligible again when its budget window resets. Cost accounting is finalized
-  only for responses that reach end of stream; the gateway policy SDK currently
-  provides no callback for a stream aborted before that point.
+  Routes each request using its exact model budget, shared across callers.
+  An optional wildcard budget ("*" or "other") caps requests for unlisted models
+  while preserving the requested model name. When the applicable budget is
+  missing or exhausted, onExhausted selects rejection or a configured fallback.
+  Fallback always uses its own exact model budget; if missing or exhausted,
+  the request receives HTTP 429 without retrying the wildcard or looping.
+  Cost is charged once after llm-cost publishes the completed response cost.
+  A request may overshoot a budget because its cost is known only afterward.
+  Aborted streams cannot be charged without a completion callback from the SDK.
 
 parameters:
   type: object
   additionalProperties: false
-  x-wso2-policy-property-order: [routes, respectRequestedModel, onExhausted, default, consumerBased]
+  x-wso2-policy-property-order: [modelBudgets, onExhausted, fallback]
   required:
-    - routes
+    - modelBudgets
   properties:
-    routes:
+    modelBudgets:
+      title: Model-budgets
       type: array
       x-wso2-policy-advanced-param: false
       description: |
-        Ordered model routes. The first route with remaining budget is selected.
-        Example order: premium, balanced, economy. Each route has its own
-        independent budget limits.
+        Budgets matched by exact requested model name, independent of list order.
+        Use modelName "*" (or "other") for a shared budget covering unlisted models. Each model
+        name must be unique, with at most one wildcard budget.
       minItems: 1
       maxItems: 10
       items:
         type: object
         additionalProperties: false
-        x-wso2-policy-property-order: [target, budgetLimits, name]
+        x-wso2-policy-property-order: [model, budgetLimits, name]
         required:
-          - target
+          - model
           - budgetLimits
         properties:
-          target:
+          model:
+            title: Model
             type: object
             additionalProperties: false
-            description: Model and optional additional provider selected while this route has budget.
+            description: Model name to match and its optional provider; pattern entries preserve unlisted requested models on the primary provider.
             required:
-              - model
+              - modelName
             properties:
-              model:
+              modelName:
+                title: Model name
                 type: string
-                description: Model name written into the upstream request.
+                description: Exact model name, a case-sensitive pattern such as "gpt-*", or "*" / "other" for all unlisted models. Only * is special (zero or more characters). Exact names win, then the pattern with most literal characters; configuration order breaks ties.
                 minLength: 1
-              provider:
+              providerName:
+                title: Provider name
                 type: string
                 description: |
-                  Optional additional-provider alias. Must match an LlmProxy
+                  Optional additional-provider alias; omit for wildcard budgets. Must match an LlmProxy
                   additionalProviders[].as value, or the provider id when `as`
                   is absent. When omitted, the LLM proxy's primary/default
                   provider is used.
@@ -65,8 +63,8 @@ parameters:
           budgetLimits:
             type: array
             description: |
-              Spending caps for this route. Multiple windows can be configured
-              (for example $2 per hour and $20 per day); the route is considered
+              Spending caps for this model budget. Multiple windows can be configured
+              (for example $2 per hour and $20 per day); the model budget is considered
               exhausted as soon as the strictest window runs out.
             minItems: 1
             maxItems: 10
@@ -93,50 +91,42 @@ parameters:
           name:
             type: string
             description: |
-              Optional human-readable route name used in diagnostics, for
+              Optional model budget name used in diagnostics, for
               example premium, balanced, or economy. Names must be unique.
             minLength: 1
-
-    respectRequestedModel:
-      type: boolean
-      x-wso2-policy-advanced-param: false
-      description: |
-        When enabled, if the model requested by the client exactly matches a
-        routes[].target.model value, that route is tried first. If its budget
-        is exhausted, the policy falls back to the first available route from
-        the top of the configured list. If the requested model is not
-        configured, normal top-to-bottom routing is used. When disabled, the
-        client-requested model does not affect route selection and routes are
-        always tried from the top.
-      default: true
 
     onExhausted:
       type: string
       x-wso2-policy-advanced-param: false
       description: |
-        What to do when every configured route budget is exhausted. Choose
-        "default" to route to the default target, or "reject" to return HTTP
-        429 without calling an upstream model. When omitted, "default" is used
-        for backward compatibility.
-      enum: ["default", "reject"]
-      default: "default"
+        What to do when the applicable exact model or wildcard budget is missing
+        or exhausted. Choose "fallback" to check the fallback model's own budget,
+        or "reject" to return HTTP 429 without calling an upstream model.
+      enum: ["fallback", "reject"]
+      default: "fallback"
 
-    default:
+    fallback:
+      title: Fallback
       type: object
       x-wso2-policy-advanced-param: false
       additionalProperties: false
       description: |
-        Model served when every configured route budget is exhausted and
-        onExhausted is "default". Its cost is not charged against any route
-        budget. This field may be omitted when onExhausted is "reject".
+        Model served when the requested model's applicable budget is missing
+        or exhausted and onExhausted is "fallback". This model must have its own
+        exact entry in modelBudgets with remaining budget. Direct and fallback
+        requests share that model budget. A missing or exhausted fallback model
+        budget returns HTTP 429 without retrying the wildcard or another model.
+        May be omitted for "reject".
       required:
-        - model
+        - modelName
       properties:
-        model:
+        modelName:
+          title: Model name
           type: string
           description: Model name written into the upstream request.
           minLength: 1
-        provider:
+        providerName:
+          title: Provider name
           type: string
           description: |
             Optional additional-provider alias. Must match an LlmProxy
@@ -145,25 +135,14 @@ parameters:
             used.
           minLength: 1
 
-    consumerBased:
-      type: boolean
-      x-wso2-policy-advanced-param: false
-      description: |
-        When true, each application gets an independent budget, identified by
-        the x-wso2-application-id metadata key set by the authentication
-        policies. Requests without an application id share a single "default"
-        budget rather than bypassing the budget. When false (default), each
-        configured route gets one shared budget for the whole API route.
-      default: false
-
   allOf:
     - if:
         properties:
           onExhausted:
-            const: "default"
+            const: "fallback"
       then:
         required:
-          - default
+          - fallback
 
 systemParameters:
   type: object
@@ -270,7 +249,7 @@ systemParameters:
           type: string
           description: |
             Behaviour when the budget store cannot be reached. 'open' keeps
-            serving on the primary target and logs the failure. 'closed' returns
+            serving on the selected model and logs the failure. 'closed' returns
             503 rather than routing on an unknown budget state. Neither mode
             reports a storage failure as budget exhaustion.
           enum: ["open", "closed"]

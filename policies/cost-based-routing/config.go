@@ -39,18 +39,8 @@ const (
 	defaultBackend        = "memory"
 	defaultRedisKeyPrefix = "ratelimit:v1:"
 
-	// consumerFallbackID is the budget scope used when consumerBased is enabled
-	// but no application id is present on the request. Unidentified callers
-	// share this single budget rather than bypassing the budget entirely.
-	consumerFallbackID = "default"
-
-	// applicationIDMetadataKey is the consumer identity published by the auth
-	// policies; llm-cost-based-ratelimit keys per-consumer budgets on the same
-	// metadata entry.
-	applicationIDMetadataKey = "x-wso2-application-id"
-
-	onExhaustedDefault = "default"
-	onExhaustedReject  = "reject"
+	onExhaustedFallback = "fallback"
+	onExhaustedReject   = "reject"
 )
 
 // target is a model, plus the optional additional provider that serves it.
@@ -68,11 +58,12 @@ type budgetLimit struct {
 	Scaled   int64
 }
 
-// costRoute is one ordered, budgeted target. A matching requested model may be
-// tried first; all fallback selection follows the configured order.
+// costRoute is a model budget. The wildcard model "*" budgets unlisted models.
 type costRoute struct {
 	Name         string
 	Target       target
+	Pattern      *regexp.Regexp
+	Specificity  int
 	BudgetLimits []budgetLimit
 }
 
@@ -105,19 +96,15 @@ type localConfig struct {
 }
 
 type config struct {
-	Routes                []costRoute
-	Default               *target
-	OnExhausted           string
-	RespectRequestedModel bool
+	Routes      []costRoute
+	Fallback    *target
+	OnExhausted string
 
 	// Legacy v0.9 fields are still populated when the old primary/fallback
-	// shape is used. The current schema exposes Routes + Default, but keeping these avoids
-	// surprising older API definitions during rollout.
-	LegacyDefaultTier bool
-	Primary           target
-	Fallback          target
-	BudgetLimits      []budgetLimit
-	ConsumerBased     bool
+	// shape is used. They also identify the first model budget for the shared
+	// storage helpers.
+	Primary      target
+	BudgetLimits []budgetLimit
 
 	RequestModel    requestModelConfig
 	CostScaleFactor int64
@@ -134,11 +121,10 @@ type config struct {
 // API definition fails fast with an actionable message.
 func parseConfig(params map[string]interface{}) (config, error) {
 	result := config{
-		CostScaleFactor:       DefaultCostScaleFactor,
-		Algorithm:             defaultAlgorithm,
-		Backend:               defaultBackend,
-		OnExhausted:           onExhaustedDefault,
-		RespectRequestedModel: true,
+		CostScaleFactor: DefaultCostScaleFactor,
+		Algorithm:       defaultAlgorithm,
+		Backend:         defaultBackend,
+		OnExhausted:     onExhaustedFallback,
 	}
 
 	if raw, exists := params["onExhausted"]; exists {
@@ -147,27 +133,19 @@ func parseConfig(params map[string]interface{}) (config, error) {
 			return result, fmt.Errorf("'onExhausted' must be a string")
 		}
 		switch strings.TrimSpace(value) {
-		case onExhaustedDefault, onExhaustedReject:
+		case "default": // Legacy spelling.
+			result.OnExhausted = onExhaustedFallback
+		case onExhaustedFallback, onExhaustedReject:
 			result.OnExhausted = strings.TrimSpace(value)
 		default:
-			return result, fmt.Errorf("'onExhausted' must be one of default or reject")
+			return result, fmt.Errorf("'onExhausted' must be one of fallback or reject")
 		}
 	}
 
-	if raw, exists := params["respectRequestedModel"]; exists {
-		value, ok := raw.(bool)
-		if !ok {
-			return result, fmt.Errorf("'respectRequestedModel' must be a boolean")
+	for _, removed := range []string{"respectRequestedModel", "consumerBased"} {
+		if _, exists := params[removed]; exists {
+			return result, fmt.Errorf("'%s' is no longer supported; model matching is always enabled and budgets are shared", removed)
 		}
-		result.RespectRequestedModel = value
-	}
-
-	if raw, exists := params["consumerBased"]; exists {
-		value, ok := raw.(bool)
-		if !ok {
-			return result, fmt.Errorf("'consumerBased' must be a boolean")
-		}
-		result.ConsumerBased = value
 	}
 
 	// The scale factor has to be resolved before the budget limits so the
@@ -178,19 +156,15 @@ func parseConfig(params map[string]interface{}) (config, error) {
 	}
 	result.CostScaleFactor = scaleFactor
 
-	routes, defaultTarget, legacyDefaultTier, err := parseRoutingTargets(params, scaleFactor, result.OnExhausted)
+	routes, fallbackTarget, err := parseRoutingTargets(params, scaleFactor, result.OnExhausted)
 	if err != nil {
 		return result, err
 	}
 	result.Routes = routes
-	result.Default = defaultTarget
-	result.LegacyDefaultTier = legacyDefaultTier
+	result.Fallback = fallbackTarget
 	if len(routes) > 0 {
 		result.Primary = routes[0].Target
 		result.BudgetLimits = routes[0].BudgetLimits
-	}
-	if defaultTarget != nil {
-		result.Fallback = *defaultTarget
 	}
 
 	requestModel, err := parseRequestModel(params["requestModel"])
@@ -249,112 +223,156 @@ func parseConfig(params map[string]interface{}) (config, error) {
 	return result, nil
 }
 
-func parseRoutingTargets(params map[string]interface{}, scaleFactor int64, onExhausted string) ([]costRoute, *target, bool, error) {
-	if rawRoutes, exists := params["routes"]; exists {
-		routes, err := parseRoutes(rawRoutes, scaleFactor)
+// parameterName accepts earlier configuration spellings during migration.
+func parameterName(values map[string]interface{}, current, legacy string) string {
+	if _, exists := values[current]; exists {
+		return current
+	}
+	if _, exists := values[legacy]; exists {
+		return legacy
+	}
+	return current
+}
+
+func parseRoutingTargets(params map[string]interface{}, scaleFactor int64, onExhausted string) ([]costRoute, *target, error) {
+	field := parameterName(params, "modelBudgets", "routes")
+	if raw, exists := params[field]; exists {
+		routes, err := parseRoutes(raw, scaleFactor, field)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, err
 		}
-		if params["default"] == nil {
-			if onExhausted == onExhaustedDefault {
-				return nil, nil, false, fmt.Errorf("'default' is required when 'onExhausted' is 'default'")
+		fallbackField := parameterName(params, "fallback", "default")
+		if params[fallbackField] == nil {
+			if onExhausted == onExhaustedFallback {
+				return nil, nil, fmt.Errorf("'fallback' is required when 'onExhausted' is 'fallback'")
 			}
-			return routes, nil, false, nil
+			return routes, nil, nil
 		}
-		defaultTarget, err := parseTarget(params["default"], "default")
+		fallback, err := parseTarget(params[fallbackField], fallbackField)
 		if err != nil {
-			return nil, nil, false, err
+			return nil, nil, err
 		}
-		return routes, &defaultTarget, false, nil
+		if isPatternModel(fallback.Model) {
+			return nil, nil, fmt.Errorf("'%s' must specify a concrete model name", fallbackField)
+		}
+		return routes, &fallback, nil
 	}
 
+	// Preserve the original single-budget configuration shape.
 	primary, err := parseTarget(params["primary"], "primary")
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
 	fallback, err := parseTarget(params["fallback"], "fallback")
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
+	}
+	if isPatternModel(primary.Model) || isPatternModel(fallback.Model) {
+		return nil, nil, fmt.Errorf("primary and fallback must specify concrete model names; configure wildcard budgets in 'modelBudgets'")
 	}
 	limits, err := parseBudgetLimits(params["budgetLimits"], scaleFactor, "budgetLimits")
 	if err != nil {
-		return nil, nil, false, err
+		return nil, nil, err
 	}
-	return []costRoute{{
-		Name:         tierPrimary,
-		Target:       primary,
-		BudgetLimits: limits,
-	}}, &fallback, true, nil
+	return []costRoute{{Name: tierPrimary, Target: primary, BudgetLimits: limits}}, &fallback, nil
 }
 
-func parseRoutes(raw interface{}, scaleFactor int64) ([]costRoute, error) {
-	if raw == nil {
-		return nil, fmt.Errorf("'routes' is required")
-	}
+func isPatternModel(model string) bool {
+	return strings.Contains(model, "*") || model == "other"
+}
+
+func isWildcardModel(model string) bool {
+	return model == "*" || model == "other"
+}
+
+func parseRoutes(raw interface{}, scaleFactor int64, field string) ([]costRoute, error) {
 	items, ok := raw.([]interface{})
 	if !ok {
-		return nil, fmt.Errorf("'routes' must be an array")
+		return nil, fmt.Errorf("'%s' must be an array", field)
 	}
-	if len(items) == 0 {
-		return nil, fmt.Errorf("'routes' must contain at least one entry")
+	if len(items) == 0 || len(items) > 10 {
+		return nil, fmt.Errorf("'%s' must contain between 1 and 10 entries", field)
 	}
 
-	names := map[string]struct{}{}
+	names := map[string]bool{}
+	models := map[string]bool{}
 	routes := make([]costRoute, 0, len(items))
 	for i, item := range items {
+		entryField := fmt.Sprintf("%s[%d]", field, i)
 		entry, ok := item.(map[string]interface{})
 		if !ok {
-			return nil, fmt.Errorf("'routes[%d]' must be an object", i)
+			return nil, fmt.Errorf("'%s' must be an object", entryField)
 		}
-
 		name := fmt.Sprintf("route-%d", i+1)
 		if rawName, exists := entry["name"]; exists {
 			value, ok := rawName.(string)
 			if !ok || strings.TrimSpace(value) == "" {
-				return nil, fmt.Errorf("'routes[%d].name' must be a non-empty string when supplied", i)
+				return nil, fmt.Errorf("'%s.name' must be a non-empty string when supplied", entryField)
 			}
 			name = strings.TrimSpace(value)
 		}
-		if _, exists := names[name]; exists {
-			return nil, fmt.Errorf("'routes[%d].name' duplicates route name %q", i, name)
+		if names[name] {
+			return nil, fmt.Errorf("'%s.name' duplicates model budget name %q", entryField, name)
 		}
-		names[name] = struct{}{}
+		names[name] = true
 
-		target, err := parseTarget(entry["target"], fmt.Sprintf("routes[%d].target", i))
+		modelsField := parameterName(entry, "model", "models")
+		if _, exists := entry[modelsField]; !exists {
+			if _, legacy := entry["target"]; legacy {
+				modelsField = "target"
+			}
+		}
+		target, err := parseTarget(entry[modelsField], entryField+"."+modelsField)
 		if err != nil {
 			return nil, err
 		}
-		limits, err := parseBudgetLimits(entry["budgetLimits"], scaleFactor, fmt.Sprintf("routes[%d].budgetLimits", i))
+		if isWildcardModel(target.Model) {
+			target.Model = "*"
+		}
+		if isPatternModel(target.Model) {
+			if target.Provider != "" {
+				return nil, fmt.Errorf("'%s.%s' wildcard budget must omit providerName; unlisted models use the proxy primary provider", entryField, modelsField)
+			}
+		}
+		if models[target.Model] {
+			return nil, fmt.Errorf("'%s.%s' duplicates model name %q", entryField, modelsField, target.Model)
+		}
+		models[target.Model] = true
+		limits, err := parseBudgetLimits(entry["budgetLimits"], scaleFactor, entryField+".budgetLimits")
 		if err != nil {
 			return nil, err
 		}
-
-		routes = append(routes, costRoute{Name: name, Target: target, BudgetLimits: limits})
+		route := costRoute{Name: name, Target: target, BudgetLimits: limits}
+		if strings.Contains(target.Model, "*") {
+			route.Pattern = regexp.MustCompile("(?s)^" + strings.ReplaceAll(regexp.QuoteMeta(target.Model), `\*`, ".*") + "$")
+			route.Specificity = len([]rune(strings.ReplaceAll(target.Model, "*", "")))
+		}
+		routes = append(routes, route)
 	}
 	return routes, nil
 }
 
-// parseTarget validates a routing target. provider is optional but,
-// when supplied, must be a non-empty string: an empty upstream name would be
-// forwarded to the router as an invalid cluster.
+// parseTarget validates a model name and optional provider alias.
 func parseTarget(raw interface{}, field string) (target, error) {
 	item, ok := raw.(map[string]interface{})
 	if !ok {
 		return target{}, fmt.Errorf("'%s' must be an object", field)
 	}
-	rawModel, exists := item["model"]
+	modelField := parameterName(item, "modelName", "model")
+	rawModel, exists := item[modelField]
 	if !exists {
-		return target{}, fmt.Errorf("'%s.model' is required", field)
+		return target{}, fmt.Errorf("'%s.%s' is required", field, modelField)
 	}
 	model, ok := rawModel.(string)
 	if !ok || strings.TrimSpace(model) == "" {
-		return target{}, fmt.Errorf("'%s.model' must be a non-empty string", field)
+		return target{}, fmt.Errorf("'%s.%s' must be a non-empty string", field, modelField)
 	}
 	parsed := target{Model: strings.TrimSpace(model)}
-	if rawProvider, exists := item["provider"]; exists {
+	providerField := parameterName(item, "providerName", "provider")
+	if rawProvider, exists := item[providerField]; exists {
 		provider, ok := rawProvider.(string)
 		if !ok || strings.TrimSpace(provider) == "" {
-			return target{}, fmt.Errorf("'%s.provider' must be a non-empty string when supplied", field)
+			return target{}, fmt.Errorf("'%s.%s' must be a non-empty string when supplied", field, providerField)
 		}
 		parsed.Provider = strings.TrimSpace(provider)
 	}

@@ -200,23 +200,6 @@ func newBudgetStore(cfg config, route costRoute, metadata policy.PolicyMetadata)
 	}, nil
 }
 
-// budgetKey builds the storage key for a request. Without consumerBased the
-// route shares one budget; with it, each application gets an independent one.
-// Requests that carry no application id share the consumerFallbackID scope
-// rather than escaping the budget altogether.
-func budgetKey(namespace string, consumerBased bool, metadata map[string]interface{}) string {
-	if !consumerBased {
-		return namespace
-	}
-	applicationID := consumerFallbackID
-	if raw, ok := metadata[applicationIDMetadataKey]; ok {
-		if value, ok := raw.(string); ok && value != "" {
-			applicationID = value
-		}
-	}
-	return namespace + ":" + applicationID
-}
-
 // budgetNamespaceFor isolates persistent counters belonging to different APIs,
 // attachment levels, and budget configurations. Route names are only unique
 // within their API context, while a Redis key prefix is commonly shared by the
@@ -244,8 +227,8 @@ func budgetNamespaceFor(metadata policy.PolicyMetadata, cfg config, route costRo
 	builder.WriteString(route.Target.Provider)
 	builder.WriteString("|algorithm=")
 	builder.WriteString(cfg.Algorithm)
-	builder.WriteString("|consumer-based=")
-	builder.WriteString(strconv.FormatBool(cfg.ConsumerBased))
+	// Keep the former shared-budget fingerprint so reloads retain spending.
+	builder.WriteString("|consumer-based=false")
 	builder.WriteString("|scale=")
 	builder.WriteString(strconv.FormatInt(cfg.CostScaleFactor, 10))
 	for _, budget := range route.BudgetLimits {
@@ -409,8 +392,8 @@ func cacheKeyFor(cfg config, args ...interface{}) string {
 	builder.WriteString("|")
 	builder.WriteString(cfg.Backend)
 	builder.WriteString("|")
-	builder.WriteString(strconv.FormatBool(cfg.ConsumerBased))
-	builder.WriteString("|")
+	// Preserve the shared-budget cache fingerprint across configuration renames.
+	builder.WriteString("false|")
 	builder.WriteString(strconv.FormatInt(cfg.CostScaleFactor, 10))
 	builder.WriteString("|route-name=")
 	builder.WriteString(route.Name)

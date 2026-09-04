@@ -146,7 +146,7 @@ func TestMemoryBackendTracksSpendingAcrossRequests(t *testing.T) {
 	params := validParams()
 	params["backend"] = "memory"
 	p := newPolicy(t, params)
-	key := budgetKey(p.budgetNamespace, false, nil)
+	key := p.budgetNamespace
 
 	requestCycle(p, "2.5", nil)
 	requestCycle(p, "2.5", nil)
@@ -167,7 +167,7 @@ func TestMemoryBudgetSurvivesAPolicyReload(t *testing.T) {
 	// Re-attaching the same policy configuration must reuse the cached limiter
 	// rather than silently resetting the budget.
 	second := newPolicyOnRoute(t, validParams(), route)
-	remaining := availableDollars(t, second, budgetKey(second.budgetNamespace, false, nil))
+	remaining := availableDollars(t, second, second.budgetNamespace)
 	if remaining < 3.99 || remaining > 4.01 {
 		t.Errorf("remaining budget after reload = %.4f, want ~4.00", remaining)
 	}
@@ -183,7 +183,7 @@ func TestChangingBudgetConfigurationStartsAFreshWindow(t *testing.T) {
 	changed["budgetLimits"] = []interface{}{map[string]interface{}{"amount": 25.0, "duration": "24h"}}
 	second := newPolicyOnRoute(t, changed, route)
 
-	remaining := availableDollars(t, second, budgetKey(second.budgetNamespace, false, nil))
+	remaining := availableDollars(t, second, second.budgetNamespace)
 	if remaining < 24.99 || remaining > 25.01 {
 		t.Errorf("remaining budget = %.4f, want the new $25 limit", remaining)
 	}
@@ -194,7 +194,7 @@ func TestChangingBudgetConfigurationStartsAFreshWindow(t *testing.T) {
 func TestGCRAAlgorithmRoutesToFallbackWhenSpent(t *testing.T) {
 	params := validParams()
 	params["algorithm"] = "gcra"
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	if tier := requestCycle(p, "11.0", nil); tier != tierPrimary {
 		t.Fatalf("first request tier = %q, want primary", tier)
@@ -257,8 +257,8 @@ func redisParams(t *testing.T, backend string) map[string]interface{} {
 }
 
 func TestRedisBackendRoutesAndCharges(t *testing.T) {
-	p := newPolicy(t, redisParams(t, "redis"))
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, redisParams(t, "redis"))
+	key := p.budgetNamespace
 
 	if tier := requestCycle(p, "4.0", nil); tier != tierPrimary {
 		t.Fatalf("first request tier = %q, want primary", tier)
@@ -277,7 +277,7 @@ func TestRedisBackendRoutesAndCharges(t *testing.T) {
 }
 
 func TestRedisBackendSharesStateAcrossGatewayInstances(t *testing.T) {
-	params := redisParams(t, "redis")
+	params := withFallbackBudget(redisParams(t, "redis"))
 	route := uniqueRoute(t)
 
 	// Two policy instances stand in for two gateway replicas pointed at one Redis.
@@ -330,8 +330,8 @@ func TestRedisBudgetsAreIsolatedAcrossAPIsAndAttachmentLevels(t *testing.T) {
 }
 
 func TestRedisLocalAsyncBackendRoutesAndCharges(t *testing.T) {
-	p := newPolicy(t, redisParams(t, "redis-local-async"))
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, redisParams(t, "redis-local-async"))
+	key := p.budgetNamespace
 
 	if tier := requestCycle(p, "4.0", nil); tier != tierPrimary {
 		t.Fatalf("first request tier = %q, want primary", tier)
@@ -488,7 +488,7 @@ func TestScaleCost(t *testing.T) {
 
 func TestSmallCostsSurviveScaling(t *testing.T) {
 	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	key := p.budgetNamespace
 
 	// A sub-cent cost must not truncate to zero in the integer counter.
 	for i := 0; i < 1000; i++ {

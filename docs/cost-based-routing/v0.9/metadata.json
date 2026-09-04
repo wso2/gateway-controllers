@@ -6,5 +6,5 @@
   "categories": [
     "AI"
   ],
-  "description": "Honors a configured client-requested model while its budget remains, then falls back through ordered model budgets and either uses a default target or returns HTTP 429."
+  "description": "Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping."
 }

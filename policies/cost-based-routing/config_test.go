@@ -43,7 +43,7 @@ func TestParseConfigValidationErrors(t *testing.T) {
 		{
 			name:     "missing primary model",
 			mutate:   func(p map[string]interface{}) { p["primary"] = map[string]interface{}{} },
-			contains: "'primary.model' is required",
+			contains: "'primary.modelName' is required",
 		},
 		{
 			name:     "empty primary model",
@@ -79,7 +79,7 @@ func TestParseConfigValidationErrors(t *testing.T) {
 		{
 			name:     "missing fallback model",
 			mutate:   func(p map[string]interface{}) { p["fallback"] = map[string]interface{}{} },
-			contains: "'fallback.model' is required",
+			contains: "'fallback.modelName' is required",
 		},
 		{
 			name:     "empty fallback model",
@@ -245,12 +245,12 @@ func TestParseConfigValidationErrors(t *testing.T) {
 		{
 			name:     "invalid consumerBased type",
 			mutate:   func(p map[string]interface{}) { p["consumerBased"] = "yes" },
-			contains: "'consumerBased' must be a boolean",
+			contains: "'consumerBased' is no longer supported",
 		},
 		{
 			name:     "invalid respectRequestedModel type",
 			mutate:   func(p map[string]interface{}) { p["respectRequestedModel"] = "yes" },
-			contains: "'respectRequestedModel' must be a boolean",
+			contains: "'respectRequestedModel' is no longer supported",
 		},
 		{
 			name:     "invalid onExhausted type",
@@ -260,7 +260,7 @@ func TestParseConfigValidationErrors(t *testing.T) {
 		{
 			name:     "invalid onExhausted value",
 			mutate:   func(p map[string]interface{}) { p["onExhausted"] = "passthrough" },
-			contains: "'onExhausted' must be one of default or reject",
+			contains: "'onExhausted' must be one of fallback or reject",
 		},
 		{
 			name:     "invalid algorithm",
@@ -292,7 +292,6 @@ func TestParseConfigValidationErrors(t *testing.T) {
 
 func TestParseConfigDefaults(t *testing.T) {
 	params := validParams()
-	delete(params, "respectRequestedModel")
 	cfg, err := parseConfig(params)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -307,14 +306,9 @@ func TestParseConfigDefaults(t *testing.T) {
 	if cfg.Backend != "memory" {
 		t.Errorf("backend = %q, want memory", cfg.Backend)
 	}
-	if cfg.ConsumerBased {
-		t.Error("consumerBased should default to false")
-	}
-	if !cfg.RespectRequestedModel {
-		t.Error("respectRequestedModel should default to true")
-	}
-	if cfg.OnExhausted != onExhaustedDefault {
-		t.Errorf("onExhausted = %q, want default", cfg.OnExhausted)
+
+	if cfg.OnExhausted != onExhaustedFallback {
+		t.Errorf("onExhausted = %q, want fallback", cfg.OnExhausted)
 	}
 	if !cfg.Redis.FailOpen {
 		t.Error("redis.failureMode should default to open")
@@ -339,10 +333,10 @@ func TestParseConfigDefaults(t *testing.T) {
 	}
 }
 
-func TestParseConfigRejectAllowsDefaultToBeOmitted(t *testing.T) {
+func TestParseConfigRejectAllowsFallbackToBeOmitted(t *testing.T) {
 	params := validMultiRouteParams()
 	params["onExhausted"] = onExhaustedReject
-	delete(params, "default")
+	delete(params, "fallback")
 
 	cfg, err := parseConfig(params)
 	if err != nil {
@@ -351,18 +345,18 @@ func TestParseConfigRejectAllowsDefaultToBeOmitted(t *testing.T) {
 	if cfg.OnExhausted != onExhaustedReject {
 		t.Errorf("onExhausted = %q, want reject", cfg.OnExhausted)
 	}
-	if cfg.Default != nil {
-		t.Errorf("default = %+v, want nil", cfg.Default)
+	if cfg.Fallback != nil {
+		t.Errorf("fallback = %+v, want nil", cfg.Fallback)
 	}
 }
 
-func TestParseConfigDefaultExhaustionRequiresDefaultTarget(t *testing.T) {
+func TestParseConfigFallbackExhaustionRequiresFallbackModel(t *testing.T) {
 	params := validMultiRouteParams()
-	delete(params, "default")
+	delete(params, "fallback")
 
 	_, err := parseConfig(params)
-	if err == nil || !strings.Contains(err.Error(), "'default' is required when 'onExhausted' is 'default'") {
-		t.Fatalf("expected missing default error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "'fallback' is required when 'onExhausted' is 'fallback'") {
+		t.Fatalf("expected missing fallback error, got %v", err)
 	}
 }
 
@@ -545,5 +539,66 @@ func TestScaleDollarsOverflow(t *testing.T) {
 	scaled, err := scaleDollars(10, DefaultCostScaleFactor)
 	if err != nil || scaled != 10*DefaultCostScaleFactor {
 		t.Errorf("scaleDollars(10) = %d, %v", scaled, err)
+	}
+}
+
+func TestModelBudgetValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		mutate   func(map[string]interface{})
+		contains string
+	}{
+		{"duplicate models", func(p map[string]interface{}) {
+			entries := p["modelBudgets"].([]interface{})
+			entries[1].(map[string]interface{})["model"] = entries[0].(map[string]interface{})["model"]
+		}, "duplicates model name"},
+		{"duplicate wildcard aliases", func(p map[string]interface{}) {
+			entries := p["modelBudgets"].([]interface{})
+			entries[0].(map[string]interface{})["model"] = map[string]interface{}{"modelName": "*"}
+			entries[1].(map[string]interface{})["model"] = map[string]interface{}{"modelName": "other"}
+		}, "duplicates model name"},
+		{"wildcard provider", func(p map[string]interface{}) {
+			p["modelBudgets"].([]interface{})[0].(map[string]interface{})["model"] = map[string]interface{}{"modelName": "*", "providerName": "openai"}
+		}, "wildcard budget must omit providerName"},
+		{"wildcard fallback", func(p map[string]interface{}) {
+			p["fallback"] = map[string]interface{}{"modelName": "*"}
+		}, "must specify a concrete model"},
+		{"empty model budgets", func(p map[string]interface{}) { p["modelBudgets"] = []interface{}{} }, "between 1 and 10"},
+		{"missing models", func(p map[string]interface{}) {
+			delete(p["modelBudgets"].([]interface{})[0].(map[string]interface{}), "model")
+		}, "modelBudgets[0].model"},
+		{"missing model name", func(p map[string]interface{}) {
+			p["modelBudgets"].([]interface{})[0].(map[string]interface{})["model"] = map[string]interface{}{}
+		}, "modelBudgets[0].model.modelName"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := validMultiRouteParams()
+			tt.mutate(params)
+			if _, err := parseConfig(params); err == nil || !strings.Contains(err.Error(), tt.contains) {
+				t.Fatalf("error = %v; want %s", err, tt.contains)
+			}
+		})
+	}
+}
+
+func TestLegacyRoutingNamesUseNewMatchingBehavior(t *testing.T) {
+	params := map[string]interface{}{
+		"routes": []interface{}{map[string]interface{}{
+			"target":       map[string]interface{}{"model": "gpt-4o", "provider": "openai"},
+			"budgetLimits": []interface{}{map[string]interface{}{"amount": 1.0, "duration": "24h"}},
+		}},
+		"default":      map[string]interface{}{"model": "gpt-4o-mini"},
+		"onExhausted":  "default",
+		"requestModel": map[string]interface{}{"location": "payload", "identifier": "$.model"},
+	}
+	p := newPolicy(t, params)
+	if p.config.OnExhausted != onExhaustedFallback {
+		t.Fatal("legacy exhaustion value not normalized")
+	}
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	response := immediate(t, requestBody(p, metadata, []byte(`{"model":"unknown-model"}`)))
+	if response.StatusCode != 429 {
+		t.Fatal("legacy names allowed an unbudgeted fallback")
 	}
 }

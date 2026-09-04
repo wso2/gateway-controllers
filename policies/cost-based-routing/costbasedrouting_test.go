@@ -18,9 +18,11 @@
 package costbasedrouting
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"strings"
 	"sync"
@@ -50,40 +52,64 @@ func validParams() map[string]interface{} {
 		"budgetLimits": []interface{}{
 			map[string]interface{}{"amount": 10.0, "duration": "24h"},
 		},
-		"requestModel":          map[string]interface{}{"location": "payload", "identifier": "$.model"},
-		"respectRequestedModel": false,
+		"requestModel": map[string]interface{}{"location": "header", "identifier": "x-model"},
 	}
 }
 
 func validMultiRouteParams() map[string]interface{} {
 	return map[string]interface{}{
-		"routes": []interface{}{
+		"modelBudgets": []interface{}{
 			map[string]interface{}{
-				"name":   "premium",
-				"target": map[string]interface{}{"model": "gpt-4o", "provider": "openai-premium"},
+				"name":  "premium",
+				"model": map[string]interface{}{"modelName": "gpt-4o", "providerName": "openai-premium"},
 				"budgetLimits": []interface{}{
 					map[string]interface{}{"amount": 5.0, "duration": "24h"},
 				},
 			},
 			map[string]interface{}{
-				"name":   "balanced",
-				"target": map[string]interface{}{"model": "gpt-4o-mini", "provider": "openai-balanced"},
+				"name":  "balanced",
+				"model": map[string]interface{}{"modelName": "gpt-4o-mini", "providerName": "openai-balanced"},
 				"budgetLimits": []interface{}{
 					map[string]interface{}{"amount": 5.0, "duration": "24h"},
 				},
 			},
 			map[string]interface{}{
-				"name":   "economy",
-				"target": map[string]interface{}{"model": "gpt-3.5-turbo", "provider": "openai-economy"},
+				"name":  "economy",
+				"model": map[string]interface{}{"modelName": "gpt-3.5-turbo", "providerName": "openai-economy"},
 				"budgetLimits": []interface{}{
 					map[string]interface{}{"amount": 5.0, "duration": "24h"},
 				},
 			},
 		},
-		"default":               map[string]interface{}{"model": "default-model", "provider": "openai-default"},
-		"requestModel":          map[string]interface{}{"location": "payload", "identifier": "$.model"},
-		"respectRequestedModel": false,
+		"fallback":     map[string]interface{}{"modelName": "default-model", "providerName": "openai-default"},
+		"requestModel": map[string]interface{}{"location": "payload", "identifier": "$.model"},
 	}
+}
+
+// withFallbackBudget adds a $5 budget for the fallback model to fixtures that exercise
+// successful fallback routing. Legacy fixtures are converted to modelBudgets.
+func withFallbackBudget(params map[string]interface{}) map[string]interface{} {
+	if primary, exists := params["primary"]; exists {
+		params["modelBudgets"] = []interface{}{map[string]interface{}{
+			"name": tierPrimary, "model": primary, "budgetLimits": params["budgetLimits"],
+		}}
+		delete(params, "primary")
+		delete(params, "budgetLimits")
+	}
+	if params["fallback"] == nil {
+		return params
+	}
+	params["modelBudgets"] = append(params["modelBudgets"].([]interface{}), map[string]interface{}{
+		"name":         tierFallback,
+		"model":        params["fallback"],
+		"budgetLimits": []interface{}{map[string]interface{}{"amount": 5.0, "duration": "24h"}},
+	})
+	return params
+}
+
+func newPolicyWithFallbackBudget(t *testing.T, params map[string]interface{}) *CostBasedRoutingPolicy {
+	t.Helper()
+	return newPolicy(t, withFallbackBudget(params))
 }
 
 func newPolicy(t *testing.T, params map[string]interface{}) *CostBasedRoutingPolicy {
@@ -118,6 +144,7 @@ func requestHeaders(p *CostBasedRoutingPolicy, path string, seed map[string]inte
 	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
 		SharedContext: &policy.SharedContext{Metadata: metadata},
 		Path:          path,
+		Headers:       policy.NewHeaders(map[string][]string{"x-model": {"gpt-4o"}}),
 		Method:        "POST",
 	}, nil)
 	return action, metadata
@@ -163,6 +190,9 @@ func streamChunks(p *CostBasedRoutingPolicy, metadata map[string]interface{}, ch
 // It returns the tier that served the request.
 func requestCycle(p *CostBasedRoutingPolicy, cost string, seed map[string]interface{}) string {
 	_, metadata := requestHeaders(p, "/chat/completions", seed)
+	if p.config.RequestModel.Location == "payload" {
+		requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`))
+	}
 	tier, _ := metadata[metadataSelectedTier].(string)
 	completeResponse(p, metadata, cost, llmCostStatusCalculated)
 	return tier
@@ -208,14 +238,16 @@ func immediate(t *testing.T, action interface{}) policy.ImmediateResponse {
 // ─── Mode ────────────────────────────────────────────────────────────────────
 
 func TestModeBuffersRequestBodyOnlyForPayloadLocation(t *testing.T) {
-	payload := newPolicy(t, validParams())
+	payloadParams := validParams()
+	payloadParams["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	payload := newPolicyWithFallbackBudget(t, payloadParams)
 	if got := payload.Mode().RequestBodyMode; got != policy.BodyModeBuffer {
 		t.Errorf("payload location request body mode = %v, want BUFFER", got)
 	}
 
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "header", "identifier": "x-model"}
-	header := newPolicy(t, params)
+	header := newPolicyWithFallbackBudget(t, params)
 	if got := header.Mode().RequestBodyMode; got != policy.BodyModeSkip {
 		t.Errorf("header location request body mode = %v, want SKIP", got)
 	}
@@ -232,7 +264,7 @@ func TestModeBuffersRequestBodyOnlyForPayloadLocation(t *testing.T) {
 // ─── Routing ─────────────────────────────────────────────────────────────────
 
 func TestPrimarySelectedWhileBudgetRemains(t *testing.T) {
-	p := newPolicy(t, validParams())
+	p := newPolicyWithFallbackBudget(t, validParams())
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
@@ -253,79 +285,52 @@ func TestPrimarySelectedWhileBudgetRemains(t *testing.T) {
 	}
 }
 
-func TestOrderedRoutesFallThroughToDefaultAsBudgetsExhaust(t *testing.T) {
-	p := newPolicy(t, validMultiRouteParams())
-
+func TestExhaustedModelSkipsOtherModels(t *testing.T) {
+	p := newPolicyWithFallbackBudget(t, validMultiRouteParams())
 	if route := requestCycle(p, "6.0", nil); route != "premium" {
-		t.Fatalf("request 1 route = %q, want premium", route)
+		t.Fatalf("selected %q", route)
 	}
-	if route := requestCycle(p, "6.0", nil); route != "balanced" {
-		t.Fatalf("request 2 route = %q, want balanced after premium is exhausted", route)
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`)))
+	if payloadModel(t, mods.Body) != "default-model" || metadata[metadataSelectedTier] != tierFallback {
+		t.Fatalf("selection: %+v", metadata)
 	}
-	if route := requestCycle(p, "6.0", nil); route != "economy" {
-		t.Fatalf("request 3 route = %q, want economy after balanced is exhausted", route)
+	if metadata[metadataTrackPrimaryCost] != true {
+		t.Fatal("fallback must be charged to its configured budget")
 	}
-
-	action, metadata := requestHeaders(p, "/chat/completions", nil)
-	mods := headerMods(t, action)
-	if got := metadata[metadataSelectedRoute]; got != tierDefault {
-		t.Errorf("selected route = %v, want default after every budgeted route is exhausted", got)
-	}
-	if got := metadata[metadataSelectedTier]; got != tierDefault {
-		t.Errorf("selected tier = %v, want default target", got)
-	}
-	if got := metadata[metadataSelectedModel]; got != "default-model" {
-		t.Errorf("selected model = %v, want default-model", got)
-	}
-	if got := metadata[metadataProviderRouting]; got != "openai-default" {
-		t.Errorf("selected provider = %v, want openai-default", got)
-	}
-	if mods.UpstreamName == nil || *mods.UpstreamName != "openai-default" {
-		t.Errorf("upstream = %v, want openai-default", mods.UpstreamName)
-	}
-	if track, _ := metadata[metadataTrackPrimaryCost].(bool); track {
-		t.Error("default target must not be charged against any route budget")
+	for _, budget := range p.budgets[1:] {
+		_, available, err := budget.store.Query(context.Background(), budget.namespace)
+		if err != nil || available != 5*DefaultCostScaleFactor {
+			t.Fatalf("unrelated budget changed: %d %v", available, err)
+		}
 	}
 }
 
-func TestRejectsWith429WhenEveryRouteBudgetIsExhausted(t *testing.T) {
+func TestRejectsExhaustedRequestedModelWhileOtherBudgetsRemain(t *testing.T) {
 	params := validMultiRouteParams()
 	params["onExhausted"] = onExhaustedReject
-	delete(params, "default")
-	p := newPolicy(t, params)
-
-	if route := requestCycle(p, "6.0", nil); route != "premium" {
-		t.Fatalf("request 1 route = %q, want premium", route)
-	}
-	if route := requestCycle(p, "6.0", nil); route != "balanced" {
-		t.Fatalf("request 2 route = %q, want balanced", route)
-	}
-	if route := requestCycle(p, "6.0", nil); route != "economy" {
-		t.Fatalf("request 3 route = %q, want economy", route)
-	}
-
-	action, metadata := requestHeaders(p, "/chat/completions", nil)
-	response := immediate(t, action)
-	if response.StatusCode != 429 {
-		t.Fatalf("status = %d, want 429", response.StatusCode)
-	}
-	if !strings.Contains(string(response.Body), "cost_based_routing_budget_exhausted") {
-		t.Errorf("body = %s, want stable exhaustion error code", response.Body)
+	delete(params, "fallback")
+	p := newPolicyWithFallbackBudget(t, params)
+	requestCycle(p, "6.0", nil)
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	response := immediate(t, requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`)))
+	if response.StatusCode != 429 || !strings.Contains(string(response.Body), "cost_based_routing_budget_exhausted") {
+		t.Fatalf("response: %+v", response)
 	}
 	if _, selected := metadata[metadataSelectedModel]; selected {
-		t.Error("rejected request must not select or charge an upstream model")
+		t.Fatal("rejected request selected a model")
 	}
 }
 
 func TestPayloadRoutingRejectsInBodyPhaseWhenEveryBudgetIsExhausted(t *testing.T) {
 	params := validMultiRouteParams()
-	params["respectRequestedModel"] = true
+
 	params["onExhausted"] = onExhaustedReject
-	delete(params, "default")
-	p := newPolicy(t, params)
+	delete(params, "fallback")
+	p := newPolicyWithFallbackBudget(t, params)
 
 	for i := range p.budgets {
-		key := budgetKey(p.budgets[i].namespace, false, nil)
+		key := p.budgets[i].namespace
 		if err := p.budgets[i].store.Charge(context.Background(), key, 6*DefaultCostScaleFactor); err != nil {
 			t.Fatalf("exhaust route %d: %v", i, err)
 		}
@@ -344,8 +349,8 @@ func TestPayloadRoutingRejectsInBodyPhaseWhenEveryBudgetIsExhausted(t *testing.T
 
 func TestRequestedPayloadModelUsesItsConfiguredRouteFirst(t *testing.T) {
 	params := validMultiRouteParams()
-	params["respectRequestedModel"] = true
-	p := newPolicy(t, params)
+
+	p := newPolicyWithFallbackBudget(t, params)
 
 	headerAction, metadata := requestHeaders(p, "/chat/completions", nil)
 	if mods := headerMods(t, headerAction); mods.UpstreamName != nil {
@@ -392,9 +397,9 @@ func TestRequestedModelIsReadFromEveryNonPayloadLocation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			params := validMultiRouteParams()
-			params["respectRequestedModel"] = true
+
 			params["requestModel"] = tt.modelConfig
-			p := newPolicy(t, params)
+			p := newPolicyWithFallbackBudget(t, params)
 			metadata := map[string]interface{}{}
 			action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
 				SharedContext: &policy.SharedContext{Metadata: metadata},
@@ -413,10 +418,10 @@ func TestRequestedModelIsReadFromEveryNonPayloadLocation(t *testing.T) {
 	}
 }
 
-func TestExhaustedRequestedPayloadModelFallsBackToBestAvailableRoute(t *testing.T) {
+func TestExhaustedRequestedPayloadModelUsesConfiguredFallback(t *testing.T) {
 	params := validMultiRouteParams()
-	params["respectRequestedModel"] = true
-	p := newPolicy(t, params)
+
+	p := newPolicyWithFallbackBudget(t, params)
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`))
@@ -428,49 +433,42 @@ func TestExhaustedRequestedPayloadModelFallsBackToBestAvailableRoute(t *testing.
 	_, metadata = requestHeaders(p, "/chat/completions", nil)
 	bodyAction := requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`))
 	mods := bodyMods(t, bodyAction)
-	if got := metadata[metadataSelectedRoute]; got != "premium" {
-		t.Fatalf("fallback route = %v, want premium", got)
+	if got := metadata[metadataSelectedRoute]; got != tierFallback {
+		t.Fatalf("fallback route = %v, want fallback", got)
 	}
-	if mods.UpstreamName == nil || *mods.UpstreamName != "openai-premium" {
-		t.Fatalf("fallback upstream = %v, want openai-premium", mods.UpstreamName)
+	if mods.UpstreamName == nil || *mods.UpstreamName != "openai-default" {
+		t.Fatalf("fallback upstream = %v, want openai-default", mods.UpstreamName)
 	}
-	if got := payloadModel(t, mods.Body); got != "gpt-4o" {
-		t.Fatalf("fallback payload model = %q, want gpt-4o", got)
+	if got := payloadModel(t, mods.Body); got != "default-model" {
+		t.Fatalf("fallback payload model = %q, want default-model", got)
 	}
 }
 
-func TestUnknownRequestedPayloadModelUsesBestAvailableRoute(t *testing.T) {
+func TestUnknownRequestedPayloadModelUsesConfiguredFallback(t *testing.T) {
 	params := validMultiRouteParams()
-	params["respectRequestedModel"] = true
-	p := newPolicy(t, params)
+
+	p := newPolicyWithFallbackBudget(t, params)
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"client-only-model"}`)))
-	if got := metadata[metadataSelectedRoute]; got != "premium" {
-		t.Fatalf("selected route = %v, want premium", got)
+	if got := metadata[metadataSelectedRoute]; got != tierFallback {
+		t.Fatalf("selected route = %v, want fallback", got)
 	}
-	if got := payloadModel(t, mods.Body); got != "gpt-4o" {
-		t.Fatalf("payload model = %q, want gpt-4o", got)
+	if got := payloadModel(t, mods.Body); got != "default-model" {
+		t.Fatalf("payload model = %q, want default-model", got)
 	}
 }
 
-func TestRequestedModelMatchingCanBeDisabled(t *testing.T) {
+func TestRequestedModelMatchingCannotBeDisabled(t *testing.T) {
 	params := validMultiRouteParams()
 	params["respectRequestedModel"] = false
-	p := newPolicy(t, params)
-
-	_, metadata := requestHeaders(p, "/chat/completions", nil)
-	mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"gpt-3.5-turbo"}`)))
-	if got := metadata[metadataSelectedRoute]; got != "premium" {
-		t.Fatalf("selected route = %v, want premium", got)
-	}
-	if got := payloadModel(t, mods.Body); got != "gpt-4o" {
-		t.Fatalf("payload model = %q, want gpt-4o", got)
+	if _, err := parseConfig(params); err == nil {
+		t.Fatal("removed option accepted")
 	}
 }
 
 func TestFallbackSelectedWhenBudgetExhausted(t *testing.T) {
-	p := newPolicy(t, validParams())
+	p := newPolicyWithFallbackBudget(t, validParams())
 
 	if tier := requestCycle(p, "12.0", nil); tier != tierPrimary {
 		t.Fatalf("first request tier = %q, want primary", tier)
@@ -484,8 +482,8 @@ func TestFallbackSelectedWhenBudgetExhausted(t *testing.T) {
 	if got := metadata[metadataSelectedModel]; got != "gpt-4o-mini" {
 		t.Errorf("model = %v, want gpt-4o-mini", got)
 	}
-	if got := metadata[metadataTrackPrimaryCost]; got != false {
-		t.Errorf("track_primary_cost = %v, want false", got)
+	if got := metadata[metadataTrackPrimaryCost]; got != true {
+		t.Errorf("track_primary_cost = %v, want true", got)
 	}
 	// Exhaustion is a routing decision: the request continues upstream.
 	mods := headerMods(t, action)
@@ -494,15 +492,15 @@ func TestFallbackSelectedWhenBudgetExhausted(t *testing.T) {
 	}
 }
 
-func TestBudgetExhaustionNeverReturns429(t *testing.T) {
-	p := newPolicy(t, validParams())
+func TestPrimaryExhaustionUsesAvailableFallbackBudget(t *testing.T) {
+	p := newPolicyWithFallbackBudget(t, validParams())
 
 	requestCycle(p, "50.0", nil)
 
 	for i := 0; i < 3; i++ {
 		action, metadata := requestHeaders(p, "/chat/completions", nil)
 		if response, ok := action.(policy.ImmediateResponse); ok {
-			t.Fatalf("request %d was short-circuited with status %d; budget exhaustion must not reject", i, response.StatusCode)
+			t.Fatalf("request %d was short-circuited with status %d; available fallback budget must allow the request", i, response.StatusCode)
 		}
 		if got := metadata[metadataSelectedTier]; got != tierFallback {
 			t.Fatalf("request %d tier = %v, want fallback", i, got)
@@ -514,7 +512,7 @@ func TestPrimaryAndFallbackShareOneProvider(t *testing.T) {
 	params := validParams()
 	params["primary"] = map[string]interface{}{"model": "gpt-4o", "provider": "openai"}
 	params["fallback"] = map[string]interface{}{"model": "gpt-4o-mini", "provider": "openai"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	action, _ := requestHeaders(p, "/chat/completions", nil)
 	if name := headerMods(t, action).UpstreamName; name == nil || *name != "openai" {
@@ -536,7 +534,7 @@ func TestPrimaryAndFallbackUseDifferentProviders(t *testing.T) {
 	params := validParams()
 	params["primary"] = map[string]interface{}{"model": "gpt-4o", "provider": "openai-provider"}
 	params["fallback"] = map[string]interface{}{"model": "claude-sonnet", "provider": "anthropic-provider"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	action, _ := requestHeaders(p, "/chat/completions", nil)
 	if name := headerMods(t, action).UpstreamName; name == nil || *name != "openai-provider" {
@@ -562,7 +560,7 @@ func TestDefaultProviderTargetDoesNotSetEmptyUpstreamName(t *testing.T) {
 	params := validParams()
 	params["primary"] = map[string]interface{}{"model": "gpt-4o"}
 	params["fallback"] = map[string]interface{}{"model": "gpt-4o-mini"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	action, metadata := requestHeaders(p, "/chat/completions", nil)
 	if name := headerMods(t, action).UpstreamName; name != nil {
@@ -577,7 +575,7 @@ func TestStaleSelectedProviderIsClearedForDefaultProviderTarget(t *testing.T) {
 	params := validParams()
 	params["primary"] = map[string]interface{}{"model": "gpt-4o"}
 	params["fallback"] = map[string]interface{}{"model": "gpt-4o-mini"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	// Another routing policy ran earlier in the chain and left its choice behind.
 	_, metadata := requestHeaders(p, "/chat/completions", map[string]interface{}{
@@ -592,7 +590,7 @@ func TestStaleSelectedProviderIsClearedForDefaultProviderTarget(t *testing.T) {
 func TestFallbackWithDefaultProviderClearsPrimaryProviderRouting(t *testing.T) {
 	params := validParams()
 	params["fallback"] = map[string]interface{}{"model": "gpt-4o-mini"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	requestCycle(p, "11.0", nil)
 
@@ -610,10 +608,12 @@ func TestFallbackWithDefaultProviderClearsPrimaryProviderRouting(t *testing.T) {
 // ─── Model rewriting ─────────────────────────────────────────────────────────
 
 func TestPayloadRewriteForBothTiers(t *testing.T) {
-	p := newPolicy(t, validParams())
+	params := validParams()
+	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	p := newPolicyWithFallbackBudget(t, params)
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
-	action := requestBody(p, metadata, []byte(`{"model":"client-requested-model","messages":[]}`))
+	action := requestBody(p, metadata, []byte(`{"model":"gpt-4o","messages":[]}`))
 	mods, ok := action.(policy.UpstreamRequestModifications)
 	if !ok {
 		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
@@ -624,7 +624,7 @@ func TestPayloadRewriteForBothTiers(t *testing.T) {
 	completeResponse(p, metadata, "11.0", llmCostStatusCalculated)
 
 	_, metadata = requestHeaders(p, "/chat/completions", nil)
-	action = requestBody(p, metadata, []byte(`{"model":"client-requested-model","messages":[]}`))
+	action = requestBody(p, metadata, []byte(`{"model":"gpt-4o","messages":[]}`))
 	mods, _ = action.(policy.UpstreamRequestModifications)
 	if model := modelFromPayload(t, mods.Body); model != "gpt-4o-mini" {
 		t.Errorf("fallback payload model = %q, want gpt-4o-mini", model)
@@ -632,7 +632,9 @@ func TestPayloadRewriteForBothTiers(t *testing.T) {
 }
 
 func TestPayloadRewritePreservesOtherFields(t *testing.T) {
-	p := newPolicy(t, validParams())
+	params := validParams()
+	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	p := newPolicyWithFallbackBudget(t, params)
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	action := requestBody(p, metadata, []byte(`{"model":"x","temperature":0.7,"messages":[{"role":"user"}]}`))
@@ -651,7 +653,9 @@ func TestPayloadRewritePreservesOtherFields(t *testing.T) {
 }
 
 func TestPayloadRewriteMalformedJSON(t *testing.T) {
-	p := newPolicy(t, validParams())
+	params := validParams()
+	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	p := newPolicyWithFallbackBudget(t, params)
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	response := immediate(t, requestBody(p, metadata, []byte(`{"model":`)))
@@ -664,7 +668,9 @@ func TestPayloadRewriteMalformedJSON(t *testing.T) {
 }
 
 func TestPayloadRewriteEmptyBody(t *testing.T) {
-	p := newPolicy(t, validParams())
+	params := validParams()
+	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	p := newPolicyWithFallbackBudget(t, params)
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	response := immediate(t, requestBody(p, metadata, nil))
@@ -674,7 +680,9 @@ func TestPayloadRewriteEmptyBody(t *testing.T) {
 }
 
 func TestPayloadRewriteNonObjectBody(t *testing.T) {
-	p := newPolicy(t, validParams())
+	params := validParams()
+	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	p := newPolicyWithFallbackBudget(t, params)
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	response := immediate(t, requestBody(p, metadata, []byte(`["not","an","object"]`)))
@@ -686,7 +694,7 @@ func TestPayloadRewriteNonObjectBody(t *testing.T) {
 func TestPayloadRewriteMissingJSONPath(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.request.model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	response := immediate(t, requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`)))
@@ -701,7 +709,7 @@ func TestPayloadRewriteMissingJSONPath(t *testing.T) {
 func TestRequestBodySkippedForNonPayloadLocations(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "header", "identifier": "x-model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	action := requestBody(p, metadata, []byte(`{"model":"unchanged"}`))
@@ -714,19 +722,21 @@ func TestRequestBodySkippedForNonPayloadLocations(t *testing.T) {
 	}
 }
 
-func TestRequestBodyWithoutHeaderPhaseSelection(t *testing.T) {
-	p := newPolicy(t, validParams())
-
-	response := immediate(t, requestBody(p, map[string]interface{}{}, []byte(`{"model":"x"}`)))
-	if response.StatusCode != 500 {
-		t.Errorf("status = %d, want 500", response.StatusCode)
+func TestRequestBodySelectsWithoutHeaderPhaseSelection(t *testing.T) {
+	params := validParams()
+	params["requestModel"] = map[string]interface{}{"location": "payload", "identifier": "$.model"}
+	p := newPolicyWithFallbackBudget(t, params)
+	metadata := map[string]interface{}{}
+	mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`)))
+	if payloadModel(t, mods.Body) != "gpt-4o" {
+		t.Fatalf("selection: %+v", metadata)
 	}
 }
 
 func TestHeaderRewriteForBothTiers(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "header", "identifier": "x-model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	action, metadata := requestHeaders(p, "/chat/completions", nil)
 	if got := headerMods(t, action).HeadersToSet["x-model"]; got != "gpt-4o" {
@@ -743,15 +753,15 @@ func TestHeaderRewriteForBothTiers(t *testing.T) {
 func TestQueryParameterRewriteForBothTiers(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "queryParam", "identifier": "model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
-	action, metadata := requestHeaders(p, "/v1/generate?model=old-model", nil)
+	action, metadata := requestHeaders(p, "/v1/generate?model=gpt-4o", nil)
 	if got := queryValue(t, headerMods(t, action).Path, "model"); got != "gpt-4o" {
 		t.Errorf("primary query model = %q, want gpt-4o", got)
 	}
 	completeResponse(p, metadata, "11.0", llmCostStatusCalculated)
 
-	action, _ = requestHeaders(p, "/v1/generate?model=old-model", nil)
+	action, _ = requestHeaders(p, "/v1/generate?model=gpt-4o", nil)
 	if got := queryValue(t, headerMods(t, action).Path, "model"); got != "gpt-4o-mini" {
 		t.Errorf("fallback query model = %q, want gpt-4o-mini", got)
 	}
@@ -760,9 +770,9 @@ func TestQueryParameterRewriteForBothTiers(t *testing.T) {
 func TestQueryParameterRewritePreservesOtherParameters(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "queryParam", "identifier": "model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
-	action, _ := requestHeaders(p, "/v1/generate?stream=true&model=old&temperature=0.2", nil)
+	action, _ := requestHeaders(p, "/v1/generate?stream=true&model=gpt-4o&temperature=0.2", nil)
 	path := headerMods(t, action).Path
 	if path == nil {
 		t.Fatal("path was not rewritten")
@@ -783,9 +793,9 @@ func TestQueryParameterRewritePreservesOtherParameters(t *testing.T) {
 
 func TestQueryParameterRewriteAddsMissingParameterAndEscapes(t *testing.T) {
 	params := validParams()
-	params["primary"] = map[string]interface{}{"model": "vendor/model name+v2"}
+	params["fallback"] = map[string]interface{}{"model": "vendor/model name+v2"}
 	params["requestModel"] = map[string]interface{}{"location": "queryParam", "identifier": "model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	action, _ := requestHeaders(p, "/v1/generate?prompt=hello%20world", nil)
 	path := headerMods(t, action).Path
@@ -806,16 +816,16 @@ func TestQueryParameterRewriteAddsMissingParameterAndEscapes(t *testing.T) {
 func TestPathParameterRewriteForBothTiers(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "pathParam", "identifier": `model/([^/]+)/invoke`}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
-	action, metadata := requestHeaders(p, "/bedrock/model/anthropic.claude/invoke", nil)
+	action, metadata := requestHeaders(p, "/bedrock/model/gpt-4o/invoke", nil)
 	path := headerMods(t, action).Path
 	if path == nil || *path != "/bedrock/model/gpt-4o/invoke" {
 		t.Fatalf("primary path = %v, want /bedrock/model/gpt-4o/invoke", path)
 	}
 	completeResponse(p, metadata, "11.0", llmCostStatusCalculated)
 
-	action, _ = requestHeaders(p, "/bedrock/model/anthropic.claude/invoke", nil)
+	action, _ = requestHeaders(p, "/bedrock/model/gpt-4o/invoke", nil)
 	path = headerMods(t, action).Path
 	if path == nil || *path != "/bedrock/model/gpt-4o-mini/invoke" {
 		t.Fatalf("fallback path = %v, want /bedrock/model/gpt-4o-mini/invoke", path)
@@ -825,9 +835,9 @@ func TestPathParameterRewriteForBothTiers(t *testing.T) {
 func TestPathParameterRewritePreservesQueryString(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "pathParam", "identifier": `model/([^/]+)/invoke`}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
-	action, _ := requestHeaders(p, "/bedrock/model/old/invoke?stream=true", nil)
+	action, _ := requestHeaders(p, "/bedrock/model/gpt-4o/invoke?stream=true", nil)
 	path := headerMods(t, action).Path
 	if path == nil || *path != "/bedrock/model/gpt-4o/invoke?stream=true" {
 		t.Fatalf("path = %v, want the query string preserved", path)
@@ -837,7 +847,7 @@ func TestPathParameterRewritePreservesQueryString(t *testing.T) {
 func TestPathParameterRewriteNonMatchingExpression(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "pathParam", "identifier": `model/([^/]+)/invoke`}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	response := immediate(t, mustAction(requestHeaders(p, "/chat/completions", nil)))
 	if response.StatusCode != 400 {
@@ -851,7 +861,7 @@ func TestPathParameterRewriteNonMatchingExpression(t *testing.T) {
 func TestQueryParameterRewriteInvalidPath(t *testing.T) {
 	params := validParams()
 	params["requestModel"] = map[string]interface{}{"location": "queryParam", "identifier": "model"}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	response := immediate(t, mustAction(requestHeaders(p, "not a valid uri", nil)))
 	if response.StatusCode != 400 {
@@ -862,19 +872,19 @@ func TestQueryParameterRewriteInvalidPath(t *testing.T) {
 // ─── Cost accounting ─────────────────────────────────────────────────────────
 
 func TestPrimaryResponseCostIsCharged(t *testing.T) {
-	p := newPolicy(t, validParams())
+	p := newPolicyWithFallbackBudget(t, validParams())
 
 	requestCycle(p, "4.0", nil)
 
-	remaining := availableDollars(t, p, budgetKey(p.budgetNamespace, false, nil))
+	remaining := availableDollars(t, p, p.budgetNamespace)
 	if remaining < 5.99 || remaining > 6.01 {
 		t.Errorf("remaining budget = %.4f, want ~6.00", remaining)
 	}
 }
 
 func TestFallbackCostIsNotChargedToPrimaryBudget(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	requestCycle(p, "11.0", nil)
 	spentAfterPrimary := availableDollars(t, p, key)
@@ -890,8 +900,8 @@ func TestFallbackCostIsNotChargedToPrimaryBudget(t *testing.T) {
 }
 
 func TestZeroCostDoesNotConsumeBudget(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	requestCycle(p, "0", nil)
 
@@ -901,8 +911,8 @@ func TestZeroCostDoesNotConsumeBudget(t *testing.T) {
 }
 
 func TestMissingCostMetadataDoesNotConsumeBudget(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	streamChunks(p, metadata, 1) // no llm-cost metadata at all
@@ -913,8 +923,8 @@ func TestMissingCostMetadataDoesNotConsumeBudget(t *testing.T) {
 }
 
 func TestNotCalculatedCostStatusDoesNotConsumeBudget(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	completeResponse(p, metadata, "0.0000000000", "not_calculated")
@@ -927,8 +937,8 @@ func TestNotCalculatedCostStatusDoesNotConsumeBudget(t *testing.T) {
 func TestInvalidCostValuesDoNotConsumeBudget(t *testing.T) {
 	for _, cost := range []string{"-1.5", "not-a-number", "NaN", "Inf"} {
 		t.Run(cost, func(t *testing.T) {
-			p := newPolicy(t, validParams())
-			key := budgetKey(p.budgetNamespace, false, nil)
+			p := newPolicyWithFallbackBudget(t, validParams())
+			key := p.budgetNamespace
 
 			_, metadata := requestHeaders(p, "/chat/completions", nil)
 			completeResponse(p, metadata, cost, llmCostStatusCalculated)
@@ -941,8 +951,8 @@ func TestInvalidCostValuesDoNotConsumeBudget(t *testing.T) {
 }
 
 func TestCostIsChargedExactlyOnceAcrossManyChunks(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	metadata[metadataLLMCostStatus] = llmCostStatusCalculated
@@ -956,8 +966,8 @@ func TestCostIsChargedExactlyOnceAcrossManyChunks(t *testing.T) {
 }
 
 func TestStreamingAndBufferedHooksChargeOnlyOnce(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	completeResponse(p, metadata, "3.0000000000", llmCostStatusCalculated)
@@ -974,8 +984,8 @@ func TestStreamingAndBufferedHooksChargeOnlyOnce(t *testing.T) {
 }
 
 func TestBufferedResponseChargesCost(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 	metadata[metadataLLMCostStatus] = llmCostStatusCalculated
@@ -992,7 +1002,7 @@ func TestBufferedResponseChargesCost(t *testing.T) {
 }
 
 func TestChunksAreForwardedUnchanged(t *testing.T) {
-	p := newPolicy(t, validParams())
+	p := newPolicyWithFallbackBudget(t, validParams())
 	_, metadata := requestHeaders(p, "/chat/completions", nil)
 
 	respCtx := &policy.ResponseStreamContext{
@@ -1017,8 +1027,8 @@ func TestChunksAreForwardedUnchanged(t *testing.T) {
 // ─── Overshoot and reset semantics ───────────────────────────────────────────
 
 func TestRequestCrossingTheBudgetStillReturnsPrimaryAndTheNextUsesFallback(t *testing.T) {
-	p := newPolicy(t, validParams())
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, validParams())
+	key := p.budgetNamespace
 
 	// $9.90 spent, budget $10.
 	if tier := requestCycle(p, "9.90", nil); tier != tierPrimary {
@@ -1049,7 +1059,7 @@ func TestRequestCrossingTheBudgetStillReturnsPrimaryAndTheNextUsesFallback(t *te
 func TestPrimaryBecomesAvailableAfterWindowReset(t *testing.T) {
 	params := validParams()
 	params["budgetLimits"] = []interface{}{map[string]interface{}{"amount": 1.0, "duration": "200ms"}}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	if tier := requestCycle(p, "2.0", nil); tier != tierPrimary {
 		t.Fatalf("first request tier = %q, want primary", tier)
@@ -1075,7 +1085,7 @@ func TestStrictestBudgetWindowWins(t *testing.T) {
 		map[string]interface{}{"amount": 2.0, "duration": "1h"},
 		map[string]interface{}{"amount": 20.0, "duration": "24h"},
 	}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	// $3 exhausts the hourly window but leaves the daily one with $17.
 	if tier := requestCycle(p, "3.0", nil); tier != tierPrimary {
@@ -1094,7 +1104,7 @@ func TestLooserWindowAloneDoesNotExhaustTheBudget(t *testing.T) {
 		map[string]interface{}{"amount": 2.0, "duration": "1h"},
 		map[string]interface{}{"amount": 20.0, "duration": "24h"},
 	}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	if tier := requestCycle(p, "1.0", nil); tier != tierPrimary {
 		t.Fatalf("first request tier = %q, want primary", tier)
@@ -1107,34 +1117,11 @@ func TestLooserWindowAloneDoesNotExhaustTheBudget(t *testing.T) {
 
 // ─── Budget scope ────────────────────────────────────────────────────────────
 
-func TestPerConsumerBudgetsAreIsolated(t *testing.T) {
-	params := validParams()
-	params["consumerBased"] = true
-	p := newPolicy(t, params)
-
-	appA := map[string]interface{}{applicationIDMetadataKey: "app-a"}
-	appB := map[string]interface{}{applicationIDMetadataKey: "app-b"}
-
-	if tier := requestCycle(p, "11.0", appA); tier != tierPrimary {
-		t.Fatalf("app-a first request tier = %q, want primary", tier)
-	}
-
-	_, metadata := requestHeaders(p, "/chat/completions", appA)
-	if got := metadata[metadataSelectedTier]; got != tierFallback {
-		t.Errorf("app-a tier = %v, want fallback", got)
-	}
-
-	_, metadata = requestHeaders(p, "/chat/completions", appB)
-	if got := metadata[metadataSelectedTier]; got != tierPrimary {
-		t.Errorf("app-b tier = %v, want primary; budgets must be independent", got)
-	}
-}
-
 func TestSharedBudgetIsSharedAcrossConsumers(t *testing.T) {
-	p := newPolicy(t, validParams()) // consumerBased defaults to false
+	p := newPolicyWithFallbackBudget(t, validParams())
 
-	appA := map[string]interface{}{applicationIDMetadataKey: "app-a"}
-	appB := map[string]interface{}{applicationIDMetadataKey: "app-b"}
+	appA := map[string]interface{}{"x-wso2-application-id": "app-a"}
+	appB := map[string]interface{}{"x-wso2-application-id": "app-b"}
 
 	requestCycle(p, "11.0", appA)
 
@@ -1144,73 +1131,11 @@ func TestSharedBudgetIsSharedAcrossConsumers(t *testing.T) {
 	}
 }
 
-func TestMissingApplicationIDSharesTheFallbackScope(t *testing.T) {
-	params := validParams()
-	params["consumerBased"] = true
-	p := newPolicy(t, params)
-
-	// Two unidentified callers land in the same "default" budget rather than
-	// escaping the budget entirely.
-	if tier := requestCycle(p, "11.0", nil); tier != tierPrimary {
-		t.Fatalf("first unidentified request tier = %q, want primary", tier)
-	}
-	_, metadata := requestHeaders(p, "/chat/completions", nil)
-	if got := metadata[metadataSelectedTier]; got != tierFallback {
-		t.Errorf("tier = %v, want fallback for the shared default scope", got)
-	}
-
-	// An identified application keeps its own budget.
-	_, metadata = requestHeaders(p, "/chat/completions", map[string]interface{}{
-		applicationIDMetadataKey: "app-a",
-	})
-	if got := metadata[metadataSelectedTier]; got != tierPrimary {
-		t.Errorf("identified app tier = %v, want primary", got)
-	}
-}
-
-func TestBudgetKey(t *testing.T) {
-	const namespace = "cbr:test-namespace"
-	tests := []struct {
-		name          string
-		consumerBased bool
-		metadata      map[string]interface{}
-		want          string
-	}{
-		{name: "shared", want: namespace},
-		{
-			name: "per consumer", consumerBased: true,
-			metadata: map[string]interface{}{applicationIDMetadataKey: "app-1"},
-			want:     namespace + ":app-1",
-		},
-		{name: "per consumer without an id", consumerBased: true, want: namespace + ":default"},
-		{
-			name: "per consumer with an empty id", consumerBased: true,
-			metadata: map[string]interface{}{applicationIDMetadataKey: ""},
-			want:     namespace + ":default",
-		},
-		{
-			name: "per consumer with a non-string id", consumerBased: true,
-			metadata: map[string]interface{}{applicationIDMetadataKey: 42},
-			want:     namespace + ":default",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := budgetKey(namespace, tt.consumerBased, tt.metadata); got != tt.want {
-				t.Errorf("budgetKey = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-// ─── Concurrency ─────────────────────────────────────────────────────────────
-
 func TestConcurrentRequestsAreRaceSafe(t *testing.T) {
 	params := validParams()
 	params["budgetLimits"] = []interface{}{map[string]interface{}{"amount": 100.0, "duration": "24h"}}
-	p := newPolicy(t, params)
-	key := budgetKey(p.budgetNamespace, false, nil)
+	p := newPolicyWithFallbackBudget(t, params)
+	key := p.budgetNamespace
 
 	const workers = 32
 	var wg sync.WaitGroup
@@ -1230,44 +1155,10 @@ func TestConcurrentRequestsAreRaceSafe(t *testing.T) {
 	}
 }
 
-func TestConcurrentConsumersKeepSeparateBudgets(t *testing.T) {
-	params := validParams()
-	params["consumerBased"] = true
-	params["budgetLimits"] = []interface{}{map[string]interface{}{"amount": 100.0, "duration": "24h"}}
-	p := newPolicy(t, params)
-
-	const consumers = 8
-	const perConsumer = 4
-	var wg sync.WaitGroup
-	wg.Add(consumers * perConsumer)
-	for c := 0; c < consumers; c++ {
-		seed := map[string]interface{}{applicationIDMetadataKey: fmt.Sprintf("app-%d", c)}
-		for i := 0; i < perConsumer; i++ {
-			go func() {
-				defer wg.Done()
-				requestCycle(p, "2.0", seed)
-			}()
-		}
-	}
-	wg.Wait()
-
-	for c := 0; c < consumers; c++ {
-		key := fmt.Sprintf("%s:app-%d", p.budgetNamespace, c)
-		remaining := availableDollars(t, p, key)
-		if remaining < 91.99 || remaining > 92.01 {
-			t.Errorf("app-%d remaining = %.4f, want ~92.00", c, remaining)
-		}
-	}
-}
-
-// ─── Documented sequence ─────────────────────────────────────────────────────
-
-// TestDocumentedRequestSequence walks the exact scenario in the policy
-// documentation: primary, overshoot, fallback, reset, primary again.
 func TestDocumentedRequestSequence(t *testing.T) {
 	params := validParams()
 	params["budgetLimits"] = []interface{}{map[string]interface{}{"amount": 10.0, "duration": "200ms"}}
-	p := newPolicy(t, params)
+	p := newPolicyWithFallbackBudget(t, params)
 
 	if tier := requestCycle(p, "4.0", nil); tier != tierPrimary {
 		t.Errorf("request 1 tier = %q, want primary", tier)
@@ -1325,4 +1216,362 @@ func availableDollars(t *testing.T, p *CostBasedRoutingPolicy, key string) float
 		t.Fatalf("budget query failed: %v", err)
 	}
 	return float64(available) / float64(p.config.CostScaleFactor)
+}
+
+// wildcardParams puts the wildcard budget first to verify order never gives it
+// priority over an exact requested-model match.
+func wildcardParams(alias string) map[string]interface{} {
+	params := validMultiRouteParams()
+	params["modelBudgets"] = append([]interface{}{map[string]interface{}{
+		"name":         "unlisted-budget",
+		"model":        map[string]interface{}{"modelName": alias},
+		"budgetLimits": []interface{}{map[string]interface{}{"amount": 2.0, "duration": "24h"}},
+	}}, params["modelBudgets"].([]interface{})...)
+	return params
+}
+
+func TestUnlistedModelBudgetIsChargedOnceThenRejects(t *testing.T) {
+	for _, alias := range []string{"*", "other"} {
+		t.Run(alias, func(t *testing.T) {
+			p := newPolicy(t, wildcardParams(alias))
+			for _, requested := range []string{"gpt-5.5", "another-model", "third-model", "gpt-5.5"} {
+				_, metadata := requestHeaders(p, "/chat/completions", nil)
+				body, _ := json.Marshal(map[string]string{"model": requested})
+				mods := bodyMods(t, requestBody(p, metadata, body))
+				if payloadModel(t, mods.Body) != requested || mods.UpstreamName != nil {
+					t.Fatalf("wildcard must preserve requested model on the primary provider: %+v", mods)
+				}
+				if metadata[metadataSelectedRoute] != "unlisted-budget" || metadata[metadataSelectedTier] != tierWildcard {
+					t.Fatalf("metadata: %+v", metadata)
+				}
+				completeResponse(p, metadata, "0.5", llmCostStatusCalculated)
+				p.OnResponseBody(context.Background(), &policy.ResponseContext{SharedContext: &policy.SharedContext{Metadata: metadata}}, nil)
+			}
+			for i := 0; i < 3; i++ {
+				_, metadata := requestHeaders(p, "/chat/completions", nil)
+				response := immediate(t, requestBody(p, metadata, []byte(`{"model":"unknown-model"}`)))
+				if response.StatusCode != 429 {
+					t.Fatalf("status: %d", response.StatusCode)
+				}
+				if _, selected := metadata[metadataSelectedModel]; selected {
+					t.Fatal("exhausted fallback selected a model")
+				}
+			}
+			// Exhausted wildcard cannot block a known model with its own budget.
+			_, metadata := requestHeaders(p, "/chat/completions", nil)
+			mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`)))
+			if payloadModel(t, mods.Body) != "gpt-4o" || metadata[metadataSelectedRoute] != "premium" {
+				t.Fatalf("selection: %+v", metadata)
+			}
+			completeResponse(p, metadata, "1.0", llmCostStatusCalculated)
+			_, available, err := p.budgets[1].store.Query(context.Background(), p.budgets[1].namespace)
+			if err != nil || available != 4*DefaultCostScaleFactor {
+				t.Fatalf("model budget remaining: %d, %v", available, err)
+			}
+		})
+	}
+}
+
+func TestExhaustedConfiguredModelCannotUseWildcard(t *testing.T) {
+	p := newPolicy(t, wildcardParams("*"))
+	if got := requestCycle(p, "6.0", nil); got != "premium" {
+		t.Fatalf("first selection: %q", got)
+	}
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	response := immediate(t, requestBody(p, metadata, []byte(`{"model":"gpt-4o"}`)))
+	if response.StatusCode != 429 {
+		t.Fatalf("status: %d", response.StatusCode)
+	}
+	_, available, err := p.budgets[0].store.Query(context.Background(), p.budgets[0].namespace)
+	if err != nil || available != 2*DefaultCostScaleFactor {
+		t.Fatalf("wildcard was used: %d %v", available, err)
+	}
+}
+
+func TestFallbackOwnModelBudgetCannotBeBypassed(t *testing.T) {
+	params := validMultiRouteParams()
+	params["fallback"] = map[string]interface{}{"modelName": "gpt-4o-mini", "providerName": "openai-balanced"}
+	p := newPolicy(t, params)
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"unknown-model"}`)))
+	if payloadModel(t, mods.Body) != "gpt-4o-mini" || metadata[metadataSelectedRoute] != "balanced" {
+		t.Fatalf("selection: %+v", metadata)
+	}
+	completeResponse(p, metadata, "6.0", llmCostStatusCalculated)
+	for _, requested := range []string{"unknown-model", "gpt-4o-mini"} {
+		_, metadata := requestHeaders(p, "/chat/completions", nil)
+		body, _ := json.Marshal(map[string]string{"model": requested})
+		response := immediate(t, requestBody(p, metadata, body))
+		if response.StatusCode != 429 {
+			t.Fatalf("status: %d", response.StatusCode)
+		}
+	}
+}
+
+func TestRejectModeUsesWildcardUntilExhausted(t *testing.T) {
+	params := wildcardParams("*")
+	params["onExhausted"] = "reject"
+	params["fallback"] = map[string]interface{}{"modelName": "gpt-4o-mini", "providerName": "openai-balanced"}
+	p := newPolicy(t, params)
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	mods := bodyMods(t, requestBody(p, metadata, []byte(`{"model":"gpt-5.5"}`)))
+	if payloadModel(t, mods.Body) != "gpt-5.5" {
+		t.Fatal("wildcard did not preserve requested model")
+	}
+	completeResponse(p, metadata, "3.0", llmCostStatusCalculated)
+	_, metadata = requestHeaders(p, "/chat/completions", nil)
+	response := immediate(t, requestBody(p, metadata, []byte(`{"model":"gpt-5.5"}`)))
+	if response.StatusCode != 429 {
+		t.Fatalf("status: %d", response.StatusCode)
+	}
+}
+
+func TestWildcardHeaderRequestPreservesModelAndUsesPrimaryProvider(t *testing.T) {
+	params := wildcardParams("*")
+	params["requestModel"] = map[string]interface{}{"location": "header", "identifier": "x-model"}
+	p := newPolicy(t, params)
+	metadata := map[string]interface{}{}
+	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{Metadata: metadata},
+		Headers:       policy.NewHeaders(map[string][]string{"x-model": {"unknown-model"}}),
+	}, nil)
+	mods := headerMods(t, action)
+	if mods.HeadersToSet["x-model"] != "unknown-model" || metadata[metadataProviderRouting] != nil || mods.UpstreamName != nil {
+		t.Fatalf("selection: %+v, %+v", mods, metadata)
+	}
+	completeResponse(p, metadata, "3.0", llmCostStatusCalculated)
+	response := immediate(t, p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+	}, nil))
+	if response.StatusCode != 429 {
+		t.Fatalf("status: %d", response.StatusCode)
+	}
+}
+
+func TestWildcardBudgetStorageFailureModes(t *testing.T) {
+	for _, failOpen := range []bool{false, true} {
+		t.Run(fmt.Sprint(failOpen), func(t *testing.T) {
+			p := newPolicy(t, wildcardParams("*"))
+			stub := &failingLimiter{}
+			p.budget = &budgetStore{lim: stub, tracker: stub, backend: "redis", failOpen: failOpen}
+			_, metadata := requestHeaders(p, "/chat/completions", nil)
+			action := requestBody(p, metadata, []byte(`{"model":"unknown-model"}`))
+			if failOpen {
+				if payloadModel(t, bodyMods(t, action).Body) != "unknown-model" {
+					t.Fatal("wrong wildcard model")
+				}
+			} else if response := immediate(t, action); response.StatusCode != 503 {
+				t.Fatalf("status: %d", response.StatusCode)
+			}
+			if stub.queries.Load() != 1 {
+				t.Fatalf("fallback queried %d times", stub.queries.Load())
+			}
+		})
+	}
+}
+
+func TestSelectionTraceIncludesActualModelAndProvider(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	p := newPolicy(t, wildcardParams("*"))
+	_, metadata := requestHeaders(p, "/chat/completions", nil)
+	bodyMods(t, requestBody(p, metadata, []byte(`{"model":"unknown-model"}`)))
+	var entry map[string]interface{}
+	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &entry); err != nil {
+		t.Fatalf("decode log: %v; %s", err, output.Bytes())
+	}
+	for key, want := range map[string]interface{}{
+		"msg": "CostBasedRouting: selected model", "requestedModel": "unknown-model",
+		"modelName": "unknown-model", "providerName": "", "modelBudget": "unlisted-budget",
+		"selectionTier": "wildcard", "policyLevel": string(policy.LevelRoute),
+	} {
+		if entry[key] != want {
+			t.Errorf("%s = %v, want %v", key, entry[key], want)
+		}
+	}
+}
+
+func TestMissingFallbackBudgetRejectsAcrossModelLocations(t *testing.T) {
+	for _, location := range []string{"payload", "header", "queryParam", "pathParam"} {
+		for _, requested := range []string{"unknown-model", "gpt-4o"} {
+			t.Run(location+"/"+requested, func(t *testing.T) {
+				params := validMultiRouteParams() // Fallback has neither a wildcard nor its own budget.
+				identifiers := map[string]string{"payload": "$.model", "header": "x-model", "queryParam": "model", "pathParam": "models/([^/]+)/invoke"}
+				params["requestModel"] = map[string]interface{}{"location": location, "identifier": identifiers[location]}
+				p := newPolicy(t, params)
+				if err := p.budgets[0].store.Charge(context.Background(), p.budgets[0].namespace, 6*DefaultCostScaleFactor); err != nil {
+					t.Fatal(err)
+				}
+				metadata := map[string]interface{}{}
+				path := "/chat/completions"
+				if location == "queryParam" {
+					path += "?model=" + requested
+				}
+				if location == "pathParam" {
+					path = "/models/" + requested + "/invoke"
+				}
+				headerAction := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+					SharedContext: &policy.SharedContext{Metadata: metadata},
+					Path:          path,
+					Headers:       policy.NewHeaders(map[string][]string{"x-model": {requested}}),
+				}, nil)
+				var action interface{} = headerAction
+				if location == "payload" {
+					headerMods(t, headerAction)
+					body, _ := json.Marshal(map[string]string{"model": requested})
+					action = requestBody(p, metadata, body)
+				}
+				response := immediate(t, action)
+				if response.StatusCode != 429 {
+					t.Fatalf("status = %d, want 429", response.StatusCode)
+				}
+				for _, key := range []string{metadataSelectedModel, metadataProviderRouting, metadataBudgetKey, metadataBudgetIndex} {
+					if _, exists := metadata[key]; exists {
+						t.Errorf("rejected request recorded %s", key)
+					}
+				}
+				completeResponse(p, metadata, "1.0", llmCostStatusCalculated)
+				for _, budget := range p.budgets[1:] {
+					_, available, err := budget.store.Query(context.Background(), budget.namespace)
+					if err != nil || available != 5*DefaultCostScaleFactor {
+						t.Fatalf("unrelated model budget changed: %d, %v", available, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestLegacyPrimaryBudgetExhaustionCannotUseUnbudgetedFallback(t *testing.T) {
+	p := newPolicy(t, validParams())
+	if tier := requestCycle(p, "11.0", nil); tier != tierPrimary {
+		t.Fatalf("first request = %s", tier)
+	}
+	for i := 0; i < 3; i++ {
+		action, metadata := requestHeaders(p, "/chat/completions", nil)
+		if response := immediate(t, action); response.StatusCode != 429 {
+			t.Fatalf("status = %d", response.StatusCode)
+		}
+		if _, exists := metadata[metadataSelectedModel]; exists {
+			t.Fatal("unbudgeted fallback selected")
+		}
+	}
+}
+
+func TestWildcardExhaustionUsesFallbackOwnBudgetThenRejects(t *testing.T) {
+	for _, alias := range []string{"*", "other"} {
+		for _, location := range []string{"payload", "header", "queryParam", "pathParam"} {
+			t.Run(alias+"/"+location, func(t *testing.T) {
+				params := wildcardParams(alias)
+				params["fallback"] = map[string]interface{}{"modelName": "gpt-4o-mini", "providerName": "openai-balanced"}
+				identifiers := map[string]string{"payload": "$.model", "header": "x-model", "queryParam": "model", "pathParam": "models/([^/]+)/invoke"}
+				params["requestModel"] = map[string]interface{}{"location": location, "identifier": identifiers[location]}
+				p := newPolicy(t, params)
+				route := func(requested string) (interface{}, map[string]interface{}) {
+					metadata := map[string]interface{}{metadataProviderRouting: "stale-provider"}
+					path := "/chat/completions"
+					if location == "queryParam" {
+						path += "?model=" + requested
+					}
+					if location == "pathParam" {
+						path = "/models/" + requested + "/invoke"
+					}
+					action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+						SharedContext: &policy.SharedContext{Metadata: metadata}, Path: path,
+						Headers: policy.NewHeaders(map[string][]string{"x-model": {requested}}),
+					}, nil)
+					if location == "payload" {
+						headerMods(t, action)
+						body, _ := json.Marshal(map[string]string{"model": requested})
+						return requestBody(p, metadata, body), metadata
+					}
+					return action, metadata
+				}
+				// Four requests: consume wildcard, direct fallback-model request, and
+				// two fallback requests sharing that model's remaining budget.
+				for i, step := range []struct{ requested, model, tier, cost string }{
+					{"gpt-5.5", "gpt-5.5", tierWildcard, "2.0"},
+					{"gpt-4o-mini", "gpt-4o-mini", "balanced", "1.0"},
+					{"gpt-5.5", "gpt-4o-mini", tierFallback, "3.0"},
+					{"another-unlisted-model", "gpt-4o-mini", tierFallback, "1.0"},
+				} {
+					action, metadata := route(step.requested)
+					if response, rejected := action.(policy.ImmediateResponse); rejected {
+						t.Fatalf("step %d rejected: %+v", i, response)
+					}
+					if metadata[metadataSelectedModel] != step.model || metadata[metadataSelectedTier] != step.tier {
+						t.Fatalf("step %d selection: %+v", i, metadata)
+					}
+					if step.tier == tierWildcard {
+						if metadata[metadataProviderRouting] != nil {
+							t.Fatal("wildcard retained stale provider")
+						}
+					} else if metadata[metadataProviderRouting] != "openai-balanced" {
+						t.Fatal("fallback provider was not selected")
+					}
+					if location == "payload" {
+						if payloadModel(t, bodyMods(t, action.(policy.RequestAction)).Body) != step.model {
+							t.Fatal("payload model not rewritten")
+						}
+					} else {
+						mods := headerMods(t, action.(policy.RequestHeaderAction))
+						if location == "header" && mods.HeadersToSet["x-model"] != step.model {
+							t.Fatal("header model not rewritten")
+						}
+						if location == "queryParam" && queryValue(t, mods.Path, "model") != step.model {
+							t.Fatal("query model not rewritten")
+						}
+						if location == "pathParam" && (mods.Path == nil || *mods.Path != "/models/"+step.model+"/invoke") {
+							t.Fatal("path model not rewritten")
+						}
+					}
+					completeResponse(p, metadata, step.cost, llmCostStatusCalculated)
+					p.OnResponseBody(context.Background(), &policy.ResponseContext{SharedContext: &policy.SharedContext{Metadata: metadata}}, nil)
+				}
+				for _, requested := range []string{"gpt-5.5", "gpt-4o-mini", "gpt-5.5"} {
+					action, metadata := route(requested)
+					if response := immediate(t, action); response.StatusCode != 429 {
+						t.Fatalf("status %d", response.StatusCode)
+					}
+					if _, exists := metadata[metadataSelectedModel]; exists {
+						t.Fatal("rejected request selected a model")
+					}
+				}
+				// An unrelated model remains eligible even after wildcard and fallback exhaust.
+				action, metadata := route("gpt-4o")
+				if _, rejected := action.(policy.ImmediateResponse); rejected || metadata[metadataSelectedModel] != "gpt-4o" {
+					t.Fatal("unrelated model was blocked")
+				}
+				_, available, err := p.budgets[1].store.Query(context.Background(), p.budgets[1].namespace)
+				if err != nil || available != 5*DefaultCostScaleFactor {
+					t.Fatalf("unrelated budget changed: %d %v", available, err)
+				}
+			})
+		}
+	}
+}
+
+func TestExhaustedFallbackNeverRetriesAvailableWildcard(t *testing.T) {
+	params := wildcardParams("*")
+	params["fallback"] = map[string]interface{}{"modelName": "gpt-4o-mini"}
+	p := newPolicy(t, params)
+	for _, index := range []int{1, 2} {
+		if err := p.budgets[index].store.Charge(context.Background(), p.budgets[index].namespace, 6*DefaultCostScaleFactor); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, requested := range []string{"gpt-4o", "gpt-4o-mini", "*", "other", ""} {
+		_, metadata := requestHeaders(p, "/chat/completions", nil)
+		body, _ := json.Marshal(map[string]string{"model": requested})
+		response := immediate(t, requestBody(p, metadata, body))
+		if response.StatusCode != 429 {
+			t.Fatalf("requested %q status %d", requested, response.StatusCode)
+		}
+	}
+	_, available, err := p.budgets[0].store.Query(context.Background(), p.budgets[0].namespace)
+	if err != nil || available != 2*DefaultCostScaleFactor {
+		t.Fatalf("wildcard used as fallback: %d %v", available, err)
+	}
 }

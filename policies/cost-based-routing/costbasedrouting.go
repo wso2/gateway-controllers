@@ -15,11 +15,10 @@
  * limitations under the License.
  */
 
-// Package costbasedrouting routes LLM requests through independently budgeted
-// model targets. A configured client-requested model is preferred while its
-// budget remains; otherwise the first available ordered route is selected. When
-// every budget is exhausted, the configured behaviour either uses the default
-// target or rejects the request with HTTP 429.
+// Package costbasedrouting matches LLM requests to shared model budgets.
+// Missing or exhausted models use a configured fallback or are rejected.
+// An optional wildcard budget caps unlisted models. Fallback uses its own
+// model budget without recursive routing.
 package costbasedrouting
 
 import (
@@ -58,7 +57,7 @@ const (
 
 	tierPrimary  = "primary"
 	tierFallback = "fallback"
-	tierDefault  = "default"
+	tierWildcard = "wildcard"
 )
 
 type routeBudget struct {
@@ -69,15 +68,14 @@ type routeBudget struct {
 type routingSelection struct {
 	target      target
 	routeName   string
+	tier        string
 	budgetIndex int
 	budgetKey   string
 	budgetState budgetState
 	available   int64
 }
 
-// CostBasedRoutingPolicy prefers a matching client-requested LLM target, then
-// selects the first ordered fallback whose recorded spending still fits inside
-// its configured budgets.
+// CostBasedRoutingPolicy routes a requested model within its spending limits.
 type CostBasedRoutingPolicy struct {
 	metadata policy.PolicyMetadata
 	config   config
@@ -136,8 +134,7 @@ func (p *CostBasedRoutingPolicy) Mode() policy.ProcessingMode {
 // OnRequestHeaders reads the client-requested model when it is available in a
 // header, query parameter, or path parameter and performs the routing decision.
 // Payload-based matching is deferred to OnRequestBody because the body is not
-// available in this phase. With requested-model matching disabled, payload
-// requests retain the historical header-phase selection behaviour.
+// available in this phase.
 func (p *CostBasedRoutingPolicy) OnRequestHeaders(
 	ctx context.Context,
 	reqCtx *policy.RequestHeaderContext,
@@ -147,27 +144,18 @@ func (p *CostBasedRoutingPolicy) OnRequestHeaders(
 		reqCtx.SharedContext.Metadata = make(map[string]interface{})
 	}
 
-	if p.config.RespectRequestedModel && p.config.RequestModel.Location == "payload" {
+	if p.config.RequestModel.Location == "payload" {
 		return policy.UpstreamRequestHeaderModifications{}
 	}
 
-	requestedModel := ""
-	if p.config.RespectRequestedModel {
-		requestedModel = requestedModelFromHeaders(reqCtx, p.config.RequestModel)
-	}
-	selection, failure := p.selectTarget(ctx, reqCtx.Metadata, requestedModel)
+	requestedModel := requestedModelFromHeaders(reqCtx, p.config.RequestModel)
+	selection, failure := p.selectTarget(ctx, requestedModel)
 	if failure != nil {
 		return *failure
 	}
-	p.recordAndLogSelection(reqCtx.Metadata, selection, requestedModel)
-
 	mods := policy.UpstreamRequestHeaderModifications{}
-	applyProviderRouting(reqCtx.Metadata, selection.target, func(name *string) { mods.UpstreamName = name })
-
 	identifier := p.config.RequestModel.Identifier
 	switch p.config.RequestModel.Location {
-	case "payload":
-		// The payload is rewritten in OnRequestBody using the target chosen here.
 	case "header":
 		mods.HeadersToSet = map[string]string{identifier: selection.target.Model}
 	case "queryParam":
@@ -185,13 +173,13 @@ func (p *CostBasedRoutingPolicy) OnRequestHeaders(
 		mods.Path = &path
 	}
 
+	p.recordAndLogSelection(ctx, reqCtx.Metadata, selection, requestedModel)
+	applyProviderRouting(reqCtx.Metadata, selection.target, func(name *string) { mods.UpstreamName = name })
 	return mods
 }
 
-// OnRequestBody reads the requested model and performs requested-model-first
-// selection for payload configurations, then rewrites both the model and the
-// upstream provider. When matching is disabled, it applies the target selected
-// in the header phase.
+// OnRequestBody matches the requested model to its budget for payload
+// configurations, then rewrites the model and selects the upstream provider.
 func (p *CostBasedRoutingPolicy) OnRequestBody(
 	ctx context.Context,
 	reqCtx *policy.RequestContext,
@@ -214,27 +202,15 @@ func (p *CostBasedRoutingPolicy) OnRequestBody(
 	}
 
 	identifier := p.config.RequestModel.Identifier
-	model, _ := reqCtx.Metadata[metadataSelectedModel].(string)
-	selectedProvider := ""
-	if p.config.RespectRequestedModel {
-		requestedModel := requestedModelFromPayload(payload, identifier)
-		selection, failure := p.selectTarget(ctx, reqCtx.Metadata, requestedModel)
-		if failure != nil {
-			return *failure
-		}
-		p.recordAndLogSelection(reqCtx.Metadata, selection, requestedModel)
-		model = selection.target.Model
-		selectedProvider = selection.target.Provider
+	if reqCtx.Metadata == nil {
+		reqCtx.Metadata = make(map[string]interface{})
 	}
-	if model == "" {
-		slog.Error("CostBasedRouting: no target was selected for payload request",
-			"route", p.metadata.RouteName)
-		return policy.ImmediateResponse{
-			StatusCode: 500,
-			Headers:    map[string]string{"Content-Type": "application/json"},
-			Body:       []byte(`{"error":"cost-based routing target was not selected"}`),
-		}
+	requestedModel := requestedModelFromPayload(payload, identifier)
+	selection, failure := p.selectTarget(ctx, requestedModel)
+	if failure != nil {
+		return *failure
 	}
+	model := selection.target.Model
 	if err := utils.SetValueAtJSONPath(payload, identifier, model); err != nil {
 		return badRequest(fmt.Sprintf("model location '%s' is missing or invalid", identifier))
 	}
@@ -248,97 +224,106 @@ func (p *CostBasedRoutingPolicy) OnRequestBody(
 	}
 
 	mods := policy.UpstreamRequestModifications{Body: updated}
-	if p.config.RespectRequestedModel {
-		applyProviderRouting(reqCtx.Metadata, target{Model: model, Provider: selectedProvider}, func(name *string) { mods.UpstreamName = name })
-	}
+	p.recordAndLogSelection(ctx, reqCtx.Metadata, selection, requestedModel)
+	applyProviderRouting(reqCtx.Metadata, selection.target, func(name *string) { mods.UpstreamName = name })
 	return mods
 }
 
-// selectTarget tries the route matching the client's requested model first.
-// If it is absent or exhausted, routes are checked from the top in configured
-// order. A previously checked requested route is skipped on the fallback pass.
-func (p *CostBasedRoutingPolicy) selectTarget(ctx context.Context, metadata map[string]interface{}, requestedModel string) (routingSelection, *policy.ImmediateResponse) {
-	requestedIndex := -1
-	if p.config.RespectRequestedModel && requestedModel != "" {
-		for i, route := range p.config.Routes {
-			if route.Target.Model == requestedModel {
-				requestedIndex = i
-				break
+// selectTarget checks the exact requested-model budget, or the wildcard budget
+// for an unlisted model. It then checks only the fallback model's own budget.
+// At most two checks are made; fallback never recurses through the wildcard.
+func (p *CostBasedRoutingPolicy) selectTarget(ctx context.Context, requestedModel string) (routingSelection, *policy.ImmediateResponse) {
+	requestedIndex, wildcardIndex, fallbackIndex := -1, -1, -1
+	bestSpecificity := -1
+	for i, route := range p.config.Routes {
+		if route.Pattern != nil {
+			if requestedModel != "" && !isPatternModel(requestedModel) && route.Pattern.MatchString(requestedModel) && route.Specificity > bestSpecificity {
+				wildcardIndex, bestSpecificity = i, route.Specificity
 			}
+			continue
+		}
+		if route.Target.Model == requestedModel {
+			requestedIndex = i
+		}
+		if p.config.Fallback != nil && route.Target.Model == p.config.Fallback.Model {
+			fallbackIndex = i
 		}
 	}
-
-	indices := make([]int, 0, len(p.config.Routes)+1)
 	if requestedIndex >= 0 {
-		indices = append(indices, requestedIndex)
-	}
-	for i := range p.config.Routes {
-		if i != requestedIndex {
-			indices = append(indices, i)
+		selection, failure := p.checkBudget(ctx, requestedIndex, p.config.Routes[requestedIndex].Target)
+		if failure != nil || selection.budgetState != budgetExhausted {
+			return selection, failure
 		}
 	}
-
-	selection := routingSelection{routeName: tierDefault, budgetIndex: -1, budgetState: budgetExhausted}
-	for _, i := range indices {
-		route := p.config.Routes[i]
-		budget := p.routeBudgetAt(i)
-		key := budgetKey(budget.namespace, p.config.ConsumerBased, metadata)
-		state, available, err := budget.store.Query(ctx, key)
-		selection.available = available
-		if err != nil {
-			if !budget.store.failOpen {
-				slog.Error("CostBasedRouting: budget storage unavailable and failure mode is closed",
-					"route", p.metadata.RouteName, "costRoute", route.Name, "backend", budget.store.backend, "error", err)
-				failure := serviceUnavailable("budget state is unavailable")
-				return routingSelection{}, &failure
-			}
-			slog.Warn("CostBasedRouting: budget storage unavailable, continuing on configured route",
-				"route", p.metadata.RouteName, "costRoute", route.Name, "backend", budget.store.backend, "error", err)
-			selection.target = route.Target
-			selection.routeName = route.Name
-			selection.budgetIndex = i
-			selection.budgetKey = key
-			selection.budgetState = budgetUnknown
-			return selection, nil
-		}
-		if state == budgetAvailable {
-			selection.target = route.Target
-			selection.routeName = route.Name
-			selection.budgetIndex = i
-			selection.budgetKey = key
-			selection.budgetState = state
-			return selection, nil
+	// The most specific matching pattern shares one allowance. Preserve
+	// the requested name and use the proxy's primary provider. A configured
+	// model cannot escape its own exhausted budget through the wildcard.
+	if requestedIndex < 0 && wildcardIndex >= 0 && requestedModel != "" && !isPatternModel(requestedModel) {
+		selection, failure := p.checkBudget(ctx, wildcardIndex, target{Model: requestedModel})
+		selection.tier = tierWildcard
+		if failure != nil || selection.budgetState != budgetExhausted {
+			return selection, failure
 		}
 	}
-	if p.config.OnExhausted == onExhaustedReject {
+	if p.config.OnExhausted == onExhaustedReject || p.config.Fallback == nil {
 		failure := budgetExhaustedResponse()
 		return routingSelection{}, &failure
 	}
 
-	if p.config.Default != nil {
-		selection.target = *p.config.Default
-		if p.config.LegacyDefaultTier {
-			selection.routeName = tierFallback
+	// Fallback must have its own exact model budget. Never reuse the wildcard
+	// or retry the already-exhausted requested model's budget.
+	if fallbackIndex >= 0 && fallbackIndex != requestedIndex {
+		selection, failure := p.checkBudget(ctx, fallbackIndex, *p.config.Fallback)
+		selection.tier = tierFallback
+		if failure != nil || selection.budgetState != budgetExhausted {
+			return selection, failure
 		}
+	}
+	failure := budgetExhaustedResponse()
+	return routingSelection{}, &failure
+}
+
+func (p *CostBasedRoutingPolicy) checkBudget(ctx context.Context, index int, selected target) (routingSelection, *policy.ImmediateResponse) {
+	route := p.config.Routes[index]
+	budget := p.routeBudgetAt(index)
+	state, available, err := budget.store.Query(ctx, budget.namespace)
+	selection := routingSelection{target: selected, routeName: route.Name, tier: route.Name,
+		budgetIndex: index, budgetKey: budget.namespace, budgetState: state, available: available}
+	if err != nil {
+		if !budget.store.failOpen {
+			slog.ErrorContext(ctx, "CostBasedRouting: budget storage unavailable and failure mode is closed",
+				"route", p.metadata.RouteName, "modelBudget", route.Name, "backend", budget.store.backend, "error", err)
+			failure := serviceUnavailable("budget state is unavailable")
+			return routingSelection{}, &failure
+		}
+		slog.WarnContext(ctx, "CostBasedRouting: budget storage unavailable, continuing on configured model",
+			"route", p.metadata.RouteName, "modelBudget", route.Name, "backend", budget.store.backend, "error", err)
+		selection.budgetState = budgetUnknown
 	}
 	return selection, nil
 }
 
-func (p *CostBasedRoutingPolicy) recordAndLogSelection(metadata map[string]interface{}, selection routingSelection, requestedModel string) {
-	slog.Debug("CostBasedRouting: selected target",
+func (p *CostBasedRoutingPolicy) recordAndLogSelection(ctx context.Context, metadata map[string]interface{}, selection routingSelection, requestedModel string) {
+	slog.DebugContext(ctx, "CostBasedRouting: selected model",
 		"route", p.metadata.RouteName,
 		"requestedModel", requestedModel,
-		"costRoute", selection.routeName,
+		"modelBudget", selection.routeName,
+		"modelName", selection.target.Model,
+		"providerName", selection.target.Provider,
+		"selectionTier", selection.tier,
+		"policyLevel", p.metadata.AttachedTo,
 		"budgetState", selection.budgetState.String(),
-		"availableScaledUnits", selection.available,
-		"consumerBased", p.config.ConsumerBased)
-	p.recordSelection(metadata, selection.target, selection.routeName, selection.routeName,
+		"availableScaledUnits", selection.available)
+	p.recordSelection(metadata, selection.target, selection.routeName, selection.tier,
 		selection.budgetKey, selection.budgetIndex, selection.budgetIndex >= 0)
 }
 
 func requestedModelFromHeaders(reqCtx *policy.RequestHeaderContext, cfg requestModelConfig) string {
 	switch cfg.Location {
 	case "header":
+		if reqCtx.Headers == nil {
+			return ""
+		}
 		values := reqCtx.Headers.Get(cfg.Identifier)
 		if len(values) > 0 {
 			return strings.TrimSpace(values[0])
@@ -451,8 +436,8 @@ func applyProviderRouting(metadata map[string]interface{}, selected target, setU
 }
 
 // chargeOnce records this request's cost against the selected route budget at
-// most once. It is a no-op for default requests, and it deliberately skips the
-// charge whenever the cost is absent, unusable, or was not calculated: a
+// most once. It skips accounting when
+// the cost is absent, unusable, or was not calculated: a
 // pricing gap must never be able to exhaust a budget.
 func (p *CostBasedRoutingPolicy) chargeOnce(ctx context.Context, metadata map[string]interface{}) {
 	if metadata == nil {
@@ -464,8 +449,7 @@ func (p *CostBasedRoutingPolicy) chargeOnce(ctx context.Context, metadata map[st
 
 	track, _ := metadata[metadataTrackPrimaryCost].(bool)
 	if !track {
-		// Default requests still have their cost calculated for analytics; it
-		// simply never reaches a route budget.
+		// Requests without a budget selection must not be charged.
 		return
 	}
 
@@ -539,7 +523,7 @@ func serviceUnavailable(message string) policy.ImmediateResponse {
 
 func budgetExhaustedResponse() policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{
-		"error": "all configured route budgets are exhausted",
+		"error": "requested model has no available budget or the fallback budget is missing or exhausted",
 		"code":  "cost_based_routing_budget_exhausted",
 	})
 	return policy.ImmediateResponse{
