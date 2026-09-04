@@ -117,9 +117,9 @@ func TestCalculateCosineSimilarity_DifferentLengths(t *testing.T) {
 func TestComputeMaxCosineSimilarity(t *testing.T) {
 	requestEmbedding := []float32{1.0, 0.0, 0.0}
 	utteranceEmbeddings := [][]float32{
-		{0.0, 1.0, 0.0},  // orthogonal = 0.0
-		{1.0, 0.0, 0.0},  // identical = 1.0
-		{0.5, 0.5, 0.0},  // partial match
+		{0.0, 1.0, 0.0}, // orthogonal = 0.0
+		{1.0, 0.0, 0.0}, // identical = 1.0
+		{0.5, 0.5, 0.0}, // partial match
 	}
 
 	result := computeMaxCosineSimilarity(requestEmbedding, utteranceEmbeddings)

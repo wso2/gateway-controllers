@@ -45,6 +45,7 @@ const DefaultSimilarityThreshold = 0.90
 // SemanticRoute represents a single route configuration with its precomputed embeddings.
 // Maps to SemanticRoutingConfigDTO.RouteConfig in Java.
 type SemanticRoute struct {
+	Provider            string      // Optional additional-provider alias; empty preserves the current upstream.
 	Model               string      // Target AI model name
 	Utterances          []string    // Sample phrases for this route
 	ScoreThreshold      float64     // Minimum cosine similarity to match (0.0 - 1.0)
@@ -59,6 +60,7 @@ type RequestModelConfig struct {
 
 // SemanticModelRoutingPolicy implements semantic similarity-based model routing.
 type SemanticModelRoutingPolicy struct {
+	defaultProvider   string
 	routes            []SemanticRoute
 	defaultModel      string
 	contentPath       string
@@ -145,8 +147,8 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 	}
 
 	if len(content) == 0 {
-		slog.Debug("SemanticModelRouting: Request body is empty, using default model")
-		return p.modifyRequestModel(content, p.defaultModel)
+		slog.Debug("SemanticModelRouting: Request body is empty, preserving current upstream")
+		return policy.UpstreamRequestModifications{}
 	}
 
 	// Extract user text from body using JSONPath
@@ -156,7 +158,7 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 		if err != nil {
 			slog.Debug("SemanticModelRouting: JSONPath extraction failed, using default model",
 				"contentPath", p.contentPath, "error", err)
-			return p.modifyRequestModel(content, p.defaultModel)
+			return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 		}
 		userText = extracted
 	} else {
@@ -165,7 +167,7 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 
 	if strings.TrimSpace(userText) == "" {
 		slog.Debug("SemanticModelRouting: Extracted text is empty, using default model")
-		return p.modifyRequestModel(content, p.defaultModel)
+		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
 	// Generate embedding for the user request
@@ -173,12 +175,12 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 	if err != nil {
 		slog.Debug("SemanticModelRouting: Failed to compute request embedding, using default model",
 			"error", err)
-		return p.modifyRequestModel(content, p.defaultModel)
+		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
 	if requestEmbedding == nil {
 		slog.Debug("SemanticModelRouting: Request embedding is nil, using default model")
-		return p.modifyRequestModel(content, p.defaultModel)
+		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
 	// Find best matching route
@@ -190,12 +192,12 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 			"score", fmt.Sprintf("%.4f", bestScore),
 			"threshold", bestRoute.ScoreThreshold,
 		)
-		return p.modifyRequestModel(content, bestRoute.Model)
+		return p.modifyRequestModel(reqCtx, content, modelTarget{Model: bestRoute.Model, Provider: bestRoute.Provider})
 	}
 
 	slog.Debug("SemanticModelRouting: No route matched threshold, using default model",
 		"bestScore", fmt.Sprintf("%.4f", bestScore))
-	return p.modifyRequestModel(content, p.defaultModel)
+	return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 }
 
 // findBestRoute iterates all routes and finds the one with the highest cosine
@@ -273,35 +275,66 @@ func CalculateCosineSimilarity(vectorA, vectorB []float32) float64 {
 	return dotProduct / denominator
 }
 
-// modifyRequestModel modifies the request body to set the selected model name.
-// Follows the same pattern as model-round-robin and model-weighted-round-robin.
-func (p *SemanticModelRoutingPolicy) modifyRequestModel(content []byte, selectedModel string) policy.RequestAction {
+// modelTarget keeps destination selection atomic, including fallback routing.
+type modelTarget struct {
+	Model    string
+	Provider string
+}
+
+func (p *SemanticModelRoutingPolicy) defaultTarget() modelTarget {
+	return modelTarget{Model: p.defaultModel, Provider: p.defaultProvider}
+}
+
+// modifyRequestModel rewrites the model and selects the named upstream in the
+// same action. Empty or invalid payloads keep the no-op behavior so a provider
+// never receives a model that failed to be rewritten.
+func (p *SemanticModelRoutingPolicy) modifyRequestModel(reqCtx *policy.RequestContext, content []byte, selected modelTarget) policy.RequestAction {
+	mods := policy.UpstreamRequestModifications{}
 	if p.requestModel.Location != "payload" || len(content) == 0 {
-		slog.Debug("SemanticModelRouting: Selected model", "model", selectedModel)
-		return policy.UpstreamRequestModifications{}
+		return mods
 	}
-
 	var payloadData map[string]interface{}
-	if err := json.Unmarshal(content, &payloadData); err != nil {
+	if err := json.Unmarshal(content, &payloadData); err != nil || payloadData == nil {
 		slog.Debug("SemanticModelRouting: Failed to parse request body JSON", "error", err)
-		return policy.UpstreamRequestModifications{}
+		return mods
 	}
-
-	if err := utils.SetValueAtJSONPath(payloadData, p.requestModel.Identifier, selectedModel); err != nil {
-		slog.Debug("SemanticModelRouting: Failed to set model in request body",
-			"identifier", p.requestModel.Identifier, "error", err)
-		return policy.UpstreamRequestModifications{}
+	if err := utils.SetValueAtJSONPath(payloadData, p.requestModel.Identifier, selected.Model); err != nil {
+		slog.Debug("SemanticModelRouting: Failed to set model in request body", "error", err)
+		return mods
 	}
-
 	updatedPayload, err := json.Marshal(payloadData)
 	if err != nil {
 		slog.Debug("SemanticModelRouting: Failed to serialize updated body", "error", err)
-		return policy.UpstreamRequestModifications{}
+		return mods
 	}
+	mods.Body = updatedPayload
 
-	slog.Debug("SemanticModelRouting: Modified request body model",
-		"model", selectedModel, "identifier", p.requestModel.Identifier)
-	return policy.UpstreamRequestModifications{Body: updatedPayload}
+	// This engine-level key lets subsequent conditional auth and protocol
+	// transformers identify the same provider as the named upstream override.
+	// An omitted provider leaves prior routing metadata and the upstream intact.
+	if selected.Provider != "" {
+		providerName := selected.Provider
+		mods.UpstreamName = &providerName
+		if reqCtx.Metadata == nil {
+			reqCtx.Metadata = make(map[string]interface{})
+		}
+		reqCtx.Metadata["selected_provider"] = providerName
+	}
+	return mods
+}
+
+// parseOptionalProvider accepts an additional-provider alias, not a provider
+// type enum. Empty or omitted values preserve existing upstream selection.
+func parseOptionalProvider(params map[string]interface{}, key, field string) (string, error) {
+	raw, exists := params[key]
+	if !exists {
+		return "", nil
+	}
+	provider, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("'%s' must be a string", field)
+	}
+	return strings.TrimSpace(provider), nil
 }
 
 // precomputeAllEmbeddings precomputes embeddings for all routes' utterances.
@@ -401,6 +434,12 @@ func parseParams(params map[string]interface{}, p *SemanticModelRoutingPolicy) e
 	}
 	p.defaultModel = defaultModel
 
+	defaultProvider, err := parseOptionalProvider(params, "defaultProvider", "defaultProvider")
+	if err != nil {
+		return err
+	}
+	p.defaultProvider = defaultProvider
+
 	// Parse requestModel config (system parameter)
 	if err := parseRequestModelConfig(params, p); err != nil {
 		return err
@@ -419,6 +458,12 @@ func parseRouteConfig(routeMap map[string]interface{}, index int) (SemanticRoute
 		return route, fmt.Errorf("'routes[%d].model' is required and must be a non-empty string", index)
 	}
 	route.Model = model
+
+	provider, err := parseOptionalProvider(routeMap, "provider", fmt.Sprintf("routes[%d].provider", index))
+	if err != nil {
+		return route, err
+	}
+	route.Provider = provider
 
 	// Parse utterances (required)
 	utterancesRaw, ok := routeMap["utterances"]
