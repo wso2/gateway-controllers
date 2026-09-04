@@ -1,0 +1,10 @@
+{
+  "name": "context-based-routing",
+  "displayName": "Context-Based Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Routes LLM requests to configured models and optional providers using client-configured input-token ranges."
+}

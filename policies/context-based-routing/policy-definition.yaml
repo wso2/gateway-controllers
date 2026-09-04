@@ -1,0 +1,130 @@
+name: context-based-routing
+version: v0.9.0
+displayName: Context-Based Routing
+description: |
+  Routes an LLM request to a configured model and optional provider according
+  to an estimate of the request's input-token count. Range boundaries and
+  targets are configured by the policy user. Output-token allowance is not
+  included in the routing decision. The complete request body is buffered to
+  make the decision. Token counts are an approximation based on text
+  characters; embedded base64 data URLs are excluded. The selected upstream
+  model remains visible in responses when the provider returns it.
+
+parameters:
+  type: object
+  additionalProperties: false
+  required:
+    - modelMappings
+  properties:
+    modelMappings:
+      title: Model Mappings
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        Ordered context ranges. minTokens is inclusive and maxTokens is
+        exclusive. Ranges must not overlap.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - maxTokens
+          - model
+        properties:
+          name:
+            title: Rule Name
+            type: string
+            description: Optional human-readable name for the route.
+            minLength: 1
+          minTokens:
+            type: integer
+            description: Inclusive lower input-token boundary. Defaults to 0 when omitted.
+            minimum: 0
+          maxTokens:
+            type: integer
+            description: Exclusive upper input-token boundary.
+            minimum: 1
+          model:
+            title: Model
+            type: object
+            additionalProperties: false
+            description: Model and optional additional provider selected for this range.
+            required:
+              - modelName
+            properties:
+              modelName:
+                title: Model Name
+                type: string
+                description: Model name written to the upstream request.
+                minLength: 1
+              providerName:
+                title: Provider Name
+                type: string
+                description: |
+                  Optional additional-provider alias. When omitted, the LLM
+                  proxy's primary provider is used.
+                minLength: 1
+    fallback:
+      title: Fallback
+      type: object
+      additionalProperties: false
+      x-wso2-policy-advanced-param: true
+      description: |
+        Optional target used when input-token estimation fails or no range
+        matches. When omitted, the client's original model and provider are
+        left unchanged.
+      required:
+        - modelName
+      properties:
+        modelName:
+          title: Model Name
+          type: string
+          description: Fallback model name written to the upstream request.
+          minLength: 1
+        providerName:
+          title: Provider Name
+          type: string
+          description: |
+            Optional additional-provider alias. When omitted, the LLM proxy's
+            primary provider is used.
+          minLength: 1
+    charsPerToken:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: Approximate number of input characters per token.
+      minimum: 1
+      default: 4
+    inputJSONPaths:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: |
+        Optional JSONPaths selecting request values whose text is included in
+        the estimate. Paths may differ by provider payload. When omitted, the
+        policy checks its built-in cross-provider paths. Values selected by
+        overlapping paths are counted more than once.
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        minLength: 1
+        pattern: '^\$(?:\..+)?$'
+systemParameters:
+  type: object
+  additionalProperties: false
+  required:
+    - requestModel
+  properties:
+    requestModel:
+      type: object
+      additionalProperties: false
+      description: Provider-template location used to rewrite the selected model.
+      required:
+        - location
+        - identifier
+      properties:
+        location:
+          type: string
+          enum: [payload, body, header, queryParam, pathParam]
+        identifier:
+          type: string
+          minLength: 1
