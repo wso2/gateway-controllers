@@ -1,0 +1,121 @@
+name: semantic-model-routing
+version: v1.0.0
+description: |
+  Routes AI/LLM requests to different models based on semantic similarity
+  between the user request and predefined utterances. On startup, embeddings
+  are precomputed for all configured utterances. At runtime, the user request
+  is embedded and compared using cosine similarity. If the best match exceeds
+  the configured score threshold, the request is routed to that model;
+  otherwise it falls back to the default model.
+
+parameters:
+  type: object
+  properties:
+    contentPath:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        JSONPath expression to extract the user request text from the
+        request payload for embedding generation.
+      default: "$.messages[-1].content"
+    routes:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        List of semantic routes. Each route defines a target model, a list
+        of sample utterances for embedding, and an optional similarity
+        score threshold.
+      items:
+        type: object
+        properties:
+          model:
+            type: string
+            description: Target AI model name to route matching requests to.
+            minLength: 1
+          utterances:
+            type: array
+            description: |
+              Sample phrases representing requests that should route to
+              this model. Embeddings are precomputed at policy init time.
+            items:
+              type: string
+              minLength: 1
+            minItems: 1
+          scorethreshold:
+            type: number
+            description: |
+              Minimum cosine similarity score (0.0 to 1.0) required to
+              route to this model. Defaults to 0.90.
+            minimum: 0.0
+            maximum: 1.0
+            default: 0.90
+        required:
+          - model
+          - utterances
+      minItems: 1
+    defaultModel:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        The model to use when no route's similarity score exceeds its
+        threshold.
+      minLength: 1
+  required:
+    - routes
+    - defaultModel
+
+systemParameters:
+  type: object
+  properties:
+    embeddingProvider:
+      type: string
+      description: |
+        Embedding provider type: "OPENAI", "MISTRAL", "AZURE_OPENAI"
+      enum:
+        - OPENAI
+        - MISTRAL
+        - AZURE_OPENAI
+      "wso2/defaultValue": "${config.policy_configurations.semantic_model_routing_v1.embedding_provider}"
+    embeddingEndpoint:
+      type: string
+      description: |
+        Endpoint URL for the embedding service.
+        For OpenAI: "https://api.openai.com/v1/embeddings"
+        For Mistral: "https://api.mistral.ai/v1/embeddings"
+        For Azure OpenAI: Azure OpenAI endpoint URL
+      minLength: 1
+      "wso2/defaultValue": "${config.policy_configurations.semantic_model_routing_v1.embedding_provider_endpoint}"
+    embeddingModel:
+      type: string
+      description: |
+        Embedding model name (required for OPENAI and MISTRAL; not required
+        for AZURE_OPENAI where the deployment name is in the endpoint URL).
+      "wso2/defaultValue": "${config.policy_configurations.semantic_model_routing_v1.embedding_provider_model}"
+    apiKey:
+      type: string
+      description: |
+        API key for the embedding service.
+      minLength: 1
+      "wso2/defaultValue": "${config.policy_configurations.semantic_model_routing_v1.embedding_provider_api_key}"
+    requestModel:
+      type: object
+      description: |
+        Specifies where the model name appears in the request so the policy
+        can replace it with the selected model.
+      properties:
+        location:
+          type: string
+          enum:
+            - payload
+        identifier:
+          type: string
+          description: |
+            JSONPath expression identifying the model field in the request payload.
+      required:
+        - location
+        - identifier
+  required:
+    - embeddingProvider
+    - embeddingEndpoint
+    - apiKey
+    - requestModel
