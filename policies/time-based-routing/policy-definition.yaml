@@ -6,8 +6,8 @@ description: |
   to the gateway's current time in a configured timezone. Time windows use
   inclusive start and exclusive end boundaries. Windows may be same-day
   (for example 06:00 to 12:00) or overnight (for example 22:00 to 06:00).
-  When no schedule matches, the optional default target is used; when the
-  default is omitted, the client's original model and provider are left
+  When no schedule matches, the optional fallback model is used; when the
+  fallback is omitted, the client's original model and provider are left
   unchanged.
 
 parameters:
@@ -32,11 +32,11 @@ parameters:
       items:
         type: object
         additionalProperties: false
-        x-wso2-policy-property-order: [days, from, to, name, target]
+        x-wso2-policy-property-order: [days, from, to, name, model]
         required:
           - from
           - to
-          - target
+          - model
         properties:
           from:
             type: string
@@ -61,24 +61,28 @@ parameters:
             items:
               type: string
               enum: [Sun, Sunday, Mon, Monday, Tue, Tues, Tuesday, Wed, Wednesday, Thu, Thur, Thurs, Thursday, Fri, Friday, Sat, Saturday]
-          target:
+          model:
+            title: Model
             type: object
             additionalProperties: false
             description: Model and optional additional provider selected for this time window.
             required:
-              - model
+              - modelName
             properties:
-              model:
+              modelName:
+                title: Model Name
                 type: string
                 description: Model name written to the upstream request.
                 minLength: 1
-              provider:
+              providerName:
+                title: Provider Name
                 type: string
                 description: |
                   Optional additional-provider alias. When omitted, the LLM
                   proxy's primary provider is used.
                 minLength: 1
-    default:
+    fallback:
+      title: Fallback
       type: object
       additionalProperties: false
       x-wso2-policy-advanced-param: true
@@ -86,13 +90,15 @@ parameters:
         Optional target used when no schedule matches. When omitted, the
         client's original model and provider are left unchanged.
       required:
-        - model
+        - modelName
       properties:
-        model:
+        modelName:
+          title: Model Name
           type: string
-          description: Default model name written to the upstream request.
+          description: Fallback model name written to the upstream request.
           minLength: 1
-        provider:
+        providerName:
+          title: Provider Name
           type: string
           description: |
             Optional additional-provider alias. When omitted, the LLM proxy's

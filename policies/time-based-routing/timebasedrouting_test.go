@@ -23,23 +23,23 @@ func testParams() map[string]interface{} {
 				"name": "morning",
 				"from": "06:00",
 				"to":   "12:00",
-				"target": map[string]interface{}{
-					"model":    "morning-model",
-					"provider": "provider-a",
+				"model": map[string]interface{}{
+					"modelName":    "morning-model",
+					"providerName": "provider-a",
 				},
 			},
 			map[string]interface{}{
 				"name": "evening",
 				"from": "18:00",
 				"to":   "23:00",
-				"target": map[string]interface{}{
-					"model": "evening-model",
+				"model": map[string]interface{}{
+					"modelName": "evening-model",
 				},
 			},
 		},
-		"default": map[string]interface{}{
-			"model":    "default-model",
-			"provider": "provider-default",
+		"fallback": map[string]interface{}{
+			"modelName":    "default-model",
+			"providerName": "provider-default",
 		},
 		"requestModel": map[string]interface{}{
 			"location":   "payload",
@@ -127,7 +127,7 @@ func TestNoMatchUsesDefaultOrPreservesOriginal(t *testing.T) {
 	}
 
 	params := testParams()
-	delete(params, "default")
+	delete(params, "fallback")
 	raw, err = GetPolicy(policy.PolicyMetadata{}, params)
 	if err != nil {
 		t.Fatal(err)
@@ -145,8 +145,8 @@ func TestOvernightScheduleMatchesAcrossMidnight(t *testing.T) {
 			"name": "night",
 			"from": "22:00",
 			"to":   "06:00",
-			"target": map[string]interface{}{
-				"model": "night-model",
+			"model": map[string]interface{}{
+				"modelName": "night-model",
 			},
 		},
 	}
@@ -179,8 +179,8 @@ func TestOvernightScheduleWithDaysUsesStartDay(t *testing.T) {
 			"from": "22:00",
 			"to":   "06:00",
 			"days": []interface{}{"Sat"},
-			"target": map[string]interface{}{
-				"model": "saturday-night-model",
+			"model": map[string]interface{}{
+				"modelName": "saturday-night-model",
 			},
 		},
 	}
@@ -219,8 +219,8 @@ func TestDaysRestrictSchedule(t *testing.T) {
 			"from": "09:00",
 			"to":   "17:00",
 			"days": []interface{}{"Mon", "Tue", "Wed", "Thu", "Fri"},
-			"target": map[string]interface{}{
-				"model": "weekday-model",
+			"model": map[string]interface{}{
+				"modelName": "weekday-model",
 			},
 		},
 	}
@@ -255,14 +255,14 @@ func TestRejectsOverlappingSchedules(t *testing.T) {
 	params := testParams()
 	params["schedules"] = []interface{}{
 		map[string]interface{}{
-			"from":   "09:00",
-			"to":     "12:00",
-			"target": map[string]interface{}{"model": "a"},
+			"from":  "09:00",
+			"to":    "12:00",
+			"model": map[string]interface{}{"modelName": "a"},
 		},
 		map[string]interface{}{
-			"from":   "11:00",
-			"to":     "13:00",
-			"target": map[string]interface{}{"model": "b"},
+			"from":  "11:00",
+			"to":    "13:00",
+			"model": map[string]interface{}{"modelName": "b"},
 		},
 	}
 	if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil {
@@ -274,9 +274,9 @@ func TestSameTimesAreRejected(t *testing.T) {
 	params := testParams()
 	params["schedules"] = []interface{}{
 		map[string]interface{}{
-			"from":   "09:00",
-			"to":     "09:00",
-			"target": map[string]interface{}{"model": "a"},
+			"from":  "09:00",
+			"to":    "09:00",
+			"model": map[string]interface{}{"modelName": "a"},
 		},
 	}
 	if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil || !strings.Contains(err.Error(), "same from and to") {

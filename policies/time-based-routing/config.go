@@ -86,8 +86,8 @@ func parseConfig(params map[string]interface{}) (config, error) {
 		return result, err
 	}
 
-	if raw, exists := params["default"]; exists {
-		parsed, err := parseTarget(raw, "default")
+	if raw, exists := aliasedField(params, "fallback", "default"); exists {
+		parsed, err := parseTarget(raw, "fallback")
 		if err != nil {
 			return result, err
 		}
@@ -181,7 +181,14 @@ func parseSchedule(item map[string]interface{}, index int) (schedule, error) {
 		}
 	}
 
-	parsedTarget, err := parseTarget(item["target"], fmt.Sprintf("schedules[%d].target", index))
+	rawModel, exists := item["model"]
+	if !exists {
+		rawModel, exists = item["models"]
+	}
+	if !exists {
+		rawModel = item["target"]
+	}
+	parsedTarget, err := parseTarget(rawModel, fmt.Sprintf("schedules[%d].model", index))
 	if err != nil {
 		return result, err
 	}
@@ -194,15 +201,16 @@ func parseTarget(raw interface{}, field string) (target, error) {
 	if !ok {
 		return target{}, fmt.Errorf("'%s' must be an object", field)
 	}
-	model, ok := item["model"].(string)
+	rawModel, _ := aliasedField(item, "modelName", "model")
+	model, ok := rawModel.(string)
 	if !ok || strings.TrimSpace(model) == "" {
-		return target{}, fmt.Errorf("'%s.model' must be a non-empty string", field)
+		return target{}, fmt.Errorf("'%s.modelName' must be a non-empty string", field)
 	}
 	result := target{Model: strings.TrimSpace(model)}
-	if rawProvider, exists := item["provider"]; exists {
+	if rawProvider, exists := aliasedField(item, "providerName", "provider"); exists {
 		provider, ok := rawProvider.(string)
 		if !ok || strings.TrimSpace(provider) == "" {
-			return target{}, fmt.Errorf("'%s.provider' must be a non-empty string", field)
+			return target{}, fmt.Errorf("'%s.providerName' must be a non-empty string", field)
 		}
 		result.Provider = strings.TrimSpace(provider)
 	}
@@ -328,4 +336,13 @@ func compilePathModelExpression(expression string) (*regexp.Regexp, int, error) 
 		return compiled, 1, nil
 	}
 	return compiled, 0, nil
+}
+
+// Canonical fields take precedence even when their supplied value is invalid.
+func aliasedField(item map[string]interface{}, canonical, legacy string) (interface{}, bool) {
+	if value, exists := item[canonical]; exists {
+		return value, true
+	}
+	value, exists := item[legacy]
+	return value, exists
 }
