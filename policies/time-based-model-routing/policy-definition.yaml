@@ -1,0 +1,126 @@
+name: time-based-model-routing
+version: v0.9.0
+displayName: Time-Based Model Routing
+description: |
+  Routes an LLM request to a configured model and optional provider according
+  to the gateway's current time in a configured timezone. Time windows use
+  inclusive start and exclusive end boundaries. Windows may be same-day
+  (for example 06:00 to 12:00) or overnight (for example 22:00 to 06:00).
+  When no schedule matches, the optional fallback model is used; when the
+  fallback is omitted, the client's original model and provider are left
+  unchanged.
+
+parameters:
+  type: object
+  additionalProperties: false
+  required:
+    - schedules
+  properties:
+    timezone:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: IANA timezone used for schedule matching. Defaults to UTC.
+      default: UTC
+      minLength: 1
+    schedules:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        Ordered routing windows. from is inclusive and to is exclusive.
+        Windows must not overlap on the same configured day.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        x-wso2-policy-property-order: [days, from, to, name, model]
+        required:
+          - from
+          - to
+          - model
+        properties:
+          from:
+            type: string
+            description: Inclusive start time in 24-hour HH:MM format.
+            pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          to:
+            type: string
+            description: Exclusive end time in 24-hour HH:MM format.
+            pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+          name:
+            type: string
+            description: Optional human-readable name for the schedule.
+            minLength: 1
+          days:
+            type: array
+            description: |
+              Optional weekdays when this schedule applies. Values may be short
+              or long names, for example Mon or Monday. When omitted, the
+              schedule applies every day.
+            minItems: 1
+            uniqueItems: true
+            items:
+              type: string
+              enum: [Sun, Sunday, Mon, Monday, Tue, Tues, Tuesday, Wed, Wednesday, Thu, Thur, Thurs, Thursday, Fri, Friday, Sat, Saturday]
+          model:
+            title: Model
+            type: object
+            additionalProperties: false
+            description: Model and optional additional provider selected for this time window.
+            required:
+              - modelName
+            properties:
+              modelName:
+                title: Model Name
+                type: string
+                description: Model name written to the upstream request.
+                minLength: 1
+              providerName:
+                title: Provider Name
+                type: string
+                description: |
+                  Optional additional-provider alias. When omitted, the LLM
+                  proxy's primary provider is used.
+                minLength: 1
+    fallback:
+      title: Fallback
+      type: object
+      additionalProperties: false
+      x-wso2-policy-advanced-param: true
+      description: |
+        Optional target used when no schedule matches. When omitted, the
+        client's original model and provider are left unchanged.
+      required:
+        - modelName
+      properties:
+        modelName:
+          title: Model Name
+          type: string
+          description: Fallback model name written to the upstream request.
+          minLength: 1
+        providerName:
+          title: Provider Name
+          type: string
+          description: |
+            Optional additional-provider alias. When omitted, the LLM proxy's
+            primary provider is used.
+          minLength: 1
+systemParameters:
+  type: object
+  additionalProperties: false
+  required:
+    - requestModel
+  properties:
+    requestModel:
+      type: object
+      additionalProperties: false
+      description: Provider-template location used to rewrite the selected model.
+      required:
+        - location
+        - identifier
+      properties:
+        location:
+          type: string
+          enum: [payload, body, header, queryParam, pathParam]
+        identifier:
+          type: string
+          minLength: 1
