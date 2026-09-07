@@ -154,6 +154,9 @@ func (p *TimeBasedModelRoutingPolicy) applyTarget(
 		mods.Path = &path
 	}
 
+	if reqCtx.SharedContext == nil {
+		reqCtx.SharedContext = &policy.SharedContext{}
+	}
 	if selected.Provider != "" {
 		providerName := selected.Provider
 		mods.UpstreamName = &providerName

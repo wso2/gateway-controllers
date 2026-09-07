@@ -110,6 +110,26 @@ func TestRoutesByConfiguredTimezone(t *testing.T) {
 	}
 }
 
+func TestRoutingInitializesMissingSharedContext(t *testing.T) {
+	fixedNow(t, "2026-08-30T01:00:00Z")
+	raw, err := GetPolicy(policy.PolicyMetadata{}, testParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := requestContext(`{"model":"client-model"}`)
+	ctx.SharedContext = nil
+	action := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
+	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("expected modifications, got %T", action)
+	}
+	if ctx.SharedContext == nil || ctx.Metadata[metadataSelectedModel] != "morning-model" {
+		t.Fatalf("routing metadata was not initialized: %#v", ctx.SharedContext)
+	}
+	if ctx.Metadata[metadataProviderRouting] != "provider-a" {
+		t.Fatalf("provider routing metadata = %v, want provider-a", ctx.Metadata[metadataProviderRouting])
+	}
+}
+
 func TestNoMatchUsesDefaultOrPreservesOriginal(t *testing.T) {
 	fixedNow(t, "2026-08-30T08:00:00Z") // 13:30 in Asia/Colombo.
 	raw, err := GetPolicy(policy.PolicyMetadata{}, testParams())
@@ -368,5 +388,27 @@ func TestQueryRewriteFailureDoesNotPublishRoutingMetadata(t *testing.T) {
 	}
 	if _, exists := ctx.Metadata[metadataSelectedModel]; exists {
 		t.Fatalf("routing metadata must not be published after rewrite failure: %#v", ctx.Metadata)
+	}
+}
+
+func TestCompilePathModelExpressionHandlesNestedLookbehindGroups(t *testing.T) {
+	compiled, group, err := compilePathModelExpression(`(?<=(models|tunedModels)/)[a-z.-]+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := "/v1/tunedModels/client-model:generate"
+	rewritten, ok := rewritePathParameter(path, compiled, group, "routed-model")
+	if !ok {
+		t.Fatal("expected nested lookbehind expression to match")
+	}
+	if rewritten != "/v1/tunedModels/routed-model:generate" {
+		t.Fatalf("rewritten path = %q", rewritten)
+	}
+}
+
+func TestCompilePathModelExpressionRejectsUnbalancedLookbehind(t *testing.T) {
+	_, _, err := compilePathModelExpression(`(?<=(models|tunedModels)/[a-z.-]+`)
+	if err == nil || !strings.Contains(err.Error(), "unterminated positive lookbehind") {
+		t.Fatalf("error = %v, want unterminated positive lookbehind", err)
 	}
 }

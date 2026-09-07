@@ -311,7 +311,36 @@ func compilePathModelExpression(expression string) (*regexp.Regexp, int, error) 
 	normalized := expression
 	modelGroupName := ""
 	if strings.HasPrefix(expression, lookbehindPrefix) {
-		closing := strings.Index(expression[len(lookbehindPrefix):], ")")
+		body := expression[len(lookbehindPrefix):]
+		closing := -1
+		depth := 0
+		inCharacterClass := false
+		for i := 0; i < len(body); i++ {
+			switch body[i] {
+			case '\\':
+				i++
+			case '[':
+				inCharacterClass = true
+			case ']':
+				inCharacterClass = false
+			case '(':
+				if !inCharacterClass {
+					depth++
+				}
+			case ')':
+				if inCharacterClass {
+					continue
+				}
+				if depth == 0 {
+					closing = i
+				} else {
+					depth--
+				}
+			}
+			if closing >= 0 {
+				break
+			}
+		}
 		if closing < 0 {
 			return nil, 0, fmt.Errorf("unterminated positive lookbehind")
 		}
