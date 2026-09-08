@@ -1,5 +1,5 @@
 name: oauth2-generator
-version: v0.9.0
+version: v0.9.1
 displayName: OAuth2 Generator
 description: |
   Injects an upstream OAuth2 credential into a request header before
