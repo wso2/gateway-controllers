@@ -1,0 +1,10 @@
+{
+  "name": "token-count-model-routing",
+  "displayName": "Token-Count Model Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Routes LLM requests to configured models and optional providers using client-configured input-token ranges."
+}
