@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1005,6 +1006,45 @@ func TestJWTAuthPolicy_Regression_claimValueToStringAndGetKeyIds(t *testing.T) {
 	}
 }
 
+// createMockRequestHeaderContextWithAPI is like createMockRequestHeaderContext but sets an API
+// identity, used to prove properties of how the verdict cache treats API identity.
+func createMockRequestHeaderContextWithAPI(headers map[string][]string, apiId, apiName string) *policy.RequestHeaderContext {
+	return &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{
+			RequestID: "test-request-id",
+			Metadata:  make(map[string]interface{}),
+			APIId:     apiId,
+			APIName:   apiName,
+		},
+		Headers: policy.NewHeaders(headers),
+		Path:    "/api/test",
+		Method:  "GET",
+	}
+}
+
+// clearJWKSFetchCache wipes the unrelated, pre-existing JWKS-fetch cache (cacheStore/cacheTTLs)
+// without touching the token verdict cache. Tests that prove the verdict cache is what's being
+// exercised must clear this too — otherwise a token-verdict-cache miss can still "succeed"
+// because the JWKS keys for that URI are separately warm from an earlier request.
+func clearJWKSFetchCache() {
+	ins.cacheMutex.Lock()
+	defer ins.cacheMutex.Unlock()
+	ins.cacheStore = make(map[string]*CachedJWKS)
+	ins.cacheTTLs = make(map[string]time.Time)
+}
+
+// clearConfigMemoizationCaches wipes the three config-lifetime memoization caches
+// (parsedPublicKeys, resolveScopeConstraintsCache, resolveClaimConstraintsCache) so memoized
+// constraints/keys from one test cannot leak into the next.
+func clearConfigMemoizationCaches() {
+	for _, m := range []*sync.Map{&parsedPublicKeys, &resolveScopeConstraintsCache, &resolveClaimConstraintsCache} {
+		m.Range(func(k, _ interface{}) bool {
+			m.Delete(k)
+			return true
+		})
+	}
+}
+
 func resetJWTAuthSingletonCache(t *testing.T) {
 	t.Helper()
 
@@ -1013,6 +1053,7 @@ func resetJWTAuthSingletonCache(t *testing.T) {
 	ins.cacheTTLs = make(map[string]time.Time)
 	ins.cacheMutex.Unlock()
 	_ = ins.currentTokenCache().Clear(context.Background())
+	clearConfigMemoizationCaches()
 
 	t.Cleanup(func() {
 		ins.cacheMutex.Lock()
@@ -1020,6 +1061,7 @@ func resetJWTAuthSingletonCache(t *testing.T) {
 		ins.cacheTTLs = make(map[string]time.Time)
 		ins.cacheMutex.Unlock()
 		_ = ins.currentTokenCache().Clear(context.Background())
+		clearConfigMemoizationCaches()
 	})
 }
 

@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.3.0
+version: v1.3.1
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -307,9 +307,12 @@ systemParameters:
       type: integer
       description: >-
         Maximum total number of cached verification verdicts (successful and failed, combined)
-        to hold across all APIs (a single global bound, not per-API). When the limit is reached,
-        the cache evicts the least-recently-used existing entries to make room. Changing this
-        value rebuilds the shared cache, which flushes all currently cached verdicts.
+        to hold across all APIs (a single global bound, not per-API). Entries themselves are
+        shared across APIs when their verification config (key managers, issuer validation,
+        issuers, leeway) matches, so a token presented to many APIs occupies one entry, not one
+        per API, stretching this budget further. When the limit is reached, the cache evicts the
+        least-recently-used existing entries to make room. Changing this value rebuilds the
+        shared cache, which flushes all currently cached verdicts.
       default: 100000
       minimum: 1
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.cachemaxsize}"
