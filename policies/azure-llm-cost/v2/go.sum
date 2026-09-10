@@ -1,0 +1,8 @@
+github.com/wso2/api-platform/sdk/ai v0.2.3 h1:UPxzogOgNYY7yTZcrkstBJgKimD9fUq/Kdfd6Tpis7Y=
+github.com/wso2/api-platform/sdk/ai v0.2.3/go.mod h1:9GqlYEQQDtGLKMPw3GlS/eqxjhw+QEorKhDfVNFZYgY=
+github.com/wso2/api-platform/sdk/core v0.3.5 h1:EFeKx9bznEQSdZ7pmLB/06JFn0T3HUss0ZxzRPhhx6s=
+github.com/wso2/api-platform/sdk/core v0.3.5/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
+gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+gopkg.in/yaml.v3 v3.0.1 h1:fxVm/GzAzEWqLHuvctI91KS9hhNmmWOoWu0XTYJS7CA=
+gopkg.in/yaml.v3 v3.0.1/go.mod h1:K4uyk7z7BCEPqu6E+C64Yfv1cQ7kz7rIZviUmN+EgEM=
