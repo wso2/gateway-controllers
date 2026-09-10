@@ -31,6 +31,11 @@ const (
 	ModeSet = "set"
 	// ModeAppend appends the configured value, preserving any existing values.
 	ModeAppend = "append"
+
+	// RequestPhaseHeader applies request headers during the header phase.
+	RequestPhaseHeader = "header"
+	// RequestPhaseBody applies request headers after body-derived routing metadata is available.
+	RequestPhaseBody = "body"
 )
 
 // HeaderEntry represents a single header to be set or appended
@@ -39,24 +44,27 @@ type HeaderEntry struct {
 	Value string
 }
 
-// SetHeadersPolicy implements header setting/appending for both request and response
-type SetHeadersPolicy struct{}
-
-var ins = &SetHeadersPolicy{}
+// SetHeadersPolicy implements header setting/appending for both request and response.
+type SetHeadersPolicy struct {
+	requestBodyPhase bool
+}
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
 func GetPolicy(
 	metadata policy.PolicyMetadata,
 	params map[string]interface{},
 ) (policy.Policy, error) {
-	return ins, nil
+	return &SetHeadersPolicy{requestBodyPhase: requestPhaseFromParams(params) == RequestPhaseBody}, nil
 }
 
-
 func (p *SetHeadersPolicy) Mode() policy.ProcessingMode {
+	requestBodyMode := policy.BodyModeSkip
+	if p.requestBodyPhase {
+		requestBodyMode = policy.BodyModeBuffer
+	}
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeProcess,
-		RequestBodyMode:    policy.BodyModeSkip,
+		RequestBodyMode:    requestBodyMode,
 		ResponseHeaderMode: policy.HeaderModeProcess,
 		ResponseBodyMode:   policy.BodyModeSkip,
 	}
@@ -89,6 +97,9 @@ func (p *SetHeadersPolicy) Validate(params map[string]interface{}) error {
 		if err := p.validateHeaderEntries(requestHeadersRaw, "request.headers"); err != nil {
 			return err
 		}
+		if err := p.validateRequestPhase(params); err != nil {
+			return err
+		}
 	}
 
 	// Validate response headers if present
@@ -98,6 +109,29 @@ func (p *SetHeadersPolicy) Validate(params map[string]interface{}) error {
 		}
 	}
 
+	return nil
+}
+
+func (p *SetHeadersPolicy) validateRequestPhase(params map[string]interface{}) error {
+	requestRaw, ok := params["request"]
+	if !ok {
+		return nil
+	}
+	requestMap, ok := requestRaw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	phaseRaw, ok := requestMap["phase"]
+	if !ok {
+		return nil
+	}
+	phase, ok := phaseRaw.(string)
+	if !ok {
+		return fmt.Errorf("request.phase must be a string")
+	}
+	if phase != RequestPhaseHeader && phase != RequestPhaseBody {
+		return fmt.Errorf("request.phase must be either '%s' or '%s'", RequestPhaseHeader, RequestPhaseBody)
+	}
 	return nil
 }
 
@@ -125,6 +159,26 @@ func (p *SetHeadersPolicy) getMode(params map[string]interface{}) string {
 		}
 	}
 	return ModeSet
+}
+
+func (p *SetHeadersPolicy) getRequestPhase(params map[string]interface{}) string {
+	return requestPhaseFromParams(params)
+}
+
+func requestPhaseFromParams(params map[string]interface{}) string {
+	requestRaw, ok := params["request"]
+	if !ok {
+		return RequestPhaseHeader
+	}
+	requestMap, ok := requestRaw.(map[string]interface{})
+	if !ok {
+		return RequestPhaseHeader
+	}
+	phase, ok := requestMap["phase"].(string)
+	if !ok || phase != RequestPhaseBody {
+		return RequestPhaseHeader
+	}
+	return RequestPhaseBody
 }
 
 // getPhaseHeaders extracts headers for a phase, supporting both nested
@@ -262,6 +316,9 @@ func (p *SetHeadersPolicy) buildRequestHeaderEntries(params map[string]interface
 
 // OnRequestHeaders sets or appends headers on the request (v2alpha.RequestHeaderPolicy).
 func (p *SetHeadersPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
+	if p.getRequestPhase(params) == RequestPhaseBody {
+		return policy.UpstreamRequestHeaderModifications{}
+	}
 	entries := p.buildRequestHeaderEntries(params)
 	if p.getMode(params) == ModeAppend {
 		return policy.UpstreamRequestHeaderModifications{
@@ -271,6 +328,18 @@ func (p *SetHeadersPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	return policy.UpstreamRequestHeaderModifications{
 		HeadersToSet: p.convertToSetHeaderMap(entries),
 	}
+}
+
+// OnRequestBody supports provider credentials that depend on a body-phase router.
+func (p *SetHeadersPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContext, params map[string]interface{}) policy.RequestAction {
+	if p.getRequestPhase(params) != RequestPhaseBody {
+		return policy.UpstreamRequestModifications{}
+	}
+	entries := p.buildRequestHeaderEntries(params)
+	if p.getMode(params) == ModeAppend {
+		return policy.UpstreamRequestModifications{HeadersToAppend: p.convertToAppendHeaderMap(entries)}
+	}
+	return policy.UpstreamRequestModifications{HeadersToSet: p.convertToSetHeaderMap(entries)}
 }
 
 // buildResponseHeaderEntries extracts and parses response header entries from params.

@@ -38,6 +38,7 @@ These parameters are configured per-API/route by the API developer:
 |-----------|------|----------|---------|-------------|
 | `mode` | string | No | `set` | Controls how configured headers are applied. `set` overwrites any existing header with the same name; `append` adds the configured value while preserving existing values. Applies to both the request and response phases. Allowed values: `set`, `append`. |
 | `request` | object | No | - | Specifies request-phase header settings. Must contain a `headers` array. At least one of `request` or `response` must be specified. |
+| `request.phase` | string | No | `header` | Controls when request headers are applied. Use `body` when header values depend on metadata produced while processing the request body. Allowed values: `header`, `body`. |
 | `response` | object | No | - | Specifies response-phase header settings. Must contain a `headers` array. At least one of `request` or `response` must be specified. |
 
 ### Request / Response Header Configuration
@@ -51,6 +52,12 @@ Each header entry in the `request.headers` or `response.headers` array must cont
 
 **Note:**
 At least one of `request` or `response` must be specified in the policy configuration. The policy will fail validation if both are omitted. If `mode` is specified, it must be either `set` or `append`.
+
+Request headers use the `header` phase by default. Set `request.phase` to `body`
+when a body-processing policy must run first, for example when model routing
+selects a provider and the provider-specific credentials are resolved from the
+resulting metadata. In body phase, the policy applies the configured request
+headers after the request body has been processed.
 
 Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 

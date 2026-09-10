@@ -1,5 +1,5 @@
 name: set-headers
-version: v1.1.0
+version: v1.1.1
 description: |
   Sets or appends configured headers on requests and/or responses. In "set" mode
   (the default), an existing header with the same name is overwritten; if the same
@@ -28,6 +28,17 @@ parameters:
       additionalProperties: false
       description: Specifies request-phase header settings.
       properties:
+        phase:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            Specifies when request headers are applied. "header" preserves the
+            default request-header phase behavior. "body" applies headers during
+            the request-body phase after body-derived metadata is available.
+          enum:
+          - header
+          - body
+          default: header
         headers:
           type: array
           x-wso2-policy-advanced-param: false
