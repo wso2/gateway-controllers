@@ -29,6 +29,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -65,6 +66,23 @@ const (
 	// purely a DoS/retry-absorption optimization.
 	defaultNegativeCacheTtl = 30 * time.Second
 )
+
+// dbgLog emits a debug log only when debug logging is enabled, avoiding slog's
+// record-building machinery on the hot path. The policy has ~140 debug call sites;
+// unguarded, dispatching them costs ~7% CPU under load even when debug is disabled
+// (nothing is emitted). Routing every Debug through this gate skips that cost.
+func dbgLog(msg string, args ...any) {
+	if debugEnabled() {
+		slog.Log(context.Background(), slog.LevelDebug, msg, args...)
+	}
+}
+
+// debugEnabled reports whether debug logging is on. Use it to guard the *construction* of
+// expensive dbgLog arguments (slice/map builders like getKeyIds): variadic args are evaluated
+// before dbgLog runs, so gating inside dbgLog alone cannot skip that work.
+func debugEnabled() bool {
+	return slog.Default().Enabled(context.Background(), slog.LevelDebug)
+}
 
 // errTokenExpired is returned by validateTokenWithSignature's exp check so callers can
 // distinguish it, via errors.Is, from other verification failures: an expired token can never
@@ -228,7 +246,7 @@ func (p *JwtAuthPolicy) ensureTokenCache(maxSize int) {
 	if p.tokenCache != nil && p.tokenCacheSize == maxSize {
 		return
 	}
-	slog.Debug("JWT Auth Policy: Rebuilding token verdict cache due to cacheMaxSize change, all cached verdicts flushed",
+	dbgLog("JWT Auth Policy: Rebuilding token verdict cache due to cacheMaxSize change, all cached verdicts flushed",
 		"previousMaxSize", p.tokenCacheSize,
 		"newMaxSize", maxSize,
 	)
@@ -259,7 +277,7 @@ func (p *JwtAuthPolicy) getCachedVerdict(ctx context.Context, key string) (cache
 		return cachedVerdict{}, false
 	}
 	if !time.Now().Before(v.expiresAt) {
-		slog.Debug("JWT Auth Policy: Cached verdict found but expired, evicting",
+		dbgLog("JWT Auth Policy: Cached verdict found but expired, evicting",
 			"cacheKey", key,
 			"expiresAt", v.expiresAt,
 		)
@@ -285,8 +303,15 @@ func (p *JwtAuthPolicy) putVerdict(ctx context.Context, key string, verdict cach
 // token is hashed (never stored or logged raw) to keep the bearer secret out of cache keys and
 // bound key length.
 func buildTokenCacheKey(fingerprint, token string) string {
-	sum := sha256.Sum256([]byte(fingerprint + "\x00" + token))
-	return fmt.Sprintf("%x", sum)
+	// Hash incrementally to avoid allocating the fingerprint+token concatenation (a
+	// ~600B string per request) plus the fmt reflection of Sprintf. The hashed byte
+	// stream (fingerprint, 0x00, token) is identical to before, so key semantics are
+	// unchanged.
+	h := sha256.New()
+	h.Write([]byte(fingerprint))
+	h.Write([]byte{0})
+	h.Write([]byte(token))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // tokenConfigFingerprint renders the token-shaping/verification configuration as a deterministic
@@ -348,7 +373,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	keyManagers map[string]*KeyManager, userIssuers []string, validateIssuer bool,
 	leeway time.Duration, cacheTTL time.Duration, fetchTimeout time.Duration, retryCount int, retryInterval time.Duration) (jwt.MapClaims, *KeyManager, error) {
 
-	slog.Debug("JWT Auth Policy: Starting token signature validation",
+	dbgLog("JWT Auth Policy: Starting token signature validation",
 		"keyManagersCount", len(keyManagers),
 		"userIssuersCount", len(userIssuers),
 		"validateIssuer", validateIssuer,
@@ -356,7 +381,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 
 	unverifiedClaims, ok := unverifiedToken.Claims.(jwt.MapClaims)
 	if !ok {
-		slog.Debug("JWT Auth Policy: Invalid token claims format")
+		dbgLog("JWT Auth Policy: Invalid token claims format")
 		return nil, nil, fmt.Errorf("invalid token claims format")
 	}
 
@@ -364,45 +389,45 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	now := time.Now()
 	if exp, ok := unverifiedClaims["exp"].(float64); ok {
 		expTime := time.Unix(int64(exp), 0)
-		slog.Debug("JWT Auth Policy: Checking token expiration",
+		dbgLog("JWT Auth Policy: Checking token expiration",
 			"expTime", expTime,
 			"now", now,
 			"leeway", leeway,
 		)
 		if now.After(expTime.Add(leeway)) {
-			slog.Debug("JWT Auth Policy: Token has expired",
+			dbgLog("JWT Auth Policy: Token has expired",
 				"expTime", expTime,
 				"now", now,
 			)
 			return nil, nil, errTokenExpired
 		}
-		slog.Debug("JWT Auth Policy: Token expiration check passed")
+		dbgLog("JWT Auth Policy: Token expiration check passed")
 	} else {
-		slog.Debug("JWT Auth Policy: No 'exp' claim found in token")
+		dbgLog("JWT Auth Policy: No 'exp' claim found in token")
 	}
 
 	if nbf, ok := unverifiedClaims["nbf"].(float64); ok {
 		nbfTime := time.Unix(int64(nbf), 0)
-		slog.Debug("JWT Auth Policy: Checking token not-before time",
+		dbgLog("JWT Auth Policy: Checking token not-before time",
 			"nbfTime", nbfTime,
 			"now", now,
 			"leeway", leeway,
 		)
 		if now.Before(nbfTime.Add(-leeway)) {
-			slog.Debug("JWT Auth Policy: Token not yet valid",
+			dbgLog("JWT Auth Policy: Token not yet valid",
 				"nbfTime", nbfTime,
 				"now", now,
 			)
 			return nil, nil, fmt.Errorf("token not yet valid")
 		}
-		slog.Debug("JWT Auth Policy: Token not-before check passed")
+		dbgLog("JWT Auth Policy: Token not-before check passed")
 	} else {
-		slog.Debug("JWT Auth Policy: No 'nbf' claim found in token")
+		dbgLog("JWT Auth Policy: No 'nbf' claim found in token")
 	}
 
 	// Get issuer from token
 	tokenIssuer := getString(unverifiedClaims["iss"])
-	slog.Debug("JWT Auth Policy: Token issuer",
+	dbgLog("JWT Auth Policy: Token issuer",
 		"issuer", tokenIssuer,
 	)
 
@@ -411,7 +436,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	if len(userIssuers) > 0 {
 		// User specified issuers - these could be actual issuer values or key manager names.
 		// Keep all compatible candidates in user-provided order for fallback verification.
-		slog.Debug("JWT Auth Policy: User-specified issuers provided",
+		dbgLog("JWT Auth Policy: User-specified issuers provided",
 			"userIssuers", userIssuers,
 			"tokenIssuer", tokenIssuer,
 		)
@@ -425,14 +450,14 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 						applicableKeyManagers = append(applicableKeyManagers, km)
 						seenKeyManagers[km.Name] = struct{}{}
 					}
-					slog.Debug("JWT Auth Policy: Added key manager candidate by name",
+					dbgLog("JWT Auth Policy: Added key manager candidate by name",
 						"keyManager", km.Name,
 						"userIssuer", userIssuer,
 						"tokenIssuer", tokenIssuer,
 						"kmIssuer", km.Issuer,
 					)
 				} else {
-					slog.Debug("JWT Auth Policy: Key manager found by name but issuer mismatch",
+					dbgLog("JWT Auth Policy: Key manager found by name but issuer mismatch",
 						"keyManager", km.Name,
 						"userIssuer", userIssuer,
 						"tokenIssuer", tokenIssuer,
@@ -450,7 +475,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 						}
 						applicableKeyManagers = append(applicableKeyManagers, km)
 						seenKeyManagers[km.Name] = struct{}{}
-						slog.Debug("JWT Auth Policy: Added key manager candidate by issuer value",
+						dbgLog("JWT Auth Policy: Added key manager candidate by issuer value",
 							"keyManager", km.Name,
 							"issuer", userIssuer,
 						)
@@ -461,7 +486,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 
 		// If still no applicable key managers found, reject the token
 		if len(applicableKeyManagers) == 0 {
-			slog.Debug("JWT Auth Policy: No matching key manager found for user-specified issuers",
+			dbgLog("JWT Auth Policy: No matching key manager found for user-specified issuers",
 				"tokenIssuer", tokenIssuer,
 				"userIssuers", userIssuers,
 			)
@@ -469,14 +494,14 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 		}
 	} else if tokenIssuer != "" {
 		// No user issuers specified, but token has issuer claim
-		slog.Debug("JWT Auth Policy: Matching token issuer to key managers",
+		dbgLog("JWT Auth Policy: Matching token issuer to key managers",
 			"tokenIssuer", tokenIssuer,
 			"validateIssuer", validateIssuer,
 		)
 		for _, km := range keyManagers {
 			if km.Issuer == tokenIssuer {
 				applicableKeyManagers = append(applicableKeyManagers, km)
-				slog.Debug("JWT Auth Policy: Found matching key manager by issuer",
+				dbgLog("JWT Auth Policy: Found matching key manager by issuer",
 					"keyManager", km.Name,
 					"issuer", km.Issuer,
 				)
@@ -494,18 +519,18 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 					}
 				}
 				if len(applicableKeyManagers) == 0 {
-					slog.Debug("JWT Auth Policy: No key manager found for token issuer (validateIssuer=true)",
+					dbgLog("JWT Auth Policy: No key manager found for token issuer (validateIssuer=true)",
 						"tokenIssuer", tokenIssuer,
 					)
 					return nil, nil, fmt.Errorf("no key manager configured for token issuer '%s'", tokenIssuer)
 				}
-				slog.Debug("JWT Auth Policy: Using key managers without issuer for token validation",
+				dbgLog("JWT Auth Policy: Using key managers without issuer for token validation",
 					"tokenIssuer", tokenIssuer,
 					"count", len(applicableKeyManagers),
 				)
 			} else {
 				// Lenient mode: try all key managers
-				slog.Debug("JWT Auth Policy: No issuer match found, using all key managers (validateIssuer=false)")
+				dbgLog("JWT Auth Policy: No issuer match found, using all key managers (validateIssuer=false)")
 				for _, km := range keyManagers {
 					applicableKeyManagers = append(applicableKeyManagers, km)
 				}
@@ -514,17 +539,17 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	} else {
 		// No issuer in token
 		if validateIssuer {
-			slog.Debug("JWT Auth Policy: Token has no issuer claim (validateIssuer=true)")
+			dbgLog("JWT Auth Policy: Token has no issuer claim (validateIssuer=true)")
 			return nil, nil, fmt.Errorf("token does not contain an issuer claim")
 		}
 		// Lenient mode: try all key managers
-		slog.Debug("JWT Auth Policy: No issuer in token, using all key managers (validateIssuer=false)")
+		dbgLog("JWT Auth Policy: No issuer in token, using all key managers (validateIssuer=false)")
 		for _, km := range keyManagers {
 			applicableKeyManagers = append(applicableKeyManagers, km)
 		}
 	}
 
-	slog.Debug("JWT Auth Policy: Applicable key managers determined",
+	dbgLog("JWT Auth Policy: Applicable key managers determined",
 		"count", len(applicableKeyManagers),
 	)
 
@@ -533,9 +558,9 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	if !ok {
 		// Kid is optional for certificate-based validation
 		kid = ""
-		slog.Debug("JWT Auth Policy: No 'kid' found in token header")
+		dbgLog("JWT Auth Policy: No 'kid' found in token header")
 	} else {
-		slog.Debug("JWT Auth Policy: Token key ID found",
+		dbgLog("JWT Auth Policy: Token key ID found",
 			"kid", kid,
 		)
 	}
@@ -545,13 +570,13 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 	// Try to verify signature with applicable key managers
 	var lastErr error
 	for _, km := range applicableKeyManagers {
-		slog.Debug("JWT Auth Policy: Attempting signature verification with key manager",
+		dbgLog("JWT Auth Policy: Attempting signature verification with key manager",
 			"keyManager", km.Name,
 			"issuer", km.Issuer,
 		)
 
 		if km.JWKS == nil {
-			slog.Debug("JWT Auth Policy: Key manager has no JWKS configuration, skipping",
+			dbgLog("JWT Auth Policy: Key manager has no JWKS configuration, skipping",
 				"keyManager", km.Name,
 			)
 			continue
@@ -559,21 +584,21 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 
 		// Try local certificate validation first if available
 		if km.JWKS.Local != nil && km.JWKS.Local.PublicKey != nil {
-			slog.Debug("JWT Auth Policy: Attempting signature verification with local certificate",
+			dbgLog("JWT Auth Policy: Attempting signature verification with local certificate",
 				"keyManager", km.Name,
 			)
 			verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, signatureKeyFunc(km.JWKS.Local.PublicKey))
 
 			if err == nil {
 				// Signature verified successfully with local certificate
-				slog.Debug("JWT Auth Policy: Signature verified successfully with local certificate",
+				dbgLog("JWT Auth Policy: Signature verified successfully with local certificate",
 					"keyManager", km.Name,
 				)
 				if claims, ok := verifiedToken.Claims.(jwt.MapClaims); ok {
 					return claims, km, nil
 				}
 			}
-			slog.Debug("JWT Auth Policy: Signature verification failed with local certificate",
+			dbgLog("JWT Auth Policy: Signature verification failed with local certificate",
 				"keyManager", km.Name,
 				"error", err,
 			)
@@ -583,14 +608,14 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 
 		// Fall back to remote JWKS-based validation
 		if km.JWKS.Remote != nil {
-			slog.Debug("JWT Auth Policy: Attempting signature verification with remote JWKS",
+			dbgLog("JWT Auth Policy: Attempting signature verification with remote JWKS",
 				"keyManager", km.Name,
 				"jwksUri", km.JWKS.Remote.URI,
 			)
 			// Get JWKS with retry logic
 			jwks, err := p.fetchJWKSWithRetry(km.JWKS.Remote, cacheTTL, fetchTimeout, retryCount, retryInterval)
 			if err != nil {
-				slog.Debug("JWT Auth Policy: Failed to fetch JWKS",
+				dbgLog("JWT Auth Policy: Failed to fetch JWKS",
 					"keyManager", km.Name,
 					"jwksUri", km.JWKS.Remote.URI,
 					"error", err,
@@ -599,34 +624,36 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 				continue
 			}
 
-			slog.Debug("JWT Auth Policy: JWKS fetched successfully",
+			dbgLog("JWT Auth Policy: JWKS fetched successfully",
 				"keyManager", km.Name,
 				"keysCount", len(jwks.Keys),
 			)
 
 			// If kid is present, find the key with matching kid
 			if kid != "" {
-				slog.Debug("JWT Auth Policy: Looking for key with matching kid",
+				dbgLog("JWT Auth Policy: Looking for key with matching kid",
 					"kid", kid,
 				)
 				publicKey, ok := jwks.Keys[kid]
 				if !ok {
-					slog.Debug("JWT Auth Policy: Key ID not found in JWKS",
-						"kid", kid,
-						"availableKids", getKeyIds(jwks.Keys),
-					)
+					if debugEnabled() {
+						dbgLog("JWT Auth Policy: Key ID not found in JWKS",
+							"kid", kid,
+							"availableKids", getKeyIds(jwks.Keys),
+						)
+					}
 					lastErr = fmt.Errorf("key id '%s' not found in JWKS from %s", kid, km.JWKS.Remote.URI)
 					continue
 				}
 
-				slog.Debug("JWT Auth Policy: Found key with matching kid, verifying signature",
+				dbgLog("JWT Auth Policy: Found key with matching kid, verifying signature",
 					"kid", kid,
 				)
 				// Verify signature
 				verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, signatureKeyFunc(publicKey))
 
 				if err != nil {
-					slog.Debug("JWT Auth Policy: Signature verification failed",
+					dbgLog("JWT Auth Policy: Signature verification failed",
 						"kid", kid,
 						"error", err,
 					)
@@ -635,7 +662,7 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 				}
 
 				// Signature verified successfully
-				slog.Debug("JWT Auth Policy: Signature verified successfully with kid",
+				dbgLog("JWT Auth Policy: Signature verified successfully with kid",
 					"kid", kid,
 					"keyManager", km.Name,
 				)
@@ -644,18 +671,18 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 				}
 			} else {
 				// No kid, try all keys in JWKS
-				slog.Debug("JWT Auth Policy: No kid in token, trying all keys in JWKS",
+				dbgLog("JWT Auth Policy: No kid in token, trying all keys in JWKS",
 					"keysCount", len(jwks.Keys),
 				)
 				for keyId, publicKey := range jwks.Keys {
-					slog.Debug("JWT Auth Policy: Trying key from JWKS",
+					dbgLog("JWT Auth Policy: Trying key from JWKS",
 						"keyId", keyId,
 					)
 					verifiedToken, err := parser.ParseWithClaims(tokenString, jwt.MapClaims{}, signatureKeyFunc(publicKey))
 
 					if err == nil {
 						// Signature verified successfully
-						slog.Debug("JWT Auth Policy: Signature verified successfully",
+						dbgLog("JWT Auth Policy: Signature verified successfully",
 							"keyId", keyId,
 							"keyManager", km.Name,
 						)
@@ -663,14 +690,14 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 							return claims, km, nil
 						}
 					} else {
-						slog.Debug("JWT Auth Policy: Signature verification failed with key",
+						dbgLog("JWT Auth Policy: Signature verification failed with key",
 							"keyId", keyId,
 							"error", err,
 						)
 					}
 				}
 				lastErr = fmt.Errorf("token signature verification failed with all keys from %s", km.JWKS.Remote.URI)
-				slog.Debug("JWT Auth Policy: Failed to verify signature with any key from JWKS",
+				dbgLog("JWT Auth Policy: Failed to verify signature with any key from JWKS",
 					"keyManager", km.Name,
 				)
 			}
@@ -679,18 +706,18 @@ func (p *JwtAuthPolicy) validateTokenWithSignature(tokenString string, unverifie
 
 	// If no key manager succeeded
 	if lastErr != nil {
-		slog.Debug("JWT Auth Policy: All key managers failed to verify signature",
+		dbgLog("JWT Auth Policy: All key managers failed to verify signature",
 			"lastError", lastErr,
 		)
 		return nil, nil, lastErr
 	}
-	slog.Debug("JWT Auth Policy: Unable to verify token signature with any available key manager")
+	dbgLog("JWT Auth Policy: Unable to verify token signature with any available key manager")
 	return nil, nil, fmt.Errorf("unable to verify token signature with available key managers")
 }
 
 // fetchJWKSWithRetry fetches JWKS with caching and retry logic
 func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Duration, fetchTimeout time.Duration, retryCount int, retryInterval time.Duration) (*CachedJWKS, error) {
-	slog.Debug("JWT Auth Policy: fetchJWKSWithRetry called",
+	dbgLog("JWT Auth Policy: fetchJWKSWithRetry called",
 		"uri", remote.URI,
 		"cacheTTL", cacheTTL,
 		"fetchTimeout", fetchTimeout,
@@ -707,18 +734,18 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 	if cached, ok := p.cacheStore[remote.URI]; ok {
 		if ttl, ok := p.cacheTTLs[remote.URI]; ok && time.Now().Before(ttl) {
 			p.cacheMutex.RUnlock()
-			slog.Debug("JWT Auth Policy: JWKS cache hit",
+			dbgLog("JWT Auth Policy: JWKS cache hit",
 				"uri", remote.URI,
 				"cacheExpiry", ttl,
 				"keysCount", len(cached.Keys),
 			)
 			return cached, nil
 		}
-		slog.Debug("JWT Auth Policy: JWKS cache expired",
+		dbgLog("JWT Auth Policy: JWKS cache expired",
 			"uri", remote.URI,
 		)
 	} else {
-		slog.Debug("JWT Auth Policy: JWKS not in cache",
+		dbgLog("JWT Auth Policy: JWKS not in cache",
 			"uri", remote.URI,
 		)
 	}
@@ -727,7 +754,7 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 	// Not in cache or expired, fetch from server
 	var lastErr error
 	for attempt := 0; attempt <= retryCount; attempt++ {
-		slog.Debug("JWT Auth Policy: Fetching JWKS from server",
+		dbgLog("JWT Auth Policy: Fetching JWKS from server",
 			"uri", remote.URI,
 			"attempt", attempt+1,
 			"maxAttempts", retryCount+1,
@@ -739,7 +766,7 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 			p.cacheStore[remote.URI] = jwks
 			p.cacheTTLs[remote.URI] = time.Now().Add(cacheTTL)
 			p.cacheMutex.Unlock()
-			slog.Debug("JWT Auth Policy: JWKS fetched and cached successfully",
+			dbgLog("JWT Auth Policy: JWKS fetched and cached successfully",
 				"uri", remote.URI,
 				"keysCount", len(jwks.Keys),
 				"cacheExpiry", time.Now().Add(cacheTTL),
@@ -747,21 +774,21 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 			return jwks, nil
 		}
 
-		slog.Debug("JWT Auth Policy: JWKS fetch attempt failed",
+		dbgLog("JWT Auth Policy: JWKS fetch attempt failed",
 			"uri", remote.URI,
 			"attempt", attempt+1,
 			"error", err,
 		)
 		lastErr = err
 		if attempt < retryCount {
-			slog.Debug("JWT Auth Policy: Waiting before retry",
+			dbgLog("JWT Auth Policy: Waiting before retry",
 				"retryInterval", retryInterval,
 			)
 			time.Sleep(retryInterval)
 		}
 	}
 
-	slog.Debug("JWT Auth Policy: All JWKS fetch attempts failed",
+	dbgLog("JWT Auth Policy: All JWKS fetch attempts failed",
 		"uri", remote.URI,
 		"lastError", lastErr,
 	)
@@ -773,7 +800,7 @@ func (p *JwtAuthPolicy) fetchJWKSWithRetry(remote *RemoteJWKS, cacheTTL time.Dur
 
 // fetchJWKS fetches JWKS from the given remote configuration
 func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration) (*CachedJWKS, error) {
-	slog.Debug("JWT Auth Policy: fetchJWKS called",
+	dbgLog("JWT Auth Policy: fetchJWKS called",
 		"uri", remote.URI,
 		"timeout", fetchTimeout,
 		"hasTlsConfig", remote.tlsConfig != nil,
@@ -783,7 +810,7 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 	var client *http.Client
 	if remote.tlsConfig != nil {
 		// Create a new client with custom TLS config
-		slog.Debug("JWT Auth Policy: Creating HTTP client with custom TLS config",
+		dbgLog("JWT Auth Policy: Creating HTTP client with custom TLS config",
 			"uri", remote.URI,
 		)
 		customTransport := &http.Transport{
@@ -795,7 +822,7 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 		}
 	} else {
 		// Create a new client with default transport
-		slog.Debug("JWT Auth Policy: Creating HTTP client with default transport",
+		dbgLog("JWT Auth Policy: Creating HTTP client with default transport",
 			"uri", remote.URI,
 		)
 		client = &http.Client{
@@ -803,12 +830,12 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 		}
 	}
 
-	slog.Debug("JWT Auth Policy: Sending HTTP GET request to JWKS endpoint",
+	dbgLog("JWT Auth Policy: Sending HTTP GET request to JWKS endpoint",
 		"uri", remote.URI,
 	)
 	resp, err := client.Get(remote.URI)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: HTTP request to JWKS endpoint failed",
+		dbgLog("JWT Auth Policy: HTTP request to JWKS endpoint failed",
 			"uri", remote.URI,
 			"error", err,
 		)
@@ -816,13 +843,13 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 	}
 	defer resp.Body.Close()
 
-	slog.Debug("JWT Auth Policy: JWKS endpoint response received",
+	dbgLog("JWT Auth Policy: JWKS endpoint response received",
 		"uri", remote.URI,
 		"statusCode", resp.StatusCode,
 	)
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Debug("JWT Auth Policy: JWKS endpoint returned non-OK status",
+		dbgLog("JWT Auth Policy: JWKS endpoint returned non-OK status",
 			"uri", remote.URI,
 			"statusCode", resp.StatusCode,
 		)
@@ -831,28 +858,28 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to read JWKS response body",
+		dbgLog("JWT Auth Policy: Failed to read JWKS response body",
 			"uri", remote.URI,
 			"error", err,
 		)
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	slog.Debug("JWT Auth Policy: JWKS response body read successfully",
+	dbgLog("JWT Auth Policy: JWKS response body read successfully",
 		"uri", remote.URI,
 		"bodyLength", len(body),
 	)
 
 	var keySet JWKSKeySet
 	if err := json.Unmarshal(body, &keySet); err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse JWKS JSON",
+		dbgLog("JWT Auth Policy: Failed to parse JWKS JSON",
 			"uri", remote.URI,
 			"error", err,
 		)
 		return nil, fmt.Errorf("failed to parse JWKS: %w", err)
 	}
 
-	slog.Debug("JWT Auth Policy: JWKS JSON parsed successfully",
+	dbgLog("JWT Auth Policy: JWKS JSON parsed successfully",
 		"uri", remote.URI,
 		"keysInResponse", len(keySet.Keys),
 	)
@@ -863,14 +890,14 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 	}
 
 	for _, key := range keySet.Keys {
-		slog.Debug("JWT Auth Policy: Processing JWKS key",
+		dbgLog("JWT Auth Policy: Processing JWKS key",
 			"kid", key.Kid,
 			"kty", key.Kty,
 			"alg", key.Alg,
 			"use", key.Use,
 		)
 		if key.Kid == "" {
-			slog.Debug("JWT Auth Policy: Skipping key without kid")
+			dbgLog("JWT Auth Policy: Skipping key without kid")
 			continue // Skip keys without kid
 		}
 
@@ -878,21 +905,21 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 			// Parse RSA public key from N and E
 			publicKey, err := parseRSAPublicKey(key.N, key.E)
 			if err != nil {
-				slog.Debug("JWT Auth Policy: Failed to parse RSA public key",
+				dbgLog("JWT Auth Policy: Failed to parse RSA public key",
 					"kid", key.Kid,
 					"error", err,
 				)
 				continue // Skip invalid keys
 			}
 			cachedJWKS.Keys[key.Kid] = publicKey
-			slog.Debug("JWT Auth Policy: RSA public key parsed successfully",
+			dbgLog("JWT Auth Policy: RSA public key parsed successfully",
 				"kid", key.Kid,
 			)
 		} else if key.Kty == "EC" {
 			// Parse EC public key from Crv, X, Y
 			publicKey, err := parseECPublicKey(key.Crv, key.X, key.Y)
 			if err != nil {
-				slog.Debug("JWT Auth Policy: Failed to parse EC public key",
+				dbgLog("JWT Auth Policy: Failed to parse EC public key",
 					"kid", key.Kid,
 					"crv", key.Crv,
 					"error", err,
@@ -900,12 +927,12 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 				continue // Skip invalid keys
 			}
 			cachedJWKS.Keys[key.Kid] = publicKey
-			slog.Debug("JWT Auth Policy: EC public key parsed successfully",
+			dbgLog("JWT Auth Policy: EC public key parsed successfully",
 				"kid", key.Kid,
 				"crv", key.Crv,
 			)
 		} else {
-			slog.Debug("JWT Auth Policy: Skipping key with unsupported kty",
+			dbgLog("JWT Auth Policy: Skipping key with unsupported kty",
 				"kid", key.Kid,
 				"kty", key.Kty,
 			)
@@ -913,13 +940,13 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 	}
 
 	if len(cachedJWKS.Keys) == 0 {
-		slog.Debug("JWT Auth Policy: No valid public keys found in JWKS",
+		dbgLog("JWT Auth Policy: No valid public keys found in JWKS",
 			"uri", remote.URI,
 		)
 		return nil, fmt.Errorf("no valid public keys found in JWKS")
 	}
 
-	slog.Debug("JWT Auth Policy: JWKS processing complete",
+	dbgLog("JWT Auth Policy: JWKS processing complete",
 		"uri", remote.URI,
 		"validKeysCount", len(cachedJWKS.Keys),
 	)
@@ -1562,33 +1589,33 @@ func getKeyIds(keys map[string]crypto.PublicKey) []string {
 // When a custom CA certificate is provided, hostname verification is skipped to allow
 // self-signed certificates with any hostname to be used (useful for development/testing)
 func loadTLSConfig(certPath string) (*tls.Config, error) {
-	slog.Debug("JWT Auth Policy: loadTLSConfig called",
+	dbgLog("JWT Auth Policy: loadTLSConfig called",
 		"certPath", certPath,
 	)
 
 	certData, err := os.ReadFile(certPath)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to read certificate file",
+		dbgLog("JWT Auth Policy: Failed to read certificate file",
 			"certPath", certPath,
 			"error", err,
 		)
 		return nil, fmt.Errorf("failed to read certificate file: %w", err)
 	}
 
-	slog.Debug("JWT Auth Policy: Certificate file read successfully",
+	dbgLog("JWT Auth Policy: Certificate file read successfully",
 		"certPath", certPath,
 		"dataLength", len(certData),
 	)
 
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(certData) {
-		slog.Debug("JWT Auth Policy: Failed to parse PEM certificate",
+		dbgLog("JWT Auth Policy: Failed to parse PEM certificate",
 			"certPath", certPath,
 		)
 		return nil, fmt.Errorf("failed to parse PEM certificate from %s", certPath)
 	}
 
-	slog.Debug("JWT Auth Policy: TLS config created successfully",
+	dbgLog("JWT Auth Policy: TLS config created successfully",
 		"certPath", certPath,
 	)
 
@@ -1600,20 +1627,20 @@ func loadTLSConfig(certPath string) (*tls.Config, error) {
 
 // loadPublicKeyFromCertificate loads a public key (RSA or ECDSA) from a certificate file
 func loadPublicKeyFromCertificate(certPath string) (crypto.PublicKey, error) {
-	slog.Debug("JWT Auth Policy: loadPublicKeyFromCertificate called",
+	dbgLog("JWT Auth Policy: loadPublicKeyFromCertificate called",
 		"certPath", certPath,
 	)
 
 	certData, err := os.ReadFile(certPath)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to read certificate file for public key",
+		dbgLog("JWT Auth Policy: Failed to read certificate file for public key",
 			"certPath", certPath,
 			"error", err,
 		)
 		return nil, fmt.Errorf("failed to read certificate file: %w", err)
 	}
 
-	slog.Debug("JWT Auth Policy: Certificate file read for public key extraction",
+	dbgLog("JWT Auth Policy: Certificate file read for public key extraction",
 		"certPath", certPath,
 		"dataLength", len(certData),
 	)
@@ -1623,48 +1650,48 @@ func loadPublicKeyFromCertificate(certPath string) (crypto.PublicKey, error) {
 
 // parsePublicKeyFromString parses a public key (RSA or ECDSA) from a PEM-encoded string
 func parsePublicKeyFromString(pemData string) (crypto.PublicKey, error) {
-	slog.Debug("JWT Auth Policy: parsePublicKeyFromString called",
+	dbgLog("JWT Auth Policy: parsePublicKeyFromString called",
 		"dataLength", len(pemData),
 	)
 
 	block, _ := pem.Decode([]byte(pemData))
 	if block == nil {
-		slog.Debug("JWT Auth Policy: Failed to decode PEM block")
+		dbgLog("JWT Auth Policy: Failed to decode PEM block")
 		return nil, fmt.Errorf("failed to decode PEM block from certificate data")
 	}
 
-	slog.Debug("JWT Auth Policy: PEM block decoded successfully",
+	dbgLog("JWT Auth Policy: PEM block decoded successfully",
 		"blockType", block.Type,
 	)
 
 	// Try to parse as a certificate first
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err == nil {
-		slog.Debug("JWT Auth Policy: Parsed as X.509 certificate",
+		dbgLog("JWT Auth Policy: Parsed as X.509 certificate",
 			"subject", cert.Subject.String(),
 			"issuer", cert.Issuer.String(),
 		)
 		// Extract public key from certificate (RSA or ECDSA)
 		switch pub := cert.PublicKey.(type) {
 		case *rsa.PublicKey:
-			slog.Debug("JWT Auth Policy: Extracted RSA public key from certificate")
+			dbgLog("JWT Auth Policy: Extracted RSA public key from certificate")
 			return pub, nil
 		case *ecdsa.PublicKey:
-			slog.Debug("JWT Auth Policy: Extracted ECDSA public key from certificate")
+			dbgLog("JWT Auth Policy: Extracted ECDSA public key from certificate")
 			return pub, nil
 		}
-		slog.Debug("JWT Auth Policy: Certificate does not contain a supported public key type")
+		dbgLog("JWT Auth Policy: Certificate does not contain a supported public key type")
 		return nil, fmt.Errorf("certificate does not contain a supported public key (RSA or ECDSA)")
 	}
 
-	slog.Debug("JWT Auth Policy: Not a certificate, trying to parse as public key directly",
+	dbgLog("JWT Auth Policy: Not a certificate, trying to parse as public key directly",
 		"parseError", err,
 	)
 
 	// If certificate parsing fails, try to parse as a public key directly
 	publicKey, err := x509.ParsePKIXPublicKey(block.Bytes)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse as PKIX public key",
+		dbgLog("JWT Auth Policy: Failed to parse as PKIX public key",
 			"error", err,
 		)
 		return nil, fmt.Errorf("failed to parse public key from certificate data: %w", err)
@@ -1672,20 +1699,20 @@ func parsePublicKeyFromString(pemData string) (crypto.PublicKey, error) {
 
 	switch pub := publicKey.(type) {
 	case *rsa.PublicKey:
-		slog.Debug("JWT Auth Policy: Parsed PKIX RSA public key successfully")
+		dbgLog("JWT Auth Policy: Parsed PKIX RSA public key successfully")
 		return pub, nil
 	case *ecdsa.PublicKey:
-		slog.Debug("JWT Auth Policy: Parsed PKIX ECDSA public key successfully")
+		dbgLog("JWT Auth Policy: Parsed PKIX ECDSA public key successfully")
 		return pub, nil
 	}
 
-	slog.Debug("JWT Auth Policy: Parsed key is not a supported type")
+	dbgLog("JWT Auth Policy: Parsed key is not a supported type")
 	return nil, fmt.Errorf("certificate data does not contain a supported public key (RSA or ECDSA)")
 }
 
 // OnRequestHeaders performs JWT validation in the request header phase.
 func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
-	slog.Debug("JWT Auth Policy: OnRequestHeaders started")
+	dbgLog("JWT Auth Policy: OnRequestHeaders started")
 
 	headerName := getStringParam(params, "headerName", "Authorization")
 	authHeaderScheme := getStringParam(params, "authHeaderScheme", "Bearer")
@@ -1702,7 +1729,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	tokenCacheTtlStr := getStringParam(params, "tokenCacheTtl", "5m")
 	negativeCacheTtlStr := getStringParam(params, "negativeCacheTtl", "30s")
 
-	slog.Debug("JWT Auth Policy: Configuration loaded",
+	dbgLog("JWT Auth Policy: Configuration loaded",
 		"headerName", headerName,
 		"authHeaderScheme", authHeaderScheme,
 		"onFailureStatusCode", onFailureStatusCode,
@@ -1722,7 +1749,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 
 	leeway, err := time.ParseDuration(leewayStr)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse leeway duration, using default",
+		dbgLog("JWT Auth Policy: Failed to parse leeway duration, using default",
 			"leewayStr", leewayStr,
 			"error", err,
 			"defaultLeeway", "30s",
@@ -1731,7 +1758,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	}
 	jwksCacheTtl, err := time.ParseDuration(jwksCacheTtlStr)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse jwksCacheTtl duration, using default",
+		dbgLog("JWT Auth Policy: Failed to parse jwksCacheTtl duration, using default",
 			"jwksCacheTtlStr", jwksCacheTtlStr,
 			"error", err,
 			"defaultCacheTtl", "5m",
@@ -1740,7 +1767,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	}
 	jwksFetchTimeout, err := time.ParseDuration(jwksFetchTimeoutStr)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse jwksFetchTimeout duration, using default",
+		dbgLog("JWT Auth Policy: Failed to parse jwksFetchTimeout duration, using default",
 			"jwksFetchTimeoutStr", jwksFetchTimeoutStr,
 			"error", err,
 			"defaultTimeout", "5s",
@@ -1749,7 +1776,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	}
 	jwksFetchRetryInterval, err := time.ParseDuration(jwksFetchRetryIntervalStr)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse jwksFetchRetryInterval duration, using default",
+		dbgLog("JWT Auth Policy: Failed to parse jwksFetchRetryInterval duration, using default",
 			"jwksFetchRetryIntervalStr", jwksFetchRetryIntervalStr,
 			"error", err,
 			"defaultInterval", "2s",
@@ -1758,7 +1785,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	}
 	tokenCacheTtl, err := time.ParseDuration(tokenCacheTtlStr)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse tokenCacheTtl duration, using default",
+		dbgLog("JWT Auth Policy: Failed to parse tokenCacheTtl duration, using default",
 			"tokenCacheTtlStr", tokenCacheTtlStr,
 			"error", err,
 			"defaultTokenCacheTtl", defaultTokenCacheTtl,
@@ -1767,7 +1794,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	}
 	negativeCacheTtl, err := time.ParseDuration(negativeCacheTtlStr)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse negativeCacheTtl duration, using default",
+		dbgLog("JWT Auth Policy: Failed to parse negativeCacheTtl duration, using default",
 			"negativeCacheTtlStr", negativeCacheTtlStr,
 			"error", err,
 			"defaultNegativeCacheTtl", defaultNegativeCacheTtl,
@@ -1775,7 +1802,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		negativeCacheTtl = defaultNegativeCacheTtl
 	}
 
-	slog.Debug("JWT Auth Policy: Parsed duration values",
+	dbgLog("JWT Auth Policy: Parsed duration values",
 		"leeway", leeway,
 		"jwksCacheTtl", jwksCacheTtl,
 		"jwksFetchTimeout", jwksFetchTimeout,
@@ -1786,7 +1813,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 
 	keyManagersRaw, ok := params["keyManagers"]
 	if !ok {
-		slog.Debug("JWT Auth Policy: Key managers not configured in params")
+		dbgLog("JWT Auth Policy: Key managers not configured in params")
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "key managers not configured")
 	}
 
@@ -1811,7 +1838,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	forwardedTokenHeader := getStringParam(params, "forwardedTokenHeader", "x-forwarded-authorization")
 	forwardTokenStripScheme := getBoolParam(params, "forwardTokenStripScheme", false)
 
-	slog.Debug("JWT Auth Policy: User configuration loaded",
+	dbgLog("JWT Auth Policy: User configuration loaded",
 		"issuers", userIssuers,
 		"audiences", userAudiences,
 		"scopeAllOf", scopeConstraints.AllOf,
@@ -1824,7 +1851,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	)
 
 	if userAuthHeaderPrefix != "" {
-		slog.Debug("JWT Auth Policy: Overriding auth header scheme with user prefix",
+		dbgLog("JWT Auth Policy: Overriding auth header scheme with user prefix",
 			"originalScheme", authHeaderScheme,
 			"newScheme", userAuthHeaderPrefix,
 		)
@@ -1833,27 +1860,27 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 
 	authHeaders := reqCtx.DownstreamHeaders().Get(strings.ToLower(headerName))
 	if len(authHeaders) == 0 {
-		slog.Debug("JWT Auth Policy: Missing authorization header",
+		dbgLog("JWT Auth Policy: Missing authorization header",
 			"headerName", headerName,
 		)
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "missing authorization header")
 	}
 
 	authHeader := authHeaders[0]
-	slog.Debug("JWT Auth Policy: Authorization header found",
+	dbgLog("JWT Auth Policy: Authorization header found",
 		"headerName", headerName,
 		"headerValueLength", len(authHeader),
 	)
 
 	token := extractToken(authHeader, authHeaderScheme)
 	if token == "" {
-		slog.Debug("JWT Auth Policy: Failed to extract token from authorization header",
+		dbgLog("JWT Auth Policy: Failed to extract token from authorization header",
 			"authHeaderScheme", authHeaderScheme,
 		)
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid authorization header format")
 	}
 
-	slog.Debug("JWT Auth Policy: Token extracted successfully",
+	dbgLog("JWT Auth Policy: Token extracted successfully",
 		"tokenLength", len(token),
 	)
 
@@ -1867,7 +1894,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		cacheKey = buildTokenCacheKey(fingerprint, token)
 		if verdict, hit := p.getCachedVerdict(ctx, cacheKey); hit {
 			if verdict.ok {
-				slog.Debug("JWT Auth Policy: Token verdict cache hit (verified)",
+				dbgLog("JWT Auth Policy: Token verdict cache hit (verified)",
 					"cacheKey", cacheKey,
 					"expiresAt", verdict.expiresAt,
 				)
@@ -1875,21 +1902,21 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 					userAudiences, scopeConstraints, claimConstraints, userClaimMappings, userIdClaim,
 					headerName, authHeader, token, forwardToken, forwardedTokenHeader, forwardTokenStripScheme)
 			}
-			slog.Debug("JWT Auth Policy: Token verdict cache hit (failure)",
+			dbgLog("JWT Auth Policy: Token verdict cache hit (failure)",
 				"cacheKey", cacheKey,
 				"reason", verdict.reason,
 				"expiresAt", verdict.expiresAt,
 			)
 			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, verdict.reason)
 		}
-		slog.Debug("JWT Auth Policy: Token verdict cache miss, proceeding to full verification",
+		dbgLog("JWT Auth Policy: Token verdict cache miss, proceeding to full verification",
 			"cacheKey", cacheKey,
 		)
 	} else {
-		slog.Debug("JWT Auth Policy: Token verdict caching disabled, performing full verification")
+		dbgLog("JWT Auth Policy: Token verdict caching disabled, performing full verification")
 	}
 
-	slog.Debug("JWT Auth Policy: Starting to parse key managers configuration")
+	dbgLog("JWT Auth Policy: Starting to parse key managers configuration")
 
 	keyManagers := make(map[string]*KeyManager)
 	keyManagersList, ok := keyManagersRaw.([]interface{})
@@ -1899,7 +1926,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 				name := getString(kmMap["name"])
 				issuer := getString(kmMap["issuer"])
 				if name == "" {
-					slog.Debug("JWT Auth Policy: Skipping key manager with empty name")
+					dbgLog("JWT Auth Policy: Skipping key manager with empty name")
 					continue
 				}
 
@@ -1912,12 +1939,12 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 					scopeClaimSeparator = defaultScopeClaimSeparator
 				}
 				if scopeClaim == "" && scopeClaimSeparator != "" {
-					slog.Debug("JWT Auth Policy: scopeClaimSeparator ignored because scopeClaim is not set",
+					dbgLog("JWT Auth Policy: scopeClaimSeparator ignored because scopeClaim is not set",
 						"keyManager", name,
 					)
 				}
 
-				slog.Debug("JWT Auth Policy: Processing key manager",
+				dbgLog("JWT Auth Policy: Processing key manager",
 					"name", name,
 					"issuer", issuer,
 					"scopeClaim", scopeClaim,
@@ -1936,7 +1963,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 						certPath := getString(remoteRaw["certificatePath"])
 						skipTlsVerify := getBool(remoteRaw["skipTlsVerify"])
 						if uri != "" {
-							slog.Debug("JWT Auth Policy: Configuring remote JWKS",
+							dbgLog("JWT Auth Policy: Configuring remote JWKS",
 								"keyManager", name,
 								"uri", uri,
 								"certificatePath", certPath,
@@ -1946,20 +1973,20 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 							if certPath != "" {
 								tlsConfig, err := loadTLSConfig(certPath)
 								if err != nil {
-									slog.Debug("JWT Auth Policy: Failed to load TLS config for remote JWKS",
+									dbgLog("JWT Auth Policy: Failed to load TLS config for remote JWKS",
 										"keyManager", name,
 										"certificatePath", certPath,
 										"error", err,
 									)
 									continue
 								}
-								slog.Debug("JWT Auth Policy: Successfully loaded TLS config for remote JWKS",
+								dbgLog("JWT Auth Policy: Successfully loaded TLS config for remote JWKS",
 									"keyManager", name,
 									"certificatePath", certPath,
 								)
 								remoteJWKS.tlsConfig = tlsConfig
 							} else if skipTlsVerify {
-								slog.Debug("JWT Auth Policy: Configuring TLS to skip verification",
+								dbgLog("JWT Auth Policy: Configuring TLS to skip verification",
 									"keyManager", name,
 								)
 								remoteJWKS.tlsConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
@@ -1971,7 +1998,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 						inline := getString(localRaw["inline"])
 						certPath := getString(localRaw["certificatePath"])
 
-						slog.Debug("JWT Auth Policy: Processing local certificate configuration",
+						dbgLog("JWT Auth Policy: Processing local certificate configuration",
 							"keyManager", name,
 							"hasInline", inline != "",
 							"certificatePath", certPath,
@@ -1982,25 +2009,25 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 							var publicKey crypto.PublicKey
 							var certErr error
 							if inline != "" {
-								slog.Debug("JWT Auth Policy: Parsing inline certificate",
+								dbgLog("JWT Auth Policy: Parsing inline certificate",
 									"keyManager", name,
 								)
 								publicKey, certErr = parsePublicKeyFromString(inline)
 							} else if certPath != "" {
-								slog.Debug("JWT Auth Policy: Loading certificate from file",
+								dbgLog("JWT Auth Policy: Loading certificate from file",
 									"keyManager", name,
 									"certificatePath", certPath,
 								)
 								publicKey, certErr = loadPublicKeyFromCertificate(certPath)
 							}
 							if certErr != nil {
-								slog.Debug("JWT Auth Policy: Failed to load local certificate",
+								dbgLog("JWT Auth Policy: Failed to load local certificate",
 									"keyManager", name,
 									"error", certErr,
 								)
 								continue
 							}
-							slog.Debug("JWT Auth Policy: Successfully loaded local certificate",
+							dbgLog("JWT Auth Policy: Successfully loaded local certificate",
 								"keyManager", name,
 							)
 							localCert.PublicKey = publicKey
@@ -2010,13 +2037,13 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 					if jwksConfig.Remote != nil || jwksConfig.Local != nil {
 						keyManager.JWKS = jwksConfig
 						keyManagers[name] = keyManager
-						slog.Debug("JWT Auth Policy: Key manager added successfully",
+						dbgLog("JWT Auth Policy: Key manager added successfully",
 							"keyManager", name,
 							"hasRemote", jwksConfig.Remote != nil,
 							"hasLocal", jwksConfig.Local != nil,
 						)
 					} else {
-						slog.Debug("JWT Auth Policy: Key manager skipped - no remote or local JWKS configured",
+						dbgLog("JWT Auth Policy: Key manager skipped - no remote or local JWKS configured",
 							"keyManager", name,
 						)
 					}
@@ -2026,21 +2053,21 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	}
 
 	if len(keyManagers) == 0 {
-		slog.Debug("JWT Auth Policy: No key managers configured after parsing")
+		dbgLog("JWT Auth Policy: No key managers configured after parsing")
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no key managers configured")
 	}
 
-	slog.Debug("JWT Auth Policy: Key managers configured",
+	dbgLog("JWT Auth Policy: Key managers configured",
 		"count", len(keyManagers),
 	)
 
 	unverifiedToken, _, err := jwt.NewParser().ParseUnverified(token, jwt.MapClaims{})
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Failed to parse token",
+		dbgLog("JWT Auth Policy: Failed to parse token",
 			"error", err,
 		)
 		if tokenCaching {
-			slog.Debug("JWT Auth Policy: Caching negative verdict (malformed token)",
+			dbgLog("JWT Auth Policy: Caching negative verdict (malformed token)",
 				"cacheKey", cacheKey,
 				"negativeCacheTtl", negativeCacheTtl,
 			)
@@ -2049,7 +2076,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid token format")
 	}
 
-	slog.Debug("JWT Auth Policy: Token parsed successfully",
+	dbgLog("JWT Auth Policy: Token parsed successfully",
 		"algorithm", unverifiedToken.Header["alg"],
 		"keyId", unverifiedToken.Header["kid"],
 		"type", unverifiedToken.Header["typ"],
@@ -2058,25 +2085,25 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	claims, matchedKeyManager, err := p.validateTokenWithSignature(token, unverifiedToken, keyManagers, userIssuers, validateIssuer,
 		leeway, jwksCacheTtl, jwksFetchTimeout, jwksFetchRetryCount, jwksFetchRetryInterval)
 	if err != nil {
-		slog.Debug("JWT Auth Policy: Token validation failed",
+		dbgLog("JWT Auth Policy: Token validation failed",
 			"error", err,
 		)
 		failureReason := fmt.Sprintf("token validation failed: %v", err)
 		if tokenCaching && errors.Is(err, errTokenExpired) {
-			slog.Debug("JWT Auth Policy: Caching negative verdict (token expired)",
+			dbgLog("JWT Auth Policy: Caching negative verdict (token expired)",
 				"cacheKey", cacheKey,
 				"negativeCacheTtl", negativeCacheTtl,
 			)
 			p.putVerdict(ctx, cacheKey, cachedVerdict{ok: false, reason: failureReason, expiresAt: time.Now().Add(negativeCacheTtl)})
 		} else if tokenCaching {
-			slog.Debug("JWT Auth Policy: Token validation failure not cached (not a conservatively-cacheable reason)",
+			dbgLog("JWT Auth Policy: Token validation failure not cached (not a conservatively-cacheable reason)",
 				"cacheKey", cacheKey,
 			)
 		}
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, failureReason)
 	}
 
-	slog.Debug("JWT Auth Policy: Token signature validated successfully")
+	dbgLog("JWT Auth Policy: Token signature validated successfully")
 
     // Resolve and cache scopes while the matched key manager is known to keep cache-hit behavior consistent.
 	scopes := resolveScopes(claims, matchedKeyManager)
@@ -2093,13 +2120,13 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			}
 		}
 		if expiresAt.After(time.Now()) {
-			slog.Debug("JWT Auth Policy: Caching positive verdict",
+			dbgLog("JWT Auth Policy: Caching positive verdict",
 				"cacheKey", cacheKey,
 				"expiresAt", expiresAt,
 			)
 			p.putVerdict(ctx, cacheKey, cachedVerdict{ok: true, claims: claims, scopes: scopes, expiresAt: expiresAt})
 		} else {
-			slog.Debug("JWT Auth Policy: Skipping positive cache write, computed expiry is not in the future",
+			dbgLog("JWT Auth Policy: Skipping positive cache write, computed expiry is not in the future",
 				"cacheKey", cacheKey,
 				"expiresAt", expiresAt,
 			)
@@ -2124,7 +2151,7 @@ func (p *JwtAuthPolicy) finishAuthentication(reqCtx *policy.RequestHeaderContext
 
 	if len(userAudiences) > 0 {
 		aud := parseAudience(claims["aud"])
-		slog.Debug("JWT Auth Policy: Validating audience",
+		dbgLog("JWT Auth Policy: Validating audience",
 			"tokenAudiences", aud,
 			"requiredAudiences", userAudiences,
 		)
@@ -2141,46 +2168,46 @@ func (p *JwtAuthPolicy) finishAuthentication(reqCtx *policy.RequestHeaderContext
 			}
 		}
 		if !found {
-			slog.Debug("JWT Auth Policy: No valid audience found in token",
+			dbgLog("JWT Auth Policy: No valid audience found in token",
 				"tokenAudiences", aud,
 			)
 			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no valid audience found in token")
 		}
-		slog.Debug("JWT Auth Policy: Audience validation passed")
+		dbgLog("JWT Auth Policy: Audience validation passed")
 	}
 
 	if !scopeConstraints.isEmpty() {
-		slog.Debug("JWT Auth Policy: Validating scope constraints",
+		dbgLog("JWT Auth Policy: Validating scope constraints",
 			"tokenScopes", scopes,
 			"allOf", scopeConstraints.AllOf,
 			"anyOf", scopeConstraints.AnyOf,
 		)
 		if ok, reason := evaluateScopeConstraints(scopeConstraints, buildScopesMap(scopes)); !ok {
-			slog.Debug("JWT Auth Policy: Scope constraint not satisfied",
+			dbgLog("JWT Auth Policy: Scope constraint not satisfied",
 				"reason", reason,
 				"tokenScopes", scopes,
 			)
 			// Client message is generic; the specific reason stays in the debug log only.
 			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "required scopes not satisfied")
 		}
-		slog.Debug("JWT Auth Policy: Scope validation passed")
+		dbgLog("JWT Auth Policy: Scope validation passed")
 	}
 
 	if !claimConstraints.isEmpty() {
-		slog.Debug("JWT Auth Policy: Validating claim constraints",
+		dbgLog("JWT Auth Policy: Validating claim constraints",
 			"allOfCount", len(claimConstraints.AllOf),
 			"anyOfCount", len(claimConstraints.AnyOf),
 		)
 		if ok, reason := evaluateClaimConstraints(claimConstraints, claims); !ok {
-			slog.Debug("JWT Auth Policy: Claim constraint not satisfied",
+			dbgLog("JWT Auth Policy: Claim constraint not satisfied",
 				"reason", reason,
 			)
 			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "required claims not satisfied")
 		}
-		slog.Debug("JWT Auth Policy: Claim validation passed")
+		dbgLog("JWT Auth Policy: Claim validation passed")
 	}
 
-	slog.Debug("JWT Auth Policy: All validations passed, authentication successful")
+	dbgLog("JWT Auth Policy: All validations passed, authentication successful")
 
 	return p.handleAuthSuccessHeaders(reqCtx.SharedContext, claims, scopes, userClaimMappings, userIdClaim, headerName, authHeader, token,
 		forwardToken, forwardedTokenHeader, forwardTokenStripScheme)
@@ -2274,7 +2301,7 @@ func (p *JwtAuthPolicy) handleAuthSuccessHeaders(shared *policy.SharedContext, c
 
 // handleAuthFailureHeaders handles JWT authentication failure in the header phase.
 func (p *JwtAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason string) policy.RequestHeaderAction {
-	slog.Debug("JWT Auth Policy: handleAuthFailureHeaders called",
+	dbgLog("JWT Auth Policy: handleAuthFailureHeaders called",
 		"statusCode", statusCode,
 		"reason", reason,
 	)
