@@ -1,0 +1,25 @@
+name: llm-cost
+version: v2.0.0
+description: |
+  Calculates the monetary cost of LLM API calls at response time using the token
+  field locations declared in the route's LlmProviderTemplate, and stores the
+  result in SharedContext.Metadata under "x-llm-cost".
+
+  Writes the same metadata keys as the llm-cost policy, so the two must never be
+  attached to the same route.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties: {}
+  required: []
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    pricing_file:
+      type: string
+      description: >
+        Path to the model pricing JSON file shipped with the gateway image.
+      "wso2/defaultValue": "${config.policy_configurations.llm_cost_v2.pricing_file}"
