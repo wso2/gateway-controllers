@@ -34,13 +34,14 @@ fallback is configured, the original model and provider remain unchanged.
 
 ### LLM provider template configuration
 
-The policy also requires the `requestModel` system parameter from the LLM
-provider template. The gateway controller injects this setting; it is not a
-user-configurable policy parameter. It tells the policy where the request stores
+The policy requires the `requestModel` mapping from the LLM provider template
+at runtime. The gateway controller merges it into regular policy parameters;
+users do not need to supply it in the policy attachment. It tells the policy
+where the request stores
 the model so that the model selected by a schedule or fallback can be written
 back to the request.
 
-| System parameter | Type | Required | Description |
+| Provider-template field | Type | Required | Description |
 |---|---|---|---|
 | `requestModel.location` | string | Yes | Model location. Supported values are `payload` (or its `body` alias), `header`, `queryParam`, and `pathParam`. |
 | `requestModel.identifier` | string | Yes | Model identifier for the configured location: a JSONPath expression for `payload`/`body`, a header name for `header`, a query parameter name for `queryParam`, or a regular expression for `pathParam`. A path expression may match the model directly, use its first capture group for the model, or use a leading positive lookbehind expression such as `(?<=models/)[a-zA-Z0-9.\\-]+`. |
