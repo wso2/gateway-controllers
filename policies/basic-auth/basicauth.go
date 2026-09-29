@@ -67,6 +67,14 @@ func (p *BasicAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.R
 			StatusCode: 500,
 			Headers:    map[string]string{"content-type": "application/json"},
 			Body:       errBody,
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeAuthGeneral,
+				Type:        policy.FaultTypeAuthentication,
+				Direction:   policy.DirectionRequest,
+				Message:     "Authentication could not be performed",
+				Description: "basic-auth misconfigured: username must be a non-empty string",
+			},
 		}
 	}
 
@@ -80,6 +88,14 @@ func (p *BasicAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.R
 			StatusCode: 500,
 			Headers:    map[string]string{"content-type": "application/json"},
 			Body:       errBody,
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeAuthGeneral,
+				Type:        policy.FaultTypeAuthentication,
+				Direction:   policy.DirectionRequest,
+				Message:     "Authentication could not be performed",
+				Description: "basic-auth misconfigured: password must be a non-empty string",
+			},
 		}
 	}
 
@@ -99,24 +115,28 @@ func (p *BasicAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.R
 
 	authHeaders := reqCtx.DownstreamHeaders().Get("authorization")
 	if len(authHeaders) == 0 {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm,
+			policy.FaultCodeAuthMissingCredentials, "no authorization header presented")
 	}
 
 	authHeader := authHeaders[0]
 	if !strings.HasPrefix(authHeader, "Basic ") {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm,
+			policy.FaultCodeAuthMissingCredentials, "authorization header does not use the Basic scheme")
 	}
 
 	encodedCredentials := strings.TrimPrefix(authHeader, "Basic ")
 	decodedBytes, err := base64.StdEncoding.DecodeString(encodedCredentials)
 	if err != nil {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm,
+			policy.FaultCodeAuthInvalidCredentials, "Basic credentials are not valid base64")
 	}
 
 	credentials := string(decodedBytes)
 	parts := strings.SplitN(credentials, ":", 2)
 	if len(parts) != 2 {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm,
+			policy.FaultCodeAuthInvalidCredentials, "decoded Basic credentials are not username:password")
 	}
 
 	providedUsername := parts[0]
@@ -126,7 +146,8 @@ func (p *BasicAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.R
 	passwordMatch := subtle.ConstantTimeCompare([]byte(providedPassword), []byte(expectedPassword)) == 1
 
 	if !usernameMatch || !passwordMatch {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, allowUnauthenticated, realm,
+			policy.FaultCodeAuthInvalidCredentials, "username or password did not match")
 	}
 
 	reqCtx.SharedContext.AuthContext = &policy.AuthContext{
@@ -140,7 +161,7 @@ func (p *BasicAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.R
 }
 
 // handleAuthFailureHeaders handles authentication failure in the header phase.
-func (p *BasicAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, allowUnauthenticated bool, realm string) policy.RequestHeaderAction {
+func (p *BasicAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, allowUnauthenticated bool, realm, code, reason string) policy.RequestHeaderAction {
 	shared.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
@@ -166,5 +187,14 @@ func (p *BasicAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext,
 		StatusCode: 401,
 		Headers:    headers,
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      policy.FaultTypeAuthentication,
+			Direction: policy.DirectionRequest,
+			Message:   "Authentication required",
+			// reason is a diagnostic, withheld from the response body by the renderer.
+			Description: reason,
+		},
 	}
 }

@@ -414,6 +414,99 @@ func assertUnauthorizedJSON(t *testing.T, action policy.RequestHeaderAction) {
 	if !strings.Contains(msg, "Valid API key required") {
 		t.Fatalf("unexpected message: %q", msg)
 	}
+
+	// Every rejection this policy makes must reach the gateway's fault flow, and must
+	// describe itself well enough for a renderer and for analytics categorisation.
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on an auth rejection")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated on an auth rejection")
+	}
+	if resp.Fault.Type != policy.FaultTypeAuthentication {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	switch resp.Fault.Code {
+	case policy.FaultCodeAuthGeneral, policy.FaultCodeAuthInvalidCredentials, policy.FaultCodeAuthMissingCredentials:
+	default:
+		t.Fatalf("unexpected Error.Code %q", resp.Fault.Code)
+	}
+}
+
+// TestAPIKeyPolicy_RejectionErrorCodes pins the code chosen per rejection condition.
+func TestAPIKeyPolicy_RejectionErrorCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		params   map[string]interface{}
+		headers  map[string][]string
+		apiName  string
+		wantCode string
+	}{
+		{
+			name:     "missing key configuration",
+			params:   map[string]interface{}{"in": "header"},
+			headers:  map[string][]string{"x-api-key": {"header-secret"}},
+			apiName:  "OrdersAPI",
+			wantCode: policy.FaultCodeAuthGeneral,
+		},
+		{
+			name:     "no api key presented",
+			params:   map[string]interface{}{"key": "x-api-key", "in": "header"},
+			headers:  nil,
+			apiName:  "OrdersAPI",
+			wantCode: policy.FaultCodeAuthMissingCredentials,
+		},
+		{
+			name:     "api key rejected",
+			params:   map[string]interface{}{"key": "x-api-key", "in": "header"},
+			headers:  map[string][]string{"x-api-key": {"wrong-secret"}},
+			apiName:  "OrdersAPI",
+			wantCode: policy.FaultCodeAuthInvalidCredentials,
+		},
+		{
+			name:     "api details missing",
+			params:   map[string]interface{}{"key": "x-api-key", "in": "header"},
+			headers:  map[string][]string{"x-api-key": {"header-secret"}},
+			apiName:  "",
+			wantCode: policy.FaultCodeAuthGeneral,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetAPIKeyStore(t)
+			seedExternalAPIKey(t, "api-1", "header-secret", `["GET /orders"]`)
+
+			p := &APIKeyPolicy{}
+			ctx := newRequestHeaderContext(t, "GET", "/orders", tt.headers,
+				"api-1", tt.apiName, "v1", "/orders")
+
+			action := p.OnRequestHeaders(context.Background(), ctx, tt.params)
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
+			}
+			if !resp.IsFault {
+				t.Fatalf("expected IsFault=true")
+			}
+			if resp.Fault == nil {
+				t.Fatalf("expected Error to be populated")
+			}
+			if resp.Fault.Code != tt.wantCode {
+				t.Fatalf("expected Error.Code=%q, got %q", tt.wantCode, resp.Fault.Code)
+			}
+			// Description carries the internal diagnostic and must not leak into the body.
+			if resp.Fault.Description == "" {
+				t.Fatalf("expected Error.Description to carry the internal reason")
+			}
+			if strings.Contains(string(resp.Body), resp.Fault.Description) {
+				t.Fatalf("Description leaked into the client body: %q", resp.Fault.Description)
+			}
+		})
+	}
 }
 
 // TestAPIKeyPolicy_OnRequestHeaders_WritesApplicationIDToSharedContextMetadata verifies
@@ -506,7 +599,7 @@ func TestAPIKeyPolicy_AuthContext_PreviousPreserved_OnFailure(t *testing.T) {
 	}
 	shared.AuthContext = prior
 
-	resp := p.failAuth(shared, 401, "json", "Valid API key required", "invalid API key")
+	resp := p.failAuth(shared, 401, "json", "Valid API key required", "invalid API key", policy.FaultCodeAuthInvalidCredentials)
 
 	if resp == nil {
 		t.Fatal("Expected ImmediateResponse from failAuth")
