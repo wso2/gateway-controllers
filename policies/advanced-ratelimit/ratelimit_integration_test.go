@@ -175,6 +175,21 @@ func assertImmediateResponse(t *testing.T, action interface{}, expectedStatus in
 	if resp.StatusCode != expectedStatus {
 		t.Fatalf("expected status %d, got %d", expectedStatus, resp.StatusCode)
 	}
+	// A throttle rejection must reach the gateway's fault flow, and its code must land in
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a throttle rejection")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated on a throttle rejection")
+	}
+	if resp.Fault.Type != policy.FaultTypeThrottling {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeThrottling, resp.Fault.Type)
+	}
+	switch resp.Fault.Code {
+	case policy.FaultCodeThrottledAPI, policy.FaultCodeThrottledResource:
+	default:
+		t.Fatalf("unexpected Error.Code %q; must be a throttling code", resp.Fault.Code)
+	}
 	return resp
 }
 
@@ -4059,5 +4074,106 @@ func TestGetQuotaCacheKey_ChangesWithMatchValue(t *testing.T) {
 	}
 	if keyWithMatch == keyWithDifferentMatch {
 		t.Fatalf("expected cache key to change when the match value changes, so a config edit doesn't reuse a stale limiter")
+	}
+}
+
+// TestThrottleErrorCodeFollowsAttachmentLevel pins the code chosen per attachment level. A
+func TestThrottleErrorCodeFollowsAttachmentLevel(t *testing.T) {
+	tests := []struct {
+		name     string
+		level    policy.Level
+		wantCode string
+	}{
+		{name: "route level is a resource throttle", level: policy.LevelRoute, wantCode: policy.FaultCodeThrottledResource},
+		{name: "api level is an api throttle", level: policy.LevelAPI, wantCode: policy.FaultCodeThrottledAPI},
+		{name: "unset level defaults to api", level: "", wantCode: policy.FaultCodeThrottledAPI},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &RateLimitPolicy{attachedTo: tt.level}
+			if got := p.throttleErrorCode(); got != tt.wantCode {
+				t.Fatalf("expected %q, got %q", tt.wantCode, got)
+			}
+		})
+	}
+}
+
+// TestThrottleRejectionDeclaresFault exercises the real rejection path end to end: exhaust
+// a one-request quota and check the second request declares the fault.
+func TestThrottleRejectionDeclaresFault(t *testing.T) {
+	params := map[string]interface{}{
+		"backend":   "memory",
+		"algorithm": "fixed-window",
+		"quotas": []interface{}{
+			map[string]interface{}{
+				"name": "tight",
+				"limits": []interface{}{
+					map[string]interface{}{"limit": float64(1), "duration": "1m"},
+				},
+			},
+		},
+	}
+	p, err := GetPolicy(policy.PolicyMetadata{
+		RouteName:  "r1",
+		APIName:    "petstore",
+		APIVersion: "v1",
+		AttachedTo: policy.LevelRoute,
+	}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+	rl := p.(*RateLimitPolicy)
+
+	first := rl.OnRequestHeaders(context.Background(), newRequestHeaderCtx(nil, nil), params)
+	if resp, ok := first.(policy.ImmediateResponse); ok {
+		t.Fatalf("expected the first request to pass, got status %d", resp.StatusCode)
+	}
+
+	second := rl.OnRequestHeaders(context.Background(), newRequestHeaderCtx(nil, nil), params)
+	resp := assertImmediateResponse(t, second, rl.statusCode)
+	if resp.Fault.Code != policy.FaultCodeThrottledResource {
+		t.Fatalf("expected Error.Code=%q for a route-attached policy, got %q",
+			policy.FaultCodeThrottledResource, resp.Fault.Code)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to name the quota that tripped")
+	}
+}
+
+// TestResponseHeaderDecorationIsNotAFault covers the response path: this policy publishes
+// rate-limit headers on every response, including successful ones. Marking that a fault
+// would notify on every request that was NOT throttled, which is the mistake the zero value
+// of IsFault exists to prevent.
+func TestResponseHeaderDecorationIsNotAFault(t *testing.T) {
+	params := basicQuotaParams()
+	p, err := GetPolicy(policy.PolicyMetadata{RouteName: "r1", APIName: "petstore", APIVersion: "v1"}, params)
+	if err != nil {
+		t.Fatalf("GetPolicy failed: %v", err)
+	}
+	rl := p.(*RateLimitPolicy)
+
+	reqCtx := newRequestHeaderCtx(nil, nil)
+	if action := rl.OnRequestHeaders(context.Background(), reqCtx, params); action == nil {
+		t.Fatalf("expected the request to pass under a limit of 10")
+	}
+
+	respCtx := newResponseCtx(nil, nil, reqCtx.SharedContext.Metadata, 200)
+	action := rl.OnResponseBody(context.Background(), respCtx, params)
+	if action == nil {
+		return
+	}
+	mods, ok := action.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+	}
+	if mods.IsFault {
+		t.Fatalf("publishing rate-limit headers on a healthy response must not be a fault")
+	}
+	if mods.Fault != nil {
+		t.Fatalf("publishing rate-limit headers must not describe an error")
 	}
 }
