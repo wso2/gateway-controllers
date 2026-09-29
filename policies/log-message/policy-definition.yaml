@@ -1,5 +1,5 @@
 name: log-message
-version: v1.0.3
+version: v1.1.0
 description: |
   Log request and response payloads and headers for observability without changing traffic.
 
@@ -59,9 +59,49 @@ parameters:
             maxLength: 256
           uniqueItems: true
           default: []
-  anyOf:
-    - required: [ request ]
-    - required: [ response ]
+    fault:
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: >-
+        Log the failure when this policy runs in the fault flow, under
+        globalFaultPolicies. Mutually exclusive with request and response: an
+        attachment is either in the normal flow or the fault flow, never both.
+      properties:
+        payload:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          default: false
+          description: Log the error response payload.
+        headers:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          default: false
+          description: Log the error response headers.
+        excludeHeaders:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: Exclude headers from the fault log.
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          uniqueItems: true
+          default: []
+
+  oneOf:
+    # Attached under `policies:` — the request/response flow.
+    - anyOf:
+        - required: [ request ]
+        - required: [ response ]
+      not:
+        required: [ fault ]
+    # Attached under `globalFaultPolicies:` — the fault flow.
+    - required: [ fault ]
+      not:
+        anyOf:
+          - required: [ request ]
+          - required: [ response ]
 
 systemParameters:
   type: object
