@@ -1,0 +1,12 @@
+{
+  "name": "mcp-tool-poisoning-guardrail",
+  "displayName": "MCP Tool Poisoning Guardrail",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Inspects MCP tools/list responses for tool poisoning — instructions hidden inside tool metadata that target the agent rather than describing the tool — before the metadata reaches the client. A Go gateway policy, it scans every string in each tool entry with gateway-local static detectors and sends tool metadata to a separately deployed internal Python classifier service that serves the wso2/tool-poisoning-detection SetFit model; the model does not run in the gateway. Violating tools can be removed from the list, refused as a JSON-RPC error, or left in place and recorded. JSON and SSE framing, JSON-RPC ids, pagination cursors and unrelated result fields are preserved, and unrelated MCP methods and upstream JSON-RPC errors pass through unchanged."
+}
