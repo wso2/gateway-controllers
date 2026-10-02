@@ -1,5 +1,5 @@
 name: granite-guardian-prompt-injection
-version: v0.9.0
+version: v0.9.1
 displayName: Granite Guardian Prompt Injection
 description: |
   Detects prompt injection and jailbreak attempts in LLM requests using
@@ -16,9 +16,13 @@ parameters:
       type: string
       x-wso2-policy-advanced-param: false
       description: |
-        JSONPath expression used to extract the user message from the request
-        body. Applies to JSON payloads only; non-JSON bodies are passed through
-        unchanged.
+        JSONPath expression used to extract the text to check from the request
+        body. It may select a string, an object or an array, and a "*" segment
+        fans out over an object's values or an array's items (for example
+        "$.questions.*.instructions"); every string, number and boolean inside
+        the selection is joined with newlines (object keys in sorted order)
+        and checked. A body that is not JSON, or a path that does not resolve, is
+        rejected with a 422 unless passthroughOnError is true.
       default: "$.messages[-1].content"
     riskNames:
       type: array
@@ -66,9 +70,10 @@ parameters:
       type: boolean
       x-wso2-policy-advanced-param: true
       description: |
-        When true, allows the request to proceed if the Granite Guardian
-        API call fails (fail-open). When false (default), a 503 is returned
-        on API errors (fail-closed).
+        When true, allows the request to proceed when it cannot be checked:
+        the Granite Guardian API call fails, the body is not JSON, or jsonPath
+        does not resolve (fail-open). When false (default), API errors return
+        a 503 and uncheckable requests a 422 (fail-closed).
       default: false
     showAssessment:
       type: boolean

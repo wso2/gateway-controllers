@@ -166,10 +166,13 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
         try:
             body_data = json.loads(req_ctx.body.content)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return _PASSTHROUGH_REQUEST
+            return _not_inspected(execution_ctx, "request", "body is not valid JSON", req_params.request.passthrough_on_error)
 
-        user_text = _resolve_jsonpath(body_data, req_params.request.json_path)
-        if not user_text or not isinstance(user_text, str):
+        resolved = _lookup_jsonpath(body_data, req_params.request.json_path)
+        if resolved is _MISSING:
+            return _not_inspected(execution_ctx, "request", "jsonPath did not resolve", req_params.request.passthrough_on_error)
+        user_text = _collect_text(resolved)
+        if not user_text:
             return _PASSTHROUGH_REQUEST
 
         try:
@@ -223,31 +226,41 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
         if not req_params.response.enabled:
             return _PASSTHROUGH_RESPONSE
 
-        if not (res_ctx.body and res_ctx.body.present and res_ctx.body.content):
+        res_body = res_ctx.response_body
+        if not (res_body and res_body.present and res_body.content):
             return _PASSTHROUGH_RESPONSE
 
-        messages: list[dict] = []
-
+        # NeMo Guard rates a response in the context of the user message that
+        # produced it, so the request text is required, not optional.
+        user_text = ""
+        user_text_missing = "request body is absent"
         if res_ctx.request_body and res_ctx.request_body.present and res_ctx.request_body.content:
-            req_json_path = req_params.request.json_path
             try:
                 req_data = json.loads(res_ctx.request_body.content)
-                user_text = _resolve_jsonpath(req_data, req_json_path)
-                if user_text and isinstance(user_text, str):
-                    messages.append({"role": "user", "content": user_text})
+                user_text = _collect_text(_resolve_jsonpath(req_data, req_params.request.json_path))
+                user_text_missing = "request jsonPath did not resolve to any text"
             except (json.JSONDecodeError, UnicodeDecodeError):
-                pass
+                user_text_missing = "request body is not valid JSON"
 
         try:
-            res_data = json.loads(res_ctx.body.content)
+            res_data = json.loads(res_body.content)
         except (json.JSONDecodeError, UnicodeDecodeError):
+            return _not_inspected(execution_ctx, "response", "body is not valid JSON", req_params.response.passthrough_on_error)
+
+        resolved = _lookup_jsonpath(res_data, req_params.response.json_path)
+        if resolved is _MISSING:
+            return _not_inspected(execution_ctx, "response", "jsonPath did not resolve", req_params.response.passthrough_on_error)
+        assistant_text = _collect_text(resolved)
+        if not assistant_text:
             return _PASSTHROUGH_RESPONSE
 
-        assistant_text = _resolve_jsonpath(res_data, req_params.response.json_path)
-        if not assistant_text or not isinstance(assistant_text, str):
-            return _PASSTHROUGH_RESPONSE
+        if not user_text:
+            return _not_inspected(execution_ctx, "response", user_text_missing, req_params.response.passthrough_on_error)
 
-        messages.append({"role": "assistant", "content": assistant_text})
+        messages = [
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": assistant_text},
+        ]
 
         try:
             unsafe, category_codes = _call_nemoguard(
@@ -292,6 +305,34 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
             )
 
         return _PASSTHROUGH_RESPONSE
+
+
+def _not_inspected(execution_ctx, direction: str, reason: str, passthrough: bool) -> ImmediateResponse | None:
+    """Fail closed when the content to check could not be read.
+
+    Letting such a request through would skip the safety check silently, so it
+    is rejected unless the operator opted into fail-open with passthroughOnError.
+    """
+    LOGGER.warning(
+        "nemoguard %s not inspected (request_id=%s): %s",
+        direction,
+        getattr(execution_ctx, "request_id", None),
+        reason,
+    )
+    if passthrough:
+        return None
+    return ImmediateResponse(
+        status_code=422,
+        headers={"content-type": "application/json"},
+        body=json.dumps({
+            "type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY",
+            "message": {
+                "action": "CONTENT_NOT_INSPECTED",
+                "actionReason": "Content could not be inspected.",
+                "direction": direction.upper(),
+            },
+        }).encode(),
+    )
 
 
 def get_policy(metadata, params):
@@ -517,12 +558,31 @@ def _call_nemoguard(
     return True, category_codes
 
 
+_MISSING = object()
+
+
 def _resolve_jsonpath(data: Any, path: str) -> Any:
     """Resolve a simple dotted JSONPath expression against *data*.
 
+    Returns ``None`` when the path does not resolve. See ``_lookup_jsonpath``
+    for the grammar and for telling a missing path apart from a JSON null.
+    """
+    value = _lookup_jsonpath(data, path)
+    return None if value is _MISSING else value
+
+
+def _lookup_jsonpath(data: Any, path: str) -> Any:
+    """Resolve a simple dotted JSONPath expression against *data*.
+
     Handles the patterns used throughout this codebase, e.g.:
-      ``$.messages[-1].content``         →  data["messages"][-1]["content"]
-      ``$.choices[0].message.content``   →  data["choices"][0]["message"]["content"]
+      ``$.messages[-1].content``      →  data["messages"][-1]["content"]
+      ``$.state``                     →  data["state"]
+      ``$.questions.*.instructions``  →  every question's "instructions"
+
+    A ``*`` segment fans out over an object's values or an array's items and
+    returns the list of matches, skipping children the rest of the path does
+    not match. Returns ``_MISSING`` when the path does not resolve (or a
+    wildcard matches nothing), so callers can fail closed.
     """
     if not path or path == "$":
         return data
@@ -541,11 +601,11 @@ def _resolve_jsonpath(data: Any, path: str) -> Any:
             try:
                 j = path.index("]", i)
             except ValueError:
-                return None
+                return _MISSING
             try:
                 segments.append(int(path[i + 1 : j]))
             except ValueError:
-                return None
+                return _MISSING
             i = j + 1
             if i < len(path) and path[i] == ".":
                 i += 1
@@ -560,15 +620,56 @@ def _resolve_jsonpath(data: Any, path: str) -> Any:
     if buf:
         segments.append(buf)
 
-    current = data
-    for seg in segments:
-        if current is None:
-            return None
-        if isinstance(seg, int):
-            if isinstance(current, list) and -len(current) <= seg < len(current):
-                current = current[seg]
-            else:
-                return None
+    return _walk_jsonpath(data, segments)
+
+
+def _walk_jsonpath(current: Any, segments: list[str | int]) -> Any:
+    if not segments:
+        return current
+    seg, rest = segments[0], segments[1:]
+    if seg == "*":
+        if isinstance(current, dict):
+            children = list(current.values())
+        elif isinstance(current, list):
+            children = current
         else:
-            current = current.get(seg) if isinstance(current, dict) else None
-    return current
+            return _MISSING
+        matches = [m for m in (_walk_jsonpath(c, rest) for c in children) if m is not _MISSING]
+        return matches if matches else _MISSING
+    if isinstance(seg, int):
+        if isinstance(current, list) and -len(current) <= seg < len(current):
+            return _walk_jsonpath(current[seg], rest)
+        return _MISSING
+    if isinstance(current, dict) and seg in current:
+        return _walk_jsonpath(current[seg], rest)
+    return _MISSING
+
+
+def _collect_text(value: Any) -> str:
+    """Return every string (and number/boolean) inside *value*, joined by newlines.
+
+    Object keys are visited in sorted order so the result is deterministic, and
+    nulls are skipped. A plain string is returned unchanged, so structured
+    values (an object ``state``, a wildcard match) are inspected in full rather
+    than skipped.
+    """
+    if isinstance(value, str):
+        return value
+    parts: list[str] = []
+    _collect_text_into(value, parts)
+    return "\n".join(parts)
+
+
+def _collect_text_into(value: Any, parts: list[str]) -> None:
+    if isinstance(value, str):
+        parts.append(value)
+    elif isinstance(value, bool):
+        parts.append("true" if value else "false")
+    elif isinstance(value, (int, float)):
+        parts.append(str(value))
+    elif isinstance(value, dict):
+        for key in sorted(value):
+            _collect_text_into(value[key], parts)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_text_into(item, parts)

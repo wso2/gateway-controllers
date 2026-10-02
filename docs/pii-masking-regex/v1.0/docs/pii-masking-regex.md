@@ -52,6 +52,10 @@ The guardrail supports JSONPath expressions to extract and process specific fiel
 
 If `jsonPath` is empty or not specified, the entire payload is processed as a string.
 
+The path may also select an object or an array, or use a `*` segment to fan out over an object's values or an array's items (for example `$.questions.*.instructions`). Every string and number inside the selection is masked in place, the rest of the payload is left unchanged, and all masked values share one set of placeholders so the response is restored correctly. This includes chat multimodal `content` arrays, whose `text` parts are masked.
+
+If the masked value cannot be written back, the request is rejected with a `500` rather than forwarded unmasked.
+
 **Note:**
 
 Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:

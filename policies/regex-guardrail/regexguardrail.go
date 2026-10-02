@@ -259,7 +259,7 @@ func (p *RegexGuardrailPolicy) validatePayload(payload []byte, params RegexGuard
 		}
 		return policy.UpstreamRequestModifications{}
 	}
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	extractedValue, err := extractInspectableText(payload, params.JsonPath)
 	if err != nil {
 		slog.Debug("RegexGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
 		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment)

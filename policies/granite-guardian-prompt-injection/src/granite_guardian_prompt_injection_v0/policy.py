@@ -75,10 +75,13 @@ class GraniteGuardianPromptInjectionPolicy(RequestPolicy):
         try:
             body_data = json.loads(req_ctx.body.content)
         except (json.JSONDecodeError, UnicodeDecodeError):
-            return _PASSTHROUGH
+            return _not_inspected(execution_ctx, "body is not valid JSON", req_params.passthrough_on_error)
 
-        text = _resolve_jsonpath(body_data, req_params.json_path)
-        if not text or not isinstance(text, str):
+        resolved = _lookup_jsonpath(body_data, req_params.json_path)
+        if resolved is _MISSING:
+            return _not_inspected(execution_ctx, "jsonPath did not resolve", req_params.passthrough_on_error)
+        text = _collect_text(resolved)
+        if not text:
             return _PASSTHROUGH
 
         for risk_name in req_params.risk_names:
@@ -181,6 +184,33 @@ class GraniteGuardianPromptInjectionPolicy(RequestPolicy):
         if confidence is not None:
             assessment["confidence"] = round(confidence, 4)
         return blocked, assessment
+
+
+def _not_inspected(execution_ctx, reason: str, passthrough: bool) -> ImmediateResponse | None:
+    """Fail closed when the prompt to check could not be read.
+
+    Letting such a request through would skip the injection check silently, so
+    it is rejected unless the operator opted into fail-open with passthroughOnError.
+    """
+    LOGGER.warning(
+        "granite-guardian request not inspected (request_id=%s): %s",
+        getattr(execution_ctx, "request_id", None),
+        reason,
+    )
+    if passthrough:
+        return None
+    return ImmediateResponse(
+        status_code=422,
+        headers={"content-type": "application/json"},
+        body=json.dumps({
+            "type": "GRANITE_GUARDIAN_PROMPT_INJECTION",
+            "message": {
+                "action": "CONTENT_NOT_INSPECTED",
+                "actionReason": "Content could not be inspected.",
+                "direction": "REQUEST",
+            },
+        }).encode(),
+    )
 
 
 def get_policy(metadata, params):
@@ -302,12 +332,31 @@ def _verdict_confidence(logprobs_content: list, verdict_word: str) -> float | No
     return None
 
 
+_MISSING = object()
+
+
 def _resolve_jsonpath(data: Any, path: str) -> Any:
     """Resolve a simple dotted JSONPath expression against *data*.
 
+    Returns ``None`` when the path does not resolve. See ``_lookup_jsonpath``
+    for the grammar and for telling a missing path apart from a JSON null.
+    """
+    value = _lookup_jsonpath(data, path)
+    return None if value is _MISSING else value
+
+
+def _lookup_jsonpath(data: Any, path: str) -> Any:
+    """Resolve a simple dotted JSONPath expression against *data*.
+
     Handles the patterns used throughout this codebase, e.g.:
-      ``$.messages[-1].content``  →  data["messages"][-1]["content"]
-      ``$.content``               →  data["content"]
+      ``$.messages[-1].content``      →  data["messages"][-1]["content"]
+      ``$.state``                     →  data["state"]
+      ``$.questions.*.instructions``  →  every question's "instructions"
+
+    A ``*`` segment fans out over an object's values or an array's items and
+    returns the list of matches, skipping children the rest of the path does
+    not match. Returns ``_MISSING`` when the path does not resolve (or a
+    wildcard matches nothing), so callers can fail closed.
     """
     if not path or path == "$":
         return data
@@ -326,11 +375,11 @@ def _resolve_jsonpath(data: Any, path: str) -> Any:
             try:
                 j = path.index("]", i)
             except ValueError:
-                return None
+                return _MISSING
             try:
                 segments.append(int(path[i + 1 : j]))
             except ValueError:
-                return None
+                return _MISSING
             i = j + 1
             if i < len(path) and path[i] == ".":
                 i += 1
@@ -345,15 +394,56 @@ def _resolve_jsonpath(data: Any, path: str) -> Any:
     if buf:
         segments.append(buf)
 
-    current = data
-    for seg in segments:
-        if current is None:
-            return None
-        if isinstance(seg, int):
-            if isinstance(current, list) and -len(current) <= seg < len(current):
-                current = current[seg]
-            else:
-                return None
+    return _walk_jsonpath(data, segments)
+
+
+def _walk_jsonpath(current: Any, segments: list[str | int]) -> Any:
+    if not segments:
+        return current
+    seg, rest = segments[0], segments[1:]
+    if seg == "*":
+        if isinstance(current, dict):
+            children = list(current.values())
+        elif isinstance(current, list):
+            children = current
         else:
-            current = current.get(seg) if isinstance(current, dict) else None
-    return current
+            return _MISSING
+        matches = [m for m in (_walk_jsonpath(c, rest) for c in children) if m is not _MISSING]
+        return matches if matches else _MISSING
+    if isinstance(seg, int):
+        if isinstance(current, list) and -len(current) <= seg < len(current):
+            return _walk_jsonpath(current[seg], rest)
+        return _MISSING
+    if isinstance(current, dict) and seg in current:
+        return _walk_jsonpath(current[seg], rest)
+    return _MISSING
+
+
+def _collect_text(value: Any) -> str:
+    """Return every string (and number/boolean) inside *value*, joined by newlines.
+
+    Object keys are visited in sorted order so the result is deterministic, and
+    nulls are skipped. A plain string is returned unchanged, so structured
+    values (an object ``state``, a wildcard match) are inspected in full rather
+    than skipped.
+    """
+    if isinstance(value, str):
+        return value
+    parts: list[str] = []
+    _collect_text_into(value, parts)
+    return "\n".join(parts)
+
+
+def _collect_text_into(value: Any, parts: list[str]) -> None:
+    if isinstance(value, str):
+        parts.append(value)
+    elif isinstance(value, bool):
+        parts.append("true" if value else "false")
+    elif isinstance(value, (int, float)):
+        parts.append(str(value))
+    elif isinstance(value, dict):
+        for key in sorted(value):
+            _collect_text_into(value[key], parts)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_text_into(item, parts)

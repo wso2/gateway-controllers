@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "granite-guardian-prompt-injection-v0"
-version = "0.9.0"
+version = "0.9.1"
 description = "WSO2 AI Gateway Granite Guardian prompt injection policy for the Python executor"
 readme = "README.md"
 requires-python = ">=3.10"

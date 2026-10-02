@@ -28,7 +28,6 @@ import (
 
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
-	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
 const (
@@ -411,7 +410,7 @@ func (p *SemanticPromptGuardPolicy) OnRequestBody(ctx context.Context, reqCtx *p
 
 // validatePayload validates payload using semantic similarity, returning policy actions.
 func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params SemanticPromptGuardPolicyParams) interface{} {
-	prompt, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	prompt, err := extractInspectableText(payload, params.JsonPath)
 	if err != nil {
 		return p.buildErrorResponse("Error extracting value from JSONPath", err, params.ShowAssessment)
 	}

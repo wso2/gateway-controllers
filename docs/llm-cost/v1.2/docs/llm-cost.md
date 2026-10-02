@@ -9,7 +9,7 @@ The LLM Cost policy works out what each LLM call cost, in US dollars, and makes 
 
 The cost is never returned to the client. It is written to `SharedContext.Metadata`, which is how policies on the same route share data. The most common consumer is the [LLM Cost Based Ratelimit](../../../llm-cost-based-ratelimit/v1.0/docs/llm-cost-based-ratelimit.md) policy, which uses it to enforce a spending budget.
 
-**Providers supported out of the box:** OpenAI, Anthropic, Google Gemini (AI Studio and Vertex AI), Mistral, and AWS Bedrock. Each ships with an `LlmProviderTemplate`, so for these providers you only need to attach the policy.
+**Providers supported out of the box:** OpenAI, Anthropic, Google Gemini (AI Studio and Vertex AI), Mistral, AWS Bedrock, and TypeSafe (Jev models, which are billed on input tokens only). Each ships with an `LlmProviderTemplate`, so for these providers you only need to attach the policy.
 
 The template says where the token counts, the model name, and the billing tier sit in a given provider's request and response, and the policy follows those directions. A new API surface on a provider already listed is therefore a template change on its own, as is a new provider that bills purely per token. A provider that also charges for something other than tokens, such as a web search call, or that applies a multiplier to the total, needs a matching calculator added to the policy as well.
 

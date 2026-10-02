@@ -1060,34 +1060,43 @@ func (p *AWSBedrockGuardrailPolicy) restorePIIInResponse(originalContent string,
 	return transformedContent
 }
 
-// updatePayloadWithMaskedContent updates the original payload by replacing the extracted content
-// Fallback policy: If jsonPath is empty, returns modifiedContent directly. For all JSON processing
-// errors (unmarshal, SetValueAtJSONPath, marshal), logs the error and returns originalPayload to
-// avoid returning invalid JSON or silently losing guardrail modifications.
-func (p *AWSBedrockGuardrailPolicy) updatePayloadWithMaskedContent(originalPayload []byte, extractedValue, modifiedContent string, jsonPath string) []byte {
+// updatePayloadWithMaskedContent updates the original payload by replacing the extracted content.
+// If jsonPath is empty, it returns modifiedContent directly. Any JSON processing error (unmarshal,
+// SetValueAtJSONPath, marshal) is returned rather than falling back to originalPayload, because the
+// original payload still carries the content the guardrail masked or redacted.
+func (p *AWSBedrockGuardrailPolicy) updatePayloadWithMaskedContent(originalPayload []byte, extractedValue, modifiedContent string, jsonPath string) ([]byte, error) {
 	if jsonPath == "" {
-		return []byte(modifiedContent)
+		return []byte(modifiedContent), nil
 	}
 
 	var jsonData map[string]interface{}
 	if err := json.Unmarshal(originalPayload, &jsonData); err != nil {
-		slog.Debug("AWSBedrockGuardrail: Failed to unmarshal payload for content update", "jsonPath", jsonPath, "extractedValue", extractedValue, "error", err)
-		return originalPayload
+		return nil, fmt.Errorf("parsing payload for masked write-back: %w", err)
 	}
 
-	err := utils.SetValueAtJSONPath(jsonData, jsonPath, modifiedContent)
-	if err != nil {
-		slog.Debug("AWSBedrockGuardrail: Failed to set value at JSONPath", "jsonPath", jsonPath, "extractedValue", extractedValue, "error", err)
-		return originalPayload
+	if err := utils.SetValueAtJSONPath(jsonData, jsonPath, modifiedContent); err != nil {
+		return nil, fmt.Errorf("writing masked value to JSONPath: %w", err)
 	}
 
 	updatedPayload, err := json.Marshal(jsonData)
 	if err != nil {
-		slog.Debug("AWSBedrockGuardrail: Failed to marshal updated payload", "jsonPath", jsonPath, "extractedValue", extractedValue, "error", err)
-		return originalPayload
+		return nil, fmt.Errorf("encoding masked payload: %w", err)
 	}
 
-	return updatedPayload
+	return updatedPayload, nil
+}
+
+// guardrailTransform returns the per-value rewrite for a structured payload. Redaction replaces
+// every match the guardrail reported with "*****"; masking replaces each original with the
+// placeholder evaluateGuardrailResponse stored in metadata, so all values share one mapping and
+// the response is restored correctly.
+func (p *AWSBedrockGuardrailPolicy) guardrailTransform(output interface{}, redactPII bool, metadata map[string]interface{}) func(string) string {
+	typed, _ := output.(*bedrockruntime.ApplyGuardrailOutput)
+	if redactPII {
+		return func(value string) string { return p.extractRedactedContent(typed, value) }
+	}
+	maskedPII, _ := metadata[MetadataKeyPIIEntities].(map[string]string)
+	return func(value string) string { return applyReplacements(value, maskedPII) }
 }
 
 // buildAssessmentObject builds the assessment object
@@ -1277,7 +1286,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		return policy.UpstreamRequestModifications{}
 	}
 
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	extractedValue, err := extractInspectableText(payload, params.JsonPath)
 	if err != nil {
 		if params.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: JSONPath extraction error, passthrough enabled", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
@@ -1345,7 +1354,19 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 
 	if modifiedContent != "" && modifiedContent != extractedValue {
 		slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
-		modifiedPayload := p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, params.JsonPath)
+		var modifiedPayload []byte
+		if selectsStructuredValue(payload, params.JsonPath) {
+			// The guardrail saw one joined text; apply its masking or redaction to each value.
+			modifiedPayload, err = rewriteStructuredPayload(payload, params.JsonPath, p.guardrailTransform(outputInterface, params.RedactPII, metadata))
+		} else {
+			modifiedPayload, err = p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, params.JsonPath)
+		}
+		if err != nil {
+			// Never fall back to the original payload: it still carries the content the
+			// guardrail masked or redacted.
+			slog.Debug("AWSBedrockGuardrail: Error applying guardrail modifications", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
+			return p.buildErrorResponse("Error applying guardrail modifications", err, isResponse, params.ShowAssessment, output)
+		}
 		if isResponse {
 			return policy.DownstreamResponseModifications{Body: modifiedPayload}
 		}

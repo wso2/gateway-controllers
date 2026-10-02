@@ -60,6 +60,8 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
+The path may also select an object or an array, or use a `*` segment to fan out over an object's values or an array's items (for example `$.questions.*.instructions`). Every string, number and boolean inside the selection is validated, joined with newlines, with object keys in sorted order. A path that does not resolve, or that selects no text, fails validation.
+
 #### Regular Expression Syntax
 
 The guardrail uses Go's standard regexp package, which supports RE2 syntax. Key features:

@@ -31,7 +31,6 @@ import (
 	"time"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
-	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
 // TODO
@@ -314,7 +313,7 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 		return policy.UpstreamRequestModifications{}
 	}
 
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	extractedValue, err := extractInspectableText(payload, params.JsonPath)
 	if err != nil {
 		if params.PassthroughOnError {
 			slog.Debug("AzureContentSafety: JSONPath extraction error, passthrough enabled", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)

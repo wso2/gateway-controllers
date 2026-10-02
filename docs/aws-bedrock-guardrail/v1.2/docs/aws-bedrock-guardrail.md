@@ -177,6 +177,10 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
+The path may also select an object or an array, or use a `*` segment to fan out over an object's values or an array's items (for example `$.questions.*.instructions`). Every string, number and boolean inside the selection is joined with newlines, with object keys in sorted order, and sent to the guardrail in one call. When the guardrail masks or redacts PII, the change is written back into each value in place, and all masked values share one set of placeholders so the response is restored correctly. A path that does not resolve, or that selects no text, fails validation.
+
+If a masked or redacted value cannot be written back into the payload, the request is rejected rather than forwarded with the original content.
+
 **Note:**
 
 Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:

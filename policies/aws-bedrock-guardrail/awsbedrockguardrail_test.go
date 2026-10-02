@@ -277,12 +277,16 @@ func TestRestorePIIInResponse(t *testing.T) {
 func TestUpdatePayloadWithMaskedContent(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 
-	if got := string(p.updatePayloadWithMaskedContent([]byte(`ignored`), "a", "b", "")); got != "b" {
-		t.Fatalf("expected direct replacement when jsonPath is empty, got: %q", got)
+	got, err := p.updatePayloadWithMaskedContent([]byte(`ignored`), "a", "b", "")
+	if err != nil || string(got) != "b" {
+		t.Fatalf("expected direct replacement when jsonPath is empty, got: %q, %v", got, err)
 	}
 
 	original := []byte(`{"message":"hello","nested":{"text":"hello"}}`)
-	updated := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text")
+	updated, err := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(updated, &payload); err != nil {
@@ -293,13 +297,15 @@ func TestUpdatePayloadWithMaskedContent(t *testing.T) {
 		t.Fatalf("expected nested.text to be updated, got: %#v", nested["text"])
 	}
 
+	// A failed write-back must never return the original payload, which still carries the
+	// content the guardrail masked.
 	invalidJSON := []byte(`{"message":`)
-	if got := p.updatePayloadWithMaskedContent(invalidJSON, "x", "y", "$.message"); string(got) != string(invalidJSON) {
-		t.Fatalf("expected original payload on invalid JSON")
+	if got, err := p.updatePayloadWithMaskedContent(invalidJSON, "x", "y", "$.message"); err == nil || got != nil {
+		t.Fatalf("expected an error and no payload on invalid JSON, got %q, %v", got, err)
 	}
 
-	if got := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text.value"); string(got) != string(original) {
-		t.Fatalf("expected original payload on invalid JSONPath")
+	if got, err := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text.value"); err == nil || got != nil {
+		t.Fatalf("expected an error and no payload on invalid JSONPath, got %q, %v", got, err)
 	}
 }
 

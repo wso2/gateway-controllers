@@ -1,5 +1,5 @@
 name: pii-masking-regex
-version: v1.0.4
+version: v1.0.5
 description: |
   Masks or redacts Personally Identifiable Information (PII) in request and
   response payloads.

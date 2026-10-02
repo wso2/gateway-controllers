@@ -66,6 +66,8 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 Set `jsonPath` to `""` to validate the entire payload as a string.
 
+The path may also select an object or an array, or use a `*` segment to fan out over an object's values or an array's items (for example `$.questions.*.instructions`). Every string, number and boolean inside the selection is validated, joined with newlines, with object keys in sorted order. A path that does not resolve, or that selects no text, fails validation.
+
 **Note:**
 
 Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
