@@ -1,0 +1,10 @@
+{
+  "name": "mtls-auth",
+  "displayName": "Mutual TLS Auth",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Security"
+  ],
+  "description": "Authenticates API callers using mutual TLS. The gateway matches the client\ncertificate presented on the connection against the accepted client\ncertificate authorities configured for this policy, optionally narrowed by\nsubject alternative name or certificate thumbprint."
+}
