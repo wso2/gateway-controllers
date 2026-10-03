@@ -1,0 +1,258 @@
+name: graphql-authz
+version: v0.1.0
+description: |
+  Authorize GraphQL query and mutation root fields using claim/scope rules evaluated after an authentication policy (e.g. jwt-auth) has populated the request's AuthContext. Rules are configured per field under `queries` / `mutations` ("op-level" rules), a type-wide `*` wildcard, and a cross-type `global` fallback; every rule that matches a field applies together (a `*` or `global` rule is not skipped just because the field also has its own exact rule — all matching rules must grant access). A field matched by no rule at all is not governed by this policy instance and passes through, leaving it to whatever else is attached to the API.
+
+parameters:
+  type: object
+  additionalProperties: false
+  anyOf:
+    - required:
+        - queries
+    - required:
+        - mutations
+    - required:
+        - global
+  properties:
+    queries:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: Authorization rules for top-level Query fields, by field name. A rule named `*` matches every query field, including one that also has its own exact-name rule — when both match, both must be satisfied.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - name
+        anyOf:
+          - required:
+              - scopes
+          - required:
+              - claims
+        properties:
+          name:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: The Query field name to authorize (e.g. `books`), or `*` to match every query field. A `*` rule applies in addition to a field's own exact-name rule when both match, not instead of it.
+            minLength: 1
+            maxLength: 256
+
+          scopes:
+            type: object
+            x-wso2-policy-advanced-param: false
+            additionalProperties: false
+            description: Scope requirement for this rule as `allOf` (all present) and/or `anyOf` (at least one present); AND-ed when both are set.
+            properties:
+              allOf:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+              anyOf:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+
+          claims:
+            type: object
+            x-wso2-policy-advanced-param: false
+            additionalProperties: false
+            description: Claim requirement for this rule as `allOf` and/or `anyOf` matchers, each `{ claim, values }`; a matcher is satisfied when the claim's value is one of `values`. AND-ed when both are set.
+            properties:
+              allOf:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - claim
+                    - values
+                  properties:
+                    claim:
+                      type: string
+                      minLength: 1
+                    values:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        minLength: 1
+              anyOf:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - claim
+                    - values
+                  properties:
+                    claim:
+                      type: string
+                      minLength: 1
+                    values:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        minLength: 1
+
+    mutations:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: Authorization rules for top-level Mutation fields, by field name. A rule named `*` matches every mutation field, including one that also has its own exact-name rule — when both match, both must be satisfied.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - name
+        anyOf:
+          - required:
+              - scopes
+          - required:
+              - claims
+        properties:
+          name:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: The Mutation field name to authorize (e.g. `createUser`), or `*` to match every mutation field. A `*` rule applies in addition to a field's own exact-name rule when both match, not instead of it.
+            minLength: 1
+            maxLength: 256
+
+          scopes:
+            type: object
+            x-wso2-policy-advanced-param: false
+            additionalProperties: false
+            description: Scope requirement for this rule as `allOf` (all present) and/or `anyOf` (at least one present); AND-ed when both are set.
+            properties:
+              allOf:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+              anyOf:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 256
+
+          claims:
+            type: object
+            x-wso2-policy-advanced-param: false
+            additionalProperties: false
+            description: Claim requirement for this rule as `allOf` and/or `anyOf` matchers, each `{ claim, values }`; a matcher is satisfied when the claim's value is one of `values`. AND-ed when both are set.
+            properties:
+              allOf:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - claim
+                    - values
+                  properties:
+                    claim:
+                      type: string
+                      minLength: 1
+                    values:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        minLength: 1
+              anyOf:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required:
+                    - claim
+                    - values
+                  properties:
+                    claim:
+                      type: string
+                      minLength: 1
+                    values:
+                      type: array
+                      minItems: 1
+                      items:
+                        type: string
+                        minLength: 1
+
+    global:
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: Authorization applied to every query and mutation root field, in addition to any matching rule (exact name or `*`) in `queries` / `mutations` — not instead of it. A field covered by neither this nor an op-level rule is not governed by this policy instance and passes through.
+      anyOf:
+        - required:
+            - scopes
+        - required:
+            - claims
+      properties:
+        scopes:
+          type: object
+          x-wso2-policy-advanced-param: false
+          additionalProperties: false
+          description: Scope requirement as `allOf` (all present) and/or `anyOf` (at least one present); AND-ed when both are set.
+          properties:
+            allOf:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 256
+            anyOf:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 256
+
+        claims:
+          type: object
+          x-wso2-policy-advanced-param: false
+          additionalProperties: false
+          description: Claim requirement as `allOf` and/or `anyOf` matchers, each `{ claim, values }`; a matcher is satisfied when the claim's value is one of `values`. AND-ed when both are set.
+          properties:
+            allOf:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - claim
+                  - values
+                properties:
+                  claim:
+                    type: string
+                    minLength: 1
+                  values:
+                    type: array
+                    minItems: 1
+                    items:
+                      type: string
+                      minLength: 1
+            anyOf:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - claim
+                  - values
+                properties:
+                  claim:
+                    type: string
+                    minLength: 1
+                  values:
+                    type: array
+                    minItems: 1
+                    items:
+                      type: string
+                      minLength: 1
