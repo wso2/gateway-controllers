@@ -1,0 +1,217 @@
+name: oauth-token-exchange
+version: v1.0.0
+description: |
+  Exchanges the caller's inbound credential for a backend-specific token at an
+  external OAuth2 authorization server, then attaches it to the upstream
+  request. Implements RFC 8693 Token Exchange (default) and RFC 7523 JWT
+  Bearer.
+
+  Unlike backend-jwt, which mints a gateway-signed assertion, the token here
+  is vouched for by the backend's own authorization server. Backend
+  credentials are never exposed to the client, and the client's original
+  credential is never forwarded upstream.
+
+  Any exchange failure (missing subject token, unreachable token endpoint,
+  non-2xx response, malformed response) rejects the request; the original
+  subject token is never forwarded as a fallback.
+
+  Makes an optimistic attempt during the request-header phase. Only a
+  missing subject token defers to the request-body phase, after any earlier
+  body-phase auth policy in the chain (e.g. mcp-auth) has had a chance to
+  run and possibly supply the credential. An invalid configuration or a
+  failed call to the token endpoint is rejected immediately at the header
+  phase instead, since repeating the identical, deterministically-failing
+  attempt would not change the outcome — that rejection short-circuits the
+  whole chain, so the request-body phase never runs for that request.
+  Attaching this policy still forces full request-body buffering on every
+  route it's applied to, since a missing subject token can only be resolved
+  there.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    tokenEndpoint:
+      type: string
+      x-wso2-policy-advanced-param: false
+      minLength: 1
+      description: >-
+        Absolute URL of the OAuth2 token endpoint to call for the exchange.
+        Must use https:// unless the system-level allowInsecureTokenEndpoint
+        override is enabled.
+
+    grantType:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: >-
+        "TokenExchange" implements RFC 8693 (sends the inbound credential as
+        subject_token). "JwtBearer" implements RFC 7523 (sends the inbound
+        credential as-is as the assertion).
+      default: TokenExchange
+      enum: ["TokenExchange", "JwtBearer"]
+
+    clientId:
+      type: string
+      x-wso2-policy-advanced-param: true
+      minLength: 1
+      description: OAuth2 client identifier used to authenticate to the token endpoint.
+
+    clientSecret:
+      type: string
+      x-wso2-policy-advanced-param: true
+      minLength: 1
+      description: OAuth2 client secret paired with clientId.
+
+    clientAuthMethod:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        How clientId/clientSecret are presented to the token endpoint.
+        "ClientSecretBasic" sends HTTP Basic auth (default). "ClientSecretPost"
+        sends client_id/client_secret as form fields.
+      default: ClientSecretBasic
+      enum: ["ClientSecretBasic", "ClientSecretPost"]
+
+    subjectTokenSource:
+      type: object
+      x-wso2-policy-advanced-param: true
+      additionalProperties: false
+      description: >-
+        Where to read the caller's credential from. Reads the live request
+        state, so a rewrite made by an earlier policy in the same chain
+        (e.g. an auth policy forwarding the token under a different header)
+        is honored.
+      default:
+        type: header
+        name: Authorization
+        prefix: "Bearer "
+      properties:
+        type:
+          type: string
+          description: >-
+            "header" reads a request header (optionally stripping a prefix,
+            e.g. "Bearer "). "cookie" reads a cookie by name. "queryParameter"
+            reads a query string parameter by name.
+          enum: ["header", "cookie", "queryParameter"]
+        name:
+          type: string
+          description: Header, cookie, or query parameter name to read from.
+        prefix:
+          type: string
+          description: >-
+            Only used when type is "header". Stripped from the header value
+            before it is used as the subject token (default "Bearer "). Set
+            to "" for a header with no prefix.
+
+    subjectTokenType:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Identifies the type of the inbound credential sent as subject_token.
+        Expanded to the corresponding urn:ietf:params:oauth:token-type:* URN.
+      default: AccessToken
+      enum: ["AccessToken", "Jwt", "IdToken"]
+
+    requestedTokenType:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Requested type of the token to be issued by the exchange. Only sent
+        when grantType is "TokenExchange". Omit to let the authorization
+        server choose its default.
+      enum: ["AccessToken", "Jwt", "IdToken"]
+
+    audiences:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: Target audience values sent as repeated "audience" parameters.
+      default: []
+      items:
+        type: string
+
+    scopes:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: OAuth scopes requested, space-joined into the "scope" parameter.
+      default: []
+      items:
+        type: string
+
+    resources:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        RFC 8707 resource indicators, sent as repeated "resource" parameters.
+      default: []
+      items:
+        type: string
+
+    header:
+      type: string
+      x-wso2-policy-advanced-param: false
+      minLength: 1
+      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+      description: Upstream request header to set the exchanged token on.
+      default: Authorization
+
+    headerPrefix:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Prefix prepended to the exchanged token when setting it on the
+        upstream header. Default "Bearer ". Set to "" for no prefix.
+      default: "Bearer "
+
+    tokenCaching:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Whether to cache exchanged tokens in memory for part of their
+        reported lifetime, to avoid a token-endpoint call on every request.
+      default: true
+
+  required:
+    - tokenEndpoint
+    - clientId
+    - clientSecret
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    cacheMaxSize:
+      type: integer
+      description: >-
+        Maximum number of exchanged tokens held in the shared cache across
+        all APIs (a global bound, not per-API). Changing this value rebuilds
+        the cache and flushes it.
+      default: 100000
+      minimum: 1
+      "wso2/defaultValue": "${config.policy_configurations.oauthtokenexchange_v1.cachemaxsize}"
+
+    requestTimeout:
+      type: string
+      description: >-
+        Timeout for the outbound call to the token endpoint, as a Go duration
+        string (e.g. "5s").
+      default: "5s"
+      "wso2/defaultValue": "${config.policy_configurations.oauthtokenexchange_v1.requesttimeout}"
+
+    maxResponseBytes:
+      type: integer
+      description: >-
+        Maximum number of bytes read from the token endpoint's response
+        before it is rejected.
+      default: 65536
+      minimum: 1
+      "wso2/defaultValue": "${config.policy_configurations.oauthtokenexchange_v1.maxresponsebytes}"
+
+    allowInsecureTokenEndpoint:
+      type: boolean
+      description: >-
+        Off-by-default operator opt-in allowing tokenEndpoint to use http://
+        instead of https://. Intended for local/dev testing only.
+      default: false
+      "wso2/defaultValue": "${config.policy_configurations.oauthtokenexchange_v1.allowinsecuretokenendpoint}"
+
+  required: []

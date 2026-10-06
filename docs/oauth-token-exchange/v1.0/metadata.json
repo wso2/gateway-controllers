@@ -1,0 +1,10 @@
+{
+  "name": "oauth-token-exchange",
+  "displayName": "OAuth Token Exchange",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Security"
+  ],
+  "description": "Exchanges the caller's inbound credential for a backend-specific token at an external OAuth2 authorization server (RFC 8693 Token Exchange or RFC 7523 JWT Bearer) and attaches it to the upstream request, so backend credentials are never exposed to the client and the client's own credential never reaches the backend."
+}
