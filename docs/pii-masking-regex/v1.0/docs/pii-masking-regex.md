@@ -29,7 +29,7 @@ This policy requires only a single-level configuration where all parameters are 
 | `phone` | boolean | No | `false` | Enables built-in PHONE detection. At least one of `email`, `phone`, `ssn`, or `customPIIEntities` must be enabled. |
 | `ssn` | boolean | No | `false` | Enables built-in SSN detection. At least one of `email`, `phone`, `ssn`, or `customPIIEntities` must be enabled. |
 | `customPIIEntities` | `CustomPIIEntity` array | No | - | Custom PII entity definitions for detection. Each item defines a `piiEntity` name and `piiRegex` pattern. At least one item required if provided. |
-| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the JSON payload. Use `"$"` or `""` to process the entire payload as a string. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the JSON payload. Use `"$"` or `""` to process the entire payload as a string. `"$"` is supported from policy version v1.0.6; on earlier versions use `""`. |
 | `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with "*****" (permanent, cannot be restored). If `false`, masks PII with placeholders that can be restored in responses. |
 
 ### CustomPIIEntity Configuration
@@ -51,6 +51,8 @@ The guardrail supports JSONPath expressions to extract and process specific fiel
 - `$.messages[0].content` - Extracts content from the first message in a messages array
 
 Set `jsonPath` to `"$"` or `""` to process the entire payload as a string.
+
+> `"$"` as the entire payload is supported from policy version v1.0.6. On earlier versions, `"$"` does not select the entire payload and PII is not masked; use `""` instead.
 
 **Note:**
 
