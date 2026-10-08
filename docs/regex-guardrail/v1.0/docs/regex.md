@@ -34,7 +34,7 @@ This policy requires only a single-level configuration where all parameters are 
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `true` | Enables validation for the request flow. |
 | `regex` | string | Conditional | - | Regular expression pattern to match against the content. Required when `enabled: true`. Must be at least 1 character. |
-| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the request JSON payload. If empty, validates the entire payload as a string. |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the request JSON payload. Use `"$"` or `""` to validate the entire payload. |
 | `invert` | boolean | No | `false` | If `true`, validation passes when regex does NOT match. If `false`, validation passes when regex matches. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
 
@@ -44,7 +44,7 @@ This policy requires only a single-level configuration where all parameters are 
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `false` | Enables validation for the response flow. |
 | `regex` | string | Conditional | - | Regular expression pattern to match against the content. Required when `enabled: true`. Must be at least 1 character. |
-| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the response JSON payload. If empty, validates the entire payload as a string. |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the response JSON payload. Use `"$"` or `""` to validate the entire payload. |
 | `streamingJsonPath` | string | No | `"$.choices[0].delta.content"` | JSONPath expression to extract content from SSE streaming delta chunks. Used when the upstream returns a streaming (`stream: true`) response. |
 | `invert` | boolean | No | `false` | If `true`, validation passes when regex does NOT match. If `false`, validation passes when regex matches. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information in error responses. |
@@ -58,7 +58,7 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 - `$.items[0].text` - Extracts text from the first item in an array
 - `$.messages[0].content` - Extracts content from the first message in a messages array
 
-If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
+Set `jsonPath` to `"$"` or `""` to validate the entire payload as a string.
 
 #### Regular Expression Syntax
 

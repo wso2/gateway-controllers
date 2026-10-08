@@ -230,6 +230,22 @@ func TestPIIMaskingRegexPolicy_OnRequest_NoMatch_NoOp(t *testing.T) {
 	}
 }
 
+func TestPIIMaskingRegexPolicy_OnRequest_RootJSONPathUsesWholePayload(t *testing.T) {
+	p := mustGetPIIPolicy(t, map[string]interface{}{
+		"email":    true,
+		"jsonPath": "$",
+	})
+
+	ctx := piiRequestContext(`{"owner":"owner@example.com","message":"hello"}`)
+	mods := mustPIIRequestMods(t, p.OnRequestBody(context.Background(), ctx, nil))
+	if strings.Contains(string(mods.Body), "owner@example.com") {
+		t.Fatalf("expected email in the whole payload to be masked, got %s", mods.Body)
+	}
+	if !json.Valid(mods.Body) {
+		t.Fatalf("expected the masked payload to remain valid JSON, got %s", mods.Body)
+	}
+}
+
 func TestPIIMaskingRegexPolicy_OnRequest_JSONPathError(t *testing.T) {
 	p := mustGetPIIPolicy(t, map[string]interface{}{
 		"email":    true,
