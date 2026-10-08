@@ -372,7 +372,7 @@ func (p *PIIMaskingRegexPolicy) restorePIIInResponse(originalContent string, mas
 
 // updatePayloadWithMaskedContent updates the original payload by replacing the extracted content
 func (p *PIIMaskingRegexPolicy) updatePayloadWithMaskedContent(originalPayload []byte, extractedValue, modifiedContent string, jsonPath string) []byte {
-	if jsonPath == "" {
+	if jsonPath == "" || jsonPath == "$" {
 		// If no JSONPath, the entire payload was processed, return the modified content
 		return []byte(modifiedContent)
 	}
@@ -996,7 +996,7 @@ func restore(content string, maskedMap map[string]string) string {
 // Returns ("", false, nil) when the value exists but is not a scalar (e.g. array/object).
 // Returns ("", false, err) on path or parse errors.
 func extractStringFromPath(payload []byte, jsonPath string) (string, bool, error) {
-	if jsonPath == "" {
+	if jsonPath == "" || jsonPath == "$" {
 		return string(payload), true, nil
 	}
 	var jsonData map[string]interface{}

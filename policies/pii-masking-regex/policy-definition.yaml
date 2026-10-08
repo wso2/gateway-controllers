@@ -1,5 +1,5 @@
 name: pii-masking-regex
-version: v1.0.5
+version: v1.0.6
 description: |
   Masks or redacts Personally Identifiable Information (PII) in request and
   response payloads.
@@ -52,7 +52,7 @@ parameters:
       x-wso2-policy-advanced-param: false
       description: |
         Specifies the JSONPath used to extract the value to process. When
-        empty, the entire payload is processed as plain text.
+        empty or set to "$", the entire payload is processed as plain text.
       default: "$.messages[-1].content"
     redactPII:
       type: boolean

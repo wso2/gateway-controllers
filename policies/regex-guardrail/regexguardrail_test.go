@@ -445,6 +445,20 @@ func TestRegexGuardrailPolicy_OnRequestBody_EmptyJSONPath_UsesWholePayload(t *te
 	}
 }
 
+func TestRegexGuardrailPolicy_OnRequestBody_RootJSONPath_UsesWholePayload(t *testing.T) {
+	p := mustGetRegexPolicy(t, map[string]interface{}{
+		"request": map[string]interface{}{
+			"regex":    `"name":"sam"`,
+			"jsonPath": "$",
+		},
+	})
+
+	action := p.OnRequestBody(context.Background(), newRequestContextWithBody(`{"name":"sam"}`), nil)
+	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
+	}
+}
+
 func TestRegexGuardrailPolicy_OnRequestBody_InvertBehavior(t *testing.T) {
 	passPolicy := mustGetRegexPolicy(t, map[string]interface{}{
 		"request": map[string]interface{}{

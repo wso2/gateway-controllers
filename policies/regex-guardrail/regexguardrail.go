@@ -98,7 +98,6 @@ func GetPolicy(
 	return p, nil
 }
 
-
 func (p *RegexGuardrailPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
@@ -259,7 +258,11 @@ func (p *RegexGuardrailPolicy) validatePayload(payload []byte, params RegexGuard
 		}
 		return policy.UpstreamRequestModifications{}
 	}
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	extractedValue := string(payload)
+	var err error
+	if params.JsonPath != "$" {
+		extractedValue, err = utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	}
 	if err != nil {
 		slog.Debug("RegexGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
 		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment)
