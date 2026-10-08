@@ -1,0 +1,13 @@
+{
+  "name": "jwt-auth",
+  "displayName": "JWT Auth",
+  "version": "1.3",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI",
+    "WebSub",
+    "WebBroker"
+  ],
+  "description": "Validates JWT access tokens included in API requests. The gateway verifies the token's signature, expiry, issuer, audience, scopes, and required claims."
+}

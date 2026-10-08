@@ -1,0 +1,13 @@
+{
+  "name": "basic-auth",
+  "displayName": "Basic Auth",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI",
+    "WebSub",
+    "WebBroker"
+  ],
+  "description": "Implements HTTP Basic Authentication to protect APIs with username and password credentials.\nValidates the Authorization header against configured credentials and sets authentication\nmetadata in the request context for downstream policies to use."
+}
