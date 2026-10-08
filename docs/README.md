@@ -31,13 +31,13 @@ All available policies, sorted alphabetically.
 | Policy | Categories | Description |
 |--------|------------|-------------|
 | [Analytics Header Filter](./analytics-header-filter/v1.0/docs/analytics-header-filter.md) | Logging, Analytics & Monitoring | The Analytics Header Filter policy allows you to control which request and response headers are included in analytics data using allow or deny modes. |
-| [API Key Auth](./api-key-auth/v1.2/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
+| [API Key Auth](./api-key-auth/v1.3/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
 | [AWS Authentication](./aws-authentication/v0.10/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |
 | [AWS Bedrock Guardrail](./aws-bedrock-guardrail/v1.2/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against AWS Bedrock Guardrails. |
 | [Azure Content Safety Content Moderation](./azure-content-safety-content-moderation/v1.0/docs/azure-content-safety.md) | Guardrails, AI | Validates request or response body content against Azure Content Safety API for content moderation. |
 | [Azure LLM Cost](./azure-llm-cost/v1.0/docs/azure-llm-cost.md) | AI | Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. |
 | [Backend JWT](./backend-jwt/v1.0/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
-| [Basic Auth](./basic-auth/v1.0/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
+| [Basic Auth](./basic-auth/v1.1/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
 | [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Cost-Based Model Routing](./cost-based-model-routing/v0.9/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
@@ -48,11 +48,11 @@ All available policies, sorted alphabetically.
 | [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.0/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
-| [JWT Auth](./jwt-auth/v1.3/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
+| [JWT Auth](./jwt-auth/v1.4/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
 | [LLM Cost](./llm-cost/v1.2/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. |
 | [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.0/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
 | [LLM Header Router](./llm-header-router/v0.9/docs/llm-header-router.md) | AI | Selects an LLM provider for OpenAI Chat Completions requests using a configurable request header. |
-| [Log Message](./log-message/v1.0/docs/log-message.md) | Logging, Analytics & Monitoring, MCP, WebSub, WebBroker | This policy provides the capability to log the payload and headers of a request/response. |
+| [Log Message](./log-message/v1.1/docs/log-message.md) | Logging, Analytics & Monitoring, MCP, WebSub, WebBroker | This policy provides the capability to log the payload and headers of a request/response. |
 | [MCP Access Control](./mcp-acl-list/v1.1/docs/mcp-acl-list.md) | MCP | MCP ACL List policy controls access to tools, resources, and prompts using mode and exceptions. |
 | [MCP Authentication](./mcp-auth/v1.4/docs/mcp-authentication.md) | MCP, Security | This policy is used to secure traffic to Model Context Protocol server as defined in the specification (https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization). |
 | [MCP Authorization](./mcp-authz/v1.3/docs/mcp-authorization.md) | MCP, Security | MCP Authorization policy validates access to MCP resources (tools, resources, prompts) and methods based on JWT claims or OAuth scopes provided by the mcp-auth policy. |
@@ -75,7 +75,7 @@ All available policies, sorted alphabetically.
 | [Prompt Compressor](./prompt-compressor/v0.9/docs/prompt-compressor.md) | AI | Compresses selected prompt text in JSON request bodies before upstream LLM calls. |
 | [Prompt Decorator](./prompt-decorator/v1.0/docs/prompt-decorator.md) | AI | Dynamically modifies the prompt by applying custom decorations using a configured strategy. |
 | [Prompt Template](./prompt-template/v1.0/docs/prompt-template.md) | AI | Dynamically modifies the prompt by applying custom templates using a configured strategy. |
-| [Rate Limit - Advanced](./advanced-ratelimit/v1.3/docs/advanced-ratelimit.md) | Security, AI | Rate limiting policy supporting multiple algorithms, multi-dimensional quotas, weighted rate limiting, flexible key extraction (including JWT/auth-context properties) with optional match conditions, and in-memory, Redis, and Redis-local-async backends. |
+| [Rate Limit - Advanced](./advanced-ratelimit/v1.4/docs/advanced-ratelimit.md) | Security, AI | Rate limiting policy supporting multiple algorithms, multi-dimensional quotas, weighted rate limiting, flexible key extraction (including JWT/auth-context properties) with optional match conditions, and in-memory, Redis, and Redis-local-async backends. |
 | [Rate Limit - Basic](./basic-ratelimit/v1.0/docs/basic-ratelimit.md) | Security, AI | Simple request rate limiting policy that limits the number of requests per time window. |
 | [Redirect](./redirect/v0.9/docs/redirect.md) | Transformation | Issues an HTTP redirect to the client without forwarding the request to the upstream backend (Gateway-API RequestRedirect semantics). |
 | [Regex Guardrail](./regex-guardrail/v1.0/docs/regex.md) | Guardrails, AI | Validates request or response body content against a regular expression pattern. |

@@ -1,5 +1,5 @@
 name: basic-auth
-version: v1.0.3
+version: v1.1.0
 description: |
   Protects APIs using Basic Authentication by validating username and password credentials.
 

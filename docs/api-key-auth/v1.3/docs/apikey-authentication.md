@@ -254,3 +254,21 @@ spec:
 
 - Always transmit API keys over HTTPS only and ensure logging practices do not inadvertently expose sensitive key material.
 
+## Fault reporting
+
+From v1.3, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). On a REST, MCP or LLM API the status and body the client receives are the same
+as in v1.2; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
+envelope. A gateway without fault policy support ignores the fault, and the policy behaves
+exactly as v1.2.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| No API key, or a malformed one | `401` | `900902` | `authentication` |
+| The API key is not recognised or is invalid | `401` | `900901` | `authentication` |
+| The policy is misconfigured, or the key could not be validated | `401` | `900900` | `authentication` |
+
+The fault's `Description` carries the internal reason, for example `API key not recognised`.
+It is passed to fault policies and analytics only, never to the client.

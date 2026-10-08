@@ -836,3 +836,21 @@ When rate limiting is applied, the following headers may be included in response
 | Header | Description |
 |--------|-------------|
 | `Retry-After` | Seconds to wait before retrying (only on 429 responses) |
+
+## Fault reporting
+
+From v1.4, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). On a REST, MCP or LLM API the status and body the client receives are the same
+as in v1.3; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
+envelope. A gateway without fault policy support ignores the fault, and the policy behaves
+exactly as v1.3.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A quota is exceeded, policy attached at the API level | the quota's status (default `429`) | `900800` | `throttling` |
+| A quota is exceeded, policy attached at an operation | the quota's status (default `429`) | `900802` | `throttling` |
+
+The fault's `Description` carries the internal reason, for example `quota exceeded: <quota name>`.
+It is passed to fault policies and analytics only, never to the client.

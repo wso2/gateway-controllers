@@ -1,7 +1,7 @@
 {
   "name": "advanced-ratelimit",
   "displayName": "Rate Limit - Advanced",
-  "version": "1.3",
+  "version": "1.4",
   "provider": "WSO2",
   "categories": [
     "Security",

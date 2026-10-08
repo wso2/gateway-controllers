@@ -64,8 +64,8 @@ parameters:
       x-wso2-policy-advanced-param: false
       additionalProperties: false
       description: >-
-        Log the failure when this policy runs in the fault flow, under
-        globalFaultPolicies. Mutually exclusive with request and response: an
+        Log the failure when this policy runs in the fault flow, attached as a
+        fault policy. Mutually exclusive with request and response: an
         attachment is either in the normal flow or the fault flow, never both.
       properties:
         payload:

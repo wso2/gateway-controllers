@@ -171,3 +171,22 @@ spec:
 - **Rate Limiting**: Protect against brute force attacks on authenticated endpoints by limiting request rates
 - **Add Headers**: Add authentication headers to upstream requests or responses based on authentication status
 - **Request Rewrite**: Conditionally rewrite requests based on authentication metadata for downstream service compatibility
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). On a REST, MCP or LLM API the status and body the client receives are the same
+as in v1.0; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
+envelope. A gateway without fault policy support ignores the fault, and the policy behaves
+exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| No Authorization header, or one that does not use the Basic scheme | `401` | `900902` | `authentication` |
+| The credentials are not valid base64, not `username:password`, or do not match | `401` | `900901` | `authentication` |
+| The policy is misconfigured (empty username or password) | `500` | `900900` | `authentication` |
+
+The fault's `Description` carries the internal reason, for example `username or password did not match`.
+It is passed to fault policies and analytics only, never to the client.

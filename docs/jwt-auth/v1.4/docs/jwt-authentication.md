@@ -450,3 +450,25 @@ Token verification caching is enabled by default. To force full re-verification 
 [policy_configurations.jwtauth_v1]
 tokencaching = false
 ```
+
+## Fault reporting
+
+From v1.4, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). On a REST, MCP or LLM API the status and body the client receives are the same
+as in v1.3; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
+envelope. A gateway without fault policy support ignores the fault, and the policy behaves
+exactly as v1.3.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The Authorization header is missing | `onFailureStatusCode` (default `401`) | `900902` | `authentication` |
+| The header or token is malformed, the signature or audience does not validate | `onFailureStatusCode` | `900901` | `authentication` |
+| The token has expired | `onFailureStatusCode` | `900903` | `authentication` |
+| Required scopes are not present | `onFailureStatusCode` | `900910` | `authorization` |
+| Required claims are not satisfied | `onFailureStatusCode` | `900908` | `authorization` |
+| The policy is misconfigured (no key managers, invalid scopes or claims configuration) | `onFailureStatusCode` | `900900` | `authentication` |
+
+The fault's `Description` carries the internal reason, for example `missing authorization header`.
+It is passed to fault policies and analytics only, never to the client.

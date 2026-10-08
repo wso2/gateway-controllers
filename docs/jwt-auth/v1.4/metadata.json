@@ -1,7 +1,7 @@
 {
   "name": "jwt-auth",
   "displayName": "JWT Auth",
-  "version": "1.3",
+  "version": "1.4",
   "provider": "WSO2",
   "categories": [
     "Security",

@@ -41,8 +41,12 @@ These parameters are configured per-API/route by the API developer:
 | `response.payload` | boolean | No | `false` | Enables logging of response payloads. When set to `true`, the response bodies will be logged. |
 | `response.headers` | boolean | No | `false` | Enables logging of response headers. When set to `true`, the response headers will be logged. |
 | `response.excludeHeaders` | array | No | `[]` | An array of header names to exclude from response logging when `response.headers` is enabled. Example: `["Set-Cookie", "X-Internal-Token"]` will exclude these headers from being logged. Header names are case-insensitive. |
+| `fault` | object | No* | - | Configuration for logging a failure, when the policy is attached as a fault policy. See [Example 9](#example-9-logging-failures-as-a-fault-policy). |
+| `fault.payload` | boolean | No | `false` | Logs the error response payload. |
+| `fault.headers` | boolean | No | `false` | Logs the error response headers. |
+| `fault.excludeHeaders` | array | No | `[]` | An array of header names to exclude from the fault log when `fault.headers` is enabled. Header names are case-insensitive. |
 
-*At least one of `request` or `response` must be provided.
+*Attached as an ordinary policy, at least one of `request` or `response` must be provided and `fault` must not be. Attached as a fault policy, `fault` must be provided and `request` and `response` must not be.
 
 **Note:**
 
@@ -341,6 +345,60 @@ spec:
 ```
 
 When the upstream returns a streaming response (`stream: true`), each SSE chunk is logged independently as it arrives. No buffering or accumulation is performed, providing real-time visibility into the token stream without added latency.
+
+### Example 9: Logging Failures as a Fault Policy
+
+Attached to an API's fault policies instead of its ordinary policies, the policy logs each failure
+the request runs into: a policy's rejection (an authentication failure, a rate limit, a guardrail
+intervention), and, where the gateway is configured to route them to fault policies, upstream and
+router errors. It needs a gateway with fault policy support. A `RestApi` or `Mcp` lists fault
+policies under `faultPolicies`; an `LlmProvider` or `LlmProxy` under `globalFaultPolicies`.
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: orders-api-v1.0
+spec:
+  displayName: Orders API
+  version: v1.0
+  context: /orders/$version
+  upstream:
+    main:
+      url: http://backend-service:8080
+  policies:
+    - name: jwt-auth
+      version: v1
+      params:
+        issuers: ["primary"]
+  faultPolicies:
+    - name: log-message
+      version: v1
+      params:
+        fault:
+          payload: true
+          headers: true
+          excludeHeaders: ["Authorization"]
+  operations:
+    - method: GET
+      path: /items
+```
+
+A request without a token is rejected by `jwt-auth`, and this policy logs a record with
+`mediation-flow` set to `FAULT`. Besides the request ID, method, path and the selected payload and
+headers, a fault record carries:
+
+| Field | Description |
+|-------|-------------|
+| `status` | The status the client receives. |
+| `original-status` | The upstream's own status, when a policy changed it. |
+| `error-code` | The failing policy's fault code, for example `900902`. |
+| `error-type` | The fault type, for example `authentication`. |
+| `error-message` | The client-facing summary of the failure. |
+| `failing-policy` | The policy that caused the failure; absent when no policy did. |
+
+The fault's internal description is never logged: for a guardrail it is the content the guardrail
+blocked.
 
 ## How it Works
 
