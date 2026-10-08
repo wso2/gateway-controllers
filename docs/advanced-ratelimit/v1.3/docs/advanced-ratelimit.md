@@ -56,6 +56,22 @@ When using the `redis` or `redis-local-async` backend, the following parameters 
 | `writeTimeout` | string | No | `"3s"` | Redis write timeout (Go duration string). |
 | `poolSize` | integer | No | `0` | Connection pool size for the shared Redis client (`0` = go-redis default, 10 × GOMAXPROCS). One pool is shared per distinct Redis endpoint across all rate-limit policy instances and reloads, so size it for the gateway, not per route. |
 
+
+#### Redis TLS Configuration
+
+To connect to Redis over TLS (TLS 1.2 or later), configure the following under `redis.tls`. TLS is disabled by default.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Connects to Redis over TLS when `true`. The other `tls` parameters are ignored when `false`. |
+| `caFile` | string | No | `""` | Path to a PEM CA bundle used to verify the Redis server certificate. Empty uses the system trust store (suitable for public CAs, such as managed cloud Redis); set it for a private CA. |
+| `serverName` | string | No | `""` | Server name to verify against the Redis certificate. Empty uses `host`. Set it when connecting by IP or by an alias that is not on the certificate. |
+| `insecureSkipVerify` | boolean | No | `false` | Disables verification of the Redis server certificate. For testing only; a warning is logged when enabled. |
+| `certFile` | string | No | `""` | Path to a PEM client certificate for mutual TLS. Must be set together with `keyFile`. |
+| `keyFile` | string | No | `""` | Path to the PEM private key for `certFile`. Must be set together with `certFile`. |
+
+All files are read and validated when the policy is created: a missing file, a CA file without valid PEM certificates, or a mismatched certificate and key fails policy creation regardless of `failureMode`. File paths are resolved inside the gateway runtime container, so the files must be mounted there. Rotated certificates take effect on the next configuration reload or restart.
+
 #### Memory Configuration
 
 When using in-memory backend, the following parameters can be configured under `memory`:
@@ -279,6 +295,30 @@ write_timeout = "3s"
 include_x_rate_limit = true
 include_ietf = true
 include_retry_after = true
+```
+
+##### Redis Backend over TLS
+
+For a Redis server that only accepts TLS connections, add a `tls` block under the Redis configuration. Omit `ca_file` when the server certificate is issued by a public CA:
+
+```toml
+[policy_configurations.ratelimit_v1]
+algorithm = "fixed-window"
+backend = "redis"
+
+[policy_configurations.ratelimit_v1.redis]
+host = "redis.example.com"
+port = 6379
+password = "your-redis-password"
+
+[policy_configurations.ratelimit_v1.redis.tls]
+enabled = true
+ca_file = "/etc/policy-engine/certs/redis-ca.pem"
+server_name = ""
+insecure_skip_verify = false
+# For mutual TLS, set both:
+cert_file = ""
+key_file = ""
 ```
 
 ##### Redis-local-async Backend Configuration

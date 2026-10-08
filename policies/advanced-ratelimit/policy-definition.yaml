@@ -1,5 +1,5 @@
 name: advanced-ratelimit
-version: v1.2.1
+version: v1.3.0
 description: |
   Applies advanced rate limits using fixed-window (default) or GCRA algorithms with multi-quota controls,
   configurable key (including JWT/auth-context properties and pattern-based match conditions) and cost
