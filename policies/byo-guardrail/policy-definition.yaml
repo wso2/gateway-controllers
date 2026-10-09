@@ -1,0 +1,146 @@
+name: byo-guardrail
+version: v0.10.0
+displayName: Bring Your Own Guardrail
+description: |
+  Checks request or response text with your own guardrail service over HTTP.
+  The service implements a small, versioned contract and decides to allow,
+  block, or modify (replace) the checked text. No policy code is required.
+
+parameters:
+  type: object
+  properties:
+    endpoint:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Full URL the policy POSTs each check to (e.g.
+        https://guardrail.example.com/evaluate). No path is appended. Must use
+        http or https and must not contain credentials; use auth instead.
+      minLength: 1
+    auth:
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: |
+        Credentials sent to the guardrail service. Omit when the service needs
+        no authentication.
+      properties:
+        type:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            Authentication scheme. "bearer" (default) sends
+            "Authorization: Bearer <token>". "raw" sends
+            "Authorization: <token>" with no prefix, for services that expect
+            the token unprefixed.
+          enum:
+            - bearer
+            - raw
+          default: bearer
+        token:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            Token for the guardrail service. Use {{ secret "handle" }} rather
+            than a literal value.
+          minLength: 1
+      required: [ token ]
+    timeout:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Maximum time to wait for the guardrail service, as a Go duration
+        string (for example "5s" or "1500ms"), up to "30s". A timeout is a
+        guardrail error, handled per onError.
+      default: "5s"
+    mode:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        "enforce" (default) applies the guardrail's decisions. "monitor" never
+        blocks or modifies traffic: it records what the guardrail would have
+        done in analytics and request metadata.
+      enum:
+        - enforce
+        - monitor
+      default: enforce
+    onError:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        What happens when no valid decision is obtained (service unreachable,
+        timeout, unexpected status, malformed response, or text that cannot be
+        extracted). "block" (default) rejects the traffic with 422; "allow"
+        passes it through unchecked and records the error.
+      enum:
+        - block
+        - allow
+      default: block
+    request:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: Configuration for request phase checks.
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables checks for the request flow.
+          default: true
+        jsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            JSONPath of the text to check, such as "$.messages[-1].content".
+            Must select a single value: a string, or an array of content parts
+            whose text parts are checked. Wildcards are not supported. Empty
+            checks the whole body as text.
+          default: "$.messages[-1].content"
+        showAssessment:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            If true, the 422 response includes the guardrail's reason for a
+            block, or the kind of error for a failed check.
+          default: false
+    response:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: |
+        Configuration for response phase checks. Enabling response checks
+        disables streaming on the route: streamed (stream: true) responses are
+        buffered and delivered in one piece once checked.
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables checks for the response flow.
+          default: true
+        jsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            JSONPath of the text to check. Same rules as request.jsonPath.
+          default: "$.choices[0].message.content"
+        streamingJsonPath:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPath of the text in each event of a streamed response; the
+            fragments are joined into the complete reply before checking.
+            Defaults to the OpenAI SSE delta content path.
+          default: "$.choices[0].delta.content"
+          minLength: 1
+        showAssessment:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            If true, the 422 response includes the guardrail's reason for a
+            block, or the kind of error for a failed check.
+          default: false
+  required:
+    - endpoint
+  anyOf:
+    - required: [ request ]
+    - required: [ response ]
