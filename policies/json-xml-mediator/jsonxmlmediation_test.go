@@ -59,7 +59,7 @@ func configuredParams(upstreamPayloadFormat string, downstreamPayloadFormat ...s
 		"upstreamPayloadFormat": upstreamPayloadFormat,
 	}
 	if len(downstreamPayloadFormat) > 0 {
-		params["downsteamPayloadFormat"] = downstreamPayloadFormat[0]
+		params["downstreamPayloadFormat"] = downstreamPayloadFormat[0]
 	}
 	return params
 }
@@ -83,6 +83,43 @@ func TestGetPolicy(t *testing.T) {
 
 	if p == p2 {
 		t.Fatalf("expected distinct policy instances per configuration")
+	}
+}
+
+// TestGetPolicy_DownstreamPayloadFormatAliasing covers the backward-compatible
+// resolution of the preferred "downstreamPayloadFormat" key and its deprecated
+// "downsteamPayloadFormat" alias: either key alone is accepted, both set to the
+// same value is accepted, and conflicting values are covered separately in
+// TestGetPolicy_InvalidUpstreamFormatConfig.
+func TestGetPolicy_DownstreamPayloadFormatAliasing(t *testing.T) {
+	cases := []struct {
+		name   string
+		params map[string]interface{}
+	}{
+		{
+			name:   "new key only",
+			params: map[string]interface{}{"upstreamPayloadFormat": "xml", "downstreamPayloadFormat": "json"},
+		},
+		{
+			name:   "deprecated key only",
+			params: map[string]interface{}{"upstreamPayloadFormat": "xml", "downsteamPayloadFormat": "json"},
+		},
+		{
+			name:   "both keys set to the same value",
+			params: map[string]interface{}{"upstreamPayloadFormat": "xml", "downstreamPayloadFormat": "json", "downsteamPayloadFormat": "json"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newConfiguredPolicy(t, tc.params)
+			if p.upstreamPayloadFormat != upstreamPayloadFormatXML {
+				t.Fatalf("expected upstream format %q, got %q", upstreamPayloadFormatXML, p.upstreamPayloadFormat)
+			}
+			if p.downstreamPayloadFormat != upstreamPayloadFormatJSON {
+				t.Fatalf("expected downstream format %q, got %q", upstreamPayloadFormatJSON, p.downstreamPayloadFormat)
+			}
+		})
 	}
 }
 
@@ -120,22 +157,37 @@ func TestGetPolicy_InvalidUpstreamFormatConfig(t *testing.T) {
 		{
 			name:      "missing downstreamPayloadFormat",
 			params:    map[string]interface{}{"upstreamPayloadFormat": "xml"},
-			expectMsg: "downsteamPayloadFormat must be a non-empty string",
+			expectMsg: "downstreamPayloadFormat must be a non-empty string",
 		},
 		{
 			name:      "empty downstreamPayloadFormat",
+			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downstreamPayloadFormat": ""},
+			expectMsg: "downstreamPayloadFormat must be a non-empty string",
+		},
+		{
+			name:      "invalid downstream enum value",
+			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downstreamPayloadFormat": "yaml"},
+			expectMsg: "downstreamPayloadFormat must be one of [xml, json]",
+		},
+		{
+			name:      "same upstream and downstream format",
+			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downstreamPayloadFormat": "xml"},
+			expectMsg: "downstreamPayloadFormat must be different from upstreamPayloadFormat",
+		},
+		{
+			name:      "empty deprecated downsteamPayloadFormat",
 			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downsteamPayloadFormat": ""},
 			expectMsg: "downsteamPayloadFormat must be a non-empty string",
 		},
 		{
-			name:      "invalid downstream enum value",
+			name:      "invalid deprecated downsteamPayloadFormat enum value",
 			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downsteamPayloadFormat": "yaml"},
 			expectMsg: "downsteamPayloadFormat must be one of [xml, json]",
 		},
 		{
-			name:      "same upstream and downstream format",
-			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downsteamPayloadFormat": "xml"},
-			expectMsg: "downsteamPayloadFormat must be different from upstreamPayloadFormat",
+			name:      "both downstream keys set to conflicting values",
+			params:    map[string]interface{}{"upstreamPayloadFormat": "xml", "downstreamPayloadFormat": "json", "downsteamPayloadFormat": "xml"},
+			expectMsg: `downstreamPayloadFormat ("json") and the deprecated downsteamPayloadFormat ("xml") must not be set to different values`,
 		},
 	}
 
