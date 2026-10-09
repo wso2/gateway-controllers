@@ -649,3 +649,78 @@ func TestOnResponseBody_LogsWithMissingRequestID(t *testing.T) {
 		t.Fatalf("expected fallback request id %s, got %s", ErrMsgMissingReqID, records[0].RequestID)
 	}
 }
+
+func TestLogMessagePolicy_StreamingRequestAndResponse(t *testing.T) {
+	p := &LogMessagePolicy{}
+	ctx := context.Background()
+
+	// 1. Test NeedsMoreRequestData & NeedsMoreResponseData (should always return false)
+	if p.NeedsMoreRequestData(nil) {
+		t.Error("expected NeedsMoreRequestData to be false")
+	}
+	if p.NeedsMoreResponseData(nil) {
+		t.Error("expected NeedsMoreResponseData to be false")
+	}
+
+	// 2. Test OnRequestBodyChunk
+	reqStreamCtx := &policy.RequestStreamContext{
+		SharedContext: &policy.SharedContext{
+			RequestID: "req-stream-123",
+		},
+		Headers: createTestHeaders(map[string]string{"x-request-id": "req-stream-123"}),
+		Method:  "POST",
+		Path:    "/stream",
+	}
+	reqChunk := &policy.StreamBody{
+		Chunk: []byte("request chunk payload"),
+	}
+	params := map[string]interface{}{
+		"request": map[string]interface{}{
+			"payload": true,
+		},
+	}
+
+	records := captureLogRecords(t, func() {
+		action := p.OnRequestBodyChunk(ctx, reqStreamCtx, reqChunk, params)
+		if _, ok := action.(policy.ForwardRequestChunk); !ok {
+			t.Fatalf("expected ForwardRequestChunk, got %T", action)
+		}
+	})
+
+	if len(records) != 1 {
+		t.Fatalf("expected 1 logged record, got %d", len(records))
+	}
+	if records[0].Payload != "request chunk payload" || records[0].RequestID != "req-stream-123" {
+		t.Errorf("unexpected record logged: %+v", records[0])
+	}
+
+	// 3. Test OnResponseBodyChunk
+	respStreamCtx := &policy.ResponseStreamContext{
+		ResponseHeaders: createTestHeaders(map[string]string{"x-request-id": "resp-stream-123"}),
+		RequestMethod:   "GET",
+		RequestPath:     "/stream",
+	}
+	respChunk := &policy.StreamBody{
+		Chunk: []byte("response chunk payload"),
+	}
+	respParams := map[string]interface{}{
+		"response": map[string]interface{}{
+			"payload": true,
+		},
+	}
+
+	respRecords := captureLogRecords(t, func() {
+		action := p.OnResponseBodyChunk(ctx, respStreamCtx, respChunk, respParams)
+		if _, ok := action.(policy.ForwardResponseChunk); !ok {
+			t.Fatalf("expected ForwardResponseChunk, got %T", action)
+		}
+	})
+
+	if len(respRecords) != 1 {
+		t.Fatalf("expected 1 logged record, got %d", len(respRecords))
+	}
+	if respRecords[0].Payload != "response chunk payload" || respRecords[0].RequestID != "resp-stream-123" {
+		t.Errorf("unexpected record logged: %+v", respRecords[0])
+	}
+}
+
