@@ -6,7 +6,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/google/cel-go v0.26.1
 	github.com/redis/go-redis/v9 v9.17.3
-	github.com/wso2/api-platform/sdk/core v0.3.4
+	github.com/wso2/api-platform/sdk/core v0.4.2
 )
 
 require (

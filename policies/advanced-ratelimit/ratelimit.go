@@ -41,6 +41,13 @@ import (
 // contextKey is used for storing values in context
 type contextKey string
 
+func (p *RateLimitPolicy) throttleErrorCode() string {
+	if p.attachedTo == policy.LevelRoute {
+		return policy.FaultCodeThrottledResource
+	}
+	return policy.FaultCodeThrottledAPI
+}
+
 const (
 	requestIDKey contextKey = "request_id"
 )
@@ -765,7 +772,26 @@ func (p *RateLimitPolicy) buildRateLimitResponse(
 		StatusCode: p.statusCode,
 		Headers:    headers,
 		Body:       []byte(p.responseBody),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      p.throttleErrorCode(),
+			Type:      policy.FaultTypeThrottling,
+			Direction: policy.DirectionRequest,
+			Message:   "Message throttled out",
+			// The quota that tripped is a configuration name, not caller content, but it
+			// is still an internal detail; the renderer withholds Description from the
+			// response body and passes it to fault policies only.
+			Description: describeViolatedQuota(violatedQuotaName),
+		},
 	}
+}
+
+// describeViolatedQuota names the quota that tripped, for FaultDetails.Description.
+func describeViolatedQuota(violatedQuotaName string) string {
+	if violatedQuotaName == "" {
+		return "a configured quota was exceeded"
+	}
+	return "quota exceeded: " + violatedQuotaName
 }
 
 // parseQuotas parses the new "quotas" array. If absent, returns nil, nil.
