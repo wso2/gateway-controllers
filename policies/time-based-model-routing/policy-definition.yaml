@@ -1,5 +1,5 @@
 name: time-based-model-routing
-version: v0.9.1
+version: v0.9.2
 displayName: Time-Based Model Routing
 description: |
   Routes an LLM request to a configured model and optional provider according
@@ -16,6 +16,20 @@ parameters:
   required:
     - schedules
   properties:
+    requestModel:
+      type: object
+      additionalProperties: false
+      description: Provider-template location used to rewrite the selected model.
+      required:
+        - location
+        - identifier
+      properties:
+        location:
+          type: string
+          enum: [payload, body, header, queryParam, pathParam]
+        identifier:
+          type: string
+          minLength: 1
     timezone:
       type: string
       x-wso2-policy-advanced-param: false
@@ -127,20 +141,4 @@ parameters:
 systemParameters:
   type: object
   additionalProperties: false
-  required:
-    - requestModel
-  properties:
-    requestModel:
-      type: object
-      additionalProperties: false
-      description: Provider-template location used to rewrite the selected model.
-      required:
-        - location
-        - identifier
-      properties:
-        location:
-          type: string
-          enum: [payload, body, header, queryParam, pathParam]
-        identifier:
-          type: string
-          minLength: 1
+  properties: {}

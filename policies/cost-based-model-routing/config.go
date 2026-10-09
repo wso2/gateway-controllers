@@ -460,7 +460,7 @@ func parseRequestModel(raw interface{}) (requestModelConfig, error) {
 	result := requestModelConfig{}
 	item, ok := raw.(map[string]interface{})
 	if !ok {
-		return result, fmt.Errorf("'requestModel' system parameter is required")
+		return result, fmt.Errorf("'requestModel' provider-template parameter is required")
 	}
 
 	location, ok := item["location"].(string)

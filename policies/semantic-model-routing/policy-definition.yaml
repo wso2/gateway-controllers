@@ -1,5 +1,5 @@
 name: semantic-model-routing
-version: v0.9.0
+version: v0.9.1
 description: |
   Routes AI/LLM requests to different models based on semantic similarity
   between the user request and predefined utterances. On startup, embeddings
@@ -11,6 +11,23 @@ description: |
 parameters:
   type: object
   properties:
+    requestModel:
+      type: object
+      description: |
+        Specifies where the model name appears in the request so the policy
+        can replace it with the selected model.
+      properties:
+        location:
+          type: string
+          enum:
+            - payload
+        identifier:
+          type: string
+          description: |
+            JSONPath expression identifying the model field in the request payload.
+      required:
+        - location
+        - identifier
     contentPath:
       type: string
       x-wso2-policy-advanced-param: false
@@ -110,25 +127,7 @@ systemParameters:
         API key for the embedding service.
       minLength: 1
       "wso2/defaultValue": "${config.policy_configurations.semantic_model_routing_v1.embedding_provider_api_key}"
-    requestModel:
-      type: object
-      description: |
-        Specifies where the model name appears in the request so the policy
-        can replace it with the selected model.
-      properties:
-        location:
-          type: string
-          enum:
-            - payload
-        identifier:
-          type: string
-          description: |
-            JSONPath expression identifying the model field in the request payload.
-      required:
-        - location
-        - identifier
   required:
     - embeddingProvider
     - embeddingEndpoint
     - apiKey
-    - requestModel
