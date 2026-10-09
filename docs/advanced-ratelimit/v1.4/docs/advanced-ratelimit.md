@@ -849,8 +849,8 @@ exactly as v1.3.
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| A quota is exceeded, policy attached at the API level | the quota's status (default `429`) | `900800` | `throttling` |
-| A quota is exceeded, policy attached at an operation | the quota's status (default `429`) | `900802` | `throttling` |
+| A quota is exceeded, policy attached at the API level | `onRateLimitExceeded.statusCode` (default `429`) | `900800` | `throttling` |
+| A quota is exceeded, policy attached at an operation | `onRateLimitExceeded.statusCode` (default `429`) | `900802` | `throttling` |
 
 The fault's `Description` carries the internal reason, for example `quota exceeded: <quota name>`.
 It is passed to fault policies and analytics only, never to the client.
