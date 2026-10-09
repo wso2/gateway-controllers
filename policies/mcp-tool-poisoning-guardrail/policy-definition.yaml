@@ -1,0 +1,276 @@
+name: mcp-tool-poisoning-guardrail
+version: v0.9.0
+displayName: MCP Tool Poisoning Guardrail
+description: |
+  Inspects MCP tools/list responses for tool poisoning — instructions hidden inside tool metadata that target the
+  agent rather than describing the tool — before the metadata reaches the client. Tool descriptions and nested
+  textual metadata (including parameter descriptions in inputSchema and outputSchema) are scanned by gateway-local
+  static detectors and classified by the wso2/tool-poisoning-detection SetFit model.
+
+  The policy is a Go gateway policy. The model does not run in the gateway: the policy sends tool metadata text to a
+  separately deployed internal classifier service (POST {endpoint}/classify) — a Python service that serves the
+  SetFit model — which must be private to the deployment and ready before model findings are enforced.
+
+  Violating tools can be removed from the list (filter), refused as a JSON-RPC error (block), or left in place and
+  recorded (flag). JSON and SSE framing, JSON-RPC ids, pagination cursors and unrelated result fields are preserved;
+  unrelated MCP methods and upstream JSON-RPC errors pass through unchanged.
+
+  Discovery filtering is not authorization. Removing a tool from tools/list hides it from the client; it does not
+  stop a client that already knows the tool name from calling it. Use mcp-acl-list or mcp-authz to enforce tool
+  execution permissions.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    action:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        What to do with a tool that violates the policy.
+        filter removes the tool from the tools/list result and delivers the rest of the response.
+        block replaces the whole response with a JSON-RPC error.
+        flag delivers the response unchanged and only records the findings.
+      enum:
+        - filter
+        - block
+        - flag
+      default: filter
+    classifierAction:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Whether a model score may enforce, independently of action. This does not change what action means; it
+        decides whether a model finding participates in it.
+        flag records the model score, field id, field class, model identity, revision and latency, but a model
+        score alone never removes or blocks a tool.
+        enforce makes a score at or above classifierThreshold an enforceable violation.
+        Default flag. Measured against the bundled model, honest tool metadata scored above poisoned metadata
+        (highest honest 0.9920 against highest poisoned 0.9919), so no single threshold separates them and model
+        scores are advisory until an operator calibrates against their own catalogue. Static detector findings and
+        incomplete inspection enforce in both modes.
+      enum:
+        - flag
+        - enforce
+      default: flag
+    classifierThreshold:
+      type: number
+      x-wso2-policy-advanced-param: false
+      description: |
+        Tool Poisoning class probability at or above which the model is treated as having detected poisoning.
+        Defaults to 0.9 as an evaluation starting point. The model score is a risk signal rather than a certainty,
+        and the right cut-off depends on the tool catalogue being served, so developers should run the classifier
+        against their own honest tools and tune this value before enabling classifierAction enforce.
+        Reaching this threshold produces a recorded model detection. Whether that detection removes or blocks a
+        tool is decided by classifierAction, which defaults to flag. A threshold alone is not a safe enforcement
+        boundary for this model: measured honest and poisoned score ranges overlap.
+      minimum: 0
+      maximum: 1
+      default: 0.9
+    onClassifierError:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        What to do when the classifier service cannot be reached, times out, or returns an unusable result.
+        block refuses to deliver the response with a JSON-RPC error.
+        useStaticDetectors decides using the static detectors alone and records the inspection as degraded; it
+        requires staticDetectors.enabled to be true.
+        This applies independently of action — with action flag and onClassifierError block, a classifier failure
+        still blocks. Combine action flag with onClassifierError useStaticDetectors for fully non-blocking
+        evaluation.
+      enum:
+        - block
+        - useStaticDetectors
+      default: block
+    showAssessment:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        When true, block responses carry the findings (tool ids, field ids, detector ids, severities and scores) in
+        the JSON-RPC error data. The tool metadata text itself is never included.
+      default: false
+    staticDetectors:
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: |
+        Gateway-local, model-free inspection of tool metadata. Static findings are evaluated independently of the
+        classifier score: a low score never cancels a static violation.
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables the static detectors. onClassifierError useStaticDetectors requires this to be true with
+            at least one of hiddenCharacters or injectionPatterns also enabled, otherwise the configuration
+            is rejected: a pass that cannot detect anything is not a fallback.
+          default: true
+        severity:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            Lowest static finding severity that counts as a policy violation. Findings below this severity are
+            still recorded, but do not remove or block a tool.
+          enum:
+            - low
+            - medium
+            - high
+          default: medium
+        hiddenCharacters:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Detects invisible and control characters used to hide instructions: bidirectional overrides, Unicode
+            tag characters, zero-width characters, private-use characters, ANSI terminal escapes and other control
+            or format characters.
+          default: true
+        injectionPatterns:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Detects explicit prompt-injection phrasing: instruction overrides, hidden instruction tags, directives
+            to conceal actions from the user, system-prompt exfiltration, imperatives aimed at credential files,
+            and secret-transmission instructions. Ordinary URLs and ordinary references to credentials are not
+            findings on their own.
+          default: true
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    endpoint:
+      type: string
+      format: uri
+      description: |
+        Base URL of the internal tool poisoning classifier service (for example
+        https://mcp-tool-poisoning-classifier:8080). The policy appends /classify automatically. The bearer
+        token and the tool metadata being inspected travel on this hop, so use https, or http only when the
+        hop is itself encrypted and authenticated by a service mesh.
+      minLength: 1
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_classifier_endpoint}"
+    apiKey:
+      type: string
+      description: |
+        Bearer token used to authenticate with the classifier service. Leave empty only if the service is
+        configured to allow anonymous access.
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_classifier_api_key}"
+    requestTimeoutMillis:
+      type: integer
+      description: |
+        Timeout in milliseconds for a single HTTP call to the classifier service.
+      default: 5000
+      minimum: 100
+      maximum: 120000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_classifier_request_timeout_millis}"
+    classificationDeadlineMillis:
+      type: integer
+      description: |
+        Overall deadline in milliseconds for classifying one tools/list response. Every batch shares this single
+        deadline, so total added latency stays bounded regardless of how many tools the upstream returns.
+      default: 10000
+      minimum: 100
+      maximum: 300000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_classification_deadline_millis}"
+    batchSize:
+      type: integer
+      description: |
+        Maximum number of text fields sent to the classifier service in one request. The ceiling matches the
+        bundled service's TOOL_POISONING_MAX_ITEMS default: a larger batch would be refused with HTTP 422, which
+        the policy has to treat as an inspection failure.
+      default: 16
+      minimum: 1
+      maximum: 32
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_batch_size}"
+    maxConcurrentBatches:
+      type: integer
+      description: |
+        Maximum number of classifier requests in flight at once for a single tools/list response. The classifier
+        service bounds its concurrency per process rather than per inspection, so this must leave room for the
+        tools/list requests you expect to overlap: maxConcurrentBatches multiplied by the number of concurrent
+        inspections should stay within the service's TOOL_POISONING_MAX_CONCURRENT_REQUESTS. Batches that are
+        shed anyway are retried inside the classification deadline.
+      default: 2
+      minimum: 1
+      maximum: 16
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_concurrent_batches}"
+    maxTools:
+      type: integer
+      description: |
+        Maximum number of tools inspected in one tools/list response. Tools beyond this limit are recorded as not
+        inspected and are treated as violations in the filter and block actions.
+      default: 200
+      minimum: 1
+      maximum: 2000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_tools}"
+    maxFieldsPerTool:
+      type: integer
+      description: |
+        Maximum number of text fields extracted from a single tool entry. Every string inside a tool entry is
+        inspected, so a tool with a large inputSchema contributes several fields per parameter. A tool that exceeds
+        this limit is recorded as not fully inspected, which is a violation in the filter and block actions.
+      default: 256
+      minimum: 1
+      maximum: 512
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_fields_per_tool}"
+    maxFieldBytes:
+      type: integer
+      description: |
+        Maximum size in bytes of a single text field. Oversized fields are never truncated: the field is dropped
+        and its tool is recorded as not fully inspected. The ceiling matches the bundled service's
+        TOOL_POISONING_MAX_TEXT_BYTES default, and the value must not exceed maxBatchBytes.
+      default: 20000
+      minimum: 256
+      maximum: 100000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_field_bytes}"
+    maxTotalBytes:
+      type: integer
+      description: |
+        Maximum total size in bytes of the text extracted from one tools/list response.
+      default: 1000000
+      minimum: 1024
+      maximum: 20000000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_total_bytes}"
+    maxBatchBytes:
+      type: integer
+      description: |
+        Maximum total size in bytes of the text in one classifier request. Batches are split to stay inside this
+        budget as well as batchSize, so a legal configuration cannot produce a request the classifier service
+        refuses with HTTP 413. The ceiling matches the bundled service's TOOL_POISONING_MAX_TOTAL_BYTES default.
+      default: 1000000
+      minimum: 1024
+      maximum: 1000000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_batch_bytes}"
+    maxClassifierAttempts:
+      type: integer
+      description: |
+        How many times one classifier batch is sent when the service reports it is at capacity (HTTP 503 or 429).
+        Retries are bounded by this count, NOT by classificationDeadlineMillis: with the default of 3 and the
+        service's Retry-After of one second, a batch tolerates roughly two seconds of saturation and then fails,
+        after which onClassifierError decides. Retrying until the deadline would amplify load against a classifier
+        that is already shedding. Add classifier replicas rather than raising this to ride out long bursts.
+      default: 3
+      minimum: 1
+      maximum: 10
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_classifier_attempts}"
+    maxResponseBytes:
+      type: integer
+      description: |
+        Maximum size in bytes of a tools/list response body the guardrail will decode and inspect, checked before
+        the body is parsed. The other limits bound extracted text, which a response can avoid contributing to
+        entirely while still costing a full JSON decode and traversal. A larger response is treated as
+        uninspectable: refused in the filter and block actions, preserved and recorded in flag.
+      default: 5000000
+      minimum: 1024
+      maximum: 50000000
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_response_bytes}"
+    maxNestingDepth:
+      type: integer
+      description: |
+        Maximum depth walked inside a tool entry when collecting nested textual metadata such as inputSchema and
+        outputSchema parameter descriptions.
+      default: 12
+      minimum: 1
+      maximum: 64
+      "wso2/defaultValue": "${config.mcp_tool_poisoning_max_nesting_depth}"
+  required:
+    - endpoint
