@@ -8,6 +8,7 @@ on:
     paths:
       - 'policies/**'
       - '.github/workflows/it.yml'
+      - 'scripts/policy_compat_scope.py'
 
 permissions:
   contents: read
@@ -53,18 +54,20 @@ jobs:
   integration-test:
     name: Gateway Integration (${{ matrix.gateway_version }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       max-parallel: 2
       matrix:
-        gateway_version: [latest, "1.2.0"]
+        gateway_version: [latest, "1.2.0", "1.1.0"]
 
     steps:
       - name: Checkout gateway-controllers
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803b # v6
         with:
           path: gateway-controllers
+          # The pull request's merge commit and its base, to list the changed policies.
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Checkout api-platform
@@ -96,6 +99,8 @@ jobs:
         run: make -C api-platform/tests/framework testbench
 
       - name: Run gateway-controller policy suite block
+        # Its runners all need Gateway 1.2.0 or later.
+        if: matrix.gateway_version != '1.1.0'
         working-directory: api-platform/tests/framework
         shell: bash
         env:
@@ -111,12 +116,62 @@ jobs:
           go test ./suites/it -count=1 -timeout=25m -v \
             -args "${suite_args[@]}" 2>&1 | tee "$GITHUB_WORKSPACE/framework-it-$GATEWAY_VERSION.log"
 
+      # The compatibility blocks build a gateway with every policy, so they are skipped when they
+      # cannot catch anything: no changed policy (or policy delegating to one) has a scenario, or
+      # this release ships none of them. Anything that cannot be narrowed safely runs them; see
+      # scripts/policy_compat_scope.py.
+      - name: Decide whether the policy error compatibility blocks apply
+        id: compat-scope
+        if: success() || failure()
+        shell: bash
+        env:
+          GATEWAY_VERSION: ${{ matrix.gateway_version }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+
+          args=(--policies gateway-controllers/policies
+            --features api-platform/tests/framework/suites/it/features/gateway/policy-errors)
+          if [[ "$EVENT_NAME" == "pull_request" ]] &&
+            git -C gateway-controllers diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed-files.txt"; then
+            args+=(--changed-files "$RUNNER_TEMP/changed-files.txt")
+          fi
+          if [[ "$GATEWAY_VERSION" != "latest" ]]; then
+            docker run --rm --entrypoint cat "ghcr.io/wso2/api-platform/gateway-runtime:$GATEWAY_VERSION" \
+              /app/build-manifest.yaml > "$RUNNER_TEMP/build-manifest.yaml" || true
+            args+=(--release-manifest "$RUNNER_TEMP/build-manifest.yaml")
+          fi
+          python3 gateway-controllers/scripts/policy_compat_scope.py "${args[@]}" >> "$GITHUB_OUTPUT" ||
+            echo "run=true" >> "$GITHUB_OUTPUT"
+
+      # Each policy's main rejection must match the error response recorded in api-platform from
+      # the policies before the change (tests/framework/suites/it/resources/expected-error-responses).
+      # Runs even when the block above failed, so one failure does not hide the other.
+      - name: Run policy error compatibility blocks
+        if: (success() || failure()) && steps.compat-scope.outputs.run != 'false'
+        working-directory: api-platform/tests/framework
+        shell: bash
+        env:
+          GATEWAY_VERSION: ${{ matrix.gateway_version }}
+        run: |
+          set -euo pipefail
+
+          suite_args=(-blocks=policy-compat/sqlite,policy-compat-semantic-ai/sqlite)
+          if [[ "$GATEWAY_VERSION" != "latest" ]]; then
+            suite_args+=("-gateway-version=$GATEWAY_VERSION")
+          fi
+
+          go test ./suites/it -count=1 -timeout=40m -v \
+            -args "${suite_args[@]}" 2>&1 | tee "$GITHUB_WORKSPACE/policy-errors-$GATEWAY_VERSION.log"
+
       - name: Upload framework test output
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: gateway-controller-policy-test-output-${{ matrix.gateway_version }}
-          path: framework-it-${{ matrix.gateway_version }}.log
+          path: |
+            framework-it-${{ matrix.gateway_version }}.log
+            policy-errors-${{ matrix.gateway_version }}.log
           if-no-files-found: ignore
           retention-days: 7
 
