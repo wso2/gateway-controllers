@@ -1,0 +1,34 @@
+[platform_api]
+
+[platform_api.logging]
+level = '{{ env "APIP_CP_LOGGING_LEVEL" "info" }}'
+
+[platform_api.security]
+encryption_key = '{{ file "/etc/platform-api/keys/encryption.key" }}'
+
+[platform_api.database]
+driver = "sqlite3"
+path   = "./data/api_platform.db"
+
+[platform_api.auth]
+mode = "file"
+
+[platform_api.auth.authorization]
+enabled = true
+mode    = "scope"
+role_to_scope_mapping = "/etc/platform-api/role-to-scope-mapping.yaml"
+
+[platform_api.auth.jwt]
+issuer            = "platform-api"
+public_key_file   = "/etc/platform-api/keys/jwt_public.pem"
+private_key_file  = "/etc/platform-api/keys/jwt_private.pem"
+
+[platform_api.auth.file.organization]
+id           = "default"
+display_name = "Default"
+region       = "us"
+
+[[platform_api.auth.file.users]]
+username      = '{{ env "APIP_CP_ADMIN_USERNAME" }}'
+password_hash = '{{ env "APIP_CP_ADMIN_PASSWORD_HASH" }}'
+roles         = ["ap_admin"]

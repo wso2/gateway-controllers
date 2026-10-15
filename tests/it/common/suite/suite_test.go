@@ -195,3 +195,67 @@ func TestStagePolicyRefusesSymlinks(t *testing.T) {
 
 	require.ErrorContains(t, StagePolicy(filepath.Join(policy, "it"), t.TempDir()), "symlink")
 }
+
+func TestStageWorkspaceCopiesTheWorkspaceFolderToTheWorkspaceRoot(t *testing.T) {
+	suiteDir := filepath.Join(t.TempDir(), "policies", "sample-policy", "it")
+	writeFile(t, filepath.Join(suiteDir, "workspace", "overlays", "timeout.toml"), "[router]\n")
+	writeFile(t, filepath.Join(suiteDir, "workspace", "platform-api", "config", "config.toml"), "[platform_api]\n")
+	writeFile(t, filepath.Join(suiteDir, "features", "sample.feature"), "Feature: sample\n")
+	workspace := t.TempDir()
+
+	require.NoError(t, StageWorkspace(suiteDir, workspace))
+
+	require.FileExists(t, filepath.Join(workspace, "overlays", "timeout.toml"))
+	require.FileExists(t, filepath.Join(workspace, "platform-api", "config", "config.toml"))
+	require.NoDirExists(t, filepath.Join(workspace, "features"))
+}
+
+func TestStageWorkspaceStagesNothingForAPolicyWithoutWorkspaceFiles(t *testing.T) {
+	suiteDir := filepath.Join(t.TempDir(), "policies", "sample-policy", "it")
+	writeFile(t, filepath.Join(suiteDir, "it-suite.yaml"), "suite: sample\n")
+	workspace := t.TempDir()
+
+	require.NoError(t, StageWorkspace(suiteDir, workspace))
+
+	entries, err := os.ReadDir(workspace)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+}
+
+func TestStagePlatformAPIStagesTheSharedFilesOnlyForASuiteThatRunsPlatformAPI(t *testing.T) {
+	gatewayOnly := filepath.Join(t.TempDir(), "it-suite.yaml")
+	writeFile(t, gatewayOnly, "blocks:\n  - name: sample\n    components:\n      - name: platform-gateway\n")
+	withControlPlane := filepath.Join(t.TempDir(), "it-suite.yaml")
+	writeFile(t, withControlPlane, "blocks:\n  - name: sample\n    components:\n      - name: platform-api\n")
+
+	skipped := t.TempDir()
+	require.NoError(t, stagePlatformAPI(gatewayOnly, skipped))
+	entries, err := os.ReadDir(skipped)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	staged := t.TempDir()
+	require.NoError(t, stagePlatformAPI(withControlPlane, staged))
+	require.FileExists(t, filepath.Join(staged, "platform-api", "config", "config.toml"))
+	require.FileExists(t, filepath.Join(staged, "platform-api", "resources", "role-to-scope-mapping.yaml"))
+	require.FileExists(t, filepath.Join(staged, "tests", "framework", "core", "catalog", "platformapi", "docker-compose.yaml"))
+}
+
+func TestStagePlatformAPIReportsASuiteFileItCannotRead(t *testing.T) {
+	require.Error(t, stagePlatformAPI(filepath.Join(t.TempDir(), "missing.yaml"), t.TempDir()))
+}
+
+func TestStageWorkspaceReplacesAStagedSharedFile(t *testing.T) {
+	suiteFile := filepath.Join(t.TempDir(), "policies", "sample-policy", "it", "it-suite.yaml")
+	writeFile(t, suiteFile, "blocks:\n  - name: sample\n    components:\n      - name: platform-api\n")
+	override := filepath.Join(filepath.Dir(suiteFile), "workspace", "platform-api", "config", "config.toml")
+	writeFile(t, override, "[policy_override]\n")
+	workspace := t.TempDir()
+
+	require.NoError(t, stagePlatformAPI(suiteFile, workspace))
+	require.NoError(t, StageWorkspace(filepath.Dir(suiteFile), workspace))
+
+	content, err := os.ReadFile(filepath.Join(workspace, "platform-api", "config", "config.toml"))
+	require.NoError(t, err)
+	require.Equal(t, "[policy_override]\n", string(content))
+}

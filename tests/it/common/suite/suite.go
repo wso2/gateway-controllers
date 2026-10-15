@@ -43,6 +43,7 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/suiterun"
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 
+	"github.com/wso2/gateway-controllers/tests/it/common/resources"
 	"github.com/wso2/gateway-controllers/tests/it/common/steps"
 	"github.com/wso2/gateway-controllers/tests/it/common/steps/platformgateway"
 )
@@ -50,6 +51,10 @@ import (
 // policyIntegrationDir is the folder inside a policy that holds its integration tests. The
 // framework leaves it out of the policy it builds into the gateway, and so does staging.
 const policyIntegrationDir = "it"
+
+// workspaceDir holds the files a policy's suite needs at the workspace root, where the framework
+// resolves overlays and component files. They are staged after the shared ones and replace them.
+const workspaceDir = "workspace"
 
 // ControllerPolicies are the policies the gateway controller requires to create LLM providers, LLM
 // proxies and their authentication: it attaches them to the resources it generates and rejects a
@@ -66,6 +71,10 @@ type Config struct {
 	// Register binds the steps only this policy needs, after the shared steps are bound. It is
 	// optional. A step defined here must not repeat a shared one.
 	Register func(sc *godog.ScenarioContext, topo *frameworkruntime.Topology)
+
+	// RegisterWithBase is Register for steps that build on the shared request steps. It also
+	// receives the shared steps' base, and runs after Register. It is optional.
+	RegisterWithBase func(sc *godog.ScenarioContext, base *steps.Base, topo *frameworkruntime.Topology)
 }
 
 // Main parses the suite flags and runs the tests. Call it from TestMain.
@@ -120,7 +129,7 @@ func pinnedTestbenchImage(goMod []byte) (string, bool) {
 // Run executes the suite declared in it-suite.yaml in the working directory, which `go test` sets
 // to the policy's it folder. The gateway is built from the policy, ControllerPolicies and
 // cfg.Companions: their folders are staged as the policy tree of a temporary workspace that the
-// suite file's addPoliciesFrom names.
+// suite file's addPoliciesFrom names. The shared and the folder's workspace files are staged beside it.
 func Run(t *testing.T, cfg Config) {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -130,6 +139,12 @@ func Run(t *testing.T, cfg Config) {
 	workspace := t.TempDir()
 	if err := StagePolicy(dir, workspace, append(slices.Clone(ControllerPolicies), cfg.Companions...)...); err != nil {
 		t.Fatalf("staging the policy: %v", err)
+	}
+	if err := stagePlatformAPI(filepath.Join(dir, suiterun.DefaultSuiteFile), workspace); err != nil {
+		t.Fatalf("staging the platform-api files: %v", err)
+	}
+	if err := StageWorkspace(dir, workspace); err != nil {
+		t.Fatalf("staging the workspace files: %v", err)
 	}
 	if reason := excludedEverywhere(suiterun.Selection(), filepath.Join(dir, suiterun.DefaultSuiteFile)); reason != nil {
 		t.Skipf("nothing to run: %v", reason)
@@ -190,6 +205,73 @@ func StagePolicy(suiteDir, workspace string, companions ...string) error {
 	return nil
 }
 
+var platformAPIComponent = regexp.MustCompile(`(?m)^\s*-\s*name:\s*platform-api\s*$`)
+
+// stagePlatformAPI stages the shared Platform API files at the workspace root when the suite file
+// runs the platform-api component, which the framework module cannot run without them.
+func stagePlatformAPI(suiteFile, workspace string) error {
+	content, err := os.ReadFile(suiteFile)
+	if err != nil {
+		return err
+	}
+	if !platformAPIComponent.Match(content) {
+		return nil
+	}
+	for name, path := range resources.PlatformAPIFiles {
+		file, err := resources.PlatformAPI.ReadFile("platformapi/" + name)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(workspace, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, file, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// StageWorkspace copies the policy's workspace folder to the root of the workspace, if it has one.
+func StageWorkspace(suiteDir, workspace string) error {
+	source := filepath.Join(suiteDir, workspaceDir)
+	info, err := os.Stat(source)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%q is not a folder", source)
+	}
+	return copyFS(os.DirFS(source), workspace)
+}
+
+// copyFS copies the files under fsys to destination, replacing files that exist, and refuses a
+// symlink.
+func copyFS(fsys fs.FS, destination string) error {
+	return fs.WalkDir(fsys, ".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(destination, filepath.FromSlash(path))
+		switch {
+		case entry.Type()&fs.ModeSymlink != 0:
+			return fmt.Errorf("symlink %q is not allowed in a workspace folder", path)
+		case entry.IsDir():
+			return os.MkdirAll(target, 0o755)
+		default:
+			content, err := fs.ReadFile(fsys, path)
+			if err != nil {
+				return err
+			}
+			return os.WriteFile(target, content, 0o644)
+		}
+	})
+}
+
 func stageOne(source, destination string) error {
 	if _, err := os.Stat(filepath.Join(source, "policy-definition.yaml")); err != nil {
 		return fmt.Errorf("%q is not a policy folder: %w", source, err)
@@ -232,6 +314,9 @@ func options(cfg Config) suiterun.Options {
 				shared.Register(sc)
 				if cfg.Register != nil {
 					cfg.Register(sc, topo)
+				}
+				if cfg.RegisterWithBase != nil {
+					cfg.RegisterWithBase(sc, shared.Base, topo)
 				}
 			}, nil
 		},

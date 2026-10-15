@@ -237,10 +237,10 @@ func responseIsHealthy(service string, resp *httpx.Response) (bool, string) {
 	return true, "status healthy"
 }
 
-func (s *Steps) checkAllHealth(ctx context.Context) error {
+func (s *Steps) checkAllHealthOnce(ctx context.Context) (map[string]healthResult, error) {
 	targets, err := s.healthTargets()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	results := make(map[string]healthResult, len(targets))
 	for name, url := range targets {
@@ -256,7 +256,35 @@ func (s *Steps) checkAllHealth(ctx context.Context) error {
 		}
 		results[name] = result
 	}
+	return results, nil
+}
+
+func (s *Steps) checkAllHealth(ctx context.Context) error {
+	results, err := s.checkAllHealthOnce(ctx)
+	if err != nil {
+		return err
+	}
 	return tcontext.Set(ctx, healthResultsKey, results)
+}
+
+// checkAllHealthUntilUnhealthy polls because a signalled process takes a moment to show as unhealthy.
+func (s *Steps) checkAllHealthUntilUnhealthy(ctx context.Context, service string) error {
+	return retry.Await(ctx, retry.Options{},
+		func(ctx context.Context) (map[string]healthResult, error) {
+			results, err := s.checkAllHealthOnce(ctx)
+			if err != nil {
+				return nil, retry.Transient(err)
+			}
+			if err := tcontext.Set(ctx, healthResultsKey, results); err != nil {
+				return nil, err
+			}
+			return results, nil
+		},
+		func(results map[string]healthResult) bool {
+			result, ok := results[service]
+			return ok && !result.healthy
+		},
+		fmt.Sprintf("waiting for service %q to become unhealthy", service))
 }
 
 func (s *Steps) allServicesHealthy(ctx context.Context) error {

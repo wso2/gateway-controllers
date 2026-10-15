@@ -34,6 +34,8 @@ func Register(sc *godog.ScenarioContext, base Base, topo *runtime.Topology, funn
 	sc.Step(`^I send a GET request to the router ready endpoint until status (\d+)$`, s.routerReadyUntil)
 	sc.Step(`^I send a GET request to the policy engine health endpoint$`, s.policyEngineHealth)
 	sc.Step(`^I check the health of all gateway services$`, s.checkAllHealth)
+	sc.Step(`^I check the health of all gateway services until service "([^"]*)" is unhealthy$`,
+		s.checkAllHealthUntilUnhealthy)
 	sc.Step(`^I stop the gateway service "([^"]*)"$`, s.stopService)
 	sc.Step(`^I start the gateway service "([^"]*)"$`, s.startService)
 	sc.Step(`^I restart the "([^"]*)" service$`, s.restartService)
