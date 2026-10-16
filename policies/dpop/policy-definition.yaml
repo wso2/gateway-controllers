@@ -1,0 +1,253 @@
+name: dpop
+version: v0.9.0
+description: |
+  Enforces OAuth 2.0 Demonstrating Proof of Possession (DPoP, RFC 9449). The
+  gateway verifies the DPoP proof JWT sent with each request and confirms that
+  it was signed by the key the access token is bound to, so a leaked or stolen
+  access token cannot be replayed without the client's private key. Place it
+  after jwt-auth or opaque-token-auth, which validate the access token itself.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    mode:
+      type: string
+      enum: [required, optional]
+      description: >-
+        "required" accepts only DPoP-bound access tokens presented with the DPoP
+        scheme and a valid proof. "optional" also lets unbound access tokens
+        through as plain bearer tokens, while still requiring a valid proof for
+        every DPoP-bound token. A DPoP-bound token presented as a bearer token is
+        rejected in both modes.
+      default: required
+
+    allowedAlgorithms:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        JWS algorithms accepted for the DPoP proof signature. Only asymmetric
+        algorithms are supported. "Ed25519" is the RFC 9864 name for what "EdDSA"
+        denotes with an Ed25519 key; list both to accept either. For FAPI 2.0, use
+        [PS256, ES256, Ed25519, EdDSA]. The list is advertised to clients in the algs
+        parameter of the WWW-Authenticate challenge.
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        enum: [ES256, ES384, ES512, PS256, PS384, PS512, RS256, RS384, RS512, EdDSA, Ed25519]
+      default: [ES256, ES384, ES512, PS256, PS384, PS512, RS256, RS384, RS512, EdDSA, Ed25519]
+
+    proofMaxAge:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        How long after its iat a DPoP proof is accepted (e.g., "60s"). The jti of
+        an accepted proof is remembered for this long plus the clock skew, so a
+        proof cannot be replayed while it is still fresh. Keep it short: a proof
+        is made for a single request.
+      default: "1m"
+
+    requireNonce:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >-
+        If true, every proof must carry a nonce issued by the gateway. A proof
+        without a valid nonce is answered with 401, error="use_dpop_nonce" and a
+        fresh nonce in the DPoP-Nonce header, and the response to a request whose
+        nonce is past half its lifetime carries the next nonce. Adds a freshness
+        check by the gateway's clock on top of the iat check, which still applies,
+        so client clocks must stay synchronized.
+      default: false
+
+    htuOrigins:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Origins (scheme://host[:port]) that the htu claim of a proof may use, for
+        example "https://api.example.com". Set this when the gateway is behind a
+        load balancer or TLS terminator, so the origin the client sees differs
+        from the scheme and host the gateway receives. When empty, the htu origin
+        must match the request's own scheme and :authority.
+      default: []
+      items:
+        type: string
+        minLength: 1
+
+    forwardProof:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >-
+        If true, the DPoP header is forwarded to the upstream service. If false
+        (the default), it is removed before the request is proxied.
+      default: false
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    clockSkew:
+      type: string
+      description: >-
+        Clock skew tolerated between the gateway and clients when checking the
+        iat of a proof and the age of a nonce (e.g., "30s").
+      default: "30s"
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.clockskew}"
+
+    nonceLifetime:
+      type: string
+      description: How long a gateway-issued DPoP nonce stays valid (e.g., "5m").
+      default: "5m"
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.noncelifetime}"
+
+    nonceSecret:
+      type: string
+      description: >-
+        Secret (at least 32 bytes) that signs DPoP nonces. Set the same value on
+        every gateway replica, injected from a secret store through an env
+        token in config.toml (see the policy docs). When empty, each
+        gateway process signs with its own random key, which only works for a
+        single replica.
+      default: ""
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.noncesecret}"
+
+    replayCacheMaxSize:
+      type: integer
+      description: >-
+        Maximum number of proof jti values remembered for replay detection,
+        across all APIs on the gateway. An entry is never dropped before its proof
+        expires, since that would allow the proof to be replayed; while the cache
+        is full of unexpired entries, DPoP requests are refused with 503. Size it
+        above the peak DPoP request rate times (proofMaxAge + clockSkew).
+      default: 100000
+      minimum: 1
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.replaycachemaxsize}"
+
+    replayStore:
+      type: string
+      description: >-
+        Where proof jti values are remembered. "memory" keeps them in each gateway
+        runtime replica, so a proof replayed to a different replica within its
+        lifetime is not detected; use it for a single replica. "redis" shares them
+        across every replica through Redis (one SET NX per verified proof), so a
+        proof is accepted once across the whole deployment.
+      enum: ["memory", "redis"]
+      default: "memory"
+      "wso2/defaultValue": "${config.policy_configurations.dpop_v0.replay_store}"
+
+    redis:
+      type: object
+      description: Redis connection used when replayStore is redis.
+      additionalProperties: false
+      properties:
+        host:
+          type: string
+          description: Redis host name or IP address.
+          default: "localhost"
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.host}"
+
+        port:
+          type: integer
+          description: Redis server port.
+          minimum: 1
+          maximum: 65535
+          default: 6379
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.port}"
+
+        username:
+          type: string
+          description: Optional Redis ACL username.
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.username}"
+
+        password:
+          type: string
+          description: Optional Redis password.
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.password}"
+
+        db:
+          type: integer
+          description: Redis database index.
+          minimum: 0
+          maximum: 15
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.db}"
+
+        keyPrefix:
+          type: string
+          description: Prefix of every key the policy writes. Give each gateway deployment sharing one Redis its own prefix.
+          default: "dpop:v0:"
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.key_prefix}"
+
+        failureMode:
+          type: string
+          description: >-
+            What happens while Redis cannot be reached. "closed" refuses DPoP
+            requests with 503, so no proof is ever accepted unrecorded. "local" keeps
+            serving: each replica also records every proof it accepts in its own
+            memory and relies on that record while Redis is down, so replays to the
+            same replica are refused before, during and after an outage, but not
+            across replicas.
+          enum: ["closed", "local"]
+          default: "closed"
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.failure_mode}"
+
+        connectionTimeout:
+          type: string
+          description: Redis connection timeout as a Go duration (e.g., "5s").
+          default: "5s"
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.connection_timeout}"
+
+        readTimeout:
+          type: string
+          description: Redis read timeout as a Go duration. It bounds the latency a Redis stall adds to a request.
+          default: "1s"
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.read_timeout}"
+
+        writeTimeout:
+          type: string
+          description: Redis write timeout as a Go duration.
+          default: "1s"
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.write_timeout}"
+
+        poolSize:
+          type: integer
+          description: Connection pool size of the shared client. 0 uses the go-redis default (10 × GOMAXPROCS).
+          minimum: 0
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.pool_size}"
+
+        tls:
+          type: object
+          description: TLS for the Redis connection (TLS 1.2 or later). Disabled by default.
+          additionalProperties: false
+          properties:
+            enabled:
+              type: boolean
+              description: Connects to Redis over TLS when true.
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.tls.enabled}"
+            caFile:
+              type: string
+              description: PEM CA bundle that verifies the Redis server certificate. Empty uses the system trust store.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.tls.ca_file}"
+            serverName:
+              type: string
+              description: Server name verified against the Redis certificate. Empty uses the Redis host.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.tls.server_name}"
+            insecureSkipVerify:
+              type: boolean
+              description: Skips verification of the Redis server certificate. For testing only; a warning is logged.
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.tls.insecure_skip_verify}"
+            certFile:
+              type: string
+              description: PEM client certificate for mutual TLS. Set together with keyFile.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.tls.cert_file}"
+            keyFile:
+              type: string
+              description: PEM private key of certFile.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.dpop_v0.redis.tls.key_file}"
