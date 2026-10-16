@@ -1,0 +1,11 @@
+{
+  "name": "byo-guardrail",
+  "displayName": "Bring Your Own Guardrail",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Checks request or response body text with your own guardrail service over HTTP, with no policy code to write.\nThe service implements a small, versioned contract and returns allow, block, or modify (replace the checked text).\nSupports bearer or raw token authentication via secret references, a configurable timeout, enforce and monitor modes, explicit fail-closed or fail-open behaviour, JSONPath extraction, and separate request and response configuration. Configuring response checks disables streaming on the route."
+}
