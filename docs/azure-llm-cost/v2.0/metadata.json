@@ -1,0 +1,10 @@
+{
+  "name": "azure-llm-cost",
+  "displayName": "Azure LLM Cost",
+  "version": "2.0",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. Token counts and the model name are read from the route's LlmProviderTemplate, while a deployment-to-model mapping supplies what Azure reports only as a deployment."
+}
