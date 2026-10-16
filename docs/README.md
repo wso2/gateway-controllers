@@ -43,6 +43,7 @@ All available policies, sorted alphabetically.
 | [Cost-Based Model Routing](./cost-based-model-routing/v0.9/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
 | [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
 | [Granite Guardian Prompt Injection](./granite-guardian-prompt-injection/v0.9/docs/granite-guardian-prompt-injection.md) | Guardrails, AI | Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B. |
+| [GraphQL Authorization](./graphql-authz/v0.1/docs/graphql-authorization.md) | GraphQL, Security | GraphQL Authorization validates access to GraphQL query and mutation root fields based on JWT claims or OAuth scopes provided by an upstream authentication policy such as jwt-auth. |
 | [Host Rewrite](./host-rewrite/v1.0/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
 | [Intelligent Model Routing](./intelligent-model-routing/v0.9/docs/intelligent-model-routing.md) | AI | Routes AI/LLM requests to different models using LLM-powered classification. |
 | [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
