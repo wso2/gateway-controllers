@@ -1,6 +1,6 @@
 module github.com/wso2/gateway-controllers/policies/oauth2-generator
 
-go 1.26.5
+go 1.26.2
 
 require (
 	github.com/redis/go-redis/v9 v9.22.0
