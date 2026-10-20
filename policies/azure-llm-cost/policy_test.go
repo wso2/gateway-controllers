@@ -140,9 +140,9 @@ func TestLookupPricing_EmptyRegionDefaultsToGlobalStandard(t *testing.T) {
 	}
 }
 
-func TestLookupPricing_RegionIgnoredForFoundry(t *testing.T) {
-	// "eu"/"us" only ever prefix "azure/" candidates; a Foundry-only model
-	// must still resolve under azure_ai/ regardless of the region setting.
+func TestLookupPricing_FoundryTierFallsBackToBase(t *testing.T) {
+	// claude-opus-4-5 has no azure_ai/eu/ entry, so an eu deployment must still
+	// resolve to its base azure_ai/ entry rather than go unpriced.
 	p, key, ok := lookupPricingWithKey(testPricingMap, "claude-opus-4-5", namespacesFor(templateAzureAI, regionEU))
 	if !ok {
 		t.Fatal("expected match for claude-opus-4-5 even with region=eu set")
@@ -187,6 +187,14 @@ func TestLogTierFallback_WarnsOncePerRegionModel(t *testing.T) {
 	if !strings.Contains(buf.String(), "missing_key=azure/eu/gpt-5.4") {
 		t.Errorf("warning should name the key to add; got:\n%s", buf.String())
 	}
+	// A Foundry-native model falling back from its tier warns the same way.
+	lookupPricingWithKey(testPricingMap, "claude-opus-4-5", namespacesFor(templateAzureAI, regionEU))
+	if got := count(); got != 3 {
+		t.Errorf("expected a warning for the azure_ai/ tier fallback, got %d", got)
+	}
+	if !strings.Contains(buf.String(), "missing_key=azure_ai/eu/claude-opus-4-5 used_key=azure_ai/claude-opus-4-5") {
+		t.Errorf("warning should name the azure_ai/ keys; got:\n%s", buf.String())
+	}
 }
 
 func TestLogTierFallback_SilentCases(t *testing.T) {
@@ -198,10 +206,11 @@ func TestLogTierFallback_SilentCases(t *testing.T) {
 
 	// global-standard falling back to base is the normal, correct path.
 	lookupPricingWithKey(testPricingMap, "gpt-5.4", namespacesFor(templateAzureOpenAI, regionGlobalStandard))
-	// A tier entry that exists is not a fallback at all.
+	// A tier entry that exists is not a fallback at all, in either catalog.
 	lookupPricingWithKey(testPricingMap, "gpt-4o-2024-08-06", namespacesFor(templateAzureOpenAI, regionEU))
-	// Foundry has no tier pricing, so the region does not apply.
-	lookupPricingWithKey(testPricingMap, "claude-opus-4-5", namespacesFor(templateAzureAI, regionEU))
+	lookupPricingWithKey(testPricingMap, "Llama-3.3-70B-Instruct", namespacesFor(templateAzureAI, regionUS))
+	// A Foundry global-standard deployment falling back to its base key.
+	lookupPricingWithKey(testPricingMap, "claude-opus-4-5", namespacesFor(templateAzureAI, regionGlobalStandard))
 
 	if n := strings.Count(buf.String(), "no pricing entry for the configured tier"); n != 0 {
 		t.Errorf("expected no warnings, got %d:\n%s", n, buf.String())
@@ -310,13 +319,13 @@ func TestNamespacesFor_HandleSelectsCatalog(t *testing.T) {
 	}
 
 	foundry := namespacesFor(templateAzureAI, regionGlobalStandard)
-	if got := strings.Join(foundry, ","); got != "azure_ai/,azure/global-standard/,azure/" {
+	if got := strings.Join(foundry, ","); got != "azure_ai/global-standard/,azure_ai/,azure/global-standard/,azure/" {
 		t.Errorf("azureai-foundry must search azure_ai/ first then fall back, got %q", got)
 	}
 
-	// The tier prefix scopes the azure/ catalog only.
-	if got := strings.Join(namespacesFor(templateAzureAI, regionEU), ","); got != "azure_ai/,azure/eu/,azure/" {
-		t.Errorf("region must apply to azure/ only, got %q", got)
+	// The tier prefix scopes both catalogs, each ahead of its base key.
+	if got := strings.Join(namespacesFor(templateAzureAI, regionEU), ","); got != "azure_ai/eu/,azure_ai/,azure/eu/,azure/" {
+		t.Errorf("region must apply to both catalogs, got %q", got)
 	}
 }
 
@@ -401,7 +410,7 @@ func TestModelPricing_Unpriced(t *testing.T) {
 
 func TestResolveRates_BaseRate(t *testing.T) {
 	p, _, _ := lookupPricingWithKey(testPricingMap, "gpt-5.4", namespacesFor(templateAzureOpenAI, regionGlobalStandard))
-	r := resolveRates(1000, false, p)
+	r := resolveRates(1000, serviceTierStandard, p)
 	if !almostEqual(r.input, 2.5e-6) || !almostEqual(r.output, 1.5e-5) {
 		t.Errorf("expected base rates, got input=%v output=%v", r.input, r.output)
 	}
@@ -409,7 +418,7 @@ func TestResolveRates_BaseRate(t *testing.T) {
 
 func TestResolveRates_Above272kOnly(t *testing.T) {
 	p, _, _ := lookupPricingWithKey(testPricingMap, "gpt-5.4", namespacesFor(templateAzureOpenAI, regionGlobalStandard))
-	r := resolveRates(300_000, false, p)
+	r := resolveRates(300_000, serviceTierStandard, p)
 	if !almostEqual(r.input, 5e-6) || !almostEqual(r.output, 2.25e-5) {
 		t.Errorf("expected above-272k rates, got input=%v output=%v", r.input, r.output)
 	}
@@ -417,7 +426,7 @@ func TestResolveRates_Above272kOnly(t *testing.T) {
 
 func TestResolveRates_PriorityOnly(t *testing.T) {
 	p, _, _ := lookupPricingWithKey(testPricingMap, "gpt-5.4", namespacesFor(templateAzureOpenAI, regionGlobalStandard))
-	r := resolveRates(1000, true, p)
+	r := resolveRates(1000, serviceTierPriority, p)
 	if !almostEqual(r.input, 5e-6) || !almostEqual(r.output, 3e-5) {
 		t.Errorf("expected priority rates, got input=%v output=%v", r.input, r.output)
 	}
@@ -425,7 +434,7 @@ func TestResolveRates_PriorityOnly(t *testing.T) {
 
 func TestResolveRates_Above272kAndPriorityCombined(t *testing.T) {
 	p, _, _ := lookupPricingWithKey(testPricingMap, "gpt-5.4", namespacesFor(templateAzureOpenAI, regionGlobalStandard))
-	r := resolveRates(300_000, true, p)
+	r := resolveRates(300_000, serviceTierPriority, p)
 	if !almostEqual(r.input, 1e-5) || !almostEqual(r.output, 4.5e-5) {
 		t.Errorf("expected combined above-272k+priority rates, got input=%v output=%v", r.input, r.output)
 	}
@@ -486,7 +495,7 @@ func TestNormalizeUsage_AllShapes(t *testing.T) {
 			name: "priority service tier",
 			body: `{"model":"gpt-5.4","service_tier":"priority","usage":{
 				"prompt_tokens":100,"completion_tokens":50}}`,
-			want: Usage{TotalInputTokens: 100, OutputTokens: 50, IsPriority: true},
+			want: Usage{TotalInputTokens: 100, OutputTokens: 50, Tier: serviceTierPriority},
 		},
 		{
 			name: "default service tier is not priority",
@@ -509,7 +518,7 @@ func TestNormalizeUsage_AllShapes(t *testing.T) {
 			name: "nested service_tier of priority is honoured",
 			body: `{"model":"claude-opus-4-8","usage":{
 				"input_tokens":32,"output_tokens":282,"service_tier":"priority"}}`,
-			want: Usage{TotalInputTokens: 32, OutputTokens: 282, IsPriority: true},
+			want: Usage{TotalInputTokens: 32, OutputTokens: 282, Tier: serviceTierPriority},
 		},
 		{
 			// Azure AI Foundry, OpenAI-style: a flat audio counter alongside the
@@ -946,7 +955,7 @@ func TestNormalizeUsage_NestedResponseEnvelope(t *testing.T) {
 	if u.TotalInputTokens != 15 || u.OutputTokens != 119 {
 		t.Errorf("tokens = in %d out %d, want in 15 out 119", u.TotalInputTokens, u.OutputTokens)
 	}
-	if !u.IsPriority {
+	if u.Tier != serviceTierPriority {
 		t.Error("service_tier inside the envelope must still select the priority tier")
 	}
 }

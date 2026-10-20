@@ -1,5 +1,5 @@
 name: azure-llm-cost
-version: v1.0.0
+version: v1.1.0
 description: |
   Calculates the cost of Azure OpenAI and Azure AI Foundry calls from the token
   usage in the response, and stores it in SharedContext as "x-llm-cost" (USD).
@@ -51,11 +51,13 @@ parameters:
               - eu
               - apac
               - regional
+              - provisioned
             default: global-standard
             description: |
               The deployment type, which sets the price tier. Global Standard is
               Azure's default. Choose us, eu or apac for a Data Zone deployment,
-              or regional for a single-region one. Ignored for Azure AI Foundry.
+              regional for a single-region one, or provisioned for a Provisioned
+              Throughput deployment, which bills by the hour and is not priced.
   required:
     - modelMappings
 
