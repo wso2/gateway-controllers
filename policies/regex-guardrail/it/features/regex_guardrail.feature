@@ -835,3 +835,30 @@ Feature: Regex guardrail policy
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
+
+  # The response must match the expected error response recorded from the policy before a
+  # change (resources/expected-error-responses), so a change a client could observe fails.
+  Scenario: regex-guardrail rejects a request that does not match the pattern
+    Given I generate a unique value from "compat-rg-miss" and store it as "apiName"
+    And I generate a unique API version from "compat-rg-miss" and store it as "apiVersion"
+    And I generate a unique API context from "/compat-rg-miss" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"POST","path":"/validate","policies":[{"name":"regex-guardrail","version":"v1","params":{"request":{"jsonPath":"","regex":"^[0-9]+$"}}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      abc123
+      """
+    Then the response status code should be 422
+    And the response should match the expected error response "regex-guardrail-request-mismatch"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
