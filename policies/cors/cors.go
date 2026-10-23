@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -38,6 +39,17 @@ type CorsPolicy struct {
 	MaxAge                 *int
 	AllowCredentials       *bool
 	ForwardPreflight       bool
+	// RejectDisallowedOrigins answers a non-preflight request whose Origin is not
+	// allowed with 403 instead of forwarding it without CORS headers. Browsers
+	// apply CORS only to what a page may read, not to whether the request reaches
+	// the backend, and never to a WebSocket handshake — so this is what stops a
+	// page on another origin from using a user's cookies against the API
+	// (cross-site WebSocket hijacking, or a cross-origin request with side effects).
+	RejectDisallowedOrigins bool
+	// RejectMissingOrigin also answers a request with no Origin header with 403.
+	// Every browser sends Origin on a WebSocket handshake and on cross-origin
+	// requests, so this only turns away non-browser clients.
+	RejectMissingOrigin bool
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -103,9 +115,22 @@ func GetPolicy(
 		p.ForwardPreflight = false
 	}
 
+	p.RejectDisallowedOrigins = getBoolParam(params, "rejectDisallowedOrigins")
+	p.RejectMissingOrigin = getBoolParam(params, "rejectMissingOrigin")
+	if p.RejectDisallowedOrigins && len(p.AllowedOrigins) == 1 && p.AllowedOrigins[0] == "*" {
+		// Rejecting disallowed origins while allowing every origin rejects nothing:
+		// refuse it rather than let it look like an active defence.
+		return nil, fmt.Errorf("rejectDisallowedOrigins requires allowedOrigins to list origins instead of \"*\"")
+	}
+
 	for _, origin := range p.AllowedOrigins {
 		if origin == "*" {
 			continue
+		}
+		if p.RejectDisallowedOrigins {
+			if err := validateEnforcedOrigin(origin); err != nil {
+				return nil, fmt.Errorf("invalid allowed origin %q: %w", origin, err)
+			}
 		}
 		regex, err := compileAllowedOrigin(origin)
 		if err != nil {
@@ -116,6 +141,39 @@ func GetPolicy(
 	}
 
 	return p, nil
+}
+
+// getBoolParam reads an optional boolean parameter, false when absent.
+func getBoolParam(params map[string]interface{}, key string) bool {
+	b, _ := params[key].(bool)
+	return b
+}
+
+// validateEnforcedOrigin requires an allowed origin to be a serialized origin as
+// a browser sends it — an http or https scheme and a host, optionally a port,
+// with nothing else — or the subdomain-wildcard form of one. Once requests are
+// rejected on a mismatch, an entry with a path, query or trailing slash would
+// silently admit nothing, and "null" — sent by sandboxed and file:// documents —
+// would admit any such page.
+func validateEnforcedOrigin(origin string) error {
+	if strings.EqualFold(origin, "null") {
+		return fmt.Errorf("the \"null\" origin cannot be allowed while rejectDisallowedOrigins is set")
+	}
+	candidate := origin
+	if scheme, suffix, isWildcard := strings.Cut(origin, "://*."); isWildcard {
+		candidate = scheme + "://wildcard." + suffix
+	}
+	u, err := url.Parse(candidate)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("scheme must be http or https")
+	}
+	if u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return fmt.Errorf("must be scheme://host[:port] with no path, query, fragment or credentials")
+	}
+	return nil
 }
 
 // compileAllowedOrigin matches configured origins literally, except for
@@ -181,6 +239,10 @@ func (p *CorsPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Reques
 		slog.Debug("CORS: Preflight request detected in header phase; handling preflight")
 		return p.handlePreflightHeaders(ds.Headers)
 	}
+	if p.rejectsOrigin(ds.Headers) {
+		slog.Debug("CORS: Rejecting non-preflight request from a disallowed or missing origin")
+		return rejectedOriginResponse()
+	}
 	corsHeaders, ok := p.handleNonPreflightHeaders(ds.Headers)
 	if ok {
 		slog.Debug("CORS: Adding CORS headers to non-preflight request")
@@ -192,6 +254,31 @@ func (p *CorsPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Reques
 		}
 	}
 	return policy.UpstreamRequestHeaderModifications{}
+}
+
+// rejectsOrigin reports whether a non-preflight request must be refused: a
+// missing Origin when RejectMissingOrigin is set, or an Origin that is not
+// allowed when RejectDisallowedOrigins is set. Only the first Origin value is
+// considered; a request legitimately carries at most one.
+func (p *CorsPolicy) rejectsOrigin(headers *policy.Headers) bool {
+	origin := headers.Get("Origin")
+	if len(origin) == 0 {
+		return p.RejectMissingOrigin
+	}
+	if !p.RejectDisallowedOrigins {
+		return false
+	}
+	return !p.isOriginAllowed(origin[0])
+}
+
+// rejectedOriginResponse is the single answer to every rejected origin — missing
+// or disallowed — so it never reveals which origins are allowed.
+func rejectedOriginResponse() policy.ImmediateResponse {
+	return policy.ImmediateResponse{
+		StatusCode: 403,
+		Headers:    map[string]string{"content-type": "application/json"},
+		Body:       []byte(`{"error":"forbidden","message":"Origin not allowed."}`),
+	}
 }
 
 // OnResponseHeaders sets CORS headers on the response in the header phase.

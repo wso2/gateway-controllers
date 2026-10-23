@@ -1,9 +1,11 @@
 name: cors
-version: v1.0.2
+version: v1.1.0
 description: |
   Applies Cross-Origin Resource Sharing (CORS) rules by handling preflight
   requests and adding CORS headers to responses. Controls cross-origin access
   through configured origins, methods, headers, credentials, and cache settings.
+  Optionally rejects requests from disallowed (or missing) origins with 403,
+  which also protects WebSocket APIs against cross-site WebSocket hijacking.
 
 parameters:
   type: object
@@ -91,9 +93,47 @@ parameters:
       description: Specifies whether unmatched preflight requests are forwarded
         upstream instead of handled by this policy.
       default: false
+    rejectDisallowedOrigins:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >
+        When true, a non-preflight request whose Origin is not in allowedOrigins
+        is rejected with 403 instead of being forwarded without CORS headers.
+        Browsers apply CORS only to what a page may read, and never to a
+        WebSocket handshake, so enable this to stop pages on other origins from
+        using a user's cookies against the API (cross-site WebSocket hijacking).
+        Requires allowedOrigins to list origins rather than "*"; each entry must
+        then be scheme://host[:port] (or https://*.example.com), and "null" is
+        refused. Requests without an Origin header are still allowed unless
+        rejectMissingOrigin is set.
+      default: false
+    rejectMissingOrigin:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >
+        When true, a non-preflight request with no Origin header is rejected with
+        403. Browsers always send Origin on a WebSocket handshake, so this only
+        turns away non-browser clients; leave it false when servers or apps that
+        omit Origin must reach the API.
+      default: false
 
   required:
     - allowedOrigins
+  # With rejectDisallowedOrigins, every allowed origin must be a bare
+  # scheme://host[:port] (or a subdomain wildcard), so "*", "null", paths and
+  # trailing slashes are refused when the API is deployed rather than when the
+  # policy is first loaded.
+  if:
+    properties:
+      rejectDisallowedOrigins:
+        const: true
+    required:
+      - rejectDisallowedOrigins
+  then:
+    properties:
+      allowedOrigins:
+        items:
+          pattern: '^https?://(\*\.)?[^/?#@\s*]+$'
 
 systemParameters:
   type: object
