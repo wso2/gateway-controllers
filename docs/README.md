@@ -38,6 +38,7 @@ All available policies, sorted alphabetically.
 | [Azure LLM Cost](./azure-llm-cost/v1.0/docs/azure-llm-cost.md) | AI | Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. |
 | [Backend JWT](./backend-jwt/v1.0/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
 | [Basic Auth](./basic-auth/v1.0/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
+| [Bring Your Own Guardrail](./byo-guardrail/v0.9/docs/byo-guardrail.md) | Guardrails, AI | Checks request or response body text with your own guardrail service over HTTP, with no policy code to write. |
 | [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Cost-Based Model Routing](./cost-based-model-routing/v0.9/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
