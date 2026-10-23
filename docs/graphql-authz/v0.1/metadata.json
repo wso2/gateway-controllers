@@ -1,0 +1,11 @@
+{
+  "name": "graphql-authz",
+  "displayName": "GraphQL Authorization",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "GraphQL",
+    "Security"
+  ],
+  "description": "GraphQL Authorization validates access to GraphQL query and mutation root fields based on \nJWT claims or OAuth scopes provided by an upstream authentication policy such as jwt-auth.\n\nRules are configured per field under queries/mutations (op-level), a type-wide wildcard, and a \ncross-type global fallback; every rule that matches a field applies together, so a wildcard or global \nrule is not skipped just because the field also has its own exact rule. A field matched by no rule at \nall is not governed by this policy instance and passes through. Every root field selected by a \nrequest is authorized independently, so a single request selecting multiple fields must satisfy every \nrule for every governed field."
+}
