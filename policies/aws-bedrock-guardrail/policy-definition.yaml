@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.2.1
+version: v1.3.0
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
@@ -233,6 +233,13 @@ parameters:
             If true, includes detailed assessment information from AWS Bedrock Guardrail in error responses.
             If false, returns minimal error information.
           default: false
+        applicableStatusCodes:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            Comma-separated upstream response status codes and inclusive ranges to validate (e.g., "200-299,422").
+            Responses with any other status code are passed through without validation. If not set, every response is validated.
+          pattern: "^\\s*[1-5][0-9]{2}\\s*(-\\s*[1-5][0-9]{2}\\s*)?(,\\s*[1-5][0-9]{2}\\s*(-\\s*[1-5][0-9]{2}\\s*)?)*$"
   anyOf:
     - required: [ request ]
     - required: [ response ]

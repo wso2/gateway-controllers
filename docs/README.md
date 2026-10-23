@@ -33,7 +33,7 @@ All available policies, sorted alphabetically.
 | [Analytics Header Filter](./analytics-header-filter/v1.0/docs/analytics-header-filter.md) | Logging, Analytics & Monitoring | The Analytics Header Filter policy allows you to control which request and response headers are included in analytics data using allow or deny modes. |
 | [API Key Auth](./api-key-auth/v1.2/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
 | [AWS Authentication](./aws-authentication/v0.10/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |
-| [AWS Bedrock Guardrail](./aws-bedrock-guardrail/v1.2/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against AWS Bedrock Guardrails. |
+| [AWS Bedrock Guardrail](./aws-bedrock-guardrail/v1.3/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against AWS Bedrock Guardrails. |
 | [Azure Content Safety Content Moderation](./azure-content-safety-content-moderation/v1.0/docs/azure-content-safety.md) | Guardrails, AI | Validates request or response body content against Azure Content Safety API for content moderation. |
 | [Azure LLM Cost](./azure-llm-cost/v1.0/docs/azure-llm-cost.md) | AI | Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. |
 | [Backend JWT](./backend-jwt/v1.0/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
