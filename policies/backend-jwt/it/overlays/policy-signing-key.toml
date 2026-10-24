@@ -1,0 +1,51 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# Gateway configuration of the backend-jwt-policy-key block: both a gateway signing key ([signing])
+# and a policy-level backend-jwt key are configured. A gateway newer than 1.2.0 signs backend JWTs
+# with the gateway key, which carries a kid and is published at /.well-known/jwks. A 1.2.0 gateway
+# has no gateway signing, ignores [signing], and signs with the policy-level key, with no kid. The
+# two keys use different algorithms (ES256 and RS256) so a token shows which key signed it.
+
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "mock-jwks"
+issuer = "http://testbench:3001/token"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"
+
+# The block's signingKeys wiring mounts the framework's fixed integration-test keys at
+# /secrets/gateway-runtime/signing, owned by the runtime user with mode 0400: active.pem is an
+# EC P-256 key and previous.pem an RSA 2048 key. The gateway signs with active.pem; the
+# policy-level key is previous.pem, whose public half is resources/keys/policy-signing-key.jwks.json.
+[signing]
+jwks_cache_max_age = "5m"
+
+[[signing.keys]]
+path = "/secrets/gateway-runtime/signing/active.pem"
+active = true
+
+[policy_configurations.backendjwt_v1]
+algorithm = "SHA256withRSA"
+issuer = "https://it-gateway.wso2.test"
+tokenexpiry = "15m"
+tokencaching = true
+cachemaxsize = 1000
+
+[policy_configurations.backendjwt_v1.signingkey]
+path = "/secrets/gateway-runtime/signing/previous.pem"

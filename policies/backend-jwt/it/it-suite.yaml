@@ -49,3 +49,48 @@ blocks:
         tags: "gateway-version>=1.2.0"
         features:
           - features/backend_jwt.feature
+
+  # Gateway signing ([signing], published at /.well-known/jwks) exists only in gateways newer than
+  # 1.2.0, so this block has its own gateway configuration and its runner is gated to them.
+  - name: backend-jwt-gateway-signing
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        addPoliciesFrom: policies
+        overlay: overlays/gateway-signing.toml
+      - name: testbench
+    wiring:
+      platform-gateway:
+        signingKeys: true
+    runners:
+      - name: backend-jwt-gateway-signing
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/backend_jwt_gateway_signing.feature
+
+  # Both a gateway signing key and a policy-level backend-jwt key are configured. Which one signs
+  # depends on the gateway release, so each release boundary has its own runner: 1.2.0 and older
+  # have no gateway signing and sign with the policy-level key, with no kid; newer gateways sign
+  # with the gateway key. The signing choice does not depend on the database, so one engine runs.
+  - name: backend-jwt-policy-key
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        addPoliciesFrom: policies
+        overlay: overlays/policy-signing-key.toml
+      - name: testbench
+    wiring:
+      platform-gateway:
+        signingKeys: true
+    runners:
+      - name: backend-jwt-policy-key
+        tags: "gateway-version<=1.2.0"
+        features:
+          - features/backend_jwt_policy_key.feature
+      - name: backend-jwt-gateway-key-precedence
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/backend_jwt_gateway_key_precedence.feature

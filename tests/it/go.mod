@@ -6,7 +6,7 @@ require (
 	github.com/a2aproject/a2a-go/v2 v2.6.0
 	github.com/cucumber/godog v0.16.0
 	github.com/stretchr/testify v1.12.1
-	github.com/wso2/api-platform/tests/framework v0.3.1
+	github.com/wso2/api-platform/tests/framework v0.4.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

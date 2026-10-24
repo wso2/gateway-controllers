@@ -36,6 +36,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	"github.com/wso2/api-platform/sdk/core/signing"
 	"github.com/wso2/api-platform/sdk/core/utils/cache"
 )
 
@@ -136,9 +137,9 @@ var ins = &BackendJWTPolicy{
 // GetPolicy is the v1alpha2 factory entry point. It is called on each API deployment and applies
 // the global cacheMaxSize from systemParameters to the shared token cache. Redeploy invalidation
 // is handled implicitly by the cache key: it folds in every token-shaping field (identity,
-// operation, claims, issuer, algorithm, dialect, excludedClaims), so a redeploy that changes any
+// operation, claims, issuer, signing key, dialect, excludedClaims), so a redeploy that changes any
 // of them simply misses the old entries — no explicit flush needed.
-func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
+func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
 	// cacheMaxSize is a single global bound across all APIs; there is no unbounded mode. A missing
 	// or invalid value falls back to the default bound.
 	maxSize := getInt(params, "cacheMaxSize", defaultCacheMaxSize)
@@ -146,7 +147,29 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		maxSize = defaultCacheMaxSize
 	}
 	ins.ensureTokenCache(maxSize)
+
+	// Gateway signing keys take precedence over the policy-level key. Say so once per
+	// deployment, never per request, so an operator migrating to [signing] sees which
+	// setting is no longer used. The key itself is never logged.
+	if active, ok := signing.ActiveKey(); ok && hasPolicySigningKey(params) {
+		slog.Warn("Backend JWT: gateway signing keys are configured; ignoring the policy-level signingKey and algorithm",
+			"api", metadata.APIName, "kid", active.Kid, "gatewayAlgorithm", string(active.Algorithm))
+	}
 	return ins, nil
+}
+
+// hasPolicySigningKey reports whether a policy-level signingKey (inline or path) is configured.
+func hasPolicySigningKey(params map[string]interface{}) bool {
+	keyMap, ok := params["signingKey"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for _, field := range []string{"inline", "path"} {
+		if v, ok := keyMap[field].(string); ok && v != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // ensureTokenCache (re)builds the shared token cache when the configured global size changes.
@@ -189,7 +212,9 @@ func (p *BackendJWTPolicy) Mode() policy.ProcessingMode {
 }
 
 // Validate checks the algorithm is supported and, for key-based algorithms,
-// that the signing key is present and parseable at config load time.
+// that the signing key is present and parseable at config load time. When the
+// gateway signing service has an active key, the policy-level key is not used,
+// so it is neither required nor checked.
 func (p *BackendJWTPolicy) Validate(params map[string]interface{}) error {
 	alg := getString(params, "algorithm", defaultAlgorithm)
 	entry, ok := algorithms[alg]
@@ -207,7 +232,7 @@ func (p *BackendJWTPolicy) Validate(params map[string]interface{}) error {
 		}
 	}
 
-	if entry.keyType == "none" {
+	if entry.keyType == "none" || signing.Available() {
 		return nil
 	}
 	pemBytes, err := p.extractSigningKeyPEM(params)
@@ -242,12 +267,22 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	// Resolve extra claims once — used for both the cache key and JWT population.
 	extras := resolveExtraClaims(reqCtx, params)
 
+	// With a gateway signing key installed, the token is signed by the gateway signing
+	// service (and carries its kid); the policy-level signingKey and algorithm are not used.
+	gatewayKey, useGatewayKey := signing.ActiveKey()
+
 	var cacheKey string
 	if tokenCaching {
+		// The signer is part of the namespace, so a token signed by one key is never
+		// served once another key signs.
+		signer := alg
+		if useGatewayKey {
+			signer = "gateway:" + gatewayKey.Kid + ":" + string(gatewayKey.Algorithm)
+		}
 		ns := keyNamespace{
 			apiName:   reqCtx.APIName,
 			issuer:    issuer,
-			algorithm: alg,
+			algorithm: signer,
 			dialect:   dialect,
 			excluded:  sortedSetKeys(excluded),
 		}
@@ -263,32 +298,15 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 		}
 	}
 
-	signingMethod := entry.method
-	var signKey interface{}
-	if entry.keyType == "none" {
-		signKey = jwt.UnsafeAllowNoneSignatureType
-	} else {
-		pemBytes, err := p.extractSigningKeyPEM(params)
-		if err != nil {
-			slog.Error("Backend JWT: failed to extract signing key", "error", err)
-			return internalError()
-		}
-		key, err := p.loadKey(pemBytes)
-		if err != nil {
-			slog.Error("Backend JWT: failed to parse signing key", "error", err)
-			return internalError()
-		}
-		if err := checkKeyType(key, entry.keyType, alg); err != nil {
-			slog.Error("Backend JWT: key type mismatch", "algorithm", alg, "error", err)
-			return internalError()
-		}
-		signKey = key
-	}
-
 	claims := buildClaims(authCtx, issuer, dialect, expiry, excluded, extras, time.Now())
 
-	token := jwt.NewWithClaims(signingMethod, claims)
-	signed, err := token.SignedString(signKey)
+	var signed string
+	var err error
+	if useGatewayKey {
+		signed, err = signWithGatewayKey(claims)
+	} else {
+		signed, err = p.signWithPolicyKey(params, entry, alg, claims)
+	}
 	if err != nil {
 		slog.Error("Backend JWT: failed to sign token", "error", err)
 		return internalError()
@@ -304,6 +322,39 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 			headerName: signed,
 		},
 	}
+}
+
+// signWithGatewayKey signs claims with the gateway's active signing key through the gateway
+// signing service. The service sets alg, kid and typ "JWT"; the key never reaches this policy.
+func signWithGatewayKey(claims jwt.MapClaims) (string, error) {
+	signed, _, err := signing.SignJWT(map[string]any(claims))
+	if err != nil {
+		return "", fmt.Errorf("gateway signing: %w", err)
+	}
+	return signed, nil
+}
+
+// signWithPolicyKey signs claims with the policy-level signingKey and algorithm, exactly as
+// this policy did before gateway signing existed: no kid is added.
+func (p *BackendJWTPolicy) signWithPolicyKey(params map[string]interface{}, entry algorithmEntry, alg string, claims jwt.MapClaims) (string, error) {
+	var signKey interface{}
+	if entry.keyType == "none" {
+		signKey = jwt.UnsafeAllowNoneSignatureType
+	} else {
+		pemBytes, err := p.extractSigningKeyPEM(params)
+		if err != nil {
+			return "", fmt.Errorf("extract signing key: %w", err)
+		}
+		key, err := p.loadKey(pemBytes)
+		if err != nil {
+			return "", fmt.Errorf("parse signing key: %w", err)
+		}
+		if err := checkKeyType(key, entry.keyType, alg); err != nil {
+			return "", fmt.Errorf("key type mismatch: %w", err)
+		}
+		signKey = key
+	}
+	return jwt.NewWithClaims(entry.method, claims).SignedString(signKey)
 }
 
 // buildClaims assembles the JWT claim set: the standard registered claims (iat/exp/iss),
