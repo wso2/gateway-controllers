@@ -96,7 +96,7 @@ func parseConfig(params map[string]interface{}) (config, error) {
 
 	requestModelRaw, ok := params["requestModel"].(map[string]interface{})
 	if !ok {
-		return result, fmt.Errorf("'requestModel' system parameter is required")
+		return result, fmt.Errorf("'requestModel' provider-template parameter is required")
 	}
 	location, ok := requestModelRaw["location"].(string)
 	if !ok {

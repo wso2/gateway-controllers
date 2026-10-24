@@ -83,6 +83,11 @@ This policy requires an embedding provider to be configured in the gateway:
 
 ## Destination Provider Routing
 
+The gateway controller merges `requestModel` from the LLM provider template into
+regular policy parameters. The mapping is required at runtime but does not need
+to be supplied in the policy attachment. This policy supports `location: payload`
+with a JSONPath `identifier` locating the model field, such as `$.model`.
+
 Configure the example aliases `coding-provider` and `fallback-provider` in the
 LlmProxy's `additionalProviders`. The `provider` and `defaultProvider` values
 must match `additionalProviders[].as`, or the provider id when `as` is absent.
