@@ -1,7 +1,7 @@
 {
   "name": "openai-to-anthropic-transformer",
   "displayName": "OpenAI to Anthropic Transformer",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "AI",

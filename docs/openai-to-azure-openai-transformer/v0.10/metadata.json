@@ -1,7 +1,7 @@
 {
   "name": "openai-to-azure-openai-transformer",
   "displayName": "OpenAI to Azure OpenAI Transformer",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "AI",

@@ -91,3 +91,29 @@ operationPolicies:
 - **Unmapped stream events.** `ping` and `content_block_stop` carry nothing OpenAI represents and are dropped. `thinking_delta` and `signature_delta` (extended thinking) have no OpenAI Chat Completions streaming equivalent and are excluded from visible assistant content.
 - A mid-stream Anthropic `error` event, or an event that cannot be parsed, is emitted as an OpenAI-style error object and the stream is then closed. Provider bytes are never forwarded as if they were OpenAI chunks, and such a stream is not terminated with `[DONE]`. Because response headers are already committed once streaming has begun, a mid-stream failure cannot be surfaced as an HTTP error status.
 - The upstream must be configured with Anthropic authentication (the `x-api-key` header) at the provider level; this policy handles only the request/response body and path translation.
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The request body is empty or is not valid JSON | `400` | `960001` | `validation` |
+| No model can be resolved: the request's `model` is not a string or is blank, and none is configured | `400` | `960001` | `validation` |
+| The translated Anthropic request body cannot be serialized | `500` | `960000` | `mediation` |
+| Response phase: the Anthropic response or error body cannot be translated back to the OpenAI shape | `500` | `960000` | `mediation` |
+| Response phase, streaming: Anthropic sends an `error` event, or an event that cannot be parsed, mid-stream | the stream's status, already sent | `101599` | `mediation` |
+
+A streaming rejection happens in the response phase after the response headers have been sent,
+so the client receives the translated error event and the stream closes with the status already
+sent; the fault records the failure.
+
+These faults set no `Description`. For a rejected request or response the fault's `Message` is
+the error text the body already carries, for example `Request body is empty.`; for a terminated
+stream it is `The upstream stream ended with an error.`, and the provider's own detail is in the
+final SSE event the client receives. The fault itself is passed to fault policies and analytics
+only, never to the client.

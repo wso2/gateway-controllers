@@ -140,3 +140,23 @@ operationPolicies:
 - Remote image URLs are not fetched; use base64 data URIs for image input.
 - File input supports inline `file_data` only; `file_id` references are rejected with a `400`.
 - Streaming translation expects Bedrock's `application/vnd.amazon.eventstream` framing.
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The request body is empty or is not valid JSON | `400` | `960001` | `validation` |
+| No model can be resolved: the request's `model` is not a string or is blank, and none is configured | `400` | `960001` | `validation` |
+| A `file` content part cannot be sent to Bedrock: it has no `file` object, uses `file_id`, has no `file_data`, its `file_data` is not a base64 data URI (or is empty, contains whitespace, or is not valid base64), or its file type is not a supported document type | `400` | `960001` | `validation` |
+| A user message carries a file without a non-empty text part | `400` | `960001` | `validation` |
+| Response phase: the Bedrock Converse response or error body cannot be translated back to the OpenAI shape | `500` | `960000` | `mediation` |
+
+These faults set no `Description`: the fault's `Message` is the error text the body already
+carries, for example `Request body is empty.`, so nothing is held back from the client. The fault
+itself is passed to fault policies and analytics only, never to the client.
