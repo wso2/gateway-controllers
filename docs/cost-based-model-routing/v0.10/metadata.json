@@ -1,7 +1,7 @@
 {
   "name": "cost-based-model-routing",
   "displayName": "Cost-Based Model Routing",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "AI"

@@ -419,3 +419,27 @@ When a request matches both an exact-name entry and a wildcard entry, *both* are
 **Use with other MCP policies**
 
 Combine with [MCP Authentication](../../../mcp-auth/v1.4/docs/mcp-authentication.md) and [MCP Authorization](../../../mcp-authz/v1.3/docs/mcp-authorization.md) for identity-aware throttling (e.g. per-user limits via `keyExtraction`), or with [MCP Access Control](../../../mcp-acl-list/v1.1/docs/mcp-acl-list.md) to deny capabilities outright while rate-limiting the rest.
+
+## Fault reporting
+
+From v1.3, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.2. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.2.
+
+Each limit is enforced by an `advanced-ratelimit` delegate, and the fault that delegate reports
+for an exceeded quota is passed through unchanged, with its code and type. This policy adds the
+JSON-RPC error code (`-32000`) and the request id, and sets the fault's `Message` to the JSON-RPC
+error message the client receives. With a custom `onRateLimitExceeded` body, the delegate's
+response and fault are returned as they are.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A quota is exceeded | the quota's status (default `429`) | the delegate's code, passed through (`900800` at the API level, `900802` at an operation) | `throttling` |
+| The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
+| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one (`-32020`) | `400` | `960001` | `validation` |
+
+A malformed request's fault also carries its JSON-RPC error code and the request id. The fault's
+`Description` is the delegate's, for example `quota exceeded: <quota name>`; a malformed request
+sets none. It is passed to fault policies and analytics only, never to the client.

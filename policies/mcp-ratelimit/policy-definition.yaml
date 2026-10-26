@@ -1,5 +1,5 @@
 name: mcp-ratelimit
-version: v1.2.1
+version: v1.3.0
 description: |
   Applies rate limits to MCP traffic per tool, resource, prompt, or JSON-RPC method.
   Each entry targets a capability by name (or "*") and declares one or more

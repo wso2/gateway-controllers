@@ -504,3 +504,29 @@ The client's token is validated by `mcp-auth`, and the MCP server receives the s
 
 - [MCP Authorization Policy](../../../mcp-authz/v1.3/docs/mcp-authorization.md) - Enforces claim and scope rules on MCP tools, resources, prompts, and methods after this policy authenticates the caller
 - [JWT Authentication Policy](../../../jwt-auth/v1.3/docs/jwt-authentication.md) - Base JWT token validation mechanism
+
+## Fault reporting
+
+From v1.5, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.4. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.4.
+
+Token validation is delegated to `jwt-auth`, and the fault `jwt-auth` reports for a rejected
+token is passed through unchanged, with its code and type.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| `jwt-auth` rejects the token (missing, malformed, expired, failing signature or audience) | `onFailureStatusCode` (default `401`) | `jwt-auth`'s code, passed through (for example `900902` missing, `900901` invalid, `900903` expired) | `jwt-auth`'s type, passed through |
+| Protected resource metadata is requested but no key manager or matching issuer is configured | `onFailureStatusCode` | `900900` | `authentication` |
+| The policy is misconfigured (`onFailureStatusCode` or `errorMessageFormat` invalid), or `jwt-auth` cannot be loaded | `500` | `900900` | `authentication` |
+| The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
+| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one (`-32020`) | `400` | `960001` | `validation` |
+
+The protected resource metadata document is a successful response and is not a fault. A
+malformed request's fault also carries its JSON-RPC error code.
+
+The fault's `Description` carries the internal reason, for example `no matching issuers found`, or
+for a malformed request the JSON-RPC error's `data`. It is passed to fault policies and analytics
+only, never to the client.

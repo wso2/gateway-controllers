@@ -236,3 +236,22 @@ its requested model on the primary provider; omit `providerName` for patterns.
 An exhausted match follows `onExhausted` without trying broader patterns.
 Fallback still requires its own exact model budget; missing or exhausted means
 HTTP 429, with no recursive fallback.
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The model is read from the payload, and the body is empty, not valid JSON or not a JSON object, or the model location in it is missing or invalid | `400` | `960001` | `validation` |
+| The model is carried in a query or path parameter that cannot be rewritten for the selected model | `400` | `960001` | `validation` |
+| The requested model has no available budget, and there is no fallback or its budget is missing or exhausted | `429` | `900806` | `throttling` |
+| Budget storage is unavailable and its failure mode is closed | `503` | `960000` | `mediation` |
+| The routed request body could not be serialised | `500` | `960000` | `mediation` |
+
+Only the last row sets a `Description`, carrying the serialisation error. It is passed to fault
+policies and analytics only, never to the client.
