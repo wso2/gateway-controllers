@@ -589,3 +589,96 @@ func TestOnRequestBodyAndOnResponseBody(t *testing.T) {
 		t.Fatalf("expected response no-op when response.enabled=false, got %T", respDisabled)
 	}
 }
+
+// TestContentLengthGuardrail_InterventionDeclaresFault covers the one funnel every rejection this policy
+// makes passes through, in both phases.
+func TestContentLengthGuardrail_InterventionDeclaresFault(t *testing.T) {
+	p := &ContentLengthGuardrailPolicy{}
+
+	t.Run("request phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, false, false, 1, 10)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		assertGuardrailError(t, resp.Fault, policy.DirectionRequest)
+	})
+
+	t.Run("response phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, true, false, 1, 10)
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side guardrail intervention")
+		}
+		// Direction is what separates a request-side hit from a response-side one; they
+		// share a status code and only the policy knows which it made.
+		assertGuardrailError(t, mods.Fault, policy.DirectionResponse)
+	})
+}
+
+// TestContentLengthGuardrail_AssessmentsGatedByShowAssessment covers the one field that must not leak:
+// Assessments frequently holds the very content the guardrail existed to stop, so it is
+// populated only where the operator opted in through showAssessment.
+func TestContentLengthGuardrail_AssessmentsGatedByShowAssessment(t *testing.T) {
+	p := &ContentLengthGuardrailPolicy{}
+
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			action := p.buildErrorResponse("blocked detail", nil, false, show, 1, 10)
+			resp := action.(policy.ImmediateResponse)
+			if resp.Fault == nil || resp.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := resp.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}
+
+// assertGuardrailError checks the parts of the description that are the same for every
+// intervention this policy makes.
+func assertGuardrailError(t *testing.T, err *policy.FaultDetails, wantDirection string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if err.Code != codeGuardrailIntervened {
+		t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, err.Code)
+	}
+	if err.Type != policy.FaultTypeGuardrail {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, err.Type)
+	}
+	if err.Direction != wantDirection {
+		t.Fatalf("expected Error.Direction=%q, got %q", wantDirection, err.Direction)
+	}
+	if err.Description == "" {
+		t.Fatalf("expected Error.Description to carry the blocked detail")
+	}
+	if err.Guardrail == nil {
+		t.Fatalf("expected Guardrail detail to be populated")
+	}
+	if err.Guardrail.InterveningGuardrail != guardrailName {
+		t.Fatalf("expected InterveningGuardrail=%q, got %q", guardrailName, err.Guardrail.InterveningGuardrail)
+	}
+	if err.Guardrail.Action != policy.GuardrailActionIntervened {
+		t.Fatalf("expected Action=%q, got %q", policy.GuardrailActionIntervened, err.Guardrail.Action)
+	}
+	if err.Guardrail.ActionReason == "" {
+		t.Fatalf("expected ActionReason to be set")
+	}
+}

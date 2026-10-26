@@ -30,6 +30,23 @@ import (
 	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
+// codeGuardrailIntervened is the specific code for what this guardrail checks —
+// how many SENTENCES the content had — so a caller can tell this rejection from another
+// guardrail's without parsing a message. The name is unchanged so every call site reads the
+// same; only the value moved.
+//
+// The tradeoff, stated because it is real: 906xxx sits OUTSIDE carbon's guardrail range
+// [900514, 900515), which is exactly one code wide. Carbon-compatible analytics assigns a
+// fault category by range membership, so this classifies as "other" rather than
+// "guardrail" there. Accepted deliberately: the code identifies the rejection, and the
+// class is already carried by FaultDetails.Type ("guardrail") and by
+// GuardrailDetails.InterveningGuardrail. See policy.GuardrailCodeIntervened for the full
+// reasoning, and use that generic code for a guardrail with nothing specific to say.
+const codeGuardrailIntervened = policy.GuardrailCodeSentenceCount
+
+// guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
+const guardrailName = "sentence-count-guardrail"
+
 const (
 	GuardrailErrorCode           = 422
 	TextCleanRegex               = "^\"|\"$"
@@ -330,6 +347,48 @@ func normalizeExtractedValue(value interface{}) (string, error) {
 	}
 }
 
+// buildGuardrailErrorResponse describes the intervention for the gateway: the code and
+// class that decide its analytics category, which side was refused, and the guardrail
+// envelope this policy already publishes in its response body.
+//
+// Direction is per phase, not per policy: a request-side hit and a response-side hit are
+// operationally different events that share a status code, and only this policy knows
+// which it made.
+func (p *SentenceCountGuardrailPolicy) buildGuardrailErrorResponse(reason string, validationError error, isResponse, showAssessment bool, min, max int) *policy.FaultDetails {
+	assessment := p.buildAssessmentObject(reason, validationError, isResponse, showAssessment, min, max)
+
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+
+	actionReason, _ := assessment["actionReason"].(string)
+
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// Assessments carries the content the guardrail existed to stop, so it is populated
+	// only where the operator already opted in through showAssessment — the same gate the
+	// published response envelope uses.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+
+	return &policy.FaultDetails{
+		Code:      codeGuardrailIntervened,
+		Type:      policy.FaultTypeGuardrail,
+		Direction: direction,
+		Message:   "Violation of applied sentence count constraints detected",
+		// reason is the detail of what was blocked. Description is withheld from the
+		// response body by every renderer and reaches fault policies only, which is why
+		// the detail belongs here rather than in Message.
+		Description: reason,
+		Guardrail:   guardrail,
+	}
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *SentenceCountGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, min, max int) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -499,6 +558,8 @@ func (p *SentenceCountGuardrailPolicy) buildErrorResponse(reason string, validat
 		bodyBytes = []byte(`{"type":"SENTENCE_COUNT_GUARDRAIL","message":"Internal error"}`)
 	}
 
+	errorResponse := p.buildGuardrailErrorResponse(reason, validationError, isResponse, showAssessment, min, max)
+
 	if isResponse {
 		statusCode := GuardrailErrorCode
 		return policy.DownstreamResponseModifications{
@@ -506,6 +567,8 @@ func (p *SentenceCountGuardrailPolicy) buildErrorResponse(reason string, validat
 			Body:              bodyBytes,
 			AnalyticsMetadata: analyticsMetadata,
 			HeadersToSet:      map[string]string{"Content-Type": "application/json"},
+			IsFault:           true,
+			Fault:             errorResponse,
 		}
 	}
 
@@ -515,7 +578,9 @@ func (p *SentenceCountGuardrailPolicy) buildErrorResponse(reason string, validat
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault:   errorResponse,
 	}
 }
 
@@ -595,11 +660,25 @@ func (p *SentenceCountGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, 
 			if !rp.Invert {
 				if count < rp.Min {
 					reason := fmt.Sprintf("sentence count %d is below minimum of %d sentences", count, rp.Min)
-					return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+					return policy.TerminateResponseChunk{
+						Body: p.buildSSEErrorEvent(reason, rp),
+						// Ending the stream here is a failure, not a clean close. Nothing else can
+						// tell the two apart: the status was committed with the headers long before
+						// this chunk arrived.
+						IsFault: true,
+						Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+					}
 				}
 			} else if count >= rp.Min && count <= rp.Max {
 				reason := fmt.Sprintf("sentence count %d is within the excluded range %d-%d sentences", count, rp.Min, rp.Max)
-				return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+				return policy.TerminateResponseChunk{
+					Body: p.buildSSEErrorEvent(reason, rp),
+					// Ending the stream here is a failure, not a clean close. Nothing else can
+					// tell the two apart: the status was committed with the headers long before
+					// this chunk arrived.
+					IsFault: true,
+					Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+				}
 			}
 			return policy.ForwardResponseChunk{}
 		}
@@ -632,13 +711,27 @@ func (p *SentenceCountGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, 
 			slog.Debug("SentenceCountGuardrail: max exceeded",
 				"count", count, "max", rp.Max, "chunkIndex", chunk.Index)
 			reason := fmt.Sprintf("sentence count %d exceeded maximum of %d sentences", count, rp.Max)
-			return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent(reason, rp),
+				// Ending the stream here is a failure, not a clean close. Nothing else can
+				// tell the two apart: the status was committed with the headers long before
+				// this chunk arrived.
+				IsFault: true,
+				Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+			}
 		}
 		if isDone && count < rp.Min {
 			slog.Debug("SentenceCountGuardrail: below min at stream end",
 				"count", count, "min", rp.Min, "chunkIndex", chunk.Index)
 			reason := fmt.Sprintf("sentence count %d is below minimum of %d sentences", count, rp.Min)
-			return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent(reason, rp),
+				// Ending the stream here is a failure, not a clean close. Nothing else can
+				// tell the two apart: the status was committed with the headers long before
+				// this chunk arrived.
+				IsFault: true,
+				Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+			}
 		}
 		return policy.ForwardResponseChunk{}
 	}
@@ -649,7 +742,14 @@ func (p *SentenceCountGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, 
 			slog.Debug("SentenceCountGuardrail: invert violation at stream end",
 				"count", count, "min", rp.Min, "max", rp.Max, "chunkIndex", chunk.Index)
 			reason := fmt.Sprintf("sentence count %d is within the excluded range %d-%d sentences", count, rp.Min, rp.Max)
-			return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent(reason, rp),
+				// Ending the stream here is a failure, not a clean close. Nothing else can
+				// tell the two apart: the status was committed with the headers long before
+				// this chunk arrived.
+				IsFault: true,
+				Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+			}
 		}
 	}
 	return policy.ForwardResponseChunk{}
