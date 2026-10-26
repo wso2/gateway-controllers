@@ -31,7 +31,35 @@ from apip_sdk_core import (
     UpstreamRequestModifications,
 )
 
+# The fault contract, when the gateway's SDK has it. The Python SDK is the one the gateway
+# runtime ships, not one this policy pins, so on a gateway that predates the contract these
+# names do not exist; the rejections then go out exactly as before, with no fault fields.
+try:
+    from apip_sdk_core import FaultCode, FaultDetails, FaultType, GuardrailCode, GuardrailDetails
+except ImportError:  # pragma: no cover - exercised on gateways without the fault contract
+    FaultDetails = None
+
 LOGGER = logging.getLogger(__name__)
+
+_GUARDRAIL_NAME = "nvidia-nemoguard-content-safety"
+
+# NemoGuard category → the GuardrailCode attribute for it. A category with no specific code
+# reports the content-safety group's generic, UNSAFE_CONTENT.
+_CATEGORY_GUARDRAIL_CODE: dict[str, str] = {
+    "S1": "VIOLENCE",
+    "S2": "SEXUAL",
+    "S3": "DANGEROUS_ACTIVITY",
+    "S4": "DANGEROUS_ACTIVITY",
+    "S5": "DANGEROUS_ACTIVITY",
+    "S6": "SELF_HARM",
+    "S7": "SEXUAL",
+    "S8": "HATE",
+    "S9": "PII",
+    "S10": "HARASSMENT",
+    "S12": "PROFANITY",
+    "S17": "DANGEROUS_ACTIVITY",
+    "S22": "DANGEROUS_ACTIVITY",
+}
 
 _DEFAULT_MODEL = "nemoguard"
 _DEFAULT_REQUEST_JSON_PATH = "$.messages[-1].content"
@@ -193,6 +221,7 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
                     "type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY",
                     "message": {"action": "SERVICE_UNAVAILABLE", "actionReason": "Content safety service unavailable."},
                 }).encode(),
+                **_service_unavailable_fault("Request"),
             )
 
         if unsafe:
@@ -214,6 +243,7 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
                 status_code=req_params.request.block_status_code,
                 headers={"content-type": "application/json"},
                 body=json.dumps({"type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY", "message": msg}).encode(),
+                **_intervention_fault("Request", category_codes, msg.get("assessments")),
             )
 
         return _PASSTHROUGH_REQUEST
@@ -270,6 +300,7 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
                     "type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY",
                     "message": {"action": "SERVICE_UNAVAILABLE", "actionReason": "Content safety service unavailable."},
                 }).encode(),
+                **_service_unavailable_fault("Response"),
             )
 
         if unsafe:
@@ -285,13 +316,63 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
             }
             if req_params.response.show_assessment and category_codes:
                 msg["assessments"] = {"categories": category_codes}
+            # A 200: the status does not say this is a failure, so is_fault is what brings
+            # the intervention into the fault flow.
             return ImmediateResponse(
                 status_code=200,
                 headers={"content-type": "application/json"},
                 body=json.dumps({"type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY", "message": msg}).encode(),
+                **_intervention_fault("Response", category_codes, msg.get("assessments")),
             )
 
         return _PASSTHROUGH_RESPONSE
+
+
+def _guardrail_code(category_codes: list[str]) -> str:
+    """The guardrail code for the first category NemoGuard reported."""
+    for category in category_codes:
+        name = _CATEGORY_GUARDRAIL_CODE.get(category)
+        if name:
+            return getattr(GuardrailCode, name)
+    return GuardrailCode.UNSAFE_CONTENT
+
+
+def _intervention_fault(direction: str, category_codes: list[str], assessments: dict | None) -> dict[str, Any]:
+    """The fault fields for blocked content; empty on an SDK without the fault contract."""
+    if FaultDetails is None:
+        return {}
+    return {
+        "is_fault": True,
+        "fault": FaultDetails(
+            code=_guardrail_code(category_codes),
+            type=FaultType.GUARDRAIL,
+            direction=direction,
+            message="Unsafe content detected.",
+            description="categories: " + ", ".join(category_codes) if category_codes else "",
+            guardrail=GuardrailDetails(
+                intervening_guardrail=_GUARDRAIL_NAME,
+                action_reason="Unsafe content detected.",
+                # Only where the operator opted in through showAssessment, as in the body.
+                assessments=assessments,
+            ),
+        ),
+    }
+
+
+def _service_unavailable_fault(direction: str) -> dict[str, Any]:
+    """The fault fields when NemoGuard could not be reached; empty on an SDK without the fault
+    contract. Not a guardrail verdict: the gateway failed to reach its own dependency."""
+    if FaultDetails is None:
+        return {}
+    return {
+        "is_fault": True,
+        "fault": FaultDetails(
+            code=FaultCode.MEDIATION_FAILED,
+            type=FaultType.MEDIATION,
+            direction=direction,
+            message="Content safety service unavailable.",
+        ),
+    }
 
 
 def get_policy(metadata, params):
