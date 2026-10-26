@@ -1739,4 +1739,56 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 			t.Fatalf("the metadata discovery response must not be a fault")
 		}
 	})
+
+	// A body the resolver could not read is the caller's malformed request, declared with the
+	// JSON-RPC code the body carries.
+	t.Run("unreadable body", func(t *testing.T) {
+		for reason, wantCode := range map[string]int{
+			"syntax-error": JSONRPCParseError,
+			"ambiguous":    JSONRPCInvalidRequest,
+		} {
+			ctx := resolvedHeaderPost(nil, map[string]string{attrBodyUnusable: reason})
+			resp, ok := exemptPolicy("ping").OnRequestHeaders(context.Background(), ctx, map[string]any{}).(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("%s: expected an immediate rejection", reason)
+			}
+			assertMalformedRequestFault(t, resp, wantCode)
+		}
+	})
+
+	// A modern request that left out a required mirrored header is malformed too.
+	t.Run("missing mirrored header", func(t *testing.T) {
+		headers := map[string][]string{headerProtocolVersion: {"2026-07-28"}}
+		attrs := map[string]string{attrBodyMethod: "tools/call", attrBodyCapabilityName: "x"}
+		resp, ok := exemptPolicy("ping").OnRequestHeaders(context.Background(),
+			resolvedHeaderPost(headers, attrs), map[string]any{}).(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected an immediate rejection")
+		}
+		assertMalformedRequestFault(t, resp, JSONRPCHeaderMismatch)
+		// Declaring the fault leaves the body the client receives as it was.
+		want := `{"error":{"code":-32020,"data":"` + headerMcpMethod + ` header is required","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}`
+		if string(resp.Body) != want {
+			t.Fatalf("body = %s, want %s", resp.Body, want)
+		}
+	})
+}
+
+// assertMalformedRequestFault checks a 400 for a malformed request declares an invalid-body
+// validation fault carrying its JSON-RPC code.
+func assertMalformedRequestFault(t *testing.T, resp policy.ImmediateResponse, wantCode int) {
+	t.Helper()
+	if resp.StatusCode != 400 || !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("status %d IsFault %v Fault %+v", resp.StatusCode, resp.IsFault, resp.Fault)
+	}
+	f := resp.Fault
+	if f.Code != policy.FaultCodeInvalidRequestBody || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Fatalf("fault = %s/%s/%s", f.Code, f.Type, f.Direction)
+	}
+	if f.Description == "" {
+		t.Errorf("expected the reason in Description")
+	}
+	if f.JSONRPC == nil || f.JSONRPC.Code == nil || *f.JSONRPC.Code != wantCode {
+		t.Fatalf("JSON-RPC code = %+v, want %d", f.JSONRPC, wantCode)
+	}
 }

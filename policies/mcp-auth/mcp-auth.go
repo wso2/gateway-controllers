@@ -772,7 +772,9 @@ func (p *McpAuthPolicy) handleMissingMirroredHeader(detail string) policy.Immedi
 	return jsonRPCBadRequest(JSONRPCHeaderMismatch, "Invalid Request", detail)
 }
 
-// jsonRPCBadRequest renders a JSON-RPC error as a 400, with a null id.
+// jsonRPCBadRequest renders a JSON-RPC error as a 400, with a null id. Both callers reject a
+// malformed request — a body that cannot be read, or a required mirrored header left out — so
+// it is declared as handleBadRequest declares a local parse failure.
 func jsonRPCBadRequest(code int, message, data string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": JSONRPCVersion,
@@ -787,6 +789,16 @@ func jsonRPCBadRequest(code int, message, data string) policy.ImmediateResponse 
 		StatusCode: 400,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+			// data describes the caller's own request and is already in the body.
+			Description: data,
+			JSONRPC:     &policy.JSONRPCError{Code: &code},
+		},
 	}
 }
 
