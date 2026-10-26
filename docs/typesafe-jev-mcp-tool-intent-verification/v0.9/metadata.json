@@ -1,0 +1,11 @@
+{
+  "name": "typesafe-jev-mcp-tool-intent-verification",
+  "displayName": "TypeSafe Jev MCP Tool Intent Verification",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Security"
+  ],
+  "description": "Screens MCP tools/call requests using TypeSafe AI's Jev System One model.\nSends the tool name and arguments to Jev with a configurable battery of typed questions (calibrated yes/no, a position on an operator-defined scale, or a choice between operator-defined options) and blocks the call with a JSON-RPC error when any question's answer crosses its threshold, or only records the hit in monitor mode.\nThe default battery asks whether the call is destructive, irreversible, sends private data out, reads secrets, raises privileges, disrupts a running system, or weakens a security control; tool rules set everything per tool, by exact name or * for every other tool: the scope that describes the agent's job, so the destructive, irreversible, privilege and disruption checks do not flag effects it calls for (the exfiltration, sensitive-data and security-control checks don't mention the scope) and calls outside it are flagged, the questions (pre-filled with the defaults and editable), the mode and fail-open.\nOther MCP methods pass through; a request body that cannot be read unambiguously is rejected so the policy always screens the call the MCP server will run."
+}

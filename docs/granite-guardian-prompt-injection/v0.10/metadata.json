@@ -1,0 +1,11 @@
+{
+  "name": "granite-guardian-prompt-injection",
+  "displayName": "Granite Guardian Prompt Injection",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B.\nBuffers the request body, extracts the user message via a configurable JSONPath expression, and forwards\nit to a Granite Guardian inference endpoint. Requests flagged above the configured confidence threshold\nare rejected before reaching the upstream LLM. Supports multiple risk categories, configurable blocking\nstatus codes, and fail-open or fail-closed error handling."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "typesafe-jev-content-safety",
+  "displayName": "TypeSafe Jev Content Safety",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Screens request or response body content using TypeSafe AI's Jev System One model.\nSends a configurable battery of typed questions (calibrated yes/no, a position on an operator-defined scale, or a choice between operator-defined options) about the extracted text and blocks the request or response when any question's answer crosses its threshold, or only records the hit in monitor mode.\nThe default battery covers jailbreak, harmful-request, and self-harm detection plus an overall severity score; the battery is fully user-configurable to cover additional hazards.\nSupports JSONPath extraction (including multimodal content parts), separate configuration for request and response phases, and a configurable Jev timeout. Configuring response screening disables streaming on the route."
+}

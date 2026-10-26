@@ -1,0 +1,11 @@
+{
+  "name": "nvidia-nemoguard-content-safety",
+  "displayName": "NeMo Guard Content Safety",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request and/or response content using NVIDIA NeMo Guard (llama-3.1-nemoguard-8b-content-safety). Buffers the request and/or response body, extracts the relevant text via configurable JSONPath expressions, and forwards it to the NeMo Guard inference endpoint for classification across 23 safety categories. Unsafe requests are blocked before reaching the upstream LLM; unsafe responses are replaced with a sanitised error message before delivery to the client."
+}
