@@ -1,0 +1,11 @@
+{
+  "name": "openai-to-mistral-transformer",
+  "displayName": "OpenAI to Mistral Transformer",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI",
+    "LLM Transformation"
+  ],
+  "description": "Adapts OpenAI Chat Completions requests for Mistral-compatible upstreams by resolving the model payload-first, stripping OpenAI fields Mistral rejects, and rewriting the request path. Mistral already emits OpenAI-shaped responses, so responses are normalised and passed back in OpenAI shape. Supports both routed (multi-provider) and unconditional (single-provider) execution modes."
+}
