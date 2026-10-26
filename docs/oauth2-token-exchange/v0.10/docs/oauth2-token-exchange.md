@@ -67,3 +67,24 @@ policies:
 ```
 
 The upstream service then receives `Authorization: Bearer <token issued by auth.backend.example.com>` — never the client's original credential, unless `subjectTokenSource.forwardToken` is enabled.
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). On a REST, MCP or LLM API the status and body the client receives are the same as in
+v0.9; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error envelope.
+A gateway without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The policy configuration cannot be parsed | `500` | `960000` | `configuration` |
+| The subject token is missing when the request body phase runs | `401` | `900902` | `authentication` |
+| The token exchange fails: the token endpoint is unreachable, returns a non-2xx status, or returns no usable token | `502` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example
+`invalid policy configuration: <error>`. For a failed exchange it carries only the tracking ID,
+`token exchange failed, tracking_id <id>`, which matches the body and the gateway log line holding
+the token endpoint's error. It is passed to fault policies and analytics only, never to the
+client.

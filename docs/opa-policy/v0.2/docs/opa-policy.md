@@ -476,3 +476,21 @@ When a request is rejected with `500`, the gateway runtime logs the cause at `ER
 
 - [JWT Authentication Policy](../../../jwt-auth/v1.3/docs/jwt-authentication.md) - Validates JWTs and provides the identity, issuer, audience and scopes used in OPA rules
 - [Basic Authentication Policy](../../../basic-auth/v1.0/docs/basic-auth.md) - Authenticates callers with a username and password before authorization
+
+## Fault reporting
+
+From v0.2, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). On a REST, MCP or LLM API the status and body the client receives are the same as in
+v0.1; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error envelope.
+A gateway without fault policy support ignores the fault, and the policy behaves exactly as v0.1.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| OPA denies the request | `403` | `900908` | `authorization` |
+| No decision can be obtained: the OPA call fails or times out, OPA returns a non-200 status, or the decision is missing, `null` or not a boolean | `500` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example
+`OPA policy "authz" rule "allow" denied the request`. It is passed to fault policies and analytics
+only, never to the client.

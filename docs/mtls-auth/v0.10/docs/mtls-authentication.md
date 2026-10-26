@@ -630,3 +630,24 @@ With `errorMessageFormat: plain` the body is `errorMessage` as `text/plain`; wit
 
 - **JWT Auth**: Combine with mutual TLS when callers must present both a certificate and a token
 - **API Key Auth**: Use for callers that cannot present a client certificate
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). On a REST, MCP or LLM API the status and body the client receives are the same as in
+v0.9; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error envelope.
+A gateway without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The gateway did not pass the connection's TLS attributes to the policy | `onFailureStatusCode` (default `401`) | `900900` | `authentication` |
+| No client certificate is presented (and no trusted relayed certificate header) | `onFailureStatusCode` | `900902` | `authentication` |
+| The client certificate has expired | `onFailureStatusCode` | `900903` | `authentication` |
+| The client certificate is not yet valid, cannot be parsed, is a CA certificate, or a relayed header carries more than one value | `onFailureStatusCode` | `900901` | `authentication` |
+| The certificate does not chain to a pooled authority, its authority is not in `accept`, or it fails the entry's SAN or thumbprint narrowing | `onFailureStatusCode` | `900901` | `authentication` |
+
+The fault's `Description` carries the deny reason, for example
+`client certificate rejected: san_mismatch`. It is passed to fault policies and analytics only,
+never to the client, whose response stays the same whatever the reason.

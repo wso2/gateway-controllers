@@ -1,7 +1,7 @@
 {
   "name": "mtls-auth",
   "displayName": "Mutual TLS Auth",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "Security"

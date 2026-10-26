@@ -1,7 +1,7 @@
 {
   "name": "opa-policy",
   "displayName": "Validate Request with OPA",
-  "version": "0.1",
+  "version": "0.2",
   "provider": "WSO2",
   "categories": [
     "Security"
