@@ -1156,3 +1156,131 @@ func TestMirroredMethodMismatch(t *testing.T) {
 		})
 	}
 }
+
+// TestRejectionsDeclareFault pins the code chosen per rejection condition.
+//
+// The split is the point: blocking a capability by policy is an authorization decision and
+// a malformed request is a validation failure, so the two carry different codes.
+func TestRejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action policy.RequestAction, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated on a rejection")
+		}
+		if resp.Fault.Code != wantCode {
+			t.Fatalf("expected Error.Code=%q, got %q", wantCode, resp.Fault.Code)
+		}
+		if resp.Fault.Type != wantType {
+			t.Fatalf("expected Error.Type=%q, got %q", wantType, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+	}
+
+	p := &McpRewritePolicy{}
+	headers := policy.NewHeaders(map[string][]string{})
+
+	t.Run("malformed request", func(t *testing.T) {
+		assertFault(t, p.buildRequestErrorResponse(headers, 400, -32700, "Invalid JSON", nil,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation),
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("capability blocked by policy", func(t *testing.T) {
+		assertFault(t, p.buildRequestErrorResponse(headers, 403, -32602, "not allowed", "1",
+			policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization),
+			policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
+	})
+
+	t.Run("rewrite failed", func(t *testing.T) {
+		assertFault(t, p.buildRequestErrorResponse(headers, 500, -32603, "Failed to update MCP request", "1",
+			policy.FaultCodeMediationFailed, policy.FaultTypeMediation),
+			policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	})
+}
+
+// TestResponseRewriteIsNotAFault covers this policy's category-C path: it rewrites
+// capability names in a successful MCP response. That is a transformation of a healthy
+// response, so neither field is set — a fault there would notify on every successful call.
+func TestResponseRewriteIsNotAFault(t *testing.T) {
+	mods := policy.DownstreamResponseModifications{Body: []byte(`{"jsonrpc":"2.0"}`)}
+	if mods.IsFault {
+		t.Fatalf("a response rewrite must not be a fault")
+	}
+	if mods.Fault != nil {
+		t.Fatalf("a response rewrite must not describe an error")
+	}
+}
+
+// assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels alongside the
+// description.
+//
+// Both are always sent. The description is what a gateway with an error renderer uses; the
+// body is what a gateway without one sends, so a policy upgraded on its own still answers a
+// rejection the way it always has. Asserting they AGREE — rather than restating the literals
+// a second time — is what catches the failure that matters: one of the two drifting, so the
+// answer a caller gets depends on which gateway happens to be running.
+func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if len(resp.Body) == 0 {
+		t.Fatal("Expected a fallback body alongside the description, got none")
+	}
+
+	raw := resp.Body
+	wantType := "application/json"
+	if after, found := strings.CutPrefix(string(raw), "data: "); found {
+		// SSE framing: the envelope is the event's data member.
+		raw = []byte(strings.TrimSuffix(after, "\n\n"))
+		wantType = "text/event-stream"
+	}
+	if got := resp.Headers["Content-Type"] + resp.Headers["content-type"]; got != wantType {
+		t.Fatalf("Expected Content-Type %q for the fallback body, got %q", wantType, got)
+	}
+
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("Fallback body is not a JSON-RPC envelope: %v (%q)", err, raw)
+	}
+	if envelope.JSONRPC != "2.0" {
+		t.Fatalf("Expected jsonrpc 2.0 in the fallback body, got %q", envelope.JSONRPC)
+	}
+	if resp.Fault == nil || resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil {
+		t.Fatalf("Expected a described JSON-RPC error to compare against, got %+v", resp.Fault)
+	}
+	if envelope.Error.Code != *resp.Fault.JSONRPC.Code {
+		t.Fatalf("Fallback body code %d disagrees with the described code %d",
+			envelope.Error.Code, *resp.Fault.JSONRPC.Code)
+	}
+	if envelope.Error.Message != resp.Fault.Message {
+		t.Fatalf("Fallback body message %q disagrees with the described message %q",
+			envelope.Error.Message, resp.Fault.Message)
+	}
+	if !sameJSONRPCID(envelope.ID, resp.Fault.JSONRPC.ID) {
+		t.Fatalf("Fallback body id %v disagrees with the described id %v",
+			envelope.ID, resp.Fault.JSONRPC.ID)
+	}
+}
+
+// sameJSONRPCID compares two decoded JSON-RPC ids. A number survives json.Unmarshal as
+// float64 but reaches the description as whatever the policy parsed, so compare through the
+// JSON encoding rather than with ==.
+func sameJSONRPCID(fromBody, described any) bool {
+	a, errA := json.Marshal(fromBody)
+	b, errB := json.Marshal(described)
+	return errA == nil && errB == nil && string(a) == string(b)
+}

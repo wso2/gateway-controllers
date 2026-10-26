@@ -55,6 +55,19 @@ const (
 	ErrorInsufficientScope = "insufficient_scope"
 )
 
+// apimErrorFor maps the RFC 6750 Bearer error code this policy already chose onto the
+// fault code and type that describe the same condition.
+func apimErrorFor(bearerErrorCode string) (code, errorType string) {
+	switch bearerErrorCode {
+	case ErrorInvalidToken:
+		return policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication
+	case ErrorInsufficientScope:
+		return policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization
+	default: // ErrorInvalidRequest
+		return policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation
+	}
+}
+
 // MCPRequest represents the JSON-RPC MCP request structure
 type MCPRequest struct {
 	Method string           `json:"method"`
@@ -705,10 +718,19 @@ func (p *McpAuthzPolicy) handleAuthFailure(reqCtx *policy.RequestHeaderContext, 
 	}
 	bodyBytes, _ := json.Marshal(errResponse)
 
+	code, errorType := apimErrorFor(errorCode)
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       bodyBytes,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: policy.DirectionRequest,
+			// errorMessage already goes to the client as the body message.
+			Message: errorMessage,
+		},
 	}
 }
 

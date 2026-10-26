@@ -419,7 +419,8 @@ func (p *McpAclListPolicy) governFromMirroredHeaders(
 	if !facts.HasMethod() {
 		slog.Debug("MCP ACL List Policy: Rejecting a modern request that mirrored no method")
 		return p.buildRequestErrorResponse(reqCtx.Headers, 400, jsonRpcErrCodeHeaderMismatch,
-			headerMcpMethod+" header is required", nil)
+			headerMcpMethod+" header is required", nil,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	}
 	// Mcp-Name is required on the three capability methods; an undecodable one counts as missing.
 	// Left in, the empty name would match no capability rule, "*" included.
@@ -427,7 +428,8 @@ func (p *McpAclListPolicy) governFromMirroredHeaders(
 		slog.Debug("MCP ACL List Policy: Rejecting a modern request that mirrored no capability name",
 			"method", facts.Method)
 		return p.buildRequestErrorResponse(reqCtx.Headers, 400, jsonRpcErrCodeHeaderMismatch,
-			headerMcpName+" header is required for "+facts.Method, nil)
+			headerMcpName+" header is required for "+facts.Method, nil,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	}
 	return p.applyAcl(reqCtx, facts)
 }
@@ -549,19 +551,22 @@ func (p *McpAclListPolicy) govern(shared *policy.SharedContext, headers *policy.
 	capabilityName, paramsReadable := nameFor(capabilityType)
 	if !paramsReadable {
 		slog.Debug("MCP ACL List Policy: Invalid request params", "capabilityType", capabilityType, "requestID", requestID, "error", "params not a map")
-		resp := p.buildRequestErrorResponse(headers, 400, -32602, "Invalid MCP request params", requestID)
+		resp := p.buildRequestErrorResponse(headers, 400, -32602, "Invalid MCP request params", requestID,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 		return &resp
 	}
 
 	if strings.TrimSpace(capabilityName) == "" {
 		slog.Debug("MCP ACL List Policy: Missing capability name", "capabilityType", capabilityType, "requestID", requestID)
-		resp := p.buildRequestErrorResponse(headers, 400, -32602, fmt.Sprintf("Missing MCP %s name", capabilityType), requestID)
+		resp := p.buildRequestErrorResponse(headers, 400, -32602, fmt.Sprintf("Missing MCP %s name", capabilityType), requestID,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 		return &resp
 	}
 
 	if !isAllowedByAcl(config, capabilityName) {
 		slog.Debug("MCP ACL List Policy: Capability denied by policy", "capabilityType", capabilityType, "capabilityName", capabilityName, "requestID", requestID)
-		resp := p.buildRequestErrorResponse(headers, 400, -32000, "MCP capability not allowed", requestID)
+		resp := p.buildRequestErrorResponse(headers, 400, -32000, "MCP capability not allowed", requestID,
+			policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
 		return &resp
 	}
 
@@ -724,74 +729,57 @@ func (p *McpAclListPolicy) handleUnusableBody(headers *policy.Headers, reason st
 		// The one this policy cannot detect itself — its map[string]any is case-sensitive.
 		message = "Ambiguous MCP request: body names a member more than once"
 	}
-	return p.buildRequestErrorResponse(headers, 400, code, message, nil)
+	return p.buildRequestErrorResponse(headers, 400, code, message, nil,
+		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 }
 
 // buildRequestErrorResponse builds a v1alpha2 error response for a request.
-func (p *McpAclListPolicy) buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcCode int, reason string, requestID any) policy.ImmediateResponse {
-	sessionID := getSessionID(headers)
-	if isEventStream(headers) {
-		return p.buildEventStreamErrorResponse(statusCode, jsonRpcCode, reason, requestID, sessionID)
-	}
-	return p.buildErrorResponse(statusCode, jsonRpcCode, reason, requestID, sessionID)
-}
+func (p *McpAclListPolicy) buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcCode int, reason string, requestID any, code, errorType string) policy.ImmediateResponse {
+	body, contentType := buildJsonRpcErrorBody(jsonRpcCode, reason, requestID, isEventStream(headers))
 
-// buildEventStreamErrorResponse builds a v1alpha2 SSE error response.
-func (p *McpAclListPolicy) buildEventStreamErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.ImmediateResponse {
-	responseBody := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      requestID,
-		"error": map[string]any{
-			"code":    jsonRpcCode,
-			"message": reason,
-		},
-	}
-	analyticsMetadata := map[string]any{
-		"mcpErrorCode": jsonRpcCode,
-	}
-	body, err := json.Marshal(responseBody)
-	if err != nil {
-		slog.Debug("MCP ACL List Policy: Failed to marshal event-stream error response", "error", err)
-		idBytes, idErr := json.Marshal(requestID)
-		if idErr != nil {
-			idBytes = []byte("null")
-		}
-		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Unexpected error"}}`, string(idBytes))
-	}
-
-	event := sseEvent{data: string(body)}
-	streamBody := buildEventStream([]sseEvent{event})
-
-	headers := map[string]string{
-		"Content-Type": "text/event-stream",
-	}
-	if sessionID != "" {
-		headers[mcpSessionHeader] = sessionID
+	responseHeaders := map[string]string{"Content-Type": contentType}
+	if sessionID := getSessionID(headers); sessionID != "" {
+		responseHeaders[mcpSessionHeader] = sessionID
 	}
 
 	return policy.ImmediateResponse{
-		StatusCode:        statusCode,
-		Headers:           headers,
-		Body:              streamBody,
-		AnalyticsMetadata: analyticsMetadata,
+		StatusCode: statusCode,
+		Headers:    responseHeaders,
+		Body:       body,
+		AnalyticsMetadata: map[string]any{
+			"mcpErrorCode": jsonRpcCode,
+		},
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: policy.DirectionRequest,
+			// reason becomes the JSON-RPC error message.
+			Message: reason,
+			JSONRPC: &policy.JSONRPCError{Code: &jsonRpcCode, ID: requestID},
+		},
 	}
 }
 
-// buildErrorResponse builds a v1alpha2 JSON error response.
-func (p *McpAclListPolicy) buildErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.ImmediateResponse {
-	responseBody := map[string]any{
+// buildJsonRpcErrorBody renders the JSON-RPC error envelope this policy has always sent,
+// SSE-framed when the caller posted an event stream. The content type is returned alongside
+// it so the two cannot drift apart.
+//
+// This is the fallback body, not the gateway's rendering — see buildRequestErrorResponse.
+// It stays byte-for-byte what the policy sent before the fault contract existed, so
+// upgrading the policy on its own changes nothing a client receives.
+func buildJsonRpcErrorBody(jsonRpcCode int, reason string, requestID any, sse bool) ([]byte, string) {
+	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      requestID,
 		"error": map[string]any{
 			"code":    jsonRpcCode,
 			"message": reason,
 		},
-	}
-	analyticsMetadata := map[string]any{
-		"mcpErrorCode": jsonRpcCode,
-	}
-	body, err := json.Marshal(responseBody)
+	})
 	if err != nil {
+		// requestID reached here from the caller's own payload, so a value that will not
+		// marshal is possible; null is the JSON-RPC answer for an unrecoverable id.
 		slog.Debug("MCP ACL List Policy: Failed to marshal error response", "error", err)
 		idBytes, idErr := json.Marshal(requestID)
 		if idErr != nil {
@@ -800,19 +788,10 @@ func (p *McpAclListPolicy) buildErrorResponse(statusCode int, jsonRpcCode int, r
 		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Unexpected error"}}`, string(idBytes))
 	}
 
-	headers := map[string]string{
-		"Content-Type": "application/json",
+	if sse {
+		return buildEventStream([]sseEvent{{data: string(body)}}), "text/event-stream"
 	}
-	if sessionID != "" {
-		headers[mcpSessionHeader] = sessionID
-	}
-
-	return policy.ImmediateResponse{
-		StatusCode:        statusCode,
-		Headers:           headers,
-		Body:              body,
-		AnalyticsMetadata: analyticsMetadata,
-	}
+	return body, "application/json"
 }
 
 // isEventStream reports whether v1alpha2 headers indicate an SSE payload.

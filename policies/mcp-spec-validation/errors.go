@@ -91,6 +91,14 @@ func errorResponse(
 		// Surfaces the rejection in analytics under the same key the other MCP policies
 		// use, so validation failures are countable alongside authz and ACL rejections.
 		AnalyticsMetadata: map[string]any{"mcpErrorCode": jsonRPCCode},
+		IsFault:           true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+			JSONRPC:   &policy.JSONRPCError{Code: &jsonRPCCode, ID: jsonRPCID(requestID)},
+		},
 	}
 }
 

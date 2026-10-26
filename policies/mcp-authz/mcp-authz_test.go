@@ -1496,3 +1496,44 @@ func TestGenerateWwwAuthenticateHeader_MetadataExtraction(t *testing.T) {
 		})
 	}
 }
+
+func TestRejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action policy.RequestAction, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated on a rejection")
+		}
+		if resp.Fault.Code != wantCode {
+			t.Fatalf("expected Error.Code=%q, got %q", wantCode, resp.Fault.Code)
+		}
+		if resp.Fault.Type != wantType {
+			t.Fatalf("expected Error.Type=%q, got %q", wantType, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+	}
+
+	t.Run("insufficient scope", func(t *testing.T) {
+		authCtx := authenticatedAuthCtx(map[string]bool{"scope:other": true}, "alice", "", nil, nil)
+		action := runBody(toolAOnlyPolicy(), mcpBody("tools/call", map[string]any{"name": "toolA"}), authCtx)
+		assertFault(t, action, policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization)
+	})
+
+	t.Run("authentication required", func(t *testing.T) {
+		action := runBody(toolAOnlyPolicy(), mcpBody("tools/call", map[string]any{"name": "toolA"}), nil)
+		assertFault(t, action, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
+	})
+
+	t.Run("malformed MCP request", func(t *testing.T) {
+		action := runBody(toolAOnlyPolicy(), []byte("{not json"), nil)
+		assertFault(t, action, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+}
