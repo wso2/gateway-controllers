@@ -1,0 +1,11 @@
+{
+  "name": "mcp-ratelimit",
+  "displayName": "MCP Rate Limit",
+  "version": "1.2",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Security"
+  ],
+  "description": "Applies rate limits to MCP traffic per tool, resource, prompt, or JSON-RPC method. Each entry targets a capability by name (or \"*\") and declares one or more (limit, duration) limits; multiple entries may be configured in the same policy. Enforcement is delegated to the advanced-ratelimit engine, so it inherits the same algorithms (GCRA, Fixed Window), memory/Redis backends, key extraction, and rate-limit headers.\n\nOn a gateway with an MCP operation resolver, it identifies the capability from the mirrored Mcp-Method and Mcp-Name headers on MCP 2026-07-28 and from the resolver's facts on earlier revisions; on a gateway without one, it reads the request body itself for every request. A capability it cannot identify is not limited; a modern request missing a required Mcp-Method or Mcp-Name header is rejected, and a request body the gateway could not read is rejected.\n\nKey features:\n- Per-capability buckets: each matched tool/resource/prompt gets its own counter, even under wildcard rules\n- Targets MCP tools, resources, prompts, or raw JSON-RPC methods\n- Multiple concurrent limits per entry (e.g. 10/minute AND 1000/hour); strictest wins\n- Flexible key extraction (header, metadata, ip, apiname, apiversion, routename, cel, constant)\n- JSON-RPC 2.0 error envelope returned to MCP clients on rate-limit breach\n- Dual backends: in-memory (single instance) or Redis (distributed)"
+}
