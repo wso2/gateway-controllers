@@ -124,7 +124,8 @@ func translateConverseResponse(body []byte, status int, model, id string) policy
 
 	newBody, err := json.Marshal(openAIResp)
 	if err != nil {
-		return errResponse(500, "failed to translate Bedrock response: "+err.Error())
+		return errResponse(500, "failed to translate Bedrock response: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 	return policy.DownstreamResponseModifications{
 		Body: newBody,
@@ -153,7 +154,8 @@ func translateErrorResponse(body []byte, status int) policy.ResponseAction {
 	}
 	newBody, err := json.Marshal(openaiErr)
 	if err != nil {
-		return errResponse(500, "failed to translate Bedrock error: "+err.Error())
+		return errResponse(500, "failed to translate Bedrock error: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 	return policy.DownstreamResponseModifications{
 		Body: newBody,

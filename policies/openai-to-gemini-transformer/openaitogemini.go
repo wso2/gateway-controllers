@@ -96,17 +96,20 @@ func (p *TranslatorPolicy) OnRequestBody(
 	}
 
 	if reqCtx.Body == nil || !reqCtx.Body.Present || len(reqCtx.Body.Content) == 0 {
-		return errResponse(400, "Request body is empty.")
+		return errResponse(400, "Request body is empty.",
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(reqCtx.Body.Content, &payload); err != nil {
-		return errResponse(400, fmt.Sprintf("Invalid JSON in request body: %s", err.Error()))
+		return errResponse(400, fmt.Sprintf("Invalid JSON in request body: %s", err.Error()),
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 
 	model, err := p.resolveModel(payload)
 	if err != nil {
-		return errResponse(400, err.Error())
+		return errResponse(400, err.Error(),
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 	storeEffectiveModel(reqCtx.SharedContext, model)
 
@@ -117,7 +120,8 @@ func (p *TranslatorPolicy) OnRequestBody(
 
 	mods, err := translateBody(payload, model, p.params, stream)
 	if err != nil {
-		return errResponse(500, "failed to marshal Gemini body: "+err.Error())
+		return errResponse(500, "failed to marshal Gemini body: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionRequest, policy.FaultTypeMediation)
 	}
 	if p.params.ProviderID != "" && mods.UpstreamName == nil {
 		upstream := p.params.ProviderID
@@ -233,7 +237,23 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 	if terminate {
 		// Response headers are already committed, so a provider error can only be
 		// delivered as a final SSE event before the stream is closed.
-		return policy.TerminateResponseChunk{Body: sse}
+		//
+		// terminate is set on exactly two conditions, and both are failures: the provider
+		// sent an error event, or it sent a frame this translator could not parse. A clean
+		// end of stream returns false and is forwarded, not terminated — so unlike the
+		// general streaming case, every termination here is a fault.
+		return policy.TerminateResponseChunk{
+			Body:    sse,
+			IsFault: true,
+			Fault: &policy.FaultDetails{
+				Code:      policy.FaultCodeUpstreamGeneric,
+				Type:      policy.FaultTypeMediation,
+				Direction: policy.DirectionResponse,
+				Message:   "The upstream stream ended with an error.",
+				// The final SSE event already carries the provider's own detail to the
+				// client; nothing further is withheld here.
+			},
+		}
 	}
 	return policy.ForwardResponseChunk{Body: sse}
 }
@@ -363,12 +383,27 @@ func optionalString(params map[string]interface{}, key string) (string, error) {
 	return strings.TrimSpace(v), nil
 }
 
-func errResponse(statusCode int, message string) policy.ImmediateResponse {
+// errResponse refuses the exchange and describes why.
+//
+// direction states which side was refused: DirectionRequest when the caller's payload could
+// not be read or converted, DirectionResponse when the provider's could not be translated
+// back. Those are operationally different events that share nothing but this function, and
+// only the caller knows which it is — which is why it is a parameter rather than inferred
+// from the status.
+func errResponse(statusCode int, message, code, direction, errorType string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{"error": message})
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: direction,
+			// message already goes to the client as the body's error text.
+			Message: message,
+		},
 	}
 }
 
