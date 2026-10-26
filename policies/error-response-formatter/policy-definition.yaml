@@ -1,0 +1,168 @@
+name: error-response-formatter
+version: v1.0.0
+description: |
+  Renders a gateway error in a shape you define, from a built-in preset or a custom template,
+  and sets the response status and headers that go with it. Use it as a fault policy
+  (spec.faultPolicies); it does not run under spec.policies.
+
+  Templates and header values can use these placeholders:
+
+    ${Code} ${Type} ${Direction}   the failure's code, class and direction
+    ${Message}                     the client-facing message
+    ${Description}                 operator-facing detail. For a guardrail rejection it is the
+                                   blocked content, so no preset includes it; add it to your
+                                   own template only where it is safe to show
+    ${Policy} ${PolicyPhase}       the policy that failed, and its phase
+    ${Source}                      who produced the failure: gateway, backend, router, noRoute
+                                   or unknown
+    ${Status} ${RequestID}         the HTTP status the client receives (statusCode, when set)
+                                   and the request ID
+    ${OpenAIType}                  the OpenAI error type, e.g. authentication_error
+    ${JsonRpcCode} ${JsonRpcID}    the JSON-RPC error code (-32600 for 4xx, -32603 for 5xx) and
+                                   the request ID
+    ${Soap11Code} ${Soap12Code}    the SOAP fault code: soapenv:Client/Server, env:Sender/Receiver
+
+  An invalid configuration, such as an unknown placeholder, is not applied: the gateway logs an
+  error and sends the error response unformatted.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    preset:
+      type: string
+      enum: [openai, canonical, jsonrpc, soap11, soap12]
+      description: |
+        A built-in shape:
+
+          openai     {"error":{"message","type","code"}}          application/json
+          canonical  {"code","type","message"}                    application/json
+          jsonrpc    {"jsonrpc","id":null,"error":{code,message}}  application/json
+          soap11     SOAP 1.1 Fault (faultcode/faultstring/detail)  text/xml
+          soap12     SOAP 1.2 Fault (Code/Reason/Detail)            application/soap+xml
+
+        Each preset sets its own Content-Type; contentType overrides it. In the SOAP presets the
+        fault code follows the status: Client/Sender for 4xx, Server/Receiver for 5xx.
+
+        Mutually exclusive with template and stringTemplate. With none of the three set, the
+        canonical shape applies.
+    template:
+      type: object
+      description: |
+        A structured shape, rendered as JSON. String values may contain placeholders; numbers,
+        booleans and nulls pass through as written. A value that is exactly ${Status},
+        ${JsonRpcCode} or ${JsonRpcID} keeps its JSON type: a number, or null for a missing ID.
+
+        A value whose placeholders are all empty is left out, and so is an object left with no
+        values.
+
+        Example:
+
+          template:
+            error:
+              message: ${Message}
+              type: ${OpenAIType}
+              code: ${Code}
+            requestId: ${RequestID}
+            status: ${Status}          # a number, because the leaf is exactly the placeholder
+    stringTemplate:
+      type: string
+      description: |
+        A text shape, for output that is not a JSON object — XML, SOAP, plain text. Substituted
+        values are escaped for the output syntax (see `escape`), so a value cannot break out of
+        its element. Empty values are not left out: a placeholder with no value leaves an empty
+        element.
+
+        Example: '<fault><code>${Soap11Code}</code><reason>${Message}</reason></fault>'
+    contentType:
+      type: string
+      description: >
+        Content-Type for the rendered body. A preset supplies its own; otherwise this defaults
+        to application/json, so set it when using stringTemplate for XML or text. It also
+        drives escaping unless `escape` overrides it.
+    headersToSet:
+      type: array
+      default: []
+      description: |
+        Response headers to set on the error, overwriting existing values. Values may contain
+        placeholders:
+
+          headersToSet:
+            - name: x-error-code
+              value: ${Code}
+            - name: x-error-source
+              value: ${Source}
+            - name: x-house-style
+              value: acme-v2
+
+        Header names cannot contain placeholders. Line breaks and NUL characters are removed
+        from substituted values. Set Content-Type with contentType, not here.
+      items:
+        type: object
+        additionalProperties: false
+        required: [name, value]
+        properties:
+          name:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: Header name. Not templated.
+          value:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: Header value. May contain placeholders.
+    headersToAppend:
+      type: array
+      default: []
+      description: >
+        Response headers to add without replacing existing values. Repeat a name to append
+        several values under it. Placeholders behave as in headersToSet.
+      items:
+        type: object
+        additionalProperties: false
+        required: [name, value]
+        properties:
+          name:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: Header name. Not templated.
+          value:
+            type: string
+            x-wso2-policy-advanced-param: false
+            description: Header value. May contain placeholders.
+    headersToRemove:
+      type: array
+      default: []
+      description: >
+        Response headers to strip from the error. Naming a header here and in
+        headersToSet/headersToAppend is an invalid configuration.
+      items:
+        type: string
+    statusCode:
+      type: integer
+      minimum: 200
+      maximum: 599
+      description: |
+        Replaces the response status. Leave it unset to keep the status the failure already has.
+
+        ${Status} and the values derived from it (${OpenAIType}, ${JsonRpcCode}, ${Soap11Code},
+        ${Soap12Code}) are rendered from the new status, so the body agrees with what the client
+        receives. A JSON-RPC code the failing policy stated itself is kept.
+
+        To change the status for some failures only, give this entry an executionCondition, for
+        example `fault.Code == "900902"`. A 2xx is allowed for protocols that report an error
+        inside a successful response, such as JSON-RPC over HTTP.
+
+        Has no effect once a streamed response has started: the status has already been sent.
+    escape:
+      type: string
+      enum: [auto, xml, json, none]
+      default: auto
+      description: |
+        How substituted values are escaped inside `stringTemplate`. `auto` follows contentType:
+        a type containing "xml" escapes as XML, "json" as JSON, anything else not at all. Set it
+        only for a content type `auto` cannot infer. Not used with `template`, which is always
+        valid JSON.
+
+systemParameters:
+  type: object
+  properties: {}
