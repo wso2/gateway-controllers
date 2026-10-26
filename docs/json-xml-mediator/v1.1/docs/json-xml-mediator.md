@@ -279,3 +279,25 @@ spec:
 - **XML to JSON**: Use for one-way XML to JSON transformation when bidirectional mediation is not needed
 - **Request Rewrite**: Combine with payload transformation for complete request modification
 - **Log Message**: Log payloads before and after transformation for debugging
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request phase: the request's `Content-Type` does not match `downstreamPayloadFormat` | `500` | `960000` | `mediation` |
+| Request phase: the request body cannot be converted (malformed, or beyond the conversion limits) | `500` | `960000` | `mediation` |
+| Response phase: the upstream response's `Content-Type` does not match `upstreamPayloadFormat` | `500` | `960000` | `mediation` |
+| Response phase: the upstream response body cannot be converted (malformed, or beyond the conversion limits) | `500` | `960000` | `mediation` |
+
+A response-phase rejection replaces the upstream's response with the `500` and is reported with
+the response direction. A streaming (SSE) response is passed through unconverted and is not a fault.
+
+The fault's `Description` carries the internal reason, for example
+`Content-Type must be application/json for downstream payload format json`. It can quote the
+payload, so it is passed to fault policies and analytics only, never to the client.

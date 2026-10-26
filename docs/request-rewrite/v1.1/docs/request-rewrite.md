@@ -268,3 +268,27 @@ flowchart TD
 - Path rewrites are applied to the path relative to API context, then API context is preserved in the final forwarded path.
 - For `ReplacePrefixMatch`, the matched prefix is derived from the operation path where the policy is attached.
 - Query rewrite rules run sequentially; later rules see the results of earlier rules.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+The rewrite is checked only for a request that meets the `match` conditions; a request that does
+not is passed through unchanged.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The policy parameters cannot be parsed into the rewrite configuration | `500` | `960000` | `configuration` |
+| A `queryRewrite` rule has an empty `name`, an unsupported `action`, or an invalid `pattern` | `500` | `960000` | `configuration` |
+| `methodRewrite` is not a supported HTTP method | `500` | `960000` | `configuration` |
+
+An invalid `pathRewrite` regex or an unsupported path rewrite type is not a rejection: the path
+is left unchanged and the request is forwarded.
+
+The fault's `Description` carries the internal reason, for example
+`invalid methodRewrite value: unsupported method: FETCH`. It is passed to fault policies and
+analytics only, never to the client.

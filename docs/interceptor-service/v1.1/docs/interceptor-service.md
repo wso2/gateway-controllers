@@ -306,3 +306,29 @@ Response-phase request body received by the interceptor:
   "interceptorContext": {"trace": "abc-123", "actor": "user-7"}
 }
 ```
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+The policy rejects only when its own call to the interceptor service fails and the phase's
+`passthroughOnError` is `false`. This applies to both the request phase and the response phase;
+in the response phase the upstream's response is replaced with the `500`.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The interceptor service cannot be reached or does not answer within `timeoutMillis` | `500` | `960000` | `mediation` |
+| The interceptor service answers with a non-`2xx` status | `500` | `960000` | `mediation` |
+| The interceptor service's reply exceeds `maxResponseSize` | `500` | `960000` | `mediation` |
+| The interceptor service's reply is not valid JSON | `500` | `960000` | `mediation` |
+
+A response the interceptor service itself asks for is not a fault, whatever its status: a
+`directRespond` reply in the request phase, or a `responseCode` in the response phase, is the
+interceptor's decision and reaches the client without a fault.
+
+The fault's `Description` carries the internal reason, for example `interceptor returned status 503`.
+It is passed to fault policies and analytics only, never to the client.

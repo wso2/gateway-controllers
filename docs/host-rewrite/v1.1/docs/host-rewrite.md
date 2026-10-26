@@ -92,3 +92,18 @@ spec:
   upstream (e.g. `backend.example.com:8080`).
 - The upstream `hostRewrite: manual` setting is required for the rewritten Host
   to be used when forwarding to the upstream.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The `host` parameter is missing, not a string, or empty | `500` | `960000` | `configuration` |
+
+The fault's `Description` carries the internal reason, for example `host parameter cannot be empty`.
+It is passed to fault policies and analytics only, never to the client.

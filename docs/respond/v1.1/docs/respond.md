@@ -315,3 +315,26 @@ Do not expose sensitive internal details in static response bodies or headers. E
 **Performance and Reliability**
 
 This policy reduces backend load and latency by terminating requests at the gateway. It can improve resilience during incidents by isolating failing upstreams while still returning predictable client responses. Monitor policy usage carefully to ensure temporary mock/maintenance rules are removed when no longer needed.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+The configured response is **not** a fault, whatever status it carries: returning a canned `404`
+or `503` on purpose is a deliberate end to the request, so it is neither recorded as a failure nor
+handed to the API's fault policies. The only rejection is a configuration the policy cannot read
+when it builds the response.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| `statusCode` is not an integer between `100` and `599`, `body` is not a string, or a `headers` entry is malformed (not an object, an unsupported field, a missing, empty, too long or invalid `name`, or a missing, non-string or too long `value`) | `500` | `960000` | `configuration` |
+
+This policy is not a fault policy: it does not run under an API's fault policies, and it cannot
+replace the response of a failure that another policy reports.
+
+The fault's `Description` carries the internal reason, for example `headers[0].name cannot be empty`.
+It is passed to fault policies and analytics only, never to the client.
