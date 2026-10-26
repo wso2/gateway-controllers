@@ -1,0 +1,10 @@
+{
+  "name": "mcp-rewrite",
+  "displayName": "MCP Rewrite",
+  "version": "1.1",
+  "provider": "WSO2",
+  "categories": [
+    "MCP"
+  ],
+  "description": "MCP Rewrite policy defines user-facing tools, resources, and prompts and maps\nthem to backend capability names using optional \"target\" fields. Request payloads\nare rewritten to the backend capability name when configured, and list responses\nrewrite capability names in-place to return user-facing values. When a list is\nprovided, only the configured capabilities are included in list responses.\n\n- Null or omitted: Allow all capabilities of that type without rewriting\n\nOn MCP 2026-07-28 a rewritten request also restates the mirrored Mcp-Name header, because the body no longer matches what the client mirrored. Before rewriting it verifies that the mirrored Mcp-Method and Mcp-Name agree with the request body, rejecting the request when a header disagrees with the body or is absent while the body names a value for it, so a rewrite can never make a mismatched request look consistent to the MCP server. On a gateway with a resolver, a request body the gateway could not read is rejected."
+}

@@ -1,0 +1,10 @@
+{
+  "name": "mcp-acl-list",
+  "displayName": "MCP Access Control",
+  "version": "1.1",
+  "provider": "WSO2",
+  "categories": [
+    "MCP"
+  ],
+  "description": "MCP ACL List policy controls access to tools, resources, and prompts using\nmode and exceptions. It filters list responses based on the configured mode\nand enforces the same allow/deny rules on request paths. This policy does not\nrewrite capability fields (tools, resources, or prompts) or modify list entry contents.\n\n- Missing capability config: Allow all capabilities of that type\n- mode: allow, exceptions: [..] => allow all except listed exceptions\n- mode: deny, exceptions: [..] => deny all except listed exceptions\n\nOn a gateway with an MCP operation resolver, it identifies the capability from the mirrored Mcp-Method and Mcp-Name headers on MCP 2026-07-28 and from the resolver's facts on earlier revisions; on a gateway without one, it reads the request body itself for every request. A capability it cannot identify is not governed; a modern request missing a required Mcp-Method or Mcp-Name header is rejected, and on a gateway with a resolver, a request body the gateway could not read is rejected."
+}

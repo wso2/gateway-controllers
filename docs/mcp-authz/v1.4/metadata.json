@@ -1,0 +1,11 @@
+{
+  "name": "mcp-authz",
+  "displayName": "MCP Authorization",
+  "version": "1.3",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Security"
+  ],
+  "description": "MCP Authorization policy validates access to MCP resources (tools, resources, prompts) \nand methods based on JWT claims or OAuth scopes provided by the mcp-auth policy.\n\nThis policy enforces fine-grained authorization by checking that incoming JWT claims \nor scopes satisfy the access requirements for specific MCP attributes. The mcp-auth \npolicy must be applied before this policy to validate and extract claims from the token.\n\nIt identifies the capability from the mirrored Mcp-Method and Mcp-Name headers on MCP 2026-07-28 where the gateway has an MCP operation resolver, and from the request body otherwise. A capability it cannot identify is not governed; a modern request missing a required Mcp-Method or Mcp-Name header is rejected, and a request body the gateway could not read is rejected."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "mcp-spec-validation",
+  "displayName": "MCP Spec Validation",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Security"
+  ],
+  "description": "Validates incoming MCP requests for conformance with the MCP specification applicable to the declared protocol version."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "mcp-tool-schema-validator",
+  "displayName": "MCP Tool Schema Validator",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Security"
+  ],
+  "description": "Validates MCP tools/call arguments and structured results against JSON Schemas configured per tool."
+}
