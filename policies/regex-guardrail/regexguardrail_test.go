@@ -756,3 +756,109 @@ type errSentinel string
 func (e errSentinel) Error() string {
 	return string(e)
 }
+
+// TestRegexGuardrail_InterventionDeclaresFault covers both phases. The code is the point:
+func TestRegexGuardrail_InterventionDeclaresFault(t *testing.T) {
+	t.Run("request phase", func(t *testing.T) {
+		p := mustGetRegexPolicy(t, map[string]interface{}{
+			"request": map[string]interface{}{
+				"regex":    "abc",
+				"jsonPath": "$.messages",
+			},
+		})
+
+		action := p.OnRequestBody(context.Background(), newRequestContextWithBody(`{"messages":"does not match"}`), nil)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != codeGuardrailIntervened {
+			t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeGuardrail {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Guardrail == nil {
+			t.Fatalf("expected Guardrail detail to be populated")
+		}
+		if resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+			t.Fatalf("expected InterveningGuardrail=%q, got %q", guardrailName, resp.Fault.Guardrail.InterveningGuardrail)
+		}
+		if resp.Fault.Guardrail.Action != policy.GuardrailActionIntervened {
+			t.Fatalf("expected Action=%q, got %q", policy.GuardrailActionIntervened, resp.Fault.Guardrail.Action)
+		}
+	})
+
+	t.Run("response phase carries DirectionResponse", func(t *testing.T) {
+		p := mustGetRegexPolicy(t, map[string]interface{}{
+			"response": map[string]interface{}{
+				"enabled":  true,
+				"regex":    "abc",
+				"jsonPath": "$.messages",
+			},
+		})
+
+		action := p.OnResponseBody(context.Background(), newResponseContextWithBody(`{"messages":"does not match"}`), nil)
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side guardrail intervention")
+		}
+		if mods.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if mods.Fault.Code != codeGuardrailIntervened {
+			t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, mods.Fault.Code)
+		}
+		// The direction is what separates a request-side hit from a response-side one;
+		// they share a status code and only the policy knows which it made.
+		if mods.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, mods.Fault.Direction)
+		}
+	})
+}
+
+// TestRegexGuardrail_AssessmentsGatedByShowAssessment covers the one field that must not
+// leak: Assessments frequently holds the very content the guardrail existed to stop, so it
+// is populated only where the operator opted in through showAssessment.
+func TestRegexGuardrail_AssessmentsGatedByShowAssessment(t *testing.T) {
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := mustGetRegexPolicy(t, map[string]interface{}{
+				"request": map[string]interface{}{
+					"regex":          "abc",
+					"jsonPath":       "$.messages",
+					"showAssessment": show,
+				},
+			})
+
+			action := p.OnRequestBody(context.Background(), newRequestContextWithBody(`{"messages":"does not match"}`), nil)
+			resp := action.(policy.ImmediateResponse)
+			if resp.Fault == nil || resp.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := resp.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}

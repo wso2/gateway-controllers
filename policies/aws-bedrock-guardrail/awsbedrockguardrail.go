@@ -39,6 +39,75 @@ import (
 	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
+// guardrailCodeFor derives the specific code from what Bedrock actually reported, so a caller
+// can route a PII leak differently from a hate verdict without parsing an assessment.
+//
+// Bedrock can trip several policies on one call, and a single code can only name one, so the
+// order below is a deliberate precedence rather than an accident of iteration. It follows the
+// order this policy already treats these concerns in: sensitive information is checked first
+// everywhere else here too (it is the one kind that can be masked rather than blocked), so a
+// rejection that involved data leaking is reported as that first.
+//
+// The fallback is the content-safety group's own generic (906099), not 900514: an
+// intervention IS a content verdict even when the assessment names nothing this vocabulary
+// covers, so a caller testing 906000 <= code < 906100 should still see it.
+//
+// The tradeoff, stated because it is real: 906xxx sits OUTSIDE carbon's guardrail range
+// [900514, 900515), which is exactly one code wide. Carbon-compatible analytics assigns a
+// fault category by range membership, so these classify as "other" rather than "guardrail"
+// there. Accepted deliberately — the class is still carried by FaultDetails.Type
+// ("guardrail") and by GuardrailDetails.InterveningGuardrail.
+func guardrailCodeFor(output interface{}) string {
+	typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
+	if !ok || typed == nil {
+		return policy.GuardrailCodeUnsafeContent
+	}
+	for _, a := range typed.Assessments {
+		if a.SensitiveInformationPolicy != nil &&
+			(len(a.SensitiveInformationPolicy.PiiEntities) > 0 || len(a.SensitiveInformationPolicy.Regexes) > 0) {
+			return policy.GuardrailCodePII
+		}
+	}
+	for _, a := range typed.Assessments {
+		if a.ContentPolicy == nil {
+			continue
+		}
+		for _, f := range a.ContentPolicy.Filters {
+			switch f.Type {
+			case types.GuardrailContentFilterTypeHate:
+				return policy.GuardrailCodeHate
+			case types.GuardrailContentFilterTypeSexual:
+				return policy.GuardrailCodeSexual
+			case types.GuardrailContentFilterTypeViolence:
+				return policy.GuardrailCodeViolence
+			case types.GuardrailContentFilterTypeInsults:
+				return policy.GuardrailCodeHarassment
+			case types.GuardrailContentFilterTypeMisconduct:
+				return policy.GuardrailCodeDangerousActivity
+			case types.GuardrailContentFilterTypePromptAttack:
+				return policy.GuardrailCodePromptInjection
+			}
+		}
+	}
+	for _, a := range typed.Assessments {
+		if a.WordPolicy != nil &&
+			(len(a.WordPolicy.CustomWords) > 0 || len(a.WordPolicy.ManagedWordLists) > 0) {
+			return policy.GuardrailCodeProfanity
+		}
+	}
+	for _, a := range typed.Assessments {
+		// A denied topic is what the content MEANT, measured against the operator's own
+		// configured policy — the intent group rather than the content-safety one.
+		if a.TopicPolicy != nil && len(a.TopicPolicy.Topics) > 0 {
+			return policy.GuardrailCodeSemanticMatch
+		}
+	}
+	return policy.GuardrailCodeUnsafeContent
+}
+
+// guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
+const guardrailName = "aws-bedrock-guardrail"
+
 const (
 	GuardrailErrorCode           = 422
 	TextCleanRegex               = "^\"|\"$"
@@ -1168,6 +1237,48 @@ func (p *AWSBedrockGuardrailPolicy) updatePayloadWithMaskedContent(originalPaylo
 	return updatedPayload
 }
 
+// buildGuardrailErrorResponse describes the intervention for the gateway: the code and
+// class that decide its analytics category, which side was refused, and the guardrail
+// envelope this policy already publishes in its response body.
+//
+// Direction is per phase, not per policy: a request-side hit and a response-side hit are
+// operationally different events that share a status code, and only this policy knows
+// which it made.
+func (p *AWSBedrockGuardrailPolicy) buildGuardrailErrorResponse(reason string, validationError error, isResponse, showAssessment bool, output interface{}) *policy.FaultDetails {
+	assessment := p.buildAssessmentObject(reason, validationError, isResponse, showAssessment, output)
+
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+
+	actionReason, _ := assessment["actionReason"].(string)
+
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// Assessments carries the content the guardrail existed to stop, so it is populated
+	// only where the operator already opted in through showAssessment — the same gate the
+	// published response envelope uses.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+
+	return &policy.FaultDetails{
+		Code:      guardrailCodeFor(output),
+		Type:      policy.FaultTypeGuardrail,
+		Direction: direction,
+		Message:   "AWS Bedrock guardrail intervened",
+		// reason is the detail of what was blocked. Description is withheld from the
+		// response body by every renderer and reaches fault policies only, which is why
+		// the detail belongs here rather than in Message.
+		Description: reason,
+		Guardrail:   guardrail,
+	}
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *AWSBedrockGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, output interface{}) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -1459,6 +1570,8 @@ func (p *AWSBedrockGuardrailPolicy) buildErrorResponse(reason string, validation
 		bodyBytes = []byte(`{"type":"AWS_BEDROCK_GUARDRAIL","message":"Internal error"}`)
 	}
 
+	errorResponse := p.buildGuardrailErrorResponse(reason, validationError, isResponse, showAssessment, output)
+
 	if isResponse {
 		statusCode := GuardrailErrorCode
 		return policy.DownstreamResponseModifications{
@@ -1466,6 +1579,8 @@ func (p *AWSBedrockGuardrailPolicy) buildErrorResponse(reason string, validation
 			Body:              bodyBytes,
 			AnalyticsMetadata: analyticsMetadata,
 			HeadersToSet:      map[string]string{"Content-Type": "application/json"},
+			IsFault:           true,
+			Fault:             errorResponse,
 		}
 	}
 
@@ -1474,5 +1589,7 @@ func (p *AWSBedrockGuardrailPolicy) buildErrorResponse(reason string, validation
 		AnalyticsMetadata: analyticsMetadata,
 		Headers:           map[string]string{"Content-Type": "application/json"},
 		Body:              bodyBytes,
+		IsFault:           true,
+		Fault:             errorResponse,
 	}
 }

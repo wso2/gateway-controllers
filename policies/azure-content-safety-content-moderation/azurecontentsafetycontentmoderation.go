@@ -34,6 +34,39 @@ import (
 	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
+// guardrailCodeFor maps the Azure category that tripped onto the specific code for it, so a
+// caller routing self-harm somewhere different from violence can branch on the code instead
+// of parsing a message. Azure reports exactly the four categories the content-safety group
+// names, so the mapping is total rather than best-effort.
+//
+// An unrecognised or absent category falls back to the group's own generic (906099) rather
+// than to 900514: the rejection IS a content-safety verdict even when the category is one
+// this vocabulary does not name, and a caller testing 906000 <= code < 906100 should still
+// see it.
+//
+// The tradeoff, stated because it is real: 906xxx sits OUTSIDE carbon's guardrail range
+// [900514, 900515), which is exactly one code wide. Carbon-compatible analytics assigns a
+// fault category by range membership, so these classify as "other" rather than "guardrail"
+// there. Accepted deliberately — the class is still carried by FaultDetails.Type
+// ("guardrail") and by GuardrailDetails.InterveningGuardrail.
+func guardrailCodeFor(category string) string {
+	switch category {
+	case "Hate":
+		return policy.GuardrailCodeHate
+	case "Sexual":
+		return policy.GuardrailCodeSexual
+	case "SelfHarm":
+		return policy.GuardrailCodeSelfHarm
+	case "Violence":
+		return policy.GuardrailCodeViolence
+	default:
+		return policy.GuardrailCodeUnsafeContent
+	}
+}
+
+// guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
+const guardrailName = "azure-content-safety-content-moderation"
+
 // TODO
 const (
 	GuardrailErrorCode      = 422
@@ -324,7 +357,7 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 			return policy.UpstreamRequestModifications{}
 		}
 		slog.Debug("AzureContentSafety: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil, "")
+		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil, "", "")
 	}
 
 	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")
@@ -340,7 +373,7 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 			return policy.UpstreamRequestModifications{}
 		}
 		slog.Debug("AzureContentSafety: Error calling Azure Content Safety API", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error calling Azure Content Safety API", err, isResponse, params.ShowAssessment, nil, "")
+		return p.buildErrorResponse("Error calling Azure Content Safety API", err, isResponse, params.ShowAssessment, nil, "", "")
 	}
 
 	for _, analysis := range categoriesAnalysis {
@@ -351,7 +384,10 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 
 		if threshold >= 0 && severity >= threshold {
 			slog.Debug("AzureContentSafety: Violation detected", "category", category, "severity", severity, "threshold", threshold, "isResponse", isResponse)
-			return p.buildErrorResponse("Violation of Azure content safety content moderation detected", nil, isResponse, params.ShowAssessment, categoriesAnalysis, extractedValue)
+			// category is carried through so the fault code can name WHICH verdict this was.
+			// The loop returns on the first category over its threshold, so exactly one
+			// category decides each rejection and the code is unambiguous.
+			return p.buildErrorResponse("Violation of Azure content safety content moderation detected", nil, isResponse, params.ShowAssessment, categoriesAnalysis, extractedValue, category)
 		}
 	}
 
@@ -364,7 +400,7 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 }
 
 // buildErrorResponse builds a policy error response for both request and response phases
-func (p *AzureContentSafetyContentModerationPolicy) buildErrorResponse(reason string, validationError error, isResponse bool, showAssessment bool, categoriesAnalysis []map[string]interface{}, inspectedContent string) interface{} {
+func (p *AzureContentSafetyContentModerationPolicy) buildErrorResponse(reason string, validationError error, isResponse bool, showAssessment bool, categoriesAnalysis []map[string]interface{}, inspectedContent string, category string) interface{} {
 	assessment := p.buildAssessmentObject(reason, validationError, isResponse, showAssessment, categoriesAnalysis, inspectedContent)
 	analyticsMetadata := map[string]interface{}{
 		"isGuardrailHit": true,
@@ -381,6 +417,8 @@ func (p *AzureContentSafetyContentModerationPolicy) buildErrorResponse(reason st
 		bodyBytes = []byte(`{"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION","message":"Internal error"}`)
 	}
 
+	errorResponse := p.buildGuardrailErrorResponse(reason, validationError, isResponse, showAssessment, categoriesAnalysis, inspectedContent, category)
+
 	if isResponse {
 		statusCode := GuardrailErrorCode
 		return policy.DownstreamResponseModifications{
@@ -390,6 +428,8 @@ func (p *AzureContentSafetyContentModerationPolicy) buildErrorResponse(reason st
 			HeadersToSet: map[string]string{
 				"Content-Type": "application/json",
 			},
+			IsFault: true,
+			Fault:   errorResponse,
 		}
 	}
 
@@ -399,7 +439,9 @@ func (p *AzureContentSafetyContentModerationPolicy) buildErrorResponse(reason st
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault:   errorResponse,
 	}
 }
 
@@ -533,6 +575,48 @@ func (p *AzureContentSafetyContentModerationPolicy) makeHTTPRequest(method, url 
 	}
 
 	return resp, nil
+}
+
+// buildGuardrailErrorResponse describes the intervention for the gateway: the code and
+// class that decide its analytics category, which side was refused, and the guardrail
+// envelope this policy already publishes in its response body.
+//
+// Direction is per phase, not per policy: a request-side hit and a response-side hit are
+// operationally different events that share a status code, and only this policy knows
+// which it made.
+func (p *AzureContentSafetyContentModerationPolicy) buildGuardrailErrorResponse(reason string, validationError error, isResponse, showAssessment bool, categoriesAnalysis []map[string]interface{}, inspectedContent string, category string) *policy.FaultDetails {
+	assessment := p.buildAssessmentObject(reason, validationError, isResponse, showAssessment, categoriesAnalysis, inspectedContent)
+
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+
+	actionReason, _ := assessment["actionReason"].(string)
+
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// Assessments carries the content the guardrail existed to stop, so it is populated
+	// only where the operator already opted in through showAssessment — the same gate the
+	// published response envelope uses.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+
+	return &policy.FaultDetails{
+		Code:      guardrailCodeFor(category),
+		Type:      policy.FaultTypeGuardrail,
+		Direction: direction,
+		Message:   "Content moderation guardrail intervened",
+		// reason is the detail of what was blocked. Description is withheld from the
+		// response body by every renderer and reaches fault policies only, which is why
+		// the detail belongs here rather than in Message.
+		Description: reason,
+		Guardrail:   guardrail,
+	}
 }
 
 // buildAssessmentObject builds the assessment object

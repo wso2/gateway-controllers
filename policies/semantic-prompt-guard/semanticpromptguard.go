@@ -31,6 +31,23 @@ import (
 	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
+// codeGuardrailIntervened is the specific code for what this guardrail checks —
+// what the content MEANT, against a configured policy — so a caller can tell this rejection from another
+// guardrail's without parsing a message. The name is unchanged so every call site reads the
+// same; only the value moved.
+//
+// The tradeoff, stated because it is real: 906xxx sits OUTSIDE carbon's guardrail range
+// [900514, 900515), which is exactly one code wide. Carbon-compatible analytics assigns a
+// fault category by range membership, so this classifies as "other" rather than
+// "guardrail" there. Accepted deliberately: the code identifies the rejection, and the
+// class is already carried by FaultDetails.Type ("guardrail") and by
+// GuardrailDetails.InterveningGuardrail. See policy.GuardrailCodeIntervened for the full
+// reasoning, and use that generic code for a guardrail with nothing specific to say.
+const codeGuardrailIntervened = policy.GuardrailCodeSemanticMatch
+
+// guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
+const guardrailName = "SemanticPromptGuard"
+
 const (
 	GuardrailErrorCode              = 422
 	defaultAllowSimilarityThreshold = 0.65 // Similarity threshold (0-1), higher = stricter matching
@@ -327,6 +344,42 @@ func (p *SemanticPromptGuardPolicy) ensureEmbeddings(phrases []PhraseEmbedding) 
 	return phrases, nil
 }
 
+// buildGuardrailErrorResponse describes the intervention for the gateway: the code and
+// class that decide its analytics category, and the guardrail envelope this policy already
+// publishes in its response body.
+//
+// Direction is always Request here: this guardrail runs only on the request phase, so there
+// is no response-side hit to distinguish.
+func (p *SemanticPromptGuardPolicy) buildGuardrailErrorResponse(reason string, validationError error, showAssessment bool) *policy.FaultDetails {
+	assessment := p.buildAssessmentObject(reason, validationError, showAssessment)
+
+	actionReason, _ := assessment["actionReason"].(string)
+
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// Assessments carries the prompt the guardrail existed to stop, so it is populated only
+	// where the operator already opted in through showAssessment — the same gate the
+	// published response envelope uses.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+
+	return &policy.FaultDetails{
+		Code:      codeGuardrailIntervened,
+		Type:      policy.FaultTypeGuardrail,
+		Direction: policy.DirectionRequest,
+		Message:   "Violation of applied semantic prompt guard constraints detected",
+		// reason names the prompt content that matched. Description is withheld from the
+		// response body by every renderer and reaches fault policies only, which is why
+		// the detail belongs here rather than in Message.
+		Description: reason,
+		Guardrail:   guardrail,
+	}
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *SemanticPromptGuardPolicy) buildAssessmentObject(reason string, validationError error, showAssessment bool) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -503,6 +556,8 @@ func (p *SemanticPromptGuardPolicy) buildErrorResponse(reason string, validation
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault:   p.buildGuardrailErrorResponse(reason, validationError, showAssessment),
 	}
 }

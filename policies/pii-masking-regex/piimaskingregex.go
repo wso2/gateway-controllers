@@ -1036,6 +1036,17 @@ func (p *PIIMaskingRegexPolicy) buildErrorResponse(reason string) interface{} {
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: policy.DirectionRequest,
+			// reason already goes to the client in the body above, so it is client-safe
+			// here and belongs in Message. It is NOT moved into Description: Description
+			// is for detail a renderer withholds, and putting an already-published string
+			// there would misrepresent it as withheld.
+			Message: "Error occurred during pii-masking-regex mediation: " + reason,
+		},
 	}
 }

@@ -675,3 +675,63 @@ func decodeSemanticPromptGuardMessage(t *testing.T, body []byte) map[string]inte
 	}
 	return message
 }
+
+// TestSemanticPromptGuard_InterventionDeclaresFault covers the funnel every rejection this
+// policy makes passes through. It runs on the request phase only, so Direction is always
+func TestSemanticPromptGuard_InterventionDeclaresFault(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+
+	action := p.buildErrorResponse("blocked prompt detail", nil, false)
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a guardrail intervention")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != codeGuardrailIntervened {
+		t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeGuardrail {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to carry the blocked detail")
+	}
+	if resp.Fault.Guardrail == nil || resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+		t.Fatalf("expected the guardrail envelope to name %q, got %+v", guardrailName, resp.Fault.Guardrail)
+	}
+}
+
+// TestSemanticPromptGuard_AssessmentsGatedByShowAssessment covers the field that must not
+// leak: Assessments holds the prompt the guardrail existed to stop.
+func TestSemanticPromptGuard_AssessmentsGatedByShowAssessment(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			action := p.buildErrorResponse("blocked prompt detail", nil, show)
+			resp := action.(policy.ImmediateResponse)
+			if resp.Fault == nil || resp.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := resp.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}

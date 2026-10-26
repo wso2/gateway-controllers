@@ -448,3 +448,72 @@ func decodeAzureJSON(t *testing.T, raw []byte) map[string]interface{} {
 	}
 	return m
 }
+
+// TestAzureContentSafety_InterventionDeclaresFault covers the funnel every intervention
+func TestAzureContentSafety_InterventionDeclaresFault(t *testing.T) {
+	p := &AzureContentSafetyContentModerationPolicy{}
+	analysis := []map[string]interface{}{{"category": "Hate", "severity": 6}}
+
+	t.Run("request phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, false, false, analysis, "inspected", "Hate")
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		if resp.Fault == nil || resp.Fault.Code != policy.GuardrailCodeHate {
+			t.Fatalf("expected Error.Code=%q, got %+v", policy.GuardrailCodeHate, resp.Fault)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Guardrail == nil || resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+			t.Fatalf("expected the guardrail envelope to name %q, got %+v", guardrailName, resp.Fault.Guardrail)
+		}
+	})
+
+	t.Run("response phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, true, false, analysis, "inspected", "Hate")
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side intervention")
+		}
+		if mods.Fault == nil || mods.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %+v", policy.DirectionResponse, mods.Fault)
+		}
+	})
+}
+
+// TestAzureContentSafety_AssessmentsGatedByShowAssessment covers the field that must not
+// leak: for a response-side hit the assessment holds the content the guardrail existed to
+// stop from leaving, so it is populated only where the operator opted in.
+func TestAzureContentSafety_AssessmentsGatedByShowAssessment(t *testing.T) {
+	p := &AzureContentSafetyContentModerationPolicy{}
+	analysis := []map[string]interface{}{{"category": "Hate", "severity": 6}}
+
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			action := p.buildErrorResponse("blocked detail", nil, true, show, analysis, "inspected", "Hate")
+			mods := action.(policy.DownstreamResponseModifications)
+			if mods.Fault == nil || mods.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := mods.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}
