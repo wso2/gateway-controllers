@@ -496,3 +496,41 @@ The credentials provider is built **once**, when the policy attachment is create
 - Content modifications (PII masking) are forwarded upstream if no blocking violation occurs.
 - Request and response phases are validated independently when both are configured.
 - Credential material is never written to logs. The session name, not the credentials, is what identifies the gateway in the target account's CloudTrail.
+
+## Fault reporting
+
+From v1.4, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.3. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.3.
+
+Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+It also names the intervening guardrail (`aws-bedrock-guardrail`) and records that it intervened; the
+assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+
+The response phase only rejects responses that it validates: when `applicableStatusCodes` is set,
+a response whose upstream status is not listed passes through without a fault. With
+`passthroughOnError` enabled, the errors in the last row pass the request or response through
+instead of rejecting it, and no fault is reported. An intervention that includes a PII finding is
+masked or redacted rather than rejected, so it produces no fault.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request or response: Bedrock intervenes because of the hate content filter | `422` | `906001` | `guardrail` |
+| Request or response: Bedrock intervenes because of the sexual content filter | `422` | `906002` | `guardrail` |
+| Request or response: Bedrock intervenes because of the violence content filter | `422` | `906004` | `guardrail` |
+| Request or response: Bedrock intervenes because of the insults content filter | `422` | `906005` | `guardrail` |
+| Request or response: Bedrock intervenes because of the misconduct content filter | `422` | `906006` | `guardrail` |
+| Request or response: Bedrock intervenes because of the prompt attack filter | `422` | `906008` | `guardrail` |
+| Request or response: Bedrock intervenes because of a word filter (custom words or a managed word list) | `422` | `906007` | `guardrail` |
+| Request or response: Bedrock intervenes because of a denied topic | `422` | `906301` | `guardrail` |
+| Request or response: Bedrock intervenes for any other reason | `422` | `906099` | `guardrail` |
+| Request or response: the value at `jsonPath` cannot be extracted, the AWS configuration cannot be loaded, the Bedrock call fails, or Bedrock returns an invalid or unexpected response | `422` | `906099` | `guardrail` |
+
+When Bedrock reports more than one finding, a content filter decides the code ahead of a word
+filter, and a word filter ahead of a denied topic.
+
+The fault's `Description` carries the internal reason, for example
+`Violation of AWS Bedrock Guardrails detected` or `Error calling AWS Bedrock Guardrail`.
+It is passed to fault policies and analytics only, never to the client.

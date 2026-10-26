@@ -1,7 +1,7 @@
 {
   "name": "azure-content-safety-content-moderation",
   "displayName": "Azure Content Safety Content Moderation",
-  "version": "1.0",
+  "version": "1.1",
   "provider": "WSO2",
   "categories": [
     "Guardrails",

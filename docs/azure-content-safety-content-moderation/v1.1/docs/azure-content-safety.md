@@ -345,3 +345,32 @@ Azure Content Safety uses an 8-level severity scale (`0-7`):
 - Rate limits may apply based on your Azure Content Safety subscription tier.
 - The API uses Azure's 8-severity-level analysis, providing fine-grained control over content moderation.
 - For production deployments, monitor API response times and adjust retry/timeout settings if needed.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+It also names the intervening guardrail (`azure-content-safety-content-moderation`) and records that it intervened; the
+assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+
+With `passthroughOnError` enabled, the errors in the last row pass the request or response through
+instead of rejecting it, and no fault is reported.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request or response: the `Hate` severity reaches its threshold | `422` | `906001` | `guardrail` |
+| Request or response: the `Sexual` severity reaches its threshold | `422` | `906002` | `guardrail` |
+| Request or response: the `SelfHarm` severity reaches its threshold | `422` | `906003` | `guardrail` |
+| Request or response: the `Violence` severity reaches its threshold | `422` | `906004` | `guardrail` |
+| Request or response: the value at `jsonPath` cannot be extracted, or the Azure Content Safety call fails | `422` | `906099` | `guardrail` |
+
+When more than one category reaches its threshold, the first one in Azure's response decides the code.
+
+The fault's `Description` carries the internal reason, for example
+`Violation of Azure content safety content moderation detected`.
+It is passed to fault policies and analytics only, never to the client.

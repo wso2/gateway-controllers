@@ -357,3 +357,28 @@ operationPolicies:
 - Similarity scores range from 0.0 (no similarity) to 1.0 (identical meaning). Higher thresholds mean stricter matching.
 
 - For production deployments, monitor false positive/negative rates and adjust similarity thresholds accordingly.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+It also names the intervening guardrail (`SemanticPromptGuard`) and records that it intervened; the
+assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+
+The policy checks the request only.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The prompt's similarity to a denied phrase reaches `denySimilarityThreshold` | `422` | `906301` | `guardrail` |
+| The prompt's similarity to every allowed phrase is below `allowSimilarityThreshold` | `422` | `906301` | `guardrail` |
+| The value at `jsonPath` cannot be extracted, or the extracted prompt is empty | `422` | `906301` | `guardrail` |
+| The prompt's embedding cannot be generated, or its similarity cannot be calculated | `422` | `906301` | `guardrail` |
+
+The fault's `Description` carries the internal reason, for example
+`prompt is too similar to denied phrase '<phrase>' (similarity=0.9123)`.
+It is passed to fault policies and analytics only, never to the client.

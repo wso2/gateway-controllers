@@ -1,7 +1,7 @@
 {
   "name": "semantic-prompt-guard",
   "displayName": "Semantic Prompt Guard",
-  "version": "1.0",
+  "version": "1.1",
   "provider": "WSO2",
   "categories": [
     "Guardrails",

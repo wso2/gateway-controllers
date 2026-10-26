@@ -220,3 +220,21 @@ Restoration needs a *complete* placeholder: an LLM emits `[EMAIL_0000]` as sever
 - In streaming mode, `redactPII: true` disables response-phase processing entirely since there is nothing to restore. Chunks pass through without buffering overhead.
 - In streaming mode, buffering continues only while the text after an unclosed `[` could still complete a placeholder, and never holds back more than 64 bytes of assistant text. Restoration does not depend on how finely the upstream tokenises a placeholder or on where chunk boundaries fall.
 - Complex regex patterns may impact performance; test thoroughly with expected content volumes.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+Masking happens on the request; restoring placeholders in the response never rejects it.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request: the value at `jsonPath` cannot be extracted | `500` | `960000` | `mediation` |
+| Request: masking the detected PII fails | `500` | `960000` | `mediation` |
+
+The fault carries no `Description`. Its `Message` holds the reason the response body already
+returns, for example `Error occurred during pii-masking-regex mediation: error masking PII: ...`.
