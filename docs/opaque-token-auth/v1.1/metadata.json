@@ -1,0 +1,11 @@
+{
+  "name": "opaque-token-auth",
+  "displayName": "Opaque Token Auth",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Validates opaque OAuth 2.0 access tokens via RFC 7662 token introspection.\nSystem-level configuration holds introspection providers, gateway client authentication, and caching behavior.\nUser-level configuration holds per-route assertions (selected issuers, audiences, scopes, claims and mappings)."
+}

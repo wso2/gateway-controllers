@@ -1,0 +1,11 @@
+{
+  "name": "websub-hmac-auth",
+  "displayName": "WebSub HMAC Auth",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "WebSub"
+  ],
+  "description": "Validates HMAC signatures on incoming WebSub hub event notification requests.\nVerifies the X-Hub-Signature-256 (or X-Hub-Signature) header against the shared\nsecret key configured at subscription time, rejecting any request whose signature\ndoes not match. Supports SHA-256 (default), SHA-512, and SHA-1 algorithms."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "oauth2-generator",
+  "displayName": "OAuth2 Generator",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Generates an upstream credential and injects it into a configurable request header before forwarding the request to the backend.\nSupports two mutually exclusive paths: exchanging client credentials for an access token via an OAuth2 grant (client_credentials or password), with automatic in-process/Redis caching and refresh, or injecting a directly supplied static bearer token. A token rejected by the upstream backend is purged from cache so the next request fetches a fresh one."
+}

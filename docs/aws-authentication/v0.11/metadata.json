@@ -1,0 +1,11 @@
+{
+  "name": "aws-authentication",
+  "displayName": "AWS Authentication",
+  "version": "0.10",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4).\nSupports four credential-acquisition modes: AWS STS AssumeRole for temporary credentials,\na static IAM user access key/secret pair, IAM Roles for Service Accounts (IRSA) on\nKubernetes clusters federated with AWS IAM via OIDC (e.g. EKS), or the AWS SDK's default\ncredential provider chain for compute already running under the target IAM role. Intended\nfor backends such as API Gateway with IAM auth, Lambda Function URLs, OpenSearch, and S3\nthat require SigV4-signed requests."
+}
