@@ -635,20 +635,47 @@ func (p *McpRateLimitPolicy) rewriteRateLimitedResponse(reqHeaders *policy.Heade
 		}
 	}
 
-	body, contentType := buildJsonRpcRateLimitedBody(requestID, isEventStream(reqHeaders))
-	headers["content-type"] = contentType
-
 	statusCode := immediate.StatusCode
 	if statusCode == 0 {
 		statusCode = 429
 	}
 
+	body, contentType := buildJsonRpcRateLimitedBody(requestID, isEventStream(reqHeaders))
+	headers["content-type"] = contentType
+
+	// The delegate already classified the throttle, so carry its account through rather than
+	// restating it — copying field-by-field without IsFault and Fault would silently drop the
+	// fault declaration. What is added here is the JSON-RPC detail the delegate has no way to
+	// know: it is a protocol-agnostic rate limiter, and the id came out of the MCP envelope
+	// this policy parsed.
+	//
+	// The body above and this description are both sent: a gateway with an error renderer
+	// overwrites the body and content-type from the description, and one without it sends
+	// the envelope this policy has always written. Neither leaves the caller a bare status.
+	described := immediate.Fault
+	if described == nil {
+		described = &policy.FaultDetails{
+			Type:      policy.FaultTypeThrottling,
+			Direction: policy.DirectionRequest,
+		}
+	}
+	// Copy before mutating: the delegate owns the value it returned, and a second throttled
+	// request must not inherit the id from the first.
+	enriched := *described
+	rateLimitedCode := jsonRpcErrCodeRateLimited
+	enriched.JSONRPC = &policy.JSONRPCError{
+		Code: &rateLimitedCode,
+		ID:   decodeRequestID(requestID),
+	}
+	enriched.Message = msgRateLimited
 	return policy.ImmediateResponse{
 		StatusCode:        statusCode,
+		IsFault:           immediate.IsFault,
 		Headers:           headers,
 		Body:              body,
 		AnalyticsMetadata: immediate.AnalyticsMetadata,
 		DynamicMetadata:   immediate.DynamicMetadata,
+		Fault:             &enriched,
 	}
 }
 
@@ -668,11 +695,82 @@ func (p *McpRateLimitPolicy) buildJsonRpcError(reqHeaders *policy.Headers, statu
 	if sid := getSessionID(reqHeaders); sid != "" {
 		headers[mcpSessionHeader] = sid
 	}
+	// Body and description both travel: the body is what a gateway without an error
+	// renderer sends, and a gateway with one overwrites it from the description below.
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			// message becomes the JSON-RPC error message.
+			Message: message,
+			// -32700 Parse error and -32600 Invalid request are both 400s, so the status
+			// alone cannot tell them apart; only this policy knows which it hit.
+			JSONRPC: &policy.JSONRPCError{Code: &jsonRpcCode, ID: decodeRequestID(requestID)},
+		},
 	}
+}
+
+// msgRateLimited is the throttle message an MCP caller receives. Shared by the fallback body
+// and the description so the two cannot report the same rejection differently.
+const msgRateLimited = "Rate limit exceeded. Please try again later."
+
+// buildJsonRpcRateLimitedBody renders the throttle rejection this policy has always sent.
+func buildJsonRpcRateLimitedBody(requestID json.RawMessage, sse bool) ([]byte, string) {
+	return buildJsonRpcErrorBody(requestID, jsonRpcErrCodeRateLimited, msgRateLimited, sse)
+}
+
+// buildJsonRpcErrorBody constructs a JSON-RPC error envelope with the given code and
+// message, using the requestID if available. When sse is true the JSON is wrapped in an SSE
+// `data:` envelope. The content type is returned alongside the body so the two cannot drift
+// apart.
+//
+// This is the fallback body, not the gateway's rendering: a gateway with an error renderer
+// overwrites it. It stays byte-for-byte what this policy sent before the fault contract
+// existed, so upgrading the policy on its own changes nothing a client receives.
+func buildJsonRpcErrorBody(requestID json.RawMessage, code int, message string, sse bool) ([]byte, string) {
+	id := requestID
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"error": map[string]any{
+			"code":    code,
+			"message": message,
+		},
+	})
+	if err != nil {
+		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":%q}}`, code, message)
+	}
+
+	if sse {
+		return []byte("data: " + string(body) + "\n\n"), "text/event-stream"
+	}
+	return body, "application/json"
+}
+
+// decodeRequestID turns the raw JSON-RPC id back into a value the gateway can re-emit.
+//
+// The id is carried as json.RawMessage because this policy never needed to interpret it, only
+// to copy it into a body it wrote. Describing it instead means handing over a real value, and
+// JSON-RPC permits a string, a number, or null — so the decoded form is whatever the client
+// sent. An absent or unparseable id becomes nil, which renders as the null the spec requires
+// for a request whose id could not be determined.
+func decodeRequestID(requestID json.RawMessage) any {
+	if len(requestID) == 0 {
+		return nil
+	}
+	var id any
+	if err := json.Unmarshal(requestID, &id); err != nil {
+		return nil
+	}
+	return id
 }
 
 func delegateKey(entryIdx int, capabilityID string) string {
@@ -765,35 +863,6 @@ func extractFirstSseJSON(body []byte) []byte {
 		return []byte(strings.TrimSpace(data.String()))
 	}
 	return nil
-}
-
-func buildJsonRpcRateLimitedBody(requestID json.RawMessage, sse bool) ([]byte, string) {
-	return buildJsonRpcErrorBody(requestID, jsonRpcErrCodeRateLimited, "Rate limit exceeded. Please try again later.", sse)
-}
-
-// buildJsonRpcErrorBody constructs a JSON-RPC error envelope with the given code and message, using the requestID if available.
-// If sse is true, wraps the JSON in an SSE `data:` envelope.
-func buildJsonRpcErrorBody(requestID json.RawMessage, code int, message string, sse bool) ([]byte, string) {
-	id := requestID
-	if len(id) == 0 {
-		id = json.RawMessage("null")
-	}
-	envelope := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"error": map[string]any{
-			"code":    code,
-			"message": message,
-		},
-	}
-	body, err := json.Marshal(envelope)
-	if err != nil {
-		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":%q}}`, code, message)
-	}
-	if sse {
-		return []byte("data: " + string(body) + "\n\n"), "text/event-stream"
-	}
-	return body, "application/json"
 }
 
 // parseEntries validates and parses the raw policy configuration into structured limitEntry objects.

@@ -220,6 +220,14 @@ func (p *CostBasedModelRoutingPolicy) OnRequestBody(
 			StatusCode: 500,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(`{"error":"failed to prepare routed request"}`),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeMediation,
+				Direction:   policy.DirectionRequest,
+				Message:     "failed to prepare routed request",
+				Description: err.Error(),
+			},
 		}
 	}
 
@@ -509,6 +517,13 @@ func badRequest(message string) policy.ImmediateResponse {
 		StatusCode: 400,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+		},
 	}
 }
 
@@ -518,6 +533,13 @@ func serviceUnavailable(message string) policy.ImmediateResponse {
 		StatusCode: 503,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+		},
 	}
 }
 
@@ -530,6 +552,15 @@ func budgetExhaustedResponse() policy.ImmediateResponse {
 		StatusCode: 429,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		// A cost budget is a quota rather than a request rate, so it takes the custom-policy
+		// throttling code; still inside the throttling range.
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeThrottledCustomPolicy,
+			Type:      policy.FaultTypeThrottling,
+			Direction: policy.DirectionRequest,
+			Message:   "requested model has no available budget or the fallback budget is missing or exhausted",
+		},
 	}
 }
 

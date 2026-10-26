@@ -1593,3 +1593,150 @@ func TestGetMcpAuthPolicy_WithIssuersAndScopes(t *testing.T) {
 		t.Error("Expected AuthConfig.Tools.Enabled to be true")
 	}
 }
+
+// assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels with the description.
+//
+// Both are always sent: the description is what a gateway with an error renderer uses, and
+// the body is what a gateway without one sends, so a policy upgraded on its own still answers
+// an unparseable request the way it always has. Asserting they AGREE — rather than restating
+// the literals — is what catches one of the two drifting.
+//
+// The `data` member is the one field that deliberately differs in reach, not in content: the
+// body carries it, and the description carries the same string as Description, which a
+// renderer withholds from the client. So this asserts they hold the same value, and that
+// enabling the renderer only ever narrows what a malformed request reveals.
+func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if len(resp.Body) == 0 {
+		t.Fatal("Expected a fallback body alongside the description, got none")
+	}
+	if got := resp.Headers["content-type"]; got != "application/json" {
+		t.Errorf("Expected content-type application/json for the fallback body, got %q", got)
+	}
+
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body, &envelope); err != nil {
+		t.Fatalf("Fallback body is not a JSON-RPC envelope: %v (%q)", err, resp.Body)
+	}
+	if envelope.JSONRPC != JSONRPCVersion {
+		t.Errorf("Expected jsonrpc %q in the fallback body, got %q", JSONRPCVersion, envelope.JSONRPC)
+	}
+	if envelope.ID != nil {
+		t.Errorf("Expected a null id for an unparseable request, got %v", envelope.ID)
+	}
+	if resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil {
+		t.Fatalf("Expected a described JSON-RPC code to compare against, got %+v", resp.Fault)
+	}
+	if envelope.Error.Code != *resp.Fault.JSONRPC.Code {
+		t.Errorf("Fallback body code %d disagrees with the described code %d",
+			envelope.Error.Code, *resp.Fault.JSONRPC.Code)
+	}
+	if envelope.Error.Message != resp.Fault.Message {
+		t.Errorf("Fallback body message %q disagrees with the described message %q",
+			envelope.Error.Message, resp.Fault.Message)
+	}
+	if envelope.Error.Data != resp.Fault.Description {
+		t.Errorf("Fallback body data %q disagrees with the described Description %q",
+			envelope.Error.Data, resp.Fault.Description)
+	}
+}
+
+// TestMcpAuth_RejectionsDeclareFault covers the three shapes of rejection this policy
+// makes, and the one short-circuit that is deliberately NOT a fault. The code, not the
+// status, is what tells one rejection from another.
+func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
+	t.Run("auth failure", func(t *testing.T) {
+		p := &McpAuthPolicy{}
+		shared := &policy.SharedContext{Metadata: map[string]any{}}
+		resp := p.handleAuthFailure(shared, 401, "json", "key managers not configured", policy.FaultCodeAuthGeneral)
+
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on an auth rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeAuthGeneral {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeAuthGeneral, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeAuthentication {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+	})
+
+	t.Run("malformed MCP request", func(t *testing.T) {
+		p := &McpAuthPolicy{}
+		resp := p.handleBadRequest(&json.SyntaxError{})
+
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a malformed request")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeInvalidRequestBody {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeInvalidRequestBody, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeValidation {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeValidation, resp.Fault.Type)
+		}
+	})
+
+	t.Run("invalid configuration", func(t *testing.T) {
+		resp := buildInvalidConfigResponse("bad config").(policy.ImmediateResponse)
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a misconfigured auth policy")
+		}
+		if resp.Fault == nil || resp.Fault.Code != policy.FaultCodeAuthGeneral {
+			t.Fatalf("expected Error.Code=%q, got %+v", policy.FaultCodeAuthGeneral, resp.Fault)
+		}
+	})
+
+	t.Run("well-known metadata response is not a fault", func(t *testing.T) {
+		// A protected-resource-metadata discovery response is a successful 200. Marking
+		// it a fault would notify on every MCP client that reads the metadata.
+		privateKey, _ := generateRSATestKeys(t)
+		_ = privateKey
+		p := &McpAuthPolicy{
+			OnFailureStatusCode: 401,
+			ErrorMessageFormat:  "json",
+		}
+		ctx := createMockRequestHeaderContext(map[string][]string{})
+		ctx.Path = WellKnownEndpointPath
+		ctx.OperationPath = WellKnownEndpointPath
+		ctx.Method = "GET"
+		params := map[string]interface{}{
+			"keyManagers": []interface{}{
+				map[string]interface{}{
+					"name":   "km",
+					"issuer": "https://issuer.example.com",
+					"jwks": map[string]interface{}{
+						"remote": map[string]interface{}{"uri": "http://127.0.0.1:1/jwks.json"},
+					},
+				},
+			},
+		}
+		action := p.OnRequestHeaders(context.Background(), ctx, params)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected the metadata response, got status %d", resp.StatusCode)
+		}
+		if resp.IsFault {
+			t.Fatalf("the metadata discovery response must not be a fault")
+		}
+	})
+}
