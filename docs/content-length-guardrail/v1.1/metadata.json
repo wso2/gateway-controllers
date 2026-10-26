@@ -1,7 +1,7 @@
 {
   "name": "content-length-guardrail",
   "displayName": "Content Length Guardrail",
-  "version": "1.0",
+  "version": "1.1",
   "provider": "WSO2",
   "categories": [
     "Guardrails",

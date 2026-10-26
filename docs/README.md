@@ -38,7 +38,7 @@ All available policies, sorted alphabetically.
 | [Azure LLM Cost](./azure-llm-cost/v1.0/docs/azure-llm-cost.md) | AI | Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. |
 | [Backend JWT](./backend-jwt/v1.1/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
 | [Basic Auth](./basic-auth/v1.1/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
-| [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
+| [Content Length Guardrail](./content-length-guardrail/v1.1/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Cost-Based Model Routing](./cost-based-model-routing/v0.9/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
 | [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
@@ -46,7 +46,7 @@ All available policies, sorted alphabetically.
 | [Host Rewrite](./host-rewrite/v1.0/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
 | [Intelligent Model Routing](./intelligent-model-routing/v0.9/docs/intelligent-model-routing.md) | AI | Routes AI/LLM requests to different models using LLM-powered classification. |
 | [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
-| [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
+| [JSON Schema Guardrail](./json-schema-guardrail/v1.1/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.0/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
 | [JWT Auth](./jwt-auth/v1.4/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
 | [LLM Cost](./llm-cost/v1.2/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. |
@@ -87,7 +87,7 @@ All available policies, sorted alphabetically.
 | [Semantic Model Routing](./semantic-model-routing/v0.9/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
 | [Semantic Prompt Guard](./semantic-prompt-guard/v1.0/docs/semantic-prompt-guard.md) | Guardrails, AI | Blocks or allows prompts based on semantic similarity to configured allow/deny phrase embeddings. |
 | [Semantic Tool Filtering](./semantic-tool-filtering/v1.0/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
-| [Sentence Count Guardrail](./sentence-count-guardrail/v1.0/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
+| [Sentence Count Guardrail](./sentence-count-guardrail/v1.1/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
 | [Set Headers](./set-headers/v1.2/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
 | [Subscription Validation](./subscription-validation/v1.0/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
 | [Time-Based Model Routing](./time-based-model-routing/v0.9/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
@@ -97,8 +97,8 @@ All available policies, sorted alphabetically.
 | [TypeSafe Jev MCP Tool Result Screening](./typesafe-jev-mcp-tool-result-screening/v0.8/docs/typesafe-jev-mcp-tool-result-screening.md) | MCP, Security | Screens the results of MCP tools/call requests using TypeSafe AI's Jev System One model, before the agent reads them. |
 | [TypeSafe Jev Model Routing](./typesafe-jev-model-routing/v0.8/docs/typesafe-jev-model-routing.md) | AI | Routes AI/LLM requests to different models using TypeSafe AI's Jev System One model. |
 | [TypeSafe Jev Tool Filtering](./typesafe-jev-tool-filtering/v0.8/docs/typesafe-jev-tool-filtering.md) | AI, Transformation | Narrows an LLM request's tools array down to the tools relevant to the current user prompt, using TypeSafe AI's Jev System One model. |
-| [URL Guardrail](./url-guardrail/v1.0/docs/url.md) | Guardrails, AI | Validates URLs found in request or response body content. |
+| [URL Guardrail](./url-guardrail/v1.1/docs/url.md) | Guardrails, AI | Validates URLs found in request or response body content. |
 | [Validate Request with OPA](./opa-policy/v0.1/docs/opa-policy.md) | Security | Validates requests against an Open Policy Agent (OPA) policy engine. |
 | [WebSub HMAC Auth](./websub-hmac-auth/v1.0/docs/websub-hmac-auth.md) | Security, WebSub | Validates HMAC signatures on incoming WebSub hub event notification requests. |
-| [Word Count Guardrail](./word-count-guardrail/v1.0/docs/word-count.md) | Guardrails, AI | Validates the word count of request or response body content. |
+| [Word Count Guardrail](./word-count-guardrail/v1.1/docs/word-count.md) | Guardrails, AI | Validates the word count of request or response body content. |
 <!-- POLICY_TABLE_END -->

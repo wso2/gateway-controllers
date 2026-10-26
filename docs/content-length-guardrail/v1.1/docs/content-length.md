@@ -265,3 +265,27 @@ This guardrail supports **Server-Sent Events (SSE) streaming responses** commonl
 - Consider network and storage constraints when setting maximum values.
 - Minimum values help ensure content quality and completeness.
 - The `streamingJsonPath` parameter is only used during SSE streaming responses. For non-streaming responses, the standard `jsonPath` is used.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+It also names the intervening guardrail (`content-length-guardrail`) and records that it intervened; the
+assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request: the body is absent or could not be buffered | `422` | `906203` | `guardrail` |
+| Request or response: the value at `jsonPath` cannot be extracted | `422` | `906203` | `guardrail` |
+| Request or response: the byte length is outside `[min, max]` (or inside it, with `invert`) | `422` | `906203` | `guardrail` |
+| Streamed (SSE) response: the running byte length exceeds `max`, or the final length fails the check at the end of the stream | the status already sent; the stream ends with an SSE error event | `906203` | `guardrail` |
+| Chunked (non-SSE) response: the complete body fails any of the checks above | the status already sent; the stream ends with the error body | `906203` | `guardrail` |
+
+The fault's `Description` carries the internal reason, for example
+`content length 5120 bytes is outside the allowed range 1-4096 bytes`.
+It is passed to fault policies and analytics only, never to the client.

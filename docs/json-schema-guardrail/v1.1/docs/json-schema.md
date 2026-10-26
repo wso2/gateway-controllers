@@ -234,3 +234,24 @@ The guardrail supports JSON Schema Draft 7, including:
 - Inverted logic is useful for blocking content that matches specific schema patterns.
 - Complex schemas may impact performance; test thoroughly with expected content volumes.
 - The guardrail validates the structure and types but does not validate business logic or semantic meaning.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+It also names the intervening guardrail (`json-schema-guardrail`) and records that it intervened; the
+assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request or response: the value at `jsonPath` cannot be extracted | `422` | `906204` | `guardrail` |
+| Request or response: the schema or the content cannot be loaded for validation | `422` | `906204` | `guardrail` |
+| Request or response: the content does not satisfy `schema` (or satisfies it, with `invert`) | `422` | `906204` | `guardrail` |
+
+The fault's `Description` carries the internal reason, for example `JSON schema validation failed`.
+It is passed to fault policies and analytics only, never to the client.
