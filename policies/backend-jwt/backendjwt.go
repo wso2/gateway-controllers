@@ -254,7 +254,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	entry, ok := algorithms[alg]
 	if !ok {
 		slog.Error("Backend JWT: unsupported algorithm", "algorithm", alg)
-		return internalError()
+		return internalError(policy.FaultTypeConfiguration, "unsupported signing algorithm: "+alg)
 	}
 	issuer := getString(params, "issuer", "")
 	expiry := parseDuration(getString(params, "tokenExpiry", ""), defaultTokenExpiry)
@@ -309,7 +309,7 @@ func (p *BackendJWTPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.
 	}
 	if err != nil {
 		slog.Error("Backend JWT: failed to sign token", "error", err)
-		return internalError()
+		return internalError(policy.FaultTypeMediation, fmt.Sprintf("failed to sign the backend JWT: %v", err))
 	}
 
 	if tokenCaching {
@@ -943,10 +943,24 @@ func resolveClaimValue(value string, reqCtx *policy.RequestHeaderContext) (strin
 	}
 }
 
-func internalError() policy.ImmediateResponse {
+// internalError refuses the request when the backend JWT cannot be built.
+//
+// faultType is policy.FaultTypeConfiguration when the policy's own parameters are unusable,
+// and policy.FaultTypeMediation when the token could not be signed. reason names the
+// gateway's own problem, so it goes in Description, which the renderer withholds from the
+// client body and passes to fault policies only.
+func internalError(faultType, reason string) policy.ImmediateResponse {
 	return policy.ImmediateResponse{
 		StatusCode: 500,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       []byte(`{"error":"Internal Server Error"}`),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        faultType,
+			Direction:   policy.DirectionRequest,
+			Message:     "Internal Server Error",
+			Description: reason,
+		},
 	}
 }

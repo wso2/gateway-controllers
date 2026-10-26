@@ -112,7 +112,33 @@ func assertFailure(t *testing.T, reqCtx *policy.RequestHeaderContext, action pol
 	if reqCtx.AuthContext == nil || reqCtx.AuthContext.Authenticated {
 		t.Fatalf("expected unauthenticated AuthContext, got %+v", reqCtx.AuthContext)
 	}
+	// Every rejection this policy makes must reach the gateway's fault flow and describe
+	// itself well enough for a renderer and for analytics categorisation.
+	if !ir.IsFault {
+		t.Fatalf("expected IsFault=true on an auth rejection")
+	}
+	if ir.Fault == nil {
+		t.Fatalf("expected Error to be populated on an auth rejection")
+	}
+	if ir.Fault.Code == "" {
+		t.Fatalf("expected Error.Code to be set")
+	}
+	if ir.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, ir.Fault.Direction)
+	}
 	return ir
+}
+
+// assertRejectionCode asserts the rejection declares a fault and carries exactly the
+// wanted code and type.
+func assertRejectionCode(t *testing.T, ir policy.ImmediateResponse, wantCode, wantType string) {
+	t.Helper()
+	if ir.Fault.Code != wantCode {
+		t.Fatalf("expected Error.Code=%q, got %q", wantCode, ir.Fault.Code)
+	}
+	if ir.Fault.Type != wantType {
+		t.Fatalf("expected Error.Type=%q, got %q", wantType, ir.Fault.Type)
+	}
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -710,4 +736,31 @@ func TestUsernameAndWSO2ClaimsInProperties(t *testing.T) {
 	if ac.Properties["org_id"] != "org-123" {
 		t.Errorf("Properties[org_id] = %q, want org-123", ac.Properties["org_id"])
 	}
+}
+
+func TestRejectionErrorCodes(t *testing.T) {
+	t.Run("no authorization header", func(t *testing.T) {
+		srv := newServer(t, activeResponder(map[string]interface{}{"active": true}))
+		params := baseParams(provider("idp", srv.URL, nil))
+		reqCtx, action := execute(t, newPolicy(), params, map[string][]string{})
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
+	})
+
+	t.Run("wrong scheme", func(t *testing.T) {
+		srv := newServer(t, activeResponder(map[string]interface{}{"active": true}))
+		params := baseParams(provider("idp", srv.URL, nil))
+		headers := map[string][]string{"authorization": {"Basic dXNlcjpwYXNz"}}
+		reqCtx, action := execute(t, newPolicy(), params, headers)
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
+	})
+
+	t.Run("token reported inactive", func(t *testing.T) {
+		srv := newServer(t, activeResponder(map[string]interface{}{"active": false}))
+		params := baseParams(provider("idp", srv.URL, nil))
+		reqCtx, action := execute(t, newPolicy(), params, bearerHeader("tok"))
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeAuthTokenInactive, policy.FaultTypeAuthentication)
+	})
 }

@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -617,5 +618,42 @@ func TestBuildHTTPRequest_InvalidUpstreamURL(t *testing.T) {
 
 	if _, err := buildHTTPRequest(reqCtx, nil); err == nil {
 		t.Error("expected an error for an invalid upstream URL")
+	}
+}
+
+// TestSigningFailureDeclaresFault covers the fault declaration on the gateway's own
+// signing failure. Only the deployment can fix a bad role ARN or an unreachable STS, so
+// this is precisely the failure a fault policy exists to notify on.
+func TestSigningFailureDeclaresFault(t *testing.T) {
+	p := newTestPolicy()
+	p.retrieveCredentialsFunc = func(ctx context.Context) (aws.Credentials, error) {
+		return aws.Credentials{}, errors.New("boom")
+	}
+
+	reqCtx := newRequestBodyCtx(nil, nil)
+	action := p.OnRequestBody(context.Background(), reqCtx, nil)
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a signing failure")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+	}
+	// The gateway's own diagnostic must not reach the caller's body.
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to carry the internal reason")
+	}
+	if strings.Contains(string(resp.Body), resp.Fault.Description) {
+		t.Fatalf("Description leaked into the client body: %q", resp.Fault.Description)
 	}
 }

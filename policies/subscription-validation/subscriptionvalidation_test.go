@@ -137,6 +137,20 @@ func assertImmediate(t *testing.T, action policy.RequestHeaderAction, wantStatus
 	if body["error"] != wantErrorKey {
 		t.Fatalf("expected error=%q, got %q", wantErrorKey, body["error"])
 	}
+	// Every rejection this policy makes must reach the gateway's fault flow and describe
+	// itself well enough for a renderer and for analytics categorisation.
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a rejection")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated on a rejection")
+	}
+	if resp.Fault.Code == "" {
+		t.Fatalf("expected Error.Code to be set")
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
 }
 
 func assertRateLimitHeaders(t *testing.T, resp policy.ImmediateResponse, wantLimit, wantRemaining int) {
@@ -645,4 +659,74 @@ func TestOnRequestHeaders_PartialBillingMetadata(t *testing.T) {
 	if _, ok := md[billingSubscriptionIDMetadataKey]; ok {
 		t.Fatalf("expected billingSubscriptionID absent when nil, got %v", md[billingSubscriptionIDMetadataKey])
 	}
+}
+
+// TestRejectionErrorCodes pins the code chosen per rejection condition. The code, not the
+// status, is what tells one condition from another.
+func TestRejectionErrorCodes(t *testing.T) {
+	t.Run("no active subscription", func(t *testing.T) {
+		store := newStore([]policyenginev1.SubscriptionData{
+			{APIId: "api-1", SubscriptionToken: policyenginev1.HashSubscriptionToken("tok-1"), Status: "ACTIVE"},
+		})
+		p := newPolicy(defaultCfg(), store)
+		ctx := headerCtxWithToken("api-1", "tok-wrong", "")
+		resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), ctx, make(map[string]interface{})))
+		if resp.Fault.Code != policy.FaultCodeSubscriptionInactive {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeSubscriptionInactive, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeAuthentication {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+		}
+	})
+
+	t.Run("subscription plan limit exceeded", func(t *testing.T) {
+		store := newStore([]policyenginev1.SubscriptionData{
+			{
+				APIId:              "api-1",
+				SubscriptionToken:  policyenginev1.HashSubscriptionToken("tok-1"),
+				Status:             "ACTIVE",
+				ThrottleLimitCount: 1,
+				ThrottleLimitUnit:  "Min",
+				StopOnQuotaReach:   true,
+			},
+		})
+		p := newPolicy(defaultCfg(), store)
+		p.OnRequestHeaders(context.Background(), headerCtxWithToken("api-1", "tok-1", ""), make(map[string]interface{}))
+
+		ctx := headerCtxWithToken("api-1", "tok-1", "")
+		resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), ctx, make(map[string]interface{})))
+		if resp.StatusCode != 429 {
+			t.Fatalf("expected the throttled response, got status %d", resp.StatusCode)
+		}
+		if resp.Fault.Code != policy.FaultCodeThrottledSubscription {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeThrottledSubscription, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeThrottling {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeThrottling, resp.Fault.Type)
+		}
+	})
+
+	t.Run("no identity presented", func(t *testing.T) {
+		p := newPolicy(defaultCfg(), newStore(nil))
+		ctx := headerCtxWithToken("api-1", "", "")
+		resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), ctx, make(map[string]interface{})))
+		if resp.Fault.Code != policy.FaultCodeAuthMissingCredentials {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeAuthMissingCredentials, resp.Fault.Code)
+		}
+	})
+}
+
+func mustImmediate(t *testing.T, action policy.RequestHeaderAction) policy.ImmediateResponse {
+	t.Helper()
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a rejection")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated on a rejection")
+	}
+	return resp
 }
