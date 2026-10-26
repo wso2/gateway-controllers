@@ -83,7 +83,7 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 func parseRegion(raw interface{}) azureRegion {
 	s, _ := raw.(string)
 	switch r := azureRegion(strings.ToLower(strings.TrimSpace(s))); r {
-	case regionUS, regionEU, regionAPAC, regionRegional, regionGlobalStandard:
+	case regionUS, regionEU, regionAPAC, regionRegional, regionGlobalStandard, regionProvisioned:
 		return r
 	default:
 		return regionGlobalStandard
@@ -211,13 +211,19 @@ func (p *AzureLLMCostPolicy) computeCost(responseBody, requestBody []byte, reque
 		return costResult{}
 	}
 
+	region := p.regionForRequest(requestBody, requestPath)
+	if region == regionProvisioned {
+		slog.Debug("azure-llm-cost: provisioned deployment bills reserved capacity, request not priced")
+		return costResult{}
+	}
+
 	normalized, err := normalizeStreamBody(responseBody)
 	if err != nil {
 		slog.Warn("azure-llm-cost: failed to prepare response body", "error", err)
 		return costResult{}
 	}
 
-	pricing, key, candidates, found := p.resolvePricing(normalized, requestBody, requestPath, templateHandle)
+	pricing, key, candidates, found := p.resolvePricingForRegion(normalized, requestBody, requestPath, templateHandle, region)
 	if !found {
 		slog.Warn("azure-llm-cost: model not found for costing, request not priced",
 			"candidates", strings.Join(candidates, ","))

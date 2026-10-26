@@ -33,11 +33,18 @@ import (
 // deployment whose name collides with a real model. Candidates are returned for
 // logging when nothing resolves.
 func (p *AzureLLMCostPolicy) resolvePricing(responseBody, requestBody []byte, requestPath, templateHandle string) (ModelPricing, string, []string, bool) {
+	return p.resolvePricingForRegion(responseBody, requestBody, requestPath, templateHandle,
+		p.regionForRequest(requestBody, requestPath))
+}
+
+// resolvePricingForRegion is resolvePricing with the deployment's tier already
+// worked out, so a caller that needs the tier itself reads it only once.
+func (p *AzureLLMCostPolicy) resolvePricingForRegion(responseBody, requestBody []byte, requestPath, templateHandle string, region azureRegion) (ModelPricing, string, []string, bool) {
 	if !isAzureTemplate(templateHandle) {
 		logNonAzureTemplate(templateHandle)
 		return ModelPricing{}, "", nil, false
 	}
-	prefixes := namespacesFor(templateHandle, p.regionForRequest(requestBody, requestPath))
+	prefixes := namespacesFor(templateHandle, region)
 
 	var candidates []string
 	add := func(name string) {

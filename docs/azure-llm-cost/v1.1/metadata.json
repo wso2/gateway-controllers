@@ -1,0 +1,10 @@
+{
+  "name": "azure-llm-cost",
+  "displayName": "Azure LLM Cost",
+  "version": "1.1",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. Model resolution and pricing lookup run automatically once an Azure provider template, modelMappings and a pricing file are configured."
+}

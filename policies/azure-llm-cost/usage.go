@@ -24,7 +24,7 @@ type Usage struct {
 	TotalInputTokens int64
 	OutputTokens     int64
 
-	// Subsets of TotalInputTokens. Cache writes are Anthropic-style only.
+	// Subsets of TotalInputTokens. A 1-hour cache write is Anthropic-style only.
 	CachedReadTokens    int64
 	CacheWriteTokens    int64
 	CacheWrite1hrTokens int64
@@ -37,12 +37,14 @@ type Usage struct {
 	// Billed per query rather than per token.
 	WebSearchRequests int64
 
-	IsPriority bool
+	Tier serviceTier
 }
 
+// GPT-5.6 and later report cache_write_tokens, billed above the input rate.
 type inputTokenDetails struct {
-	CachedTokens int64 `json:"cached_tokens"`
-	AudioTokens  int64 `json:"audio_tokens"`
+	CachedTokens     int64 `json:"cached_tokens"`
+	CacheWriteTokens int64 `json:"cache_write_tokens"`
+	AudioTokens      int64 `json:"audio_tokens"`
 }
 
 // Reasoning is spelled reasoning_tokens by OpenAI and thinking_tokens by
@@ -92,9 +94,6 @@ type rawUsage struct {
 	ServiceTier string `json:"service_tier"`
 }
 
-// The standard tier reports "default" or "standard"; both are simply not this.
-const priorityServiceTier = "priority"
-
 // normalizeUsage accepts any rawUsage variant. No usage object yields a zero
 // Usage and no error, which callers treat as unpriceable.
 func normalizeUsage(responseBody []byte) (Usage, error) {
@@ -143,9 +142,13 @@ func normalizeUsage(responseBody []byte) (Usage, error) {
 		cacheWrite5m = u.CacheCreationInputTokens
 	}
 
+	tier := parseServiceTier(serviceTier)
+	if tier == serviceTierStandard {
+		tier = parseServiceTier(u.ServiceTier)
+	}
 	usage := Usage{
 		OutputTokens: outputTokens,
-		IsPriority:   serviceTier == priorityServiceTier || u.ServiceTier == priorityServiceTier,
+		Tier:         tier,
 	}
 
 	// Output-side details and server tools are reported the same way under both
@@ -177,7 +180,7 @@ func normalizeUsage(responseBody []byte) (Usage, error) {
 		return usage, nil
 	}
 
-	// Cached is already in the input total and writes are free. Either spelling.
+	// Cached reads and writes are already in the input total. Either spelling.
 	usage.TotalInputTokens = inputTokens
 	for _, d := range []*inputTokenDetails{u.PromptTokensDetails, u.PromptTokenDetails, u.InputTokensDetails} {
 		if d == nil {
@@ -186,6 +189,9 @@ func normalizeUsage(responseBody []byte) (Usage, error) {
 		if usage.CachedReadTokens == 0 {
 			usage.CachedReadTokens = d.CachedTokens
 		}
+		if usage.CacheWriteTokens == 0 {
+			usage.CacheWriteTokens = d.CacheWriteTokens
+		}
 		if usage.AudioInputTokens == 0 {
 			usage.AudioInputTokens = d.AudioTokens
 		}
@@ -193,13 +199,14 @@ func normalizeUsage(responseBody []byte) (Usage, error) {
 	return usage, nil
 }
 
-// calculateCost covers both caching styles, since Azure OpenAI writes are 0.
+// calculateCost covers both caching styles; cache writes are billed at the
+// write rate the tier resolves to, or as input where the entry has none.
 func calculateCost(u Usage, p ModelPricing) float64 {
-	rates := resolveRates(u.TotalInputTokens, u.IsPriority, p)
+	rates := resolveRates(u.TotalInputTokens, u.Tier, p)
 
 	cacheCreate1hr := p.CacheCreationInputTokenCostAbove1hr
 	if cacheCreate1hr == 0 {
-		cacheCreate1hr = p.CacheCreationInputTokenCost
+		cacheCreate1hr = rates.cacheCreate
 	}
 	audioIn := p.InputCostPerAudioToken
 	if audioIn == 0 {

@@ -101,26 +101,39 @@ type ModelPricing struct {
 	// multiple sizes of context.
 	SearchContextCostPerQuery json.RawMessage `json:"search_context_cost_per_query"`
 
-	// Read cost alone means read-only caching, where writes are free. A
-	// creation cost too means Anthropic-style, where writes are billed.
+	// Cache reads and writes. An entry without one of these bills those tokens
+	// at the input rate, which is what Azure charges a model with no cache meter.
 	CacheReadInputTokenCost             float64 `json:"cache_read_input_token_cost"`
 	CacheCreationInputTokenCost         float64 `json:"cache_creation_input_token_cost"`
 	CacheCreationInputTokenCostAbove1hr float64 `json:"cache_creation_input_token_cost_above_1hr"`
 
 	// Long-context tier (>272k input tokens), applied only when present.
-	InputCostPerTokenAbove272k       float64 `json:"input_cost_per_token_above_272k_tokens"`
-	OutputCostPerTokenAbove272k      float64 `json:"output_cost_per_token_above_272k_tokens"`
-	CacheReadInputTokenCostAbove272k float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
+	InputCostPerTokenAbove272k           float64 `json:"input_cost_per_token_above_272k_tokens"`
+	OutputCostPerTokenAbove272k          float64 `json:"output_cost_per_token_above_272k_tokens"`
+	CacheReadInputTokenCostAbove272k     float64 `json:"cache_read_input_token_cost_above_272k_tokens"`
+	CacheCreationInputTokenCostAbove272k float64 `json:"cache_creation_input_token_cost_above_272k_tokens"`
 
 	// Priority tier, applied only when present and the response reports it.
-	InputCostPerTokenPriority       float64 `json:"input_cost_per_token_priority"`
-	OutputCostPerTokenPriority      float64 `json:"output_cost_per_token_priority"`
-	CacheReadInputTokenCostPriority float64 `json:"cache_read_input_token_cost_priority"`
+	InputCostPerTokenPriority           float64 `json:"input_cost_per_token_priority"`
+	OutputCostPerTokenPriority          float64 `json:"output_cost_per_token_priority"`
+	CacheReadInputTokenCostPriority     float64 `json:"cache_read_input_token_cost_priority"`
+	CacheCreationInputTokenCostPriority float64 `json:"cache_creation_input_token_cost_priority"`
 
-	// Combined tier, preferred over the plain above-272k rate when present.
-	InputCostPerTokenAbove272kPriority       float64 `json:"input_cost_per_token_above_272k_tokens_priority"`
-	OutputCostPerTokenAbove272kPriority      float64 `json:"output_cost_per_token_above_272k_tokens_priority"`
-	CacheReadInputTokenCostAbove272kPriority float64 `json:"cache_read_input_token_cost_above_272k_tokens_priority"`
+	// Flex tier, applied only when present and the response reports it.
+	InputCostPerTokenFlex           float64 `json:"input_cost_per_token_flex"`
+	OutputCostPerTokenFlex          float64 `json:"output_cost_per_token_flex"`
+	CacheReadInputTokenCostFlex     float64 `json:"cache_read_input_token_cost_flex"`
+	CacheCreationInputTokenCostFlex float64 `json:"cache_creation_input_token_cost_flex"`
+
+	// Combined tiers, preferred over the plain above-272k rate when present.
+	InputCostPerTokenAbove272kPriority           float64 `json:"input_cost_per_token_above_272k_tokens_priority"`
+	OutputCostPerTokenAbove272kPriority          float64 `json:"output_cost_per_token_above_272k_tokens_priority"`
+	CacheReadInputTokenCostAbove272kPriority     float64 `json:"cache_read_input_token_cost_above_272k_tokens_priority"`
+	CacheCreationInputTokenCostAbove272kPriority float64 `json:"cache_creation_input_token_cost_above_272k_tokens_priority"`
+	InputCostPerTokenAbove272kFlex               float64 `json:"input_cost_per_token_above_272k_tokens_flex"`
+	OutputCostPerTokenAbove272kFlex              float64 `json:"output_cost_per_token_above_272k_tokens_flex"`
+	CacheReadInputTokenCostAbove272kFlex         float64 `json:"cache_read_input_token_cost_above_272k_tokens_flex"`
+	CacheCreationInputTokenCostAbove272kFlex     float64 `json:"cache_creation_input_token_cost_above_272k_tokens_flex"`
 }
 
 // searchQueryRate returns the per-query web search rate. The context size is a
@@ -143,7 +156,31 @@ func (p ModelPricing) Unpriced() bool {
 	return p.InputCostPerToken == 0 && p.OutputCostPerToken == 0
 }
 
-// effectiveRates holds the rates after long-context and priority overrides.
+// longContextThresholdTokens is the input size above which Azure bills the whole
+// request, output included, at its long-context rates.
+const longContextThresholdTokens = 272_000
+
+// serviceTier is the processing tier the response reports. Azure bills priority
+// and flex on their own meters; anything else is the standard tier.
+type serviceTier string
+
+const (
+	serviceTierStandard serviceTier = ""
+	serviceTierPriority serviceTier = "priority"
+	serviceTierFlex     serviceTier = "flex"
+)
+
+// parseServiceTier maps a reported tier onto the ones billed differently. The
+// standard tier reports "default" or "standard"; both are simply not these.
+func parseServiceTier(reported string) serviceTier {
+	switch serviceTier(reported) {
+	case serviceTierPriority, serviceTierFlex:
+		return serviceTier(reported)
+	}
+	return serviceTierStandard
+}
+
+// effectiveRates holds the rates after long-context and service-tier overrides.
 type effectiveRates struct {
 	input       float64
 	output      float64
@@ -151,9 +188,43 @@ type effectiveRates struct {
 	cacheCreate float64
 }
 
-// resolveRates applies each override only where the entry carries the field. A
-// request qualifying for both prefers the combined fields.
-func resolveRates(inputTokensForTiering int64, isPriority bool, pricing ModelPricing) effectiveRates {
+// tierCandidates lists the rate sets that may override the base rates, most
+// specific first. A request above the long-context threshold on a priority or
+// flex tier prefers the combined set, then the plain long-context set.
+func (p ModelPricing) tierCandidates(longContext bool, tier serviceTier) []effectiveRates {
+	var candidates []effectiveRates
+	if longContext {
+		switch tier {
+		case serviceTierPriority:
+			candidates = append(candidates, effectiveRates{p.InputCostPerTokenAbove272kPriority,
+				p.OutputCostPerTokenAbove272kPriority, p.CacheReadInputTokenCostAbove272kPriority,
+				p.CacheCreationInputTokenCostAbove272kPriority})
+		case serviceTierFlex:
+			candidates = append(candidates, effectiveRates{p.InputCostPerTokenAbove272kFlex,
+				p.OutputCostPerTokenAbove272kFlex, p.CacheReadInputTokenCostAbove272kFlex,
+				p.CacheCreationInputTokenCostAbove272kFlex})
+		}
+		candidates = append(candidates, effectiveRates{p.InputCostPerTokenAbove272k,
+			p.OutputCostPerTokenAbove272k, p.CacheReadInputTokenCostAbove272k,
+			p.CacheCreationInputTokenCostAbove272k})
+	}
+	switch tier {
+	case serviceTierPriority:
+		candidates = append(candidates, effectiveRates{p.InputCostPerTokenPriority,
+			p.OutputCostPerTokenPriority, p.CacheReadInputTokenCostPriority,
+			p.CacheCreationInputTokenCostPriority})
+	case serviceTierFlex:
+		candidates = append(candidates, effectiveRates{p.InputCostPerTokenFlex,
+			p.OutputCostPerTokenFlex, p.CacheReadInputTokenCostFlex,
+			p.CacheCreationInputTokenCostFlex})
+	}
+	return candidates
+}
+
+// resolveRates applies the first override set the entry defines, judged by its
+// input rate; within it, each missing rate keeps the base rate. Cache reads and
+// writes without any rate are billed as ordinary input rather than for free.
+func resolveRates(inputTokensForTiering int64, tier serviceTier, pricing ModelPricing) effectiveRates {
 	r := effectiveRates{
 		input:       pricing.InputCostPerToken,
 		output:      pricing.OutputCostPerToken,
@@ -161,35 +232,29 @@ func resolveRates(inputTokensForTiering int64, isPriority bool, pricing ModelPri
 		cacheCreate: pricing.CacheCreationInputTokenCost,
 	}
 
-	aboveTier := inputTokensForTiering > 272_000
-
-	switch {
-	case aboveTier && isPriority && pricing.InputCostPerTokenAbove272kPriority > 0:
-		r.input = pricing.InputCostPerTokenAbove272kPriority
-		if pricing.OutputCostPerTokenAbove272kPriority > 0 {
-			r.output = pricing.OutputCostPerTokenAbove272kPriority
+	for _, override := range pricing.tierCandidates(inputTokensForTiering > longContextThresholdTokens, tier) {
+		if override.input <= 0 {
+			continue
 		}
-		if pricing.CacheReadInputTokenCostAbove272kPriority > 0 {
-			r.cacheRead = pricing.CacheReadInputTokenCostAbove272kPriority
+		r.input = override.input
+		if override.output > 0 {
+			r.output = override.output
 		}
-	case aboveTier && pricing.InputCostPerTokenAbove272k > 0:
-		r.input = pricing.InputCostPerTokenAbove272k
-		if pricing.OutputCostPerTokenAbove272k > 0 {
-			r.output = pricing.OutputCostPerTokenAbove272k
+		if override.cacheRead > 0 {
+			r.cacheRead = override.cacheRead
 		}
-		if pricing.CacheReadInputTokenCostAbove272k > 0 {
-			r.cacheRead = pricing.CacheReadInputTokenCostAbove272k
+		if override.cacheCreate > 0 {
+			r.cacheCreate = override.cacheCreate
 		}
-	case isPriority && pricing.InputCostPerTokenPriority > 0:
-		r.input = pricing.InputCostPerTokenPriority
-		if pricing.OutputCostPerTokenPriority > 0 {
-			r.output = pricing.OutputCostPerTokenPriority
-		}
-		if pricing.CacheReadInputTokenCostPriority > 0 {
-			r.cacheRead = pricing.CacheReadInputTokenCostPriority
-		}
+		break
 	}
 
+	if r.cacheRead == 0 {
+		r.cacheRead = r.input
+	}
+	if r.cacheCreate == 0 {
+		r.cacheCreate = r.input
+	}
 	return r
 }
 
@@ -209,6 +274,12 @@ func isAzureTemplate(templateHandle string) bool {
 	return false
 }
 
+const (
+	catalogAzureOpenAI = "azure/"
+	catalogAzureAI     = "azure_ai/"
+)
+
+// Each catalog is searched tier-first, then at its base (Global Standard) key.
 // Foundry also serves the OpenAI models, which are catalogued only under
 // azure/, so it falls back there. Azure OpenAI cannot serve a Foundry-native
 // model and so never reads azure_ai/.
@@ -216,25 +287,28 @@ func namespacesFor(templateHandle string, region azureRegion) []string {
 	if region == "" {
 		region = regionGlobalStandard
 	}
-	azureOpenAI := []string{"azure/" + string(region) + "/", "azure/"}
+	tiered := func(catalog string) []string {
+		return []string{catalog + string(region) + "/", catalog}
+	}
 
 	switch strings.ToLower(strings.TrimSpace(templateHandle)) {
 	case templateAzureOpenAI:
-		return azureOpenAI
+		return tiered(catalogAzureOpenAI)
 	case templateAzureAI:
-		return append([]string{"azure_ai/"}, azureOpenAI...)
+		return append(tiered(catalogAzureAI), tiered(catalogAzureOpenAI)...)
 	}
 	return nil
 }
 
-// azureRegion is the deployment type whose prefix is tried first. Provisioned
-// (PTU) types bill reserved capacity, not tokens, so are absent:
+// azureRegion is the deployment type, which sets the price tier:
 //
 //	global-standard  Global Standard      any region; Azure's default
 //	us / eu / apac   Data Zone Standard   pinned to that data zone
 //	regional         Standard             pinned to a single region
+//	provisioned      Provisioned (PTU)    reserved capacity billed by the hour
 //
-// Applied to the azure/ catalog only; azure_ai/ keys are not tier-scoped.
+// The token-priced types prefix both catalogs. Provisioned deployments are not
+// priced at all, since Azure does not bill them per token.
 type azureRegion string
 
 const (
@@ -243,11 +317,13 @@ const (
 	regionEU             azureRegion = "eu"
 	regionAPAC           azureRegion = "apac"
 	regionRegional       azureRegion = "regional"
+	regionProvisioned    azureRegion = "provisioned"
 )
 
 // lookupPricingWithKey requires an exact key match, so an unknown model is
 // reported unresolved rather than billed at a near neighbour's rate. Adding an
-// "azure/<region>/<model>" key is how an operator sets a tier-specific rate.
+// "azure/<region>/<model>" or "azure_ai/<region>/<model>" key is how an
+// operator sets a tier-specific rate.
 func lookupPricingWithKey(pricingMap map[string]ModelPricing, modelName string, prefixes []string) (ModelPricing, string, bool) {
 	modelName = strings.ToLower(strings.TrimSpace(modelName))
 	if modelName == "" {
@@ -266,19 +342,20 @@ func lookupPricingWithKey(pricingMap map[string]ModelPricing, modelName string, 
 var tierFallbackSeen sync.Map
 
 // logTierFallback warns that a tier-specific entry was missing and the base
-// entry was billed. Silent for global-standard, whose rates are the base.
+// entry of the same catalog was billed. Silent for global-standard, whose
+// rates are the base.
 func logTierFallback(prefixes []string, modelName, matchedPrefix string) {
-	if matchedPrefix != "azure/" {
+	if matchedPrefix != catalogAzureOpenAI && matchedPrefix != catalogAzureAI {
 		return
 	}
 	var tierPrefix string
 	for _, p := range prefixes {
-		if strings.HasPrefix(p, "azure/") && p != "azure/" {
+		if strings.HasPrefix(p, matchedPrefix) && p != matchedPrefix {
 			tierPrefix = p
 			break
 		}
 	}
-	if tierPrefix == "" || tierPrefix == "azure/"+string(regionGlobalStandard)+"/" {
+	if tierPrefix == "" || tierPrefix == matchedPrefix+string(regionGlobalStandard)+"/" {
 		return
 	}
 	if _, seen := tierFallbackSeen.LoadOrStore(tierPrefix+"|"+modelName, struct{}{}); seen {
@@ -287,5 +364,5 @@ func logTierFallback(prefixes []string, modelName, matchedPrefix string) {
 	slog.Warn("azure-llm-cost: no pricing entry for the configured tier, billing at the base rate",
 		"model", modelName,
 		"missing_key", tierPrefix+modelName,
-		"used_key", "azure/"+modelName)
+		"used_key", matchedPrefix+modelName)
 }
