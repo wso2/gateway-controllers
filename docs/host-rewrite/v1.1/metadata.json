@@ -1,0 +1,10 @@
+{
+  "name": "host-rewrite",
+  "displayName": "Host Rewrite",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Transformation"
+  ],
+  "description": "Sets the Host/:authority header sent to the upstream. Useful when the upstream requires a specific Host value different from the incoming request. Requires upstream.hostRewrite set to 'manual'."
+}
