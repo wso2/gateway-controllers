@@ -512,7 +512,7 @@ func (p *OAuth2TokenExchangePolicy) OnRequestHeaders(ctx context.Context, reqCtx
 	cfg, err := parseConfig(params)
 	if err != nil {
 		slog.Error("OAuth2 token exchange: invalid policy configuration", "phase", "header", "error", err)
-		return internalError()
+		return internalError(fmt.Sprintf("invalid policy configuration: %v", err))
 	}
 
 	apiName := ""
@@ -599,7 +599,7 @@ func (p *OAuth2TokenExchangePolicy) OnRequestBody(ctx context.Context, reqCtx *p
 	cfg, err := parseConfig(params)
 	if err != nil {
 		slog.Error("OAuth2 token exchange: invalid policy configuration", "phase", "body", "error", err)
-		return internalError()
+		return internalError(fmt.Sprintf("invalid policy configuration: %v", err))
 	}
 
 	if headerPhaseSucceeded(reqCtx.SharedContext) && outputHeaderIntact(reqCtx.SharedContext, reqCtx.Headers, cfg.header) {
@@ -666,11 +666,24 @@ func (p *OAuth2TokenExchangePolicy) OnRequestBody(ctx context.Context, reqCtx *p
 // both phases when the exchange call itself fails. ImmediateResponse
 // implements both RequestHeaderAction and RequestAction, so this one helper
 // serves OnRequestHeaders and OnRequestBody alike.
+//
+// The failure is the gateway's own: it could not obtain the backend
+// credential, so the fault is policy.FaultCodeMediationFailed. The exchange
+// error is left out of Description: it can carry token-endpoint detail that
+// belongs in the log line the tracking ID points to.
 func badGatewayResponse(trackingID string) policy.ImmediateResponse {
 	return policy.ImmediateResponse{
 		StatusCode: 502,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       fmt.Appendf(nil, `{"error":"bad_gateway","message":"Unable to obtain a backend credential.","tracking_id":%q}`, trackingID),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionRequest,
+			Message:     "Unable to obtain a backend credential.",
+			Description: "token exchange failed, tracking_id " + trackingID,
+		},
 	}
 }
 
@@ -1207,19 +1220,41 @@ func maskToken(token string) string {
 	return token[:4] + "..." + token[len(token)-4:]
 }
 
+// unauthorized rejects a request that carries no subject token to exchange:
+// the caller's credential is missing.
 func unauthorized() policy.ImmediateResponse {
 	return policy.ImmediateResponse{
 		StatusCode: 401,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       []byte(`{"error":"unauthorized","message":"Invalid or expired credentials."}`),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeAuthMissingCredentials,
+			Type:        policy.FaultTypeAuthentication,
+			Direction:   policy.DirectionRequest,
+			Message:     "Invalid or expired credentials.",
+			Description: "subject token missing or empty",
+		},
 	}
 }
 
-func internalError() policy.ImmediateResponse {
+// internalError refuses the request when the policy's configuration cannot be
+// parsed, so the backend credential cannot be obtained. reason names the
+// configuration problem and goes in Description, which reaches fault policies
+// and analytics, never the client.
+func internalError(reason string) policy.ImmediateResponse {
 	return policy.ImmediateResponse{
 		StatusCode: 500,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       []byte(`{"error":"Internal Server Error"}`),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeConfiguration,
+			Direction:   policy.DirectionRequest,
+			Message:     "Internal Server Error",
+			Description: reason,
+		},
 	}
 }
 

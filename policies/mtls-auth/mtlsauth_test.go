@@ -576,6 +576,75 @@ func assertDenied(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderC
 	if string(resp.Body) != wantBody {
 		t.Errorf("body = %q, want %q (deny body must be byte-identical regardless of reason %q)", resp.Body, wantBody, result.reason)
 	}
+	assertFault(t, resp, faultCodeForReason(wantReason), wantReason)
+}
+
+// assertFault asserts resp is declared as an authentication fault with
+// wantCode, carrying wantReason in its Description and the configured message
+// in its Message.
+func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantReason string) {
+	t.Helper()
+	if !resp.IsFault {
+		t.Error("IsFault = false, want true")
+	}
+	if resp.Fault == nil {
+		t.Fatal("Fault = nil, want a fault description")
+	}
+	if resp.Fault.Code != wantCode {
+		t.Errorf("Fault.Code = %q, want %q", resp.Fault.Code, wantCode)
+	}
+	if resp.Fault.Type != policy.FaultTypeAuthentication {
+		t.Errorf("Fault.Type = %q, want %q", resp.Fault.Type, policy.FaultTypeAuthentication)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Errorf("Fault.Direction = %q, want %q", resp.Fault.Direction, policy.DirectionRequest)
+	}
+	if resp.Fault.Message != defaultErrorMessage {
+		t.Errorf("Fault.Message = %q, want %q", resp.Fault.Message, defaultErrorMessage)
+	}
+	if want := "client certificate rejected: " + wantReason; resp.Fault.Description != want {
+		t.Errorf("Fault.Description = %q, want %q", resp.Fault.Description, want)
+	}
+}
+
+// TestFaultCodeForReason pins the fault code each deny reason reports.
+func TestFaultCodeForReason(t *testing.T) {
+	for reason, want := range map[string]string{
+		reasonAttributeAbsent:      policy.FaultCodeAuthGeneral,
+		reasonNoCertificate:        policy.FaultCodeAuthMissingCredentials,
+		reasonExpired:              policy.FaultCodeAuthTokenExpired,
+		reasonNotYetValid:          policy.FaultCodeAuthInvalidCredentials,
+		reasonUntrustedChain:       policy.FaultCodeAuthInvalidCredentials,
+		reasonInvalidCert:          policy.FaultCodeAuthInvalidCredentials,
+		reasonAuthorityNotAccepted: policy.FaultCodeAuthInvalidCredentials,
+		reasonSANMismatch:          policy.FaultCodeAuthInvalidCredentials,
+		reasonThumbprintMismatch:   policy.FaultCodeAuthInvalidCredentials,
+	} {
+		if got := faultCodeForReason(reason); got != want {
+			t.Errorf("faultCodeForReason(%q) = %q, want %q", reason, got, want)
+		}
+	}
+}
+
+// TestMtlsAuthPolicy_RejectionDeclaresFault checks the fault on the two
+// denials that need no certificate: TLS attributes absent, and a connection
+// that presented no certificate.
+func TestMtlsAuthPolicy_RejectionDeclaresFault(t *testing.T) {
+	p := mustGetPolicy(t)
+
+	action := p.OnRequestHeaders(context.Background(), newTestRequestHeaderContext(), map[string]interface{}{})
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("OnRequestHeaders returned %T, want policy.ImmediateResponse", action)
+	}
+	assertFault(t, resp, policy.FaultCodeAuthGeneral, reasonAttributeAbsent)
+
+	action = p.OnRequestHeaders(context.Background(), reqCtxWithTLS(&policy.DownstreamTLS{MTLS: false}), map[string]interface{}{})
+	resp, ok = action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("OnRequestHeaders returned %T, want policy.ImmediateResponse", action)
+	}
+	assertFault(t, resp, policy.FaultCodeAuthMissingCredentials, reasonNoCertificate)
 }
 
 // assertAuthenticated asserts evaluate authenticated at wantEntryIndex and

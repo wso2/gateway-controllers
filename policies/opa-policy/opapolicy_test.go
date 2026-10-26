@@ -200,6 +200,36 @@ func TestOnRequestHeaders_Deny(t *testing.T) {
 	if !ok || resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403, got %#v", resp)
 	}
+	if want := `{"error":"Forbidden","message":"The request was rejected by the OPA policy validation"}`; string(resp.Body) != want {
+		t.Errorf("body = %s, want %s", resp.Body, want)
+	}
+	assertFault(t, resp, policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
+	if want := `OPA policy "authz" rule "allow" denied the request`; resp.Fault.Description != want {
+		t.Errorf("Fault.Description = %q, want %q", resp.Fault.Description, want)
+	}
+}
+
+// assertFault asserts resp is declared as a fault with wantCode and wantType.
+func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantType string) {
+	t.Helper()
+	if !resp.IsFault {
+		t.Error("IsFault = false, want true")
+	}
+	if resp.Fault == nil {
+		t.Fatal("Fault = nil, want a fault description")
+	}
+	if resp.Fault.Code != wantCode {
+		t.Errorf("Fault.Code = %q, want %q", resp.Fault.Code, wantCode)
+	}
+	if resp.Fault.Type != wantType {
+		t.Errorf("Fault.Type = %q, want %q", resp.Fault.Type, wantType)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Errorf("Fault.Direction = %q, want %q", resp.Fault.Direction, policy.DirectionRequest)
+	}
+	if resp.Fault.Description == "" {
+		t.Error("Fault.Description is empty, want the internal reason")
+	}
 }
 
 func TestOnRequestHeaders_Errors(t *testing.T) {
@@ -221,6 +251,10 @@ func TestOnRequestHeaders_Errors(t *testing.T) {
 			if !ok || resp.StatusCode != http.StatusInternalServerError {
 				t.Fatalf("expected 500, got %#v", resp)
 			}
+			if want := `{"error":"Internal Server Error","message":"Unable to validate the request with the OPA policy engine"}`; string(resp.Body) != want {
+				t.Errorf("body = %s, want %s", resp.Body, want)
+			}
+			assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 		})
 	}
 }
@@ -235,6 +269,7 @@ func TestOnRequestHeaders_UnreachableServer(t *testing.T) {
 	if !ok || resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %#v", resp)
 	}
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 }
 
 func TestOnRequestHeaders_Timeout(t *testing.T) {

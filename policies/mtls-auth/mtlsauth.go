@@ -709,7 +709,7 @@ func (p *MtlsAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Re
 			slog.String("api", reqCtx.APIName),
 			slog.String("path", reqCtx.Path),
 		)
-		return p.handleAuthFailure(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage)
+		return p.handleAuthFailure(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, result.reason)
 	}
 
 	properties := map[string]string{
@@ -805,8 +805,9 @@ func setSpanAttributes(ctx context.Context, result evaluationResult, tls *policy
 // handleAuthFailure returns the uniform rejection response and records the
 // failed attempt on the AuthContext chain. The response never varies by
 // reason and carries no WWW-Authenticate header, since mutual TLS has no
-// challenge to offer.
-func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage string) policy.RequestHeaderAction {
+// challenge to offer. reason picks the fault code and goes in the fault's
+// Description, which reaches fault policies and analytics, never the client.
+func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason string) policy.RequestHeaderAction {
 	shared.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
@@ -838,6 +839,32 @@ func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusC
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       []byte(body),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        faultCodeForReason(reason),
+			Type:        policy.FaultTypeAuthentication,
+			Direction:   policy.DirectionRequest,
+			Message:     errorMessage,
+			Description: "client certificate rejected: " + reason,
+		},
+	}
+}
+
+// faultCodeForReason maps a deny reason to its fault code. A request that
+// presented no certificate is missing its credential; an expired certificate
+// is a credential that was valid and is no longer; TLS attributes the policy
+// could not read leave it unable to authenticate at all. Every other reason is
+// a certificate that was presented and rejected.
+func faultCodeForReason(reason string) string {
+	switch reason {
+	case reasonNoCertificate:
+		return policy.FaultCodeAuthMissingCredentials
+	case reasonExpired:
+		return policy.FaultCodeAuthTokenExpired
+	case reasonAttributeAbsent:
+		return policy.FaultCodeAuthGeneral
+	default:
+		return policy.FaultCodeAuthInvalidCredentials
 	}
 }
 
