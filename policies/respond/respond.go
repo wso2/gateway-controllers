@@ -186,6 +186,15 @@ func configError(message string) policy.ImmediateResponse {
 		Headers: map[string]string{
 			"content-type": "application/json",
 		},
-		Body: errBody,
+		Body:    errBody,
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeConfiguration,
+			Direction: policy.DirectionRequest,
+			Message:   "Configuration Error",
+			// message names the operator's own configuration mistake.
+			Description: message,
+		},
 	}
 }

@@ -596,7 +596,17 @@ func (p *JSONXMLMediationPolicy) handleInternalServerError(message string) polic
 			"content-type":   "application/json",
 			"content-length": fmt.Sprintf("%d", len(bodyBytes)),
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: policy.DirectionRequest,
+			Message:   "Payload conversion failed",
+			// message can quote the caller's own payload, so it stays in Description,
+			// which the renderer withholds from the client body.
+			Description: message,
+		},
 	}
 }
 

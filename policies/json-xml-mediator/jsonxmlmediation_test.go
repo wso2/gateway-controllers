@@ -459,3 +459,35 @@ func TestConvertXMLToJSON_RejectsAmplificationPayload(t *testing.T) {
 		t.Fatalf("an ordinary XML document must still convert: %v", err)
 	}
 }
+
+// TestMediationFailureDeclaresFault covers the one rejection this policy makes: it could
+// not apply its own transformation, so the request is refused rather than forwarded
+// half-transformed.
+func TestMediationFailureDeclaresFault(t *testing.T) {
+	p := &JSONXMLMediationPolicy{}
+	action := p.handleInternalServerError("conversion failed: malformed XML")
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a mediation failure")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	// The detail can quote the caller's own payload, so it stays out of the client body.
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to carry the failure detail")
+	}
+}

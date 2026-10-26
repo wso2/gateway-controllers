@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -432,5 +433,60 @@ func TestInterceptorContext_RoundTrip(t *testing.T) {
 	}
 	if seenContext["trace"] != "abc-123" {
 		t.Fatalf("interceptor did not see context: %+v", seenContext)
+	}
+}
+
+// TestInterceptorUnavailableDeclaresFault covers the one rejection this policy makes: the
+// interceptor could not be reached and passthroughOnError is off, so the gateway refuses.
+// Only the deployment can fix an unreachable interceptor, which is what makes notifying
+// worthwhile.
+func TestInterceptorUnavailableDeclaresFault(t *testing.T) {
+	resp := interceptorErrorImmediate(fmt.Errorf("dial tcp: connection refused"), policy.DirectionRequest)
+
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true when the interceptor cannot be reached")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+	}
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to carry the connectivity detail")
+	}
+	// The gateway's own connectivity detail must not reach the caller.
+	if strings.Contains(string(resp.Body), resp.Fault.Description) {
+		t.Fatalf("Description leaked into the client body: %q", resp.Fault.Description)
+	}
+}
+
+// This policy carries the external interceptor's own status, headers and body; it describes
+// nothing of its own, because it did not decide anything.
+//
+// So it does not declare either. The interceptor is acting as a backend, and its 404 is its
+// contract rather than this policy's failure — this policy has no basis for calling it one.
+// An operator who does want an interceptor's 5xx reported has the backend-error path for it,
+// which reaches the fault chain on its own status without this policy asserting anything.
+//
+// What this policy must still not do is DESCRIBE the failure. It has no account of it —
+// inventing a code for someone else's 503 would misreport it.
+func TestAppliedInterceptorReplyIsNotDescribed(t *testing.T) {
+	for _, status := range []int{200, 403, 503} {
+		t.Run(fmt.Sprintf("interceptor returned %d", status), func(t *testing.T) {
+			resp := buildImmediateResponse(&interceptorReply{ResponseCode: status})
+			if resp.StatusCode != status {
+				t.Fatalf("expected status %d, got %d", status, resp.StatusCode)
+			}
+			if resp.IsFault {
+				t.Fatalf("applying the interceptor's own %d must not be a fault", status)
+			}
+			if resp.Fault != nil {
+				t.Fatalf("applying the interceptor's own %d must not describe an error", status)
+			}
+		})
 	}
 }

@@ -88,6 +88,16 @@ func (p *HostRewritePolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy
 			StatusCode: 500,
 			Headers:    map[string]string{"content-type": "application/json"},
 			Body:       []byte(fmt.Sprintf(`{"error":"Configuration Error","message":"%s"}`, err.Error())),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:      policy.FaultCodeMediationFailed,
+				Type:      policy.FaultTypeConfiguration,
+				Direction: policy.DirectionRequest,
+				Message:   "Configuration Error",
+				// err names the operator's own configuration mistake; the renderer
+				// withholds Description from the client body.
+				Description: err.Error(),
+			},
 		}
 	}
 
