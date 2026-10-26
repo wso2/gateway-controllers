@@ -270,3 +270,28 @@ Providers without a `tokenPattern` match all tokens and act as a fallback for an
 ## Related Policies
 
 - **JWT Authentication** — validates self-contained JWT access tokens locally via JWKS providers.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). On a REST, MCP or LLM API the status and body the client receives are the same as in
+v1.0; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error envelope.
+A gateway without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The introspection providers are invalid or not configured, or none matches the configured issuers | `onFailureStatusCode` (default `401`) | `900900` | `authentication` |
+| The authorization header is missing | `onFailureStatusCode` | `900902` | `authentication` |
+| The header does not use the configured scheme, or no provider's `tokenPattern` matches the token | `onFailureStatusCode` | `900901` | `authentication` |
+| The token is inactive or not recognised | `onFailureStatusCode` | `900904` | `authentication` |
+| Introspection failed: no authorization server could answer | `onFailureStatusCode` | `900900` | `authentication` |
+| The token has expired | `onFailureStatusCode` | `900903` | `authentication` |
+| The token is not yet valid, or no valid audience is found | `onFailureStatusCode` | `900901` | `authentication` |
+| The token does not contain any required scope | `onFailureStatusCode` | `900910` | `authorization` |
+| A required claim does not match | `onFailureStatusCode` | `900908` | `authorization` |
+
+The fault's `Description` carries the internal reason, for example
+`token inactive or unrecognized`. It is passed to fault policies and analytics only, never to the
+client.

@@ -188,3 +188,22 @@ When a subscription has a throttle plan configured (for example, request limits 
 
 This allows you to combine subscription validation with fine-grained quota enforcement for different subscription tiers.
 
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). On a REST, MCP or LLM API the status and body the client receives are the same as in
+v1.0; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error envelope.
+A gateway without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The request context, the API id or the subscription store is missing | `403` | `900900` | `authentication` |
+| No subscription token or application identity is presented | `403` | `900902` | `authentication` |
+| No active subscription is found for the token or the application | `403` | `900909` | `authentication` |
+| The subscription plan's request limit is exceeded | `429` | `900804` | `throttling` |
+
+The fault carries no `Description`: its `Message` is the message the client already receives, for
+example `Subscription required for this API: API id is missing`, and the rate-limit fault's is
+`Subscription plan request limit exceeded`.

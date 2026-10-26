@@ -165,3 +165,22 @@ The upstream service then validates the `x-jwt-assertion` header using the publi
 - [`jwt-auth`](../../jwt-auth/v1.0/docs/jwt-authentication.md) — validates incoming JWTs from clients
 - [`basic-auth`](../../basic-auth/) — authenticates clients with username/password; pairs well with Backend JWT to forward user identity
 - [`api-key-auth`](../../api-key-auth/) — authenticates clients with API keys; pairs well with Backend JWT to forward client identity
+
+## Fault reporting
+
+From v1.2, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). On a REST, MCP or LLM API the status and body the client receives are the same as in
+v1.1; on an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error envelope.
+A gateway without fault policy support ignores the fault, and the policy behaves exactly as v1.1.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The configured signing algorithm is not supported | `500` | `960000` | `configuration` |
+| The policy-level signing key cannot be read or parsed, or does not match the algorithm | `500` | `960000` | `mediation` |
+| The backend JWT cannot be signed, with the policy-level key or the gateway's signing key | `500` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example
+`failed to sign the backend JWT: parse signing key: <error>`. It is passed to fault policies and
+analytics only, never to the client.

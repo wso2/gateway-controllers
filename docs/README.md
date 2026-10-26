@@ -32,11 +32,11 @@ All available policies, sorted alphabetically.
 |--------|------------|-------------|
 | [Analytics Header Filter](./analytics-header-filter/v1.0/docs/analytics-header-filter.md) | Logging, Analytics & Monitoring | The Analytics Header Filter policy allows you to control which request and response headers are included in analytics data using allow or deny modes. |
 | [API Key Auth](./api-key-auth/v1.3/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
-| [AWS Authentication](./aws-authentication/v0.10/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |
+| [AWS Authentication](./aws-authentication/v0.11/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |
 | [AWS Bedrock Guardrail](./aws-bedrock-guardrail/v1.3/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against AWS Bedrock Guardrails. |
 | [Azure Content Safety Content Moderation](./azure-content-safety-content-moderation/v1.0/docs/azure-content-safety.md) | Guardrails, AI | Validates request or response body content against Azure Content Safety API for content moderation. |
 | [Azure LLM Cost](./azure-llm-cost/v1.0/docs/azure-llm-cost.md) | AI | Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. |
-| [Backend JWT](./backend-jwt/v1.1/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
+| [Backend JWT](./backend-jwt/v1.2/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
 | [Basic Auth](./basic-auth/v1.1/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
 | [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
@@ -64,9 +64,9 @@ All available policies, sorted alphabetically.
 | [Model Weighted Round Robin](./model-weighted-round-robin/v1.1/docs/model-weighted-round-robin.md) | AI | Implements weighted round-robin load balancing for AI models. |
 | [Mutual TLS Auth](./mtls-auth/v0.9/docs/mtls-authentication.md) | Security | Authenticates API callers using mutual TLS. |
 | [NeMo Guard Content Safety](./nvidia-nemoguard-content-safety/v0.9/docs/nvidia-nemoguard-content-safety.md) | Guardrails, AI | Validates request and/or response content using NVIDIA NeMo Guard (llama-3.1-nemoguard-8b-content-safety). |
-| [OAuth2 Generator](./oauth2-generator/v0.9/docs/oauth2-generator.md) | Security, AI | Generates an upstream credential and injects it into a configurable request header before forwarding the request to the backend. |
+| [OAuth2 Generator](./oauth2-generator/v0.10/docs/oauth2-generator.md) | Security, AI | Generates an upstream credential and injects it into a configurable request header before forwarding the request to the backend. |
 | [OAuth2 Token Exchange](./oauth2-token-exchange/v0.9/docs/oauth2-token-exchange.md) | Security | Exchanges the caller's inbound credential for a backend-specific token at an external OAuth2 authorization server (RFC 8693 Token Exchange or RFC 7523 JWT Bearer) and attaches it to the upstream request, so backend credentials are never exposed to the client and the client's own credential never reaches the backend unless forwarding it is explicitly enabled. |
-| [Opaque Token Auth](./opaque-token-auth/v1.0/docs/opaque-token-authentication.md) | Security, AI | Validates opaque OAuth 2.0 access tokens via RFC 7662 token introspection. |
+| [Opaque Token Auth](./opaque-token-auth/v1.1/docs/opaque-token-authentication.md) | Security, AI | Validates opaque OAuth 2.0 access tokens via RFC 7662 token introspection. |
 | [OpenAI to Anthropic Transformer](./openai-to-anthropic-transformer/v0.9/docs/openai-to-anthropic-transformer.md) | AI, LLM Transformation | Translates OpenAI Chat Completions requests into Anthropic Messages API format and rewrites non-streaming and streaming Anthropic responses back into OpenAI-compatible JSON or Chat Completions Server-Sent Events. |
 | [OpenAI to Azure OpenAI Transformer](./openai-to-azure-openai-transformer/v0.9/docs/openai-to-azure-openai-transformer.md) | AI, LLM Transformation | Routes OpenAI Chat Completions requests to an Azure OpenAI upstream by rewriting the request path with the deployment id and api-version query parameter. |
 | [OpenAI to Bedrock Transformer](./openai-to-bedrock-transformer/v0.9/docs/openai-to-bedrock-transformer.md) | AI, LLM Transformation | Translates OpenAI Chat Completions requests into AWS Bedrock Converse format and rewrites non-streaming and streaming Bedrock responses back into OpenAI-compatible JSON or Server-Sent Events. |
@@ -89,7 +89,7 @@ All available policies, sorted alphabetically.
 | [Semantic Tool Filtering](./semantic-tool-filtering/v1.0/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
 | [Sentence Count Guardrail](./sentence-count-guardrail/v1.0/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
 | [Set Headers](./set-headers/v1.2/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
-| [Subscription Validation](./subscription-validation/v1.0/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
+| [Subscription Validation](./subscription-validation/v1.1/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
 | [Time-Based Model Routing](./time-based-model-routing/v0.9/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
 | [Token Based Ratelimit](./token-based-ratelimit/v1.0/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
 | [TypeSafe Jev Content Safety](./typesafe-jev-content-safety/v0.8/docs/typesafe-jev-content-safety.md) | Guardrails, AI | Screens request or response body content using TypeSafe AI's Jev System One model. |
@@ -99,6 +99,6 @@ All available policies, sorted alphabetically.
 | [TypeSafe Jev Tool Filtering](./typesafe-jev-tool-filtering/v0.8/docs/typesafe-jev-tool-filtering.md) | AI, Transformation | Narrows an LLM request's tools array down to the tools relevant to the current user prompt, using TypeSafe AI's Jev System One model. |
 | [URL Guardrail](./url-guardrail/v1.0/docs/url.md) | Guardrails, AI | Validates URLs found in request or response body content. |
 | [Validate Request with OPA](./opa-policy/v0.1/docs/opa-policy.md) | Security | Validates requests against an Open Policy Agent (OPA) policy engine. |
-| [WebSub HMAC Auth](./websub-hmac-auth/v1.0/docs/websub-hmac-auth.md) | Security, WebSub | Validates HMAC signatures on incoming WebSub hub event notification requests. |
+| [WebSub HMAC Auth](./websub-hmac-auth/v1.1/docs/websub-hmac-auth.md) | Security, WebSub | Validates HMAC signatures on incoming WebSub hub event notification requests. |
 | [Word Count Guardrail](./word-count-guardrail/v1.0/docs/word-count.md) | Guardrails, AI | Validates the word count of request or response body content. |
 <!-- POLICY_TABLE_END -->

@@ -1,7 +1,7 @@
 {
   "name": "oauth2-generator",
   "displayName": "OAuth2 Generator",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "Security",

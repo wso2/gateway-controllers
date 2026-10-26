@@ -1,7 +1,7 @@
 {
   "name": "opaque-token-auth",
   "displayName": "Opaque Token Auth",
-  "version": "1.0",
+  "version": "1.1",
   "provider": "WSO2",
   "categories": [
     "Security",

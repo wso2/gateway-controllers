@@ -135,3 +135,21 @@ All error responses are returned as JSON with `Content-Type: application/json`.
 - name: websub-hmac-auth
   gomodule: github.com/wso2/gateway-controllers/policies/websub-hmac-auth@v1
 ```
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**: a
+stable code and type alongside the response. A gateway that supports fault policies uses it for
+the analytics event and hands it to the API's fault policies (for example `log-message`, to log
+the failure). The status and body the client receives are the same as in v1.0. A gateway without
+fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The signature header is missing (header or body phase) | `401` | `900902` | `authentication` |
+| The signature header is malformed, names a different algorithm, or its digest is not valid hex | `401` | `900901` | `authentication` |
+| No webhook secrets are configured for the API | `401` | `900900` | `authentication` |
+| The HMAC does not match any configured secret | `401` | `900901` | `authentication` |
+
+The fault carries no `Description`: its `Message` is the reason the client already receives in the
+body, for example `invalid HMAC signature`.
