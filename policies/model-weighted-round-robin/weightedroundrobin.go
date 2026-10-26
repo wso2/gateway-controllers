@@ -375,6 +375,13 @@ func (p *ModelWeightedRoundRobinPolicy) OnRequestHeaders(ctx context.Context, re
 			StatusCode: 503,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(`{"error": "All models are currently unavailable"}`),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:      policy.FaultCodeUpstreamUnavailable,
+				Type:      policy.FaultTypeRouting,
+				Direction: policy.DirectionRequest,
+				Message:   "All models are currently unavailable",
+			},
 		}
 	}
 
@@ -474,6 +481,13 @@ func (p *ModelWeightedRoundRobinPolicy) OnRequestBody(ctx context.Context, reqCt
 			StatusCode: 400,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(`{"error":"Request body is empty."}`),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:      policy.FaultCodeInvalidRequestBody,
+				Type:      policy.FaultTypeValidation,
+				Direction: policy.DirectionRequest,
+				Message:   "Request body is empty.",
+			},
 		}
 	}
 
@@ -483,6 +497,16 @@ func (p *ModelWeightedRoundRobinPolicy) OnRequestBody(ctx context.Context, reqCt
 			StatusCode: 400,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(fmt.Sprintf(`{"error":"Invalid JSON in request body: %s"}`, err.Error())),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:      policy.FaultCodeInvalidRequestBody,
+				Type:      policy.FaultTypeValidation,
+				Direction: policy.DirectionRequest,
+				Message:   "Invalid JSON in request body.",
+				// err quotes the caller's own payload, so it stays in Description,
+				// which the renderer withholds from the client body.
+				Description: err.Error(),
+			},
 		}
 	}
 
@@ -492,6 +516,14 @@ func (p *ModelWeightedRoundRobinPolicy) OnRequestBody(ctx context.Context, reqCt
 			StatusCode: 400,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(fmt.Sprintf(`{"error":"Invalid or missing model at '%s': %s"}`, identifier, err.Error())),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeInvalidRequestBody,
+				Type:        policy.FaultTypeValidation,
+				Direction:   policy.DirectionRequest,
+				Message:     "Invalid or missing model in request body.",
+				Description: fmt.Sprintf("model identifier %q: %s", identifier, err.Error()),
+			},
 		}
 	}
 
@@ -501,6 +533,14 @@ func (p *ModelWeightedRoundRobinPolicy) OnRequestBody(ctx context.Context, reqCt
 			StatusCode: 500,
 			Headers:    map[string]string{"Content-Type": "application/json"},
 			Body:       []byte(fmt.Sprintf(`{"error":"Failed to serialize updated request body: %s"}`, err.Error())),
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeMediation,
+				Direction:   policy.DirectionRequest,
+				Message:     "Failed to apply the selected model to the request body.",
+				Description: err.Error(),
+			},
 		}
 	}
 

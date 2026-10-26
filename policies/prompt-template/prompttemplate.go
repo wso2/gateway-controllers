@@ -407,6 +407,16 @@ func (p *PromptTemplatePolicy) buildErrorResponse(reason string, validationError
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: policy.DirectionRequest,
+			Message:   "Prompt template resolution failed",
+			// errorMessage can quote the caller's own payload, so it stays in
+			// Description, which the renderer withholds from the client body.
+			Description: errorMessage,
+		},
 	}
 }

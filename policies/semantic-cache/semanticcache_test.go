@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
 	vectordbproviders "github.com/wso2/api-platform/sdk/ai/vectordb"
+	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
 type mockEmbeddingProvider struct {
@@ -450,6 +450,15 @@ func TestSemanticCachePolicy_OnRequest(t *testing.T) {
 			if tt.wantCacheStatus != "" {
 				if resp.Headers["X-Cache-Status"] != tt.wantCacheStatus {
 					t.Fatalf("unexpected cache status: %q", resp.Headers["X-Cache-Status"])
+				}
+				// A cache hit ends the request successfully. It must never be a fault:
+				// doing so would page on-call for every hit, which is the exact mistake
+				// the zero value of IsFault exists to prevent.
+				if resp.IsFault {
+					t.Fatalf("a cache hit must not be a fault")
+				}
+				if resp.Fault != nil {
+					t.Fatalf("a cache hit must not describe an error")
 				}
 				var body map[string]interface{}
 				if err := json.Unmarshal(resp.Body, &body); err != nil {

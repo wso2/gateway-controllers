@@ -494,3 +494,58 @@ func baseWeightedModels() []interface{} {
 		map[string]interface{}{"model": "gpt-35", "weight": 1},
 	}
 }
+
+// TestModelWeightedRoundRobin_RejectionsDeclareFault covers the conditions this policy refuses on, and pins
+// which code each takes.
+func TestModelWeightedRoundRobin_RejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action interface{}, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated on a rejection")
+		}
+		if resp.Fault.Code != wantCode {
+			t.Fatalf("expected Error.Code=%q, got %q", wantCode, resp.Fault.Code)
+		}
+		if resp.Fault.Type != wantType {
+			t.Fatalf("expected Error.Type=%q, got %q", wantType, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+	}
+
+	t.Run("empty request body", func(t *testing.T) {
+		p := &ModelWeightedRoundRobinPolicy{}
+		p.params.RequestModel.Location = "payload"
+		p.params.RequestModel.Identifier = "$.model"
+		reqCtx := &policy.RequestContext{
+			SharedContext: &policy.SharedContext{
+				Metadata: map[string]interface{}{MetadataKeySelectedModel: "gpt-4"},
+			},
+			Body: nil,
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil),
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("request body is not JSON", func(t *testing.T) {
+		p := &ModelWeightedRoundRobinPolicy{}
+		p.params.RequestModel.Location = "payload"
+		p.params.RequestModel.Identifier = "$.model"
+		reqCtx := &policy.RequestContext{
+			SharedContext: &policy.SharedContext{
+				Metadata: map[string]interface{}{MetadataKeySelectedModel: "gpt-4"},
+			},
+			Body: &policy.Body{Content: []byte("{not json"), Present: true},
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil),
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+}

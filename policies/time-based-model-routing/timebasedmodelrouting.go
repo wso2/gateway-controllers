@@ -135,6 +135,14 @@ func (p *TimeBasedModelRoutingPolicy) applyTarget(
 				StatusCode: 500,
 				Headers:    map[string]string{"Content-Type": "application/json"},
 				Body:       []byte(`{"error":"failed to prepare routed request"}`),
+				IsFault:    true,
+				Fault: &policy.FaultDetails{
+					Code:        policy.FaultCodeMediationFailed,
+					Type:        policy.FaultTypeMediation,
+					Direction:   policy.DirectionRequest,
+					Message:     "failed to prepare routed request",
+					Description: err.Error(),
+				},
 			}
 		}
 		mods.Body = updated
@@ -181,6 +189,13 @@ func badRequest(message string) policy.ImmediateResponse {
 		StatusCode: 400,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+		},
 	}
 }
 
