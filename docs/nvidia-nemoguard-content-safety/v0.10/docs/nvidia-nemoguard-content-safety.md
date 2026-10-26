@@ -288,3 +288,35 @@ When the NeMo Guard endpoint is unreachable and `passthroughOnError` is `false` 
   }
 }
 ```
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+On a gateway whose Python policy SDK predates the fault contract, the policy sends the same
+responses with no fault attached.
+
+
+A blocked request or response reports the guardrail code for the first category NeMo Guard
+returned. The response-phase block keeps status `200`, so the fault is what marks it as a
+failure.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Unsafe content in category S8 (Hate/Identity Hate) | request: `blockStatusCode` (default `400`); response: `200` | `906001` | `guardrail` |
+| Unsafe content in category S2 or S7 (Sexual) | as above | `906002` | `guardrail` |
+| Unsafe content in category S6 (Suicide and Self Harm) | as above | `906003` | `guardrail` |
+| Unsafe content in category S1 (Violence) | as above | `906004` | `guardrail` |
+| Unsafe content in category S10 (Harassment) | as above | `906005` | `guardrail` |
+| Unsafe content in category S3, S4, S5, S17 or S22 (criminal planning, weapons, regulated substances, malware, illegal activity) | as above | `906006` | `guardrail` |
+| Unsafe content in category S12 (Profanity) | as above | `906007` | `guardrail` |
+| Unsafe content in category S9 (PII/Privacy) | as above | `906101` | `guardrail` |
+| Unsafe content in any other category, or with no category | as above | `906099` | `guardrail` |
+| The NeMo Guard endpoint cannot be reached or fails, and `passthroughOnError` is `false` (either phase) | `503` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example `categories: S1, S10`. A
+guardrail fault also names the guardrail and, only when `showAssessment` is `true`, the
+categories. Both are passed to fault policies and analytics only, never to the client.

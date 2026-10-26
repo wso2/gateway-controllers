@@ -1,7 +1,7 @@
 {
   "name": "nvidia-nemoguard-content-safety",
   "displayName": "NeMo Guard Content Safety",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "Guardrails",

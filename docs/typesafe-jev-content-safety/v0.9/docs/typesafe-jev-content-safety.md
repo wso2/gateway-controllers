@@ -343,3 +343,25 @@ operationPolicies:
 ```
 
 Requests always reach the upstream. When the combined probability of `legal_advice` and `medical_advice` is at or above `0.6`, the hit is recorded in analytics and request metadata. Switch `mode` to `enforce` (or remove it) to start blocking.
+
+## Fault reporting
+
+From v0.9, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.8. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.8.
+
+A response-phase rejection is reported with direction `response`. Monitor-mode hits and
+checks that fail open (`passthroughOnError: true`) are not faults.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A question's answer crosses its threshold, request or response phase | `422` | `906099` | `guardrail` |
+| The Jev API call fails, times out or returns an incomplete or malformed answer, and the phase fails closed | `422` | `960000` | `mediation` |
+| The request body cannot be read at `jsonPath` (not JSON, or the path does not fit it), and the phase fails closed | `422` | `960001` | `validation` |
+| The response body cannot be read at `jsonPath` or `streamingJsonPath`, and the phase fails closed | `422` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example `failed questions: jailbreak, severity`.
+A guardrail fault also names the guardrail and, only when `showAssessment` is `true`, the
+assessments. Both are passed to fault policies and analytics only, never to the client.

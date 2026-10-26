@@ -290,3 +290,26 @@ policies:
 ```
 
 Flagged results are recorded in analytics and request metadata without being withheld. Once the thresholds look right on real traffic, set the rule's `mode` to `enforce`.
+
+## Fault reporting
+
+From v0.9, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.8. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.8.
+
+These are response-phase faults. A withheld result keeps status `200` and stays a tool result
+marked `isError`, so the fault is what marks it as a failure; it carries the request `id`.
+Monitor-mode hits and results that pass through unscreened (`passthroughOnError: true`, the
+default) are not faults.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A question's answer crosses its threshold and the result is withheld | `200` | `906008` | `guardrail` |
+| The Jev API call fails, times out or returns an incomplete answer, and the rule fails closed | `200` | `960000` | `mediation` |
+| The result is larger than `maxResultBytes`, is not a valid tool result, or the response cannot be read as a JSON-RPC message, and the rule fails closed | `200` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example `tool fetch_url failed questions: injected_instructions`.
+A guardrail fault also names the guardrail and, only when `showAssessment` is `true`, the
+assessments. Both are passed to fault policies and analytics only, never to the client.

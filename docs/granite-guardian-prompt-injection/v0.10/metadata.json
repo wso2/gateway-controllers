@@ -1,7 +1,7 @@
 {
   "name": "granite-guardian-prompt-injection",
   "displayName": "Granite Guardian Prompt Injection",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "Guardrails",

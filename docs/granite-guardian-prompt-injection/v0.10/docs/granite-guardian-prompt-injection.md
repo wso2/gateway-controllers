@@ -230,3 +230,23 @@ When the Granite Guardian endpoint is unreachable and `passthroughOnError` is `f
   }
 }
 ```
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+On a gateway whose Python policy SDK predates the fault contract, the policy sends the same
+responses with no fault attached.
+
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A configured risk is detected above `threshold` | `blockStatusCode` (default `400`) | `906008` | `guardrail` |
+| The Granite Guardian endpoint cannot be reached or fails, and `passthroughOnError` is `false` | `503` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example `risk jailbreak detected`.
+A guardrail fault also names the guardrail and, only when `showAssessment` is `true`, the
+assessment. Both are passed to fault policies and analytics only, never to the client.

@@ -325,3 +325,24 @@ policies:
 ```
 
 Flagged calls are recorded in analytics and request metadata without being blocked. Once the thresholds look right on real traffic, set the rule's `mode` to `enforce`.
+
+## Fault reporting
+
+From v0.9, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.8. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.8.
+
+Each fault also carries the JSON-RPC error code and the request `id` of the error the client
+receives. Monitor-mode hits and checks that fail open (`passthroughOnError: true`) are not faults.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A question's answer crosses its threshold (JSON-RPC `-32000`) | `400` | `906000` | `guardrail` |
+| The Jev API call fails, times out or returns an incomplete or malformed answer, and the rule fails closed (JSON-RPC `-32603`) | `503` | `960000` | `mediation` |
+| The `tools/call` body is invalid JSON, not a single object, ambiguous, or has invalid params or no tool name (JSON-RPC `-32700`, `-32600` or `-32602`) | `400` | `960001` | `validation` |
+
+The fault's `Description` carries the internal reason, for example `tool run_sql failed questions: destructive`.
+A guardrail fault also names the guardrail and, only when `showAssessment` is `true`, the
+assessments. Both are passed to fault policies and analytics only, never to the client.

@@ -1,7 +1,7 @@
 {
   "name": "typesafe-jev-mcp-tool-intent-verification",
   "displayName": "TypeSafe Jev MCP Tool Intent Verification",
-  "version": "0.8",
+  "version": "0.9",
   "provider": "WSO2",
   "categories": [
     "MCP",
