@@ -285,3 +285,24 @@ promptDecoratorConfig:
 - Valid role values are: `system`, `user`, `assistant`, `tool`.
 - Negative array indices (e.g., `[-1]` for last element) are supported in JSONPath expressions.
 - If `jsonPath` is omitted, it defaults to `"$.messages[-1].content"` for `text` decorations and `"$.messages"` for `messages` decorations.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The request body is empty or is not valid JSON | `500` | `960000` | `mediation` |
+| `jsonPath` does not resolve in the request body | `500` | `960000` | `mediation` |
+| The decoration does not fit the target: `text` is not set for a string target, or `messages` is not set for an array target | `500` | `960000` | `mediation` |
+| The array at `jsonPath` contains an element that is not a message object | `500` | `960000` | `mediation` |
+| The value at `jsonPath` is neither a string nor an array of message objects | `500` | `960000` | `mediation` |
+| The decoration messages cannot be built, or the decorated value cannot be written back to the request body | `500` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example
+`Error parsing JSON payload: <parser error>`. It is passed to fault policies and analytics only,
+never to the client.

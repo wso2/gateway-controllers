@@ -154,3 +154,25 @@ The runtime also accepts `target` and `models` as legacy aliases for the schedul
 
 The runtime accepts `default`, inner `model`, and `provider` as legacy aliases for
 `fallback`, `modelName`, and `providerName`. Canonical fields take precedence.
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| `requestModel.location` is `payload` and the request body is empty, is not valid JSON, or is not a JSON object | `400` | `960001` | `validation` |
+| The selected model cannot be written at `requestModel.identifier` in the request body | `400` | `960001` | `validation` |
+| `requestModel.location` is `queryParam` and the request path cannot be rewritten with the model | `400` | `960001` | `validation` |
+| `requestModel.location` is `pathParam` and `pathExpression` does not match the request path | `400` | `960001` | `validation` |
+| The updated request body cannot be serialized | `500` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason where there is one beyond the body's error
+text, for example the serializer's error when the updated body cannot be produced; for the `400`
+rejections the fault's `Message` is the body's error text, for example
+`request body contains malformed JSON`. The fault is passed to fault policies and analytics only,
+never to the client.

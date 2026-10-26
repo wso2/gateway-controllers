@@ -268,3 +268,22 @@ operationPolicies:
 - Use `onMissingTemplate: passthrough` to leave unresolved template references unchanged instead of returning an error.
 - Use `onUnresolvedPlaceholder: empty` to replace missing placeholders with empty strings, or `error` to fail on missing placeholders.
 - Multiple `template://` patterns can appear in a single payload and will all be processed.
+
+## Fault reporting
+
+From v1.1, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A template reference cannot be resolved: the `template://` reference is malformed, the template does not exist and `onMissingTemplate` is `error`, or a placeholder has no value and `onUnresolvedPlaceholder` is `error` | `500` | `960000` | `mediation` |
+| `jsonPath` is set and the request body is not valid JSON | `500` | `960000` | `mediation` |
+| `jsonPath` is set and does not resolve to a string in the request body | `500` | `960000` | `mediation` |
+| The resolved prompt cannot be written back to the request body | `500` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example
+`Error parsing JSON payload: <parser error>`. It is passed to fault policies and analytics only,
+never to the client.

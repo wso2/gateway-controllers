@@ -400,3 +400,20 @@ The `similarityThreshold` parameter controls how similar requests must be to tri
 - The policy stores embeddings in metadata between request and response phases. Ensure metadata persistence is enabled in your gateway configuration.
 
 - For production deployments, monitor cache hit rates, embedding generation latency, and vector database performance metrics to optimize configuration.
+
+## Fault reporting
+
+From v1.3, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.2. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.2.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| `jsonPath` is set and the text to embed cannot be extracted from the request body | `400` | `960001` | `validation` |
+
+A cache hit is not a fault: the cached response is returned with `200` and `X-Cache-Status: HIT`,
+and nothing is reported. This fault sets no `Description`; its `Message` is
+`Error extracting value from JSONPath`, the reason the body also carries. The fault is passed to
+fault policies and analytics only, never to the client.

@@ -273,3 +273,22 @@ When a model returns a 5xx or 429 response, the policy can automatically suspend
   memory, local to each policy-engine instance. They are not shared across instances and
   are reset on process restart or configuration reload. With multiple gateway replicas,
   each replica advances its own round-robin cursor and tracks suspensions independently.
+
+## Fault reporting
+
+From v1.2, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.1. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.1.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Every configured model is suspended, so none is available to route to | `503` | `303001` | `routing` |
+| `requestModel.location` is `payload` and the request body is empty or is not valid JSON | `400` | `960001` | `validation` |
+| The selected model cannot be written at `requestModel.identifier` in the request body | `400` | `960001` | `validation` |
+| The updated request body cannot be serialized | `500` | `960000` | `mediation` |
+
+The fault's `Description` carries the internal reason, for example the JSON parser's error for a
+malformed body, or the model location and why the model could not be written there. It is passed
+to fault policies and analytics only, never to the client.

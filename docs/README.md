@@ -60,8 +60,8 @@ All available policies, sorted alphabetically.
 | [MCP Rewrite](./mcp-rewrite/v1.1/docs/mcp-rewrite.md) | MCP | MCP Rewrite policy defines user-facing tools, resources, and prompts and maps them to backend capability names using optional "target" fields. |
 | [MCP Spec Validation](./mcp-spec-validation/v0.9/docs/mcp-spec-validation.md) | MCP, Security | Validates incoming MCP requests for conformance with the MCP specification applicable to the declared protocol version. |
 | [MCP Tool Schema Validator](./mcp-tool-schema-validator/v0.9/docs/mcp-tool-schema-validator.md) | MCP, Security | Validates MCP tools/call arguments and structured results against JSON Schemas configured per tool. |
-| [Model Round Robin](./model-round-robin/v1.1/docs/model-round-robin.md) | AI | Implements round-robin load balancing for AI models. |
-| [Model Weighted Round Robin](./model-weighted-round-robin/v1.1/docs/model-weighted-round-robin.md) | AI | Implements weighted round-robin load balancing for AI models. |
+| [Model Round Robin](./model-round-robin/v1.2/docs/model-round-robin.md) | AI | Implements round-robin load balancing for AI models. |
+| [Model Weighted Round Robin](./model-weighted-round-robin/v1.2/docs/model-weighted-round-robin.md) | AI | Implements weighted round-robin load balancing for AI models. |
 | [Mutual TLS Auth](./mtls-auth/v0.9/docs/mtls-authentication.md) | Security | Authenticates API callers using mutual TLS. |
 | [NeMo Guard Content Safety](./nvidia-nemoguard-content-safety/v0.9/docs/nvidia-nemoguard-content-safety.md) | Guardrails, AI | Validates request and/or response content using NVIDIA NeMo Guard (llama-3.1-nemoguard-8b-content-safety). |
 | [OAuth2 Generator](./oauth2-generator/v0.9/docs/oauth2-generator.md) | Security, AI | Generates an upstream credential and injects it into a configurable request header before forwarding the request to the backend. |
@@ -74,8 +74,8 @@ All available policies, sorted alphabetically.
 | [OpenAI to Mistral Transformer](./openai-to-mistral-transformer/v0.10/docs/openai-to-mistral-transformer.md) | AI, LLM Transformation | Adapts OpenAI Chat Completions requests for Mistral-compatible upstreams by resolving the model payload-first, stripping OpenAI fields Mistral rejects, and rewriting the request path. |
 | [PII Masking Regex](./pii-masking-regex/v1.0/docs/pii-masking-regex.md) | Guardrails, AI | Masks or redacts Personally Identifiable Information (PII) from request/response bodies using regex patterns. |
 | [Prompt Compressor](./prompt-compressor/v0.9/docs/prompt-compressor.md) | AI | Compresses selected prompt text in JSON request bodies before upstream LLM calls. |
-| [Prompt Decorator](./prompt-decorator/v1.0/docs/prompt-decorator.md) | AI | Dynamically modifies the prompt by applying custom decorations using a configured strategy. |
-| [Prompt Template](./prompt-template/v1.0/docs/prompt-template.md) | AI | Dynamically modifies the prompt by applying custom templates using a configured strategy. |
+| [Prompt Decorator](./prompt-decorator/v1.1/docs/prompt-decorator.md) | AI | Dynamically modifies the prompt by applying custom decorations using a configured strategy. |
+| [Prompt Template](./prompt-template/v1.1/docs/prompt-template.md) | AI | Dynamically modifies the prompt by applying custom templates using a configured strategy. |
 | [Rate Limit - Advanced](./advanced-ratelimit/v1.4/docs/advanced-ratelimit.md) | Security, AI | Rate limiting policy supporting multiple algorithms, multi-dimensional quotas, weighted rate limiting, flexible key extraction (including JWT/auth-context properties) with optional match conditions, and in-memory, Redis, and Redis-local-async backends. |
 | [Rate Limit - Basic](./basic-ratelimit/v1.0/docs/basic-ratelimit.md) | Security, AI | Simple request rate limiting policy that limits the number of requests per time window. |
 | [Redirect](./redirect/v0.9/docs/redirect.md) | Transformation | Issues an HTTP redirect to the client without forwarding the request to the upstream backend (Gateway-API RequestRedirect semantics). |
@@ -83,14 +83,14 @@ All available policies, sorted alphabetically.
 | [Remove Headers](./remove-headers/v1.0/docs/remove-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to remove headers from either the request or the response. |
 | [Request Rewrite](./request-rewrite/v1.0/docs/request-rewrite.md) | Transformation | Rewrites incoming requests by updating path, query parameters, and/or HTTP method before forwarding to upstream services. |
 | [Respond](./respond/v1.0/docs/respond.md) | AI | Returns an immediate response to the client without forwarding the request to the upstream backend. |
-| [Semantic Cache](./semantic-cache/v1.2/docs/semantic-caching.md) | AI | Implements semantic caching for LLM responses using vector similarity search. |
+| [Semantic Cache](./semantic-cache/v1.3/docs/semantic-caching.md) | AI | Implements semantic caching for LLM responses using vector similarity search. |
 | [Semantic Model Routing](./semantic-model-routing/v0.9/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
 | [Semantic Prompt Guard](./semantic-prompt-guard/v1.0/docs/semantic-prompt-guard.md) | Guardrails, AI | Blocks or allows prompts based on semantic similarity to configured allow/deny phrase embeddings. |
 | [Semantic Tool Filtering](./semantic-tool-filtering/v1.0/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
 | [Sentence Count Guardrail](./sentence-count-guardrail/v1.0/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
 | [Set Headers](./set-headers/v1.2/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
 | [Subscription Validation](./subscription-validation/v1.0/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
-| [Time-Based Model Routing](./time-based-model-routing/v0.9/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
+| [Time-Based Model Routing](./time-based-model-routing/v0.10/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
 | [Token Based Ratelimit](./token-based-ratelimit/v1.0/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
 | [TypeSafe Jev Content Safety](./typesafe-jev-content-safety/v0.8/docs/typesafe-jev-content-safety.md) | Guardrails, AI | Screens request or response body content using TypeSafe AI's Jev System One model. |
 | [TypeSafe Jev MCP Tool Intent Verification](./typesafe-jev-mcp-tool-intent-verification/v0.8/docs/typesafe-jev-mcp-tool-intent-verification.md) | MCP, Security | Screens MCP tools/call requests using TypeSafe AI's Jev System One model. |
