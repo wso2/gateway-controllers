@@ -1,0 +1,10 @@
+{
+  "name": "prompt-decorator",
+  "displayName": "Prompt Decorator",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Dynamically modifies the prompt by applying custom decorations using a configured strategy.\nOnly processes request body."
+}

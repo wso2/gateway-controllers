@@ -1,0 +1,10 @@
+{
+  "name": "time-based-model-routing",
+  "displayName": "Time-Based Model Routing",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone."
+}
