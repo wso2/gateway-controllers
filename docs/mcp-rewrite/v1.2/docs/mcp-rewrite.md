@@ -250,3 +250,24 @@ spec:
   tools:
     ...
 ```
+
+## Fault reporting
+
+From v1.2, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.1. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.1.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The request body could not be read: broken JSON (JSON-RPC `-32700`), or not a single JSON-RPC request object, a member of the wrong type or a member named twice (`-32600`) | `400` | `960001` | `validation` |
+| `Mcp-Method` or `Mcp-Name` is missing while the body names one, cannot be decoded, or disagrees with the body (`-32020`) | `400` | `960001` | `validation` |
+| The request's `params` is not an object, or names no capability (`-32602`) | `400` | `960001` | `validation` |
+| The tool, resource or prompt is not one the policy defines (`-32602`) | `403` | `900908` | `authorization` |
+| The rewritten request could not be serialised (`-32603`) | `500` | `960000` | `mediation` |
+
+A JSON-RPC rejection's fault also carries the JSON-RPC error code shown above and the request id,
+so a fault policy can answer in the same JSON-RPC shape. The fault's `Message` is the JSON-RPC
+error message the client already receives; this policy sets no `Description`. The fault is passed
+to fault policies and analytics only, never to the client.

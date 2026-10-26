@@ -539,3 +539,21 @@ The Result column reflects only the authorization decision. Authentication is ch
 
 - [MCP Authentication Policy](../../../mcp-auth/v1.4/docs/mcp-authentication.md) - Validates JWT tokens and is a prerequisite for MCP Authorization
 - [JWT Authentication Policy](../../../jwt-auth/v1.3/docs/jwt-authentication.md) - Base JWT token validation mechanism
+
+## Fault reporting
+
+From v1.4, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.3. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.3.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one | `400` | `960001` | `validation` |
+| The request body could not be read, or names a member more than once | `400` | `960001` | `validation` |
+| A capability a rule governs is invoked without an authenticated identity | `401` | `900902` | `authentication` |
+| The caller's scopes or claims do not satisfy the matching rules | `403` | `900910` | `authorization` |
+
+The fault's `Message` is the `message` in the response body; this policy sets no `Description`.
+The fault is passed to fault policies and analytics only, never to the client.

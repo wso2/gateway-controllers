@@ -245,3 +245,26 @@ A result whose `structuredContent` fails the schema, or is missing, is replaced 
   every digit.
 - Error details never include argument or result values. The policy writes its own messages
   because the validator's messages quote the value it rejected.
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request phase: the tool's arguments fail its input schema, are not an object, are nested too deeply, or arrive in a body too large to validate (JSON-RPC `-32602`) | `400` | `960001` | `validation` |
+| Request phase: the call or its arguments name a member more than once, or the body is nested beyond the decoder limit (`-32600`) | `400` | `960001` | `validation` |
+| Response phase: the tool result fails the output schema, has no `structuredContent`, names a member more than once, is nested too deeply, is too large to validate, or is empty (`-32021`) | `200` | `960000` | `validation` |
+
+A replaced tool result is a fault even though its status stays `200`: the client receives an
+error instead of the result. A valid result, a tool error (`isError`) and a JSON-RPC error from
+the server are not faults. Every fault also carries the JSON-RPC error code shown above and the
+request id.
+
+The fault's `Description` carries the internal reason, for example
+`tool get_weather result failed validation: schema_mismatch (2 errors)`. It is passed to fault
+policies and analytics only, never to the client.

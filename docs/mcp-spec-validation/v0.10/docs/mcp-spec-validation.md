@@ -269,3 +269,22 @@ Content-Type: text/event-stream
 event: message
 data: {"jsonrpc":"2.0","id":7,"error":{"code":-32020,"message":"Mcp-Method does not match the method in the request body"}}
 ```
+
+## Fault reporting
+
+From v0.10, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v0.9. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v0.9.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| The request body is not valid JSON (JSON-RPC `-32700`) | `400` | `960001` | `validation` |
+| The request body is a batch or a bare scalar, has a member of the wrong type, or names a member twice (`-32600`) | `400` | `960001` | `validation` |
+| On a `2026-07-28` or later request, a required `Mcp-Method` or `Mcp-Name` is missing, a header value has characters not permitted in an HTTP field value or is a malformed sentinel, `MCP-Protocol-Version` is not a dated revision, or a header disagrees with the body (`-32020`) | `400` | `960001` | `validation` |
+
+A JSON-RPC rejection's fault also carries the JSON-RPC error code shown above and the request id,
+so a fault policy can answer in the same JSON-RPC shape. The fault's `Message` is the JSON-RPC
+error message the client already receives; this policy sets no `Description`. The fault is passed
+to fault policies and analytics only, never to the client.

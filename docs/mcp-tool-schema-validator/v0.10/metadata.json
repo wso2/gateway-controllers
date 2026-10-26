@@ -1,7 +1,7 @@
 {
   "name": "mcp-tool-schema-validator",
   "displayName": "MCP Tool Schema Validator",
-  "version": "0.9",
+  "version": "0.10",
   "provider": "WSO2",
   "categories": [
     "MCP",
