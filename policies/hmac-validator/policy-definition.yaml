@@ -1,0 +1,38 @@
+name: hmac-validator
+displayName: HMAC Validator
+version: v0.1.0
+description: |
+  Implements HTTP HMAC Authentication to protect.
+
+parameters:
+  type: object
+  properties:
+    headerName:
+      type: string
+      description: Expected header name for authentication. Compared against the
+        header in the request.
+      minLength: 1
+      maxLength: 256
+    algorithm:
+      type: string
+      description: Expected algorithm for authentication. Compared against the algorithm
+        in the HMAC header.
+      minLength: 1
+      maxLength: 256
+    secretKey:
+      type: string
+      description: Secret key used for HMAC authentication.
+      minLength: 1
+      maxLength: 256
+    allowUnauthenticated:
+      type: boolean
+      description: If true, allows unauthenticated requests to proceed to websubhub.
+      default: false
+  required:
+  - headerName
+  - algorithm
+  - secretKey
+
+systemParameters:
+  type: object
+  properties: {}
