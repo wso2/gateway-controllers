@@ -7,6 +7,10 @@ on:
         description: "Comma-separated policies to test, or 'all' for every policy with integration tests"
         required: true
         default: all
+      block_parallel:
+        description: "Most blocks that boot at the same time across the selected suites; empty uses the IT_BLOCK_PARALLEL variable, then the Makefile default; 0 runs one suite at a time"
+        required: false
+        default: ""
   pull_request:
     branches:
       - main
@@ -145,17 +149,28 @@ jobs:
           GATEWAY_VERSION: ${{ matrix.gateway_version }}
           GATEWAY_HOST: ${{ matrix.gateway_host }}
           POLICIES: ${{ needs.detect.outputs.policies }}
+          BLOCK_PARALLEL: ${{ inputs.block_parallel || vars.IT_BLOCK_PARALLEL }}
         run: |
           set -euo pipefail
+          # Record the runner's memory and load while the suites run, to choose BLOCK_PARALLEL from.
+          usage="$GITHUB_WORKSPACE/resource-usage-$GATEWAY_VERSION.log"
+          (while true; do
+            echo "$(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/ {print "used_mb=" $3 " available_mb=" $7}') load=$(cut -d' ' -f1-3 /proc/loadavg) containers=$(docker ps -q | wc -l)"
+            sleep 10
+          done) >> "$usage" &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
           make it POLICIES="$POLICIES" GATEWAY_VERSION="$GATEWAY_VERSION" GATEWAY_HOST="$GATEWAY_HOST" \
-            2>&1 | tee "$GITHUB_WORKSPACE/policy-it-$GATEWAY_VERSION.log"
+            ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} 2>&1 | tee "$GITHUB_WORKSPACE/policy-it-$GATEWAY_VERSION.log"
 
       - name: Upload the test output
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: gateway-controller-policy-test-output-${{ matrix.gateway_version }}
-          path: policy-it-${{ matrix.gateway_version }}.log
+          path: |
+            policy-it-${{ matrix.gateway_version }}.log
+            resource-usage-${{ matrix.gateway_version }}.log
           if-no-files-found: ignore
           retention-days: 7
 

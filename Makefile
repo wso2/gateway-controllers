@@ -31,8 +31,11 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # to one database (sqlite, postgres or sqlserver); GATEWAY_HOST replaces the image repository prefix.
 # One run builds the gateway once, on the base images of GATEWAY_VERSION, and every selected suite
 # boots that build. It carries every policy of the repository; GATEWAY_POLICIES, a comma-separated
-# list, narrows it.
+# list, narrows it. BLOCK_PARALLEL is the most blocks, each with its own gateway, testbench and
+# database, that boot at once across all selected suites. 0 runs the suites one at a time instead,
+# each with the block parallelism its suite file declares.
 GATEWAY_VERSION ?= 1.2.0
+BLOCK_PARALLEL ?= 7
 comma := ,
 space := $(subst ,, )
 IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml)))
@@ -45,15 +48,9 @@ it: ## Build the gateway once, then run the integration suites of the selected p
 		$(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(GATEWAY_POLICIES),-policies $(GATEWAY_POLICIES)) \
 		-env-file "$$envfile") || { rm -f "$$envfile"; exit 1; }; \
 	set -a; . "$$envfile"; set +a; rm -f "$$envfile"; \
-	failed=""; \
-	for policy in $(IT_POLICIES); do \
-		echo "=== Integration suite of $$policy on gateway $(GATEWAY_VERSION) ==="; \
-		(cd policies/$$policy/it && go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args \
-			$(if $(DB),-blocks=$$policy/$(DB)) \
-			-gateway-version=$(GATEWAY_VERSION) \
-			$(if $(GATEWAY_HOST),-host=$(GATEWAY_HOST))) || failed="$$failed $$policy"; \
-	done; \
-	test -z "$$failed" || { echo "Failed integration suites:$$failed"; exit 1; }
+	cd tests/it && go run ./cmd/run-suites -policies-dir ../../policies -policies "$(subst $(space),$(comma),$(IT_POLICIES))" \
+		-version $(GATEWAY_VERSION) $(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(DB),-db $(DB)) \
+		$(if $(BLOCK_PARALLEL),-block-parallel $(BLOCK_PARALLEL))
 
 it-unit: ## Run the unit tests of the shared steps and of the selected policies' own steps
 	cd tests/it && go test ./... -count=1

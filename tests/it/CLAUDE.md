@@ -18,6 +18,7 @@ tests needs only that policy's folder and the shared code in `tests/it/common`.
 | Canonical resource templates every policy shares | `tests/it/common/resources/templates/` |
 | The code that runs a policy's suite on the shared steps | `tests/it/common/suite/` |
 | The code that builds the gateway the suites boot | `tests/it/common/gateway/`, `tests/it/cmd/build-gateway/` |
+| The code that runs the selected suites, several at a time when asked | `tests/it/common/runsuites/`, `tests/it/cmd/run-suites/` |
 | Selecting the policies a pull request runs | `scripts/it/changed-policies.py` |
 | The pull request workflow | `.github/workflows/it.yml` |
 
@@ -57,8 +58,9 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0
 ```
 
-`make it` builds the gateway once, then runs the suite of each named policy in turn against it and
-fails if any of them fails. To run one suite directly, from its folder (it builds its own gateway):
+`make it` builds the gateway once, then runs the suites of the named policies against it, together
+while their blocks fit within `BLOCK_PARALLEL`, and fails if any of them fails. To run one suite directly, from
+its folder (it builds its own gateway):
 
 ```bash
 cd policies/time-based-model-routing/it
@@ -72,6 +74,7 @@ go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args -gateway-vers
 | `GATEWAY_HOST` | Image repository prefix for the gateway controller, runtime and builder images when they are not under `ghcr.io/wso2/api-platform`. The 1.1.0 images are patched, because the stock 1.1.0 builder cannot build policies that need a newer Go, so 1.1.0 runs use `docker.io/isurangaws`, which publishes all three. |
 | `GATEWAY_POLICIES` | Comma-separated policies to build into the shared gateway. Defaults to every policy of the repository. |
 | `DB` | Limit the run to `sqlite`, `postgres` or `sqlserver`. All three run by default. |
+| `BLOCK_PARALLEL` | The most blocks that boot at the same time across all selected suites. Each block boots its own gateway, testbench and database. Default `7`. It replaces the `parallel` of the suite files, and suites run together while their blocks fit in the limit: every block runs at once when the total is at most `BLOCK_PARALLEL`. `0` runs the suites one at a time, each with the `parallel` its suite file declares. |
 
 - `latest` is the gateway built from api-platform `main`; it can change between two runs, and its
   `main-<sha>` tag identifies what a run used. It is pulled again on every run.
