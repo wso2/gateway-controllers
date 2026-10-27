@@ -62,11 +62,9 @@ GO_LICENSE_HEADER = """\
 """
 
 SUITE = """\
-# The integration suite of the @NAME@ policy. The gateway under test is built from this policy and
-# the policies the gateway controller requires (tests/it/common/suite), staged as the policy tree
-# that addPoliciesFrom names. Feature paths are relative to this directory. Give a runner a tags
-# entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release newer than the
-# oldest one tested.
+# The integration suite of the @NAME@ policy. Feature paths are relative to this directory. Give a
+# runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release newer
+# than the oldest one tested.
 
 suite: @NAME@
 
@@ -88,7 +86,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: @NAME@

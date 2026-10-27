@@ -9,7 +9,7 @@ tests needs only that policy's folder and the shared code in `tests/it/common`.
 
 | What | Where |
 | --- | --- |
-| A policy's suite: the gateway it boots, its databases, its runners | `policies/<name>/it/it-suite.yaml` |
+| A policy's suite: its databases and its runners | `policies/<name>/it/it-suite.yaml` |
 | A policy's scenarios | `policies/<name>/it/features/*.feature` |
 | Steps only that policy needs | `policies/<name>/it/steps/` |
 | The policy suite's Go module and test entry | `policies/<name>/it/go.mod`, `policies/<name>/it/suite_test.go` |
@@ -17,15 +17,20 @@ tests needs only that policy's folder and the shared code in `tests/it/common`.
 | Steps every policy shares | `tests/it/common/steps/` |
 | Canonical resource templates every policy shares | `tests/it/common/resources/templates/` |
 | The code that runs a policy's suite on the shared steps | `tests/it/common/suite/` |
+| The code that builds the gateway the suites boot | `tests/it/common/gateway/`, `tests/it/cmd/build-gateway/` |
 | Selecting the policies a pull request runs | `scripts/it/changed-policies.py` |
 | The pull request workflow | `.github/workflows/it.yml` |
 
-A suite has one block, named for the policy. The gateway is built from the policy under test and
-the policies the gateway controller itself requires to create LLM providers and proxies
-(`api-key-auth`, `host-rewrite`, `oauth2-generator`, `respond` and `set-headers`), not from the
-whole catalog: the suite file's `addPoliciesFrom: policies` names a temporary workspace that
-`tests/it/common/suite` fills with copies of those policy folders (without their `it/`). A policy
-whose scenarios use further policies lists them in its `suite_test.go`:
+A suite has one block, named for the policy. It names no policy tree: the gateway it boots is not
+built by the suite. `make it` builds the gateway once per gateway version
+(`tests/it/cmd/build-gateway`), from every policy of the repository on the base images of that
+version, and every selected suite boots that build. It hands the build to the suites through the
+framework's `IT_IMAGE_GATEWAY_CONTROLLER` and `IT_IMAGE_GATEWAY_RUNTIME`, as images tagged with the
+version (`local/apip-it-gateway-controller:<version>`). A suite run directly with `go test`, without
+those variables, builds a gateway of its own from the policy under test and the policies the gateway
+controller itself requires to create LLM providers and proxies (`api-key-auth`, `host-rewrite`,
+`oauth2-generator`, `respond` and `set-headers`). A policy whose scenarios use further policies
+lists them in its `suite_test.go` for that run:
 `suite.Config{Register: steps.Register, Companions: []string{"<other policy>"}}`. A policy's `it/`
 folder is a Go module of its own, `github.com/wso2/gateway-controllers/policies/<name>/it`, so its
 test dependencies never reach the policy's own `go.mod`, and the gateway build and the policy's
@@ -52,8 +57,8 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0
 ```
 
-`make it` runs the suite of each named policy in turn and fails if any of them fails. To run one
-suite directly, from its folder:
+`make it` builds the gateway once, then runs the suite of each named policy in turn against it and
+fails if any of them fails. To run one suite directly, from its folder (it builds its own gateway):
 
 ```bash
 cd policies/time-based-model-routing/it
@@ -65,6 +70,7 @@ go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args -gateway-vers
 | `POLICIES` | Comma-separated policies. Defaults to every policy that has an `it/it-suite.yaml`. |
 | `GATEWAY_VERSION` | `1.2.0`, `1.1.0` or `latest`. Default `1.2.0`. |
 | `GATEWAY_HOST` | Image repository prefix for the gateway controller, runtime and builder images when they are not under `ghcr.io/wso2/api-platform`. The 1.1.0 images are patched, because the stock 1.1.0 builder cannot build policies that need a newer Go, so 1.1.0 runs use `docker.io/isurangaws`, which publishes all three. |
+| `GATEWAY_POLICIES` | Comma-separated policies to build into the shared gateway. Defaults to every policy of the repository. |
 | `DB` | Limit the run to `sqlite`, `postgres` or `sqlserver`. All three run by default. |
 
 - `latest` is the gateway built from api-platform `main`; it can change between two runs, and its
@@ -162,10 +168,10 @@ steps does not reach it by itself, so port it when a policy needs it.
 `scripts/it/changed-policies.py` selects every policy whose folder has a changed file, plus the
 policies that depend on one of them through a `go.mod` require, limited to policies that have an
 `it/it-suite.yaml`. A change to the workflow, these scripts, `tests/it` or the Makefile runs the
-smoke policy instead. One workflow run executes the suite of every selected policy on gateway
-1.2.0, 1.1.0 and latest, each on all three databases (SQL Server only from 1.2.0). The standards
-check runs on the shared steps and on the selected policies' steps, features and suite files. A
-manual run takes `policies` (comma-separated, or `all`).
+smoke policy instead. One workflow run builds the gateway once for each of gateway 1.2.0, 1.1.0 and
+latest and executes the suite of every selected policy on it, each on all three databases (SQL
+Server only from 1.2.0). The standards check runs on the shared steps and on the selected policies'
+steps, features and suite file. A manual run takes `policies` (comma-separated, or `all`).
 
 ## The framework dependency
 

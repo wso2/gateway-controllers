@@ -29,15 +29,23 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 #   make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0
 # POLICIES is a comma-separated list and defaults to every policy that has a suite. DB limits the run
 # to one database (sqlite, postgres or sqlserver); GATEWAY_HOST replaces the image repository prefix.
+# One run builds the gateway once, on the base images of GATEWAY_VERSION, and every selected suite
+# boots that build. It carries every policy of the repository; GATEWAY_POLICIES, a comma-separated
+# list, narrows it.
 GATEWAY_VERSION ?= 1.2.0
 comma := ,
 space := $(subst ,, )
 IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml)))
 IT_STANDARDS_IMPORTS = github.com/wso2/gateway-controllers/tests/it/
 
-it: ## Run the integration suites of the selected policies against a released gateway
+it: ## Build the gateway once, then run the integration suites of the selected policies against it
 	@test -n "$(IT_POLICIES)" || { echo "no policy has an integration suite"; exit 2; }
-	@failed=""; \
+	@envfile=$$(mktemp); \
+	(cd tests/it && go run ./cmd/build-gateway -policies-dir ../../policies -version $(GATEWAY_VERSION) \
+		$(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(GATEWAY_POLICIES),-policies $(GATEWAY_POLICIES)) \
+		-env-file "$$envfile") || { rm -f "$$envfile"; exit 1; }; \
+	set -a; . "$$envfile"; set +a; rm -f "$$envfile"; \
+	failed=""; \
 	for policy in $(IT_POLICIES); do \
 		echo "=== Integration suite of $$policy on gateway $(GATEWAY_VERSION) ==="; \
 		(cd policies/$$policy/it && go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args \

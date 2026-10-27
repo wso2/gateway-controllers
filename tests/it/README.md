@@ -2,10 +2,10 @@
 
 Integration tests for the gateway policies in this repository. Each policy owns its suite in
 `policies/<name>/it/`: a suite file, its scenarios, its own step definitions and a Go module. The
-suite boots a gateway built from that policy, with the policies the gateway controller requires,
-and runs the scenarios against it, so a pull request that changes a policy updates and runs its
-tests together. A pull request runs the suite of every policy it changes, in one workflow run, on
-gateway 1.2.0, 1.1.0 and the latest image.
+suite boots the gateway of its run and runs the scenarios against it, so a pull request that changes
+a policy updates and runs its tests together. A run builds that gateway once, from every policy of
+the repository, and every suite of the run boots it. A pull request runs the suite of every policy
+it changes, in one workflow run, on gateway 1.2.0, 1.1.0 and the latest image.
 
 This directory, `tests/it`, holds what every policy's suite shares: the step definitions, the
 canonical resource templates and the code that runs a suite. They began as copies of the

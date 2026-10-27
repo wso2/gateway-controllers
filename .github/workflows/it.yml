@@ -86,7 +86,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
         include:
           - gateway_version: "1.2.0"
@@ -118,8 +118,9 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      # One run per gateway version executes the suite of every selected policy in turn and fails
-      # if any of them fails.
+      # One run per gateway version builds the gateway once, from every policy of the repository on
+      # the base images of that version, then executes the suite of every selected policy in turn
+      # against that build and fails if any of them fails.
       # The suites run on the testbench image published with the pinned framework release. Pull it
       # when this repository can, and otherwise build the same image from the pinned module's
       # source, which is what the release publishes.
