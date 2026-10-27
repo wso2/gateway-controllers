@@ -19,21 +19,50 @@
 package runsuites
 
 import (
+	"errors"
+	"strings"
+
 	"github.com/wso2/api-platform/tests/framework/core/components"
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 )
 
-// BlockCount returns how many blocks the suite in suiteFile boots under selection: its blocks
-// with their database matrices expanded, less the variants and runners the selected gateway
-// version excludes. It resolves the suite the way the suite's own run does, against registry.
-func BlockCount(registry *components.Registry, suiteFile string, selection topology.Selection) (int, error) {
+// Block is one block of a suite, a matrix variant when the suite declares a database matrix.
+type Block struct {
+	// Name is the name a run selects the block by, for example "basic-auth/postgres".
+	Name string
+
+	// Runners is the number of runners the block executes one after the other.
+	Runners int
+}
+
+// Blocks returns the blocks the suite in suiteFile boots under selection: its blocks with their
+// database matrices expanded, less the variants and runners the selected gateway version excludes.
+// It resolves the suite the way the suite's own run does, against registry. A suite the selection
+// leaves nothing to run has no blocks and no error.
+func Blocks(registry *components.Registry, suiteFile string, selection topology.Selection) ([]Block, error) {
 	resolved, err := topology.LoadFile(suiteFile, registry)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	applied, err := selection.Apply(resolved)
-	if err != nil {
-		return 0, err
+	if nothingToRun(err) {
+		return nil, nil
 	}
-	return len(applied.Blocks), nil
+	if err != nil {
+		return nil, err
+	}
+	blocks := make([]Block, len(applied.Blocks))
+	for i, block := range applied.Blocks {
+		blocks[i] = Block{Name: block.Name, Runners: len(block.Runners)}
+	}
+	return blocks, nil
+}
+
+// nothingToRun reports whether err says the selection left no block or runner to execute. The
+// framework reports that as ErrNothingToRun only for a selection by policy name, which a suite of
+// declared runners never uses; otherwise it returns a plain error.
+func nothingToRun(err error) bool {
+	return errors.Is(err, topology.ErrNothingToRun) ||
+		err != nil && (strings.Contains(err.Error(), "the selection has no compatible blocks") ||
+			strings.Contains(err.Error(), "the selection has no compatible runners"))
 }

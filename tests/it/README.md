@@ -38,7 +38,7 @@ tests/it/
 
 ```bash
 make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0   # run (1.2.0, 1.1.0 or latest)
-make it POLICIES=a,b BLOCK_PARALLEL=6                             # at most 6 blocks at once (default 7, 0 = one suite at a time)
+make it POLICIES=a,b BLOCK_PARALLEL=6                             # 6 blocks at a time across the suites (default 7)
 make it-scaffold POLICY=<name>                                    # start tests for a policy
 make it-standards                                                 # check steps, features and suites
 make it-unit                                                      # unit tests of the steps

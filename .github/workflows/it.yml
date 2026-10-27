@@ -8,7 +8,7 @@ on:
         required: true
         default: all
       block_parallel:
-        description: "Most blocks that boot at the same time across the selected suites; empty uses the IT_BLOCK_PARALLEL variable, then the Makefile default; 0 runs one suite at a time"
+        description: "Most blocks that run at the same time across the selected suites; empty uses the IT_BLOCK_PARALLEL variable, then the Makefile default"
         required: false
         default: ""
   pull_request:

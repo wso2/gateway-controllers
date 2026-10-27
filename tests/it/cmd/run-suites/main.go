@@ -17,26 +17,23 @@
  */
 
 // Command run-suites runs the integration suites of the named policies against the gateway the
-// environment names, keeping the number of blocks that boot at the same time under -block-parallel.
-// Without it the suites run one at a time and each keeps the block parallelism its suite file declares.
+// environment names. It runs every block of every suite as a process of its own and keeps
+// -block-parallel of them running at the same time until none is left to start.
 //
 //	go run ./cmd/run-suites -policies-dir ../../policies -policies basic-auth,cors -version 1.2.0 -block-parallel 6
 package main
 
 import (
-	"bytes"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/wso2/api-platform/tests/framework/core/catalog"
-	"github.com/wso2/api-platform/tests/framework/core/components"
 	"github.com/wso2/api-platform/tests/framework/core/suiterun"
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 
@@ -45,138 +42,199 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	policiesDir := flag.String("policies-dir", "", "the folder that holds the policy folders")
 	policies := flag.String("policies", "", "comma-separated policies whose suites to run")
 	version := flag.String("version", "", "the gateway version the suites run against")
 	host := flag.String("host", "", "the image repository prefix of the gateway's images")
 	db := flag.String("db", "", "limit each suite to one database (sqlite, postgres or sqlserver)")
-	blockParallel := flag.Int("block-parallel", 0, "the most blocks that boot at the same time across all suites; 0 runs the suites one at a time")
-	timeout := flag.Duration("timeout", 40*time.Minute, "the time limit of each suite")
+	blockParallel := flag.Int("block-parallel", 1, "the most blocks that run at the same time across all suites")
+	timeout := flag.Duration("timeout", 40*time.Minute, "the time limit of each block")
 	flag.Parse()
 
 	names := splitList(*policies)
-	if len(names) == 0 || *version == "" || *policiesDir == "" || *blockParallel < 0 {
-		fmt.Fprintln(os.Stderr, "run-suites: -policies-dir, -policies and -version are required, and -block-parallel cannot be negative")
-		os.Exit(2)
+	if len(names) == 0 || *version == "" || *policiesDir == "" || *blockParallel < 1 {
+		fmt.Fprintln(os.Stderr, "run-suites: -policies-dir, -policies and -version are required, and -block-parallel must be at least 1")
+		return 2
 	}
-
-	r := runner{
-		policiesDir: *policiesDir,
-		version:     *version,
-		host:        *host,
-		db:          *db,
-		timeout:     *timeout,
-		override:    *blockParallel > 0,
-	}
-	limit := *blockParallel
-	if r.override {
-		registry, err := catalog.Registry()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "run-suites:", err)
-			os.Exit(1)
-		}
-		r.registry = registry
-	}
-	jobs := make([]runsuites.Job, 0, len(names))
-	for _, name := range names {
-		weight := 1
-		if r.override {
-			weight = min(r.blocks(name), limit)
-		}
-		jobs = append(jobs, runsuites.Job{Name: name, Weight: weight})
-	}
-	if r.override {
-		fmt.Printf("running %d suites with at most %d blocks at the same time\n", len(jobs), limit)
-	}
-
-	failed := runsuites.Schedule(jobs, limit, r.run)
-	if len(failed) > 0 {
-		fmt.Printf("Failed integration suites: %s\n", strings.Join(failed, " "))
-		os.Exit(1)
-	}
-}
-
-// runner runs the suite of one policy.
-type runner struct {
-	policiesDir string
-	version     string
-	host        string
-	db          string
-	timeout     time.Duration
-
-	// override is set when -block-parallel replaces the block parallelism of the suite files.
-	override bool
-
-	// registry resolves the suite files when override is set.
-	registry *components.Registry
-
-	// printing keeps the output of two suites from interleaving.
-	printing sync.Mutex
-}
-
-// selection is how a run of the policy's suite selects blocks.
-func (r *runner) selection(policy string) topology.Selection {
-	selection := topology.Selection{GatewayVersion: r.version, GatewayHost: r.host}
-	if r.db != "" {
-		selection.Blocks = []string{policy + "/" + r.db}
-	}
-	return selection
-}
-
-// blocks returns how many blocks the policy's suite boots. A suite that cannot be judged here
-// counts as one block, and runs with whatever it finds to do.
-func (r *runner) blocks(policy string) int {
-	suiteFile := filepath.Join(r.policiesDir, policy, gateway.IntegrationDir, suiterun.DefaultSuiteFile)
-	count, err := runsuites.BlockCount(r.registry, suiteFile, r.selection(policy))
-	if err != nil || count < 1 {
+	registry, err := catalog.Registry()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "run-suites:", err)
 		return 1
 	}
-	return count
+	binaries, err := os.MkdirTemp("", "suite-binaries-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "run-suites:", err)
+		return 1
+	}
+	defer os.RemoveAll(binaries)
+
+	r := &runner{
+		policiesDir: *policiesDir,
+		binaries:    binaries,
+		version:     *version,
+		host:        *host,
+		timeout:     *timeout,
+		builds:      map[string]*build{},
+		items:       map[string]item{},
+	}
+
+	var jobs []runsuites.Job
+	var broken []string
+	for _, policy := range names {
+		suiteFile := filepath.Join(*policiesDir, policy, gateway.IntegrationDir, suiterun.DefaultSuiteFile)
+		blocks, err := runsuites.Blocks(registry, suiteFile, topology.Selection{GatewayVersion: *version, GatewayHost: *host})
+		if err != nil {
+			r.say("[%s] cannot list the blocks: %v\n", policy, err)
+			broken = append(broken, policy)
+			continue
+		}
+		blocks = onlyDatabase(blocks, *db)
+		if len(blocks) == 0 {
+			r.say("[%s] nothing to run on gateway %s\n", policy, *version)
+			continue
+		}
+		for _, block := range blocks {
+			name := displayName(policy, block.Name)
+			r.items[name] = item{policy: policy, block: block.Name}
+			jobs = append(jobs, runsuites.Job{Name: name, Priority: block.Runners})
+		}
+	}
+	r.say("running %d blocks of %d suites on gateway %s, at most %d at the same time\n", len(jobs), len(names)-len(broken), *version, *blockParallel)
+
+	failed := runsuites.Schedule(jobs, *blockParallel, r.run)
+	failed = append(failed, broken...)
+	if len(failed) > 0 {
+		fmt.Printf("Failed integration blocks: %s\n", strings.Join(failed, " "))
+		return 1
+	}
+	return 0
 }
 
-// run runs the suite of the job's policy and prints its output when it ends.
+// item is the policy and block a job runs.
+type item struct {
+	policy string
+	block  string
+}
+
+// build is the test binary of one policy, compiled once.
+type build struct {
+	once sync.Once
+	path string
+	err  error
+}
+
+// runner runs the blocks of the suites.
+type runner struct {
+	policiesDir string
+	binaries    string
+	version     string
+	host        string
+	timeout     time.Duration
+
+	// items maps a job name to what it runs. It is complete before the first job starts.
+	items map[string]item
+
+	// printing keeps the lines of blocks that run at the same time from splitting each other.
+	printing sync.Mutex
+
+	mu     sync.Mutex
+	builds map[string]*build
+}
+
+// run runs the block of the job in a process of its own, streaming its output with the block's
+// name in front of every line.
 func (r *runner) run(job runsuites.Job) error {
-	args := []string{"test", ".", "-count=1", "-timeout=" + r.timeout.String(), "-v", "-run", "TestIntegrationSuite", "-args"}
-	if r.db != "" {
-		args = append(args, "-blocks="+job.Name+"/"+r.db)
+	it := r.items[job.Name]
+	out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+job.Name+"] ")
+	defer out.Flush()
+
+	binary, err := r.binary(it.policy)
+	if err != nil {
+		fmt.Fprintf(out, "cannot build the suite: %v\n", err)
+		return err
 	}
-	if r.override {
-		args = append(args, "-block-parallel="+strconv.Itoa(job.Weight))
+	args := []string{
+		"-test.v", "-test.run=^TestIntegrationSuite$", "-test.timeout=" + r.timeout.String(),
+		"-blocks=" + it.block, "-gateway-version=" + r.version,
 	}
-	args = append(args, "-gateway-version="+r.version)
 	if r.host != "" {
 		args = append(args, "-host="+r.host)
 	}
+	cmd := exec.Command(binary, args...)
+	cmd.Dir = r.policyDir(it.policy)
+	cmd.Stdout = out
+	cmd.Stderr = out
 
-	var output bytes.Buffer
-	cmd := exec.Command("go", args...)
-	cmd.Dir = filepath.Join(r.policiesDir, job.Name, gateway.IntegrationDir)
-	cmd.Stdout = &output
-	cmd.Stderr = &output
-
-	if r.override {
-		r.print("=== Integration suite of %s on gateway %s started, %d blocks at once ===\n", job.Name, r.version, job.Weight)
-	} else {
-		r.print("=== Integration suite of %s on gateway %s started ===\n", job.Name, r.version)
-	}
+	fmt.Fprintf(out, "=== started on gateway %s ===\n", r.version)
 	started := time.Now()
-	err := cmd.Run()
-
+	err = cmd.Run()
 	result := "passed"
 	if err != nil {
 		result = "failed: " + err.Error()
 	}
-	r.printing.Lock()
-	defer r.printing.Unlock()
-	fmt.Printf("=== Integration suite of %s on gateway %s ===\n%s", job.Name, r.version, output.String())
-	fmt.Printf("=== %s %s in %.0fs ===\n", job.Name, result, time.Since(started).Seconds())
+	fmt.Fprintf(out, "=== %s in %.0fs ===\n", result, time.Since(started).Seconds())
 	return err
 }
 
-func (r *runner) print(format string, args ...any) {
+// binary returns the compiled test binary of the policy, compiling it on first use. Blocks of the
+// same policy wait for that one compilation.
+func (r *runner) binary(policy string) (string, error) {
+	r.mu.Lock()
+	b, ok := r.builds[policy]
+	if !ok {
+		b = &build{}
+		r.builds[policy] = b
+	}
+	r.mu.Unlock()
+
+	b.once.Do(func() {
+		b.path = filepath.Join(r.binaries, policy+".test")
+		out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+policy+" build] ")
+		defer out.Flush()
+		cmd := exec.Command("go", "test", "-c", "-o", b.path, ".")
+		cmd.Dir = r.policyDir(policy)
+		cmd.Stdout = out
+		cmd.Stderr = out
+		b.err = cmd.Run()
+	})
+	return b.path, b.err
+}
+
+func (r *runner) policyDir(policy string) string {
+	return filepath.Join(r.policiesDir, policy, gateway.IntegrationDir)
+}
+
+func (r *runner) say(format string, args ...any) {
 	r.printing.Lock()
 	defer r.printing.Unlock()
 	fmt.Printf(format, args...)
+}
+
+// displayName names a block in the output: the block's own name when it begins with the policy's,
+// otherwise the policy and the block.
+func displayName(policy, block string) string {
+	if block == policy || strings.HasPrefix(block, policy+"/") || strings.HasPrefix(block, policy+"-") {
+		return block
+	}
+	return policy + "/" + block
+}
+
+// onlyDatabase keeps the matrix variants that run on database. An empty database keeps every block.
+func onlyDatabase(blocks []runsuites.Block, database string) []runsuites.Block {
+	if database == "" {
+		return blocks
+	}
+	var kept []runsuites.Block
+	for _, block := range blocks {
+		if strings.HasSuffix(block.Name, "/"+database) {
+			kept = append(kept, block)
+		}
+	}
+	return kept
 }
 
 func splitList(value string) []string {

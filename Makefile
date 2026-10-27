@@ -31,9 +31,8 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # to one database (sqlite, postgres or sqlserver); GATEWAY_HOST replaces the image repository prefix.
 # One run builds the gateway once, on the base images of GATEWAY_VERSION, and every selected suite
 # boots that build. It carries every policy of the repository; GATEWAY_POLICIES, a comma-separated
-# list, narrows it. BLOCK_PARALLEL is the most blocks, each with its own gateway, testbench and
-# database, that boot at once across all selected suites. 0 runs the suites one at a time instead,
-# each with the block parallelism its suite file declares.
+# list, narrows it. BLOCK_PARALLEL is the number of blocks, each with its own gateway, testbench and
+# database, that run at once across all selected suites: as soon as one ends, the next starts.
 GATEWAY_VERSION ?= 1.2.0
 BLOCK_PARALLEL ?= 7
 comma := ,

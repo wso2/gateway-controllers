@@ -16,92 +16,67 @@
  * under the License.
  */
 
-// Package runsuites runs the integration suites of several policies at once while keeping the
-// number of blocks they boot at the same time under one limit. Each suite is a process of its own,
-// so the framework's -block-parallel bounds the blocks of one suite only; the limit across suites
-// is kept here.
+// Package runsuites runs the blocks of the integration suites of several policies at once, keeping
+// the number of blocks that run at the same time at a limit until none is left to start. A suite
+// is a process of its own, so the framework's -block-parallel bounds the blocks of one suite only;
+// the limit across suites is kept here, with every block run as a job of its own.
 package runsuites
 
 import (
-	"slices"
 	"sort"
 	"sync"
 )
 
-// Job is one suite to run and the number of blocks it boots at once.
+// Job is one block to run. It takes one slot while it runs.
 type Job struct {
-	// Name identifies the suite, usually the policy it belongs to.
+	// Name identifies the block in the output and in the list of failures.
 	Name string
 
-	// Weight is the number of blocks the suite runs at the same time. A weight below one counts
-	// as one, and a weight above the limit counts as the limit.
-	Weight int
+	// Priority orders the jobs: a job with a higher priority starts before a job with a lower
+	// one. The number of runners a block executes is a good priority, since it keeps the longest
+	// blocks from finishing last on their own.
+	Priority int
 }
 
-// Schedule runs every job through run and returns the names of the jobs whose run returned an
-// error, in name order. A job starts as soon as the weights of the running jobs plus its own stay
-// within limit, so when the weights of all jobs fit, they all run at once. The heaviest jobs start
-// first and lighter ones fill the room they leave. A limit below one counts as one, which runs the
-// jobs one at a time.
+// Schedule runs every job through run, at most limit at a time, and returns the names of the jobs
+// whose run returned an error, in name order. A job starts as soon as a slot is free, so limit jobs
+// are running until fewer than limit are left. A limit below one counts as one.
 func Schedule(jobs []Job, limit int, run func(Job) error) []string {
 	limit = max(limit, 1)
-	pending := ordered(jobs, limit)
+	queue := ordered(jobs)
 
 	var (
 		mu     sync.Mutex
-		wake   = sync.NewCond(&mu)
-		used   int
 		failed []string
 		wg     sync.WaitGroup
+		next   = make(chan Job)
 	)
-	for len(pending) > 0 {
-		mu.Lock()
-		next := firstFit(pending, limit-used)
-		for next < 0 {
-			wake.Wait()
-			next = firstFit(pending, limit-used)
-		}
-		job := pending[next]
-		pending = slices.Delete(pending, next, next+1)
-		used += job.Weight
-		mu.Unlock()
-
+	for range min(limit, len(queue)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			err := run(job)
-			mu.Lock()
-			defer mu.Unlock()
-			used -= job.Weight
-			if err != nil {
-				failed = append(failed, job.Name)
+			for job := range next {
+				if err := run(job); err != nil {
+					mu.Lock()
+					failed = append(failed, job.Name)
+					mu.Unlock()
+				}
 			}
-			wake.Broadcast()
 		}()
 	}
+	for _, job := range queue {
+		next <- job
+	}
+	close(next)
 	wg.Wait()
 	sort.Strings(failed)
 	return failed
 }
 
-// ordered returns a copy of jobs with every weight clamped to 1..limit, heaviest first and in the
-// given order among equal weights.
-func ordered(jobs []Job, limit int) []Job {
-	out := make([]Job, len(jobs))
-	for i, job := range jobs {
-		job.Weight = min(max(job.Weight, 1), limit)
-		out[i] = job
-	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Weight > out[j].Weight })
+// ordered returns a copy of jobs with the highest priority first, and in the given order among
+// equal priorities.
+func ordered(jobs []Job) []Job {
+	out := append([]Job(nil), jobs...)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority > out[j].Priority })
 	return out
-}
-
-// firstFit returns the index of the first job whose weight is at most room, or -1.
-func firstFit(jobs []Job, room int) int {
-	for i, job := range jobs {
-		if job.Weight <= room {
-			return i
-		}
-	}
-	return -1
 }

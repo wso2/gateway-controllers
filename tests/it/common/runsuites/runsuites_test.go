@@ -19,10 +19,14 @@
 package runsuites
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -32,136 +36,126 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 )
 
-// load tracks the weight of the jobs running at the same time.
-type load struct {
+// gauge tracks how many jobs run at the same time.
+type gauge struct {
 	mu      sync.Mutex
 	current int
 	peak    int
 }
 
-func (l *load) enter(weight int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.current += weight
-	l.peak = max(l.peak, l.current)
+func (g *gauge) enter() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.current++
+	g.peak = max(g.peak, g.current)
 }
 
-func (l *load) leave(weight int) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.current -= weight
+func (g *gauge) leave() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.current--
 }
 
-func TestScheduleKeepsTheRunningWeightWithinTheLimit(t *testing.T) {
-	jobs := []Job{{"a", 3}, {"b", 3}, {"c", 2}, {"d", 2}, {"e", 1}, {"f", 1}}
-	var l load
+func names(count int) []Job {
+	jobs := make([]Job, count)
+	for i := range jobs {
+		jobs[i] = Job{Name: fmt.Sprintf("job-%02d", i)}
+	}
+	return jobs
+}
+
+func TestScheduleRunsEveryJobOnceWithinTheLimit(t *testing.T) {
+	var g gauge
+	var mu sync.Mutex
 	ran := map[string]int{}
-	var ranMu sync.Mutex
 
-	failed := Schedule(jobs, 4, func(job Job) error {
-		l.enter(job.Weight)
-		defer l.leave(job.Weight)
-		time.Sleep(20 * time.Millisecond)
-		ranMu.Lock()
+	failed := Schedule(names(20), 4, func(job Job) error {
+		g.enter()
+		defer g.leave()
+		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
 		ran[job.Name]++
-		ranMu.Unlock()
+		mu.Unlock()
 		return nil
 	})
 
 	if len(failed) != 0 {
 		t.Fatalf("failed = %v, want none", failed)
 	}
-	if l.peak > 4 {
-		t.Fatalf("peak weight = %d, want at most 4", l.peak)
+	if g.peak > 4 {
+		t.Fatalf("peak = %d jobs at once, want at most 4", g.peak)
 	}
-	for _, job := range jobs {
+	if g.peak < 4 {
+		t.Fatalf("peak = %d jobs at once, want the limit of 4 to be reached", g.peak)
+	}
+	for _, job := range names(20) {
 		if ran[job.Name] != 1 {
 			t.Errorf("job %s ran %d times, want once", job.Name, ran[job.Name])
 		}
 	}
 }
 
-func TestScheduleRunsEveryJobAtOnceWhenTheyFit(t *testing.T) {
-	jobs := []Job{{"a", 3}, {"b", 2}, {"c", 1}}
+func TestScheduleStartsTheNextJobAsSoonAsAnyJobEnds(t *testing.T) {
+	jobs := []Job{{Name: "short"}, {Name: "long-1"}, {Name: "long-2"}, {Name: "late"}}
 	started := make(chan string, len(jobs))
 	release := make(chan struct{})
 
 	done := make(chan []string)
 	go func() {
-		done <- Schedule(jobs, 6, func(job Job) error {
+		done <- Schedule(jobs, 3, func(job Job) error {
 			started <- job.Name
-			<-release
+			if job.Name != "short" {
+				<-release
+			}
 			return nil
 		})
 	}()
 
+	seen := map[string]bool{}
 	for range jobs {
 		select {
-		case <-started:
+		case name := <-started:
+			seen[name] = true
 		case <-time.After(5 * time.Second):
-			t.Fatal("the jobs did not all start while the others were still running")
+			t.Fatalf("started %v while the long jobs still held two slots, want all four", seen)
 		}
 	}
 	close(release)
 	<-done
-}
-
-func TestScheduleRunsJobsOneAtATimeWithoutALimit(t *testing.T) {
-	var l load
-	jobs := []Job{{"a", 1}, {"b", 1}, {"c", 1}}
-	Schedule(jobs, 0, func(job Job) error {
-		l.enter(job.Weight)
-		defer l.leave(job.Weight)
-		time.Sleep(10 * time.Millisecond)
-		return nil
-	})
-	if l.peak != 1 {
-		t.Fatalf("peak weight = %d, want 1", l.peak)
+	if !seen["late"] {
+		t.Fatal("the job behind the limit never started before the long jobs ended")
 	}
 }
 
-func TestScheduleClampsAJobHeavierThanTheLimit(t *testing.T) {
-	var l load
-	var seen []int
-	var mu sync.Mutex
-	Schedule([]Job{{"big", 10}, {"zero", 0}, {"negative", -3}}, 3, func(job Job) error {
-		l.enter(job.Weight)
-		defer l.leave(job.Weight)
-		mu.Lock()
-		seen = append(seen, job.Weight)
-		mu.Unlock()
-		time.Sleep(10 * time.Millisecond)
-		return nil
-	})
-	if l.peak > 3 {
-		t.Fatalf("peak weight = %d, want at most 3", l.peak)
-	}
-	for _, weight := range seen {
-		if weight < 1 || weight > 3 {
-			t.Errorf("a job ran with weight %d, want 1 to 3", weight)
+func TestScheduleRunsJobsOneAtATimeWhenTheLimitIsBelowOne(t *testing.T) {
+	for _, limit := range []int{0, -3} {
+		var g gauge
+		Schedule(names(4), limit, func(Job) error {
+			g.enter()
+			defer g.leave()
+			time.Sleep(5 * time.Millisecond)
+			return nil
+		})
+		if g.peak != 1 {
+			t.Fatalf("limit %d: peak = %d jobs at once, want 1", limit, g.peak)
 		}
 	}
 }
 
-func TestScheduleStartsTheHeaviestJobsFirstAndFillsTheRoomWithLighterOnes(t *testing.T) {
+func TestScheduleStartsTheHighestPriorityFirst(t *testing.T) {
+	jobs := []Job{{"low", 1}, {"high-a", 5}, {"middle", 3}, {"high-b", 5}}
 	var order []string
-	var mu sync.Mutex
-	Schedule([]Job{{"light", 1}, {"heavy", 3}, {"middle", 2}}, 3, func(job Job) error {
-		mu.Lock()
+	Schedule(jobs, 1, func(job Job) error {
 		order = append(order, job.Name)
-		mu.Unlock()
 		return nil
 	})
-	if len(order) != 3 {
-		t.Fatalf("ran %v, want all three", order)
-	}
-	if order[0] != "heavy" {
-		t.Fatalf("started %v first, want heavy", order[0])
+	if want := []string{"high-a", "high-b", "middle", "low"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("order = %v, want %v", order, want)
 	}
 }
 
 func TestScheduleReturnsTheFailedJobsInNameOrder(t *testing.T) {
-	jobs := []Job{{"c", 1}, {"a", 1}, {"b", 1}, {"d", 1}}
+	jobs := []Job{{Name: "c"}, {Name: "a"}, {Name: "b"}, {Name: "d"}}
 	failed := Schedule(jobs, 4, func(job Job) error {
 		if job.Name == "d" {
 			return nil
@@ -173,9 +167,19 @@ func TestScheduleReturnsTheFailedJobsInNameOrder(t *testing.T) {
 	}
 }
 
-func TestScheduleWithNoJobsReturnsNothing(t *testing.T) {
+func TestScheduleHandlesNoJobsAndAnOversizedLimit(t *testing.T) {
 	if failed := Schedule(nil, 3, func(Job) error { return errors.New("never") }); len(failed) != 0 {
 		t.Fatalf("failed = %v, want none", failed)
+	}
+	var g gauge
+	Schedule(names(2), 50, func(Job) error {
+		g.enter()
+		defer g.leave()
+		time.Sleep(5 * time.Millisecond)
+		return nil
+	})
+	if g.peak > 2 {
+		t.Fatalf("peak = %d jobs at once, want at most the 2 jobs there are", g.peak)
 	}
 }
 
@@ -196,9 +200,12 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
-      - name: first
+      - name: one
         features:
-          - features/first.feature
+          - features/one.feature
+      - name: two
+        features:
+          - features/two.feature
   - name: second
     parallel: 1
     components:
@@ -207,19 +214,29 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
-      - name: second
+      - name: only
         features:
-          - features/second.feature
+          - features/only.feature
 `
 
-func writeSuite(t *testing.T, content string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "it-suite.yaml")
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("writing the suite file: %v", err)
-	}
-	return path
-}
+const gatedSuiteFile = `suite: gated
+defaults:
+  parallel: 1
+  components:
+    platform-gateway:
+      db: sqlite
+blocks:
+  - name: gated
+    parallel: 1
+    components:
+      - name: platform-gateway
+      - name: testbench
+    runners:
+      - name: newer
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/newer.feature
+`
 
 func registry(t *testing.T) *components.Registry {
 	t.Helper()
@@ -230,43 +247,147 @@ func registry(t *testing.T) *components.Registry {
 	return r
 }
 
-func TestBlockCountExpandsTheDatabaseMatrixAndDropsExcludedVariants(t *testing.T) {
+func writeSuite(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "it-suite.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing the suite file: %v", err)
+	}
+	return path
+}
+
+func blockNames(blocks []Block) []string {
+	out := make([]string, len(blocks))
+	for i, block := range blocks {
+		out[i] = block.Name
+	}
+	slices.Sort(out)
+	return out
+}
+
+func TestBlocksExpandTheDatabaseMatrixAndDropExcludedVariants(t *testing.T) {
 	path := writeSuite(t, suiteFile)
 	tests := []struct {
 		name      string
 		selection topology.Selection
-		want      int
+		want      []string
 	}{
-		{"current release", topology.Selection{GatewayVersion: "1.2.0"}, 6},
-		{"release without sqlserver", topology.Selection{GatewayVersion: "1.1.0"}, 4},
-		{"latest", topology.Selection{GatewayVersion: "latest"}, 6},
-		{"one block's database", topology.Selection{GatewayVersion: "1.2.0", Blocks: []string{"first/sqlite"}}, 1},
+		{"current release", topology.Selection{GatewayVersion: "1.2.0"},
+			[]string{"first/postgres", "first/sqlite", "first/sqlserver", "second/postgres", "second/sqlite", "second/sqlserver"}},
+		{"release without sqlserver", topology.Selection{GatewayVersion: "1.1.0"},
+			[]string{"first/postgres", "first/sqlite", "second/postgres", "second/sqlite"}},
+		{"latest", topology.Selection{GatewayVersion: "latest"},
+			[]string{"first/postgres", "first/sqlite", "first/sqlserver", "second/postgres", "second/sqlite", "second/sqlserver"}},
+		{"one variant", topology.Selection{GatewayVersion: "1.2.0", Blocks: []string{"first/sqlite"}},
+			[]string{"first/sqlite"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := BlockCount(registry(t), path, tt.selection)
+			blocks, err := Blocks(registry(t), path, tt.selection)
 			if err != nil {
-				t.Fatalf("BlockCount: %v", err)
+				t.Fatalf("Blocks: %v", err)
 			}
-			if got != tt.want {
-				t.Fatalf("BlockCount = %d, want %d", got, tt.want)
+			if got := blockNames(blocks); !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("blocks = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestBlockCountReportsAnUnreadableSuite(t *testing.T) {
-	if _, err := BlockCount(registry(t), filepath.Join(t.TempDir(), "missing.yaml"), topology.Selection{}); err == nil {
-		t.Fatal("BlockCount of a missing file returned no error")
+func TestBlocksCountTheRunnersOfEachBlock(t *testing.T) {
+	blocks, err := Blocks(registry(t), writeSuite(t, suiteFile), topology.Selection{GatewayVersion: "1.2.0", Blocks: []string{"first/sqlite", "second/sqlite"}})
+	if err != nil {
+		t.Fatalf("Blocks: %v", err)
 	}
-	if _, err := BlockCount(registry(t), writeSuite(t, "not: [a suite"), topology.Selection{}); err == nil {
-		t.Fatal("BlockCount of a malformed file returned no error")
+	runners := map[string]int{}
+	for _, block := range blocks {
+		runners[block.Name] = block.Runners
+	}
+	if want := map[string]int{"first/sqlite": 2, "second/sqlite": 1}; !reflect.DeepEqual(runners, want) {
+		t.Fatalf("runners = %v, want %v", runners, want)
 	}
 }
 
-func TestBlockCountReportsASelectionThatMatchesNothing(t *testing.T) {
-	path := writeSuite(t, suiteFile)
-	if _, err := BlockCount(registry(t), path, topology.Selection{GatewayVersion: "1.2.0", Blocks: []string{"missing/sqlite"}}); err == nil {
-		t.Fatal("BlockCount of an unknown block returned no error")
+func TestBlocksOfASuiteTheGatewayVersionExcludesAreEmpty(t *testing.T) {
+	blocks, err := Blocks(registry(t), writeSuite(t, gatedSuiteFile), topology.Selection{GatewayVersion: "1.1.0"})
+	if err != nil {
+		t.Fatalf("Blocks: %v", err)
+	}
+	if len(blocks) != 0 {
+		t.Fatalf("blocks = %v, want none", blocks)
+	}
+	if blocks, err = Blocks(registry(t), writeSuite(t, gatedSuiteFile), topology.Selection{GatewayVersion: "1.2.0"}); err != nil || len(blocks) != 1 {
+		t.Fatalf("blocks = %v, error = %v, want the one block on 1.2.0", blocks, err)
+	}
+}
+
+func TestBlocksReportAnUnreadableSuite(t *testing.T) {
+	if _, err := Blocks(registry(t), filepath.Join(t.TempDir(), "missing.yaml"), topology.Selection{}); err == nil {
+		t.Fatal("Blocks of a missing file returned no error")
+	}
+	if _, err := Blocks(registry(t), writeSuite(t, "not: [a suite"), topology.Selection{}); err == nil {
+		t.Fatal("Blocks of a malformed file returned no error")
+	}
+}
+
+func TestLineWriterPrefixesWholeLinesAndHoldsAPartialLine(t *testing.T) {
+	var out bytes.Buffer
+	var mu sync.Mutex
+	w := NewLineWriter(&out, &mu, "[a] ")
+
+	if _, err := w.Write([]byte("one\ntwo")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := out.String(), "[a] one\n"; got != want {
+		t.Fatalf("after the first write = %q, want %q", got, want)
+	}
+	if _, err := w.Write([]byte(" more\nthree\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if got, want := out.String(), "[a] one\n[a] two more\n[a] three\n"; got != want {
+		t.Fatalf("after the second write = %q, want %q", got, want)
+	}
+}
+
+func TestLineWriterFlushEndsAnUnfinishedLine(t *testing.T) {
+	var out bytes.Buffer
+	var mu sync.Mutex
+	w := NewLineWriter(&out, &mu, "> ")
+	if err := w.Flush(); err != nil || out.Len() != 0 {
+		t.Fatalf("Flush of nothing wrote %q, error %v", out.String(), err)
+	}
+	w.Write([]byte("tail"))
+	if err := w.Flush(); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if got, want := out.String(), "> tail\n"; got != want {
+		t.Fatalf("output = %q, want %q", got, want)
+	}
+}
+
+func TestLineWritersSharingAMutexNeverSplitALine(t *testing.T) {
+	var out bytes.Buffer
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, prefix := range []string{"[a] ", "[b] ", "[c] "} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := NewLineWriter(&out, &mu, prefix)
+			for range 200 {
+				w.Write([]byte("a whole line of output\n"))
+			}
+		}()
+	}
+	wg.Wait()
+
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 600 {
+		t.Fatalf("got %d lines, want 600", len(lines))
+	}
+	for _, line := range lines {
+		if line != "[a] a whole line of output" && line != "[b] a whole line of output" && line != "[c] a whole line of output" {
+			t.Fatalf("a line was split or mixed: %q", line)
+		}
 	}
 }
