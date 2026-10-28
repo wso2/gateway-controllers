@@ -34,6 +34,11 @@ const (
 	MediationFlowRequest  = "REQUEST"
 	MediationFlowResponse = "RESPONSE"
 	MediationFlowFault    = "FAULT"
+
+	// faultPhaseKey is the params key an attachment under globalFaultPolicies uses. It is a
+	// sibling of "request" and "response" and mutually exclusive with both, which the policy
+	// definition's schema enforces.
+	faultPhaseKey = "fault"
 )
 
 // LogMessagePolicy implements logging of request/response payloads and headers
@@ -65,6 +70,9 @@ func (p *LogMessagePolicy) Mode() policy.ProcessingMode {
 }
 
 // LogRecord represents the structure of log data
+//
+// The fault fields are omitempty so a request or response record serialises exactly as it
+// did before OnFault existed; they are populated only on the fault path.
 type LogRecord struct {
 	MediationFlow string                 `json:"mediation-flow"`
 	RequestID     string                 `json:"request-id"`
@@ -72,6 +80,23 @@ type LogRecord struct {
 	ResourcePath  string                 `json:"resource-path"`
 	Payload       string                 `json:"payload,omitempty"`
 	Headers       map[string]interface{} `json:"headers,omitempty"`
+
+	// Status is the status the client will receive.
+	Status int `json:"status,omitempty"`
+	// OriginalStatus is the upstream's own status when a policy changed it. Not otherwise
+	// recoverable — once a guardrail turns a 200 into a 422, the original is gone from
+	// every downstream view.
+	OriginalStatus int `json:"original-status,omitempty"`
+	// FaultCode and FaultType are the failing policy's own classification.
+	FaultCode string `json:"error-code,omitempty"`
+	FaultType string `json:"error-type,omitempty"`
+	// FaultMessage is the client-facing summary. The fault's Description is deliberately
+	// NOT logged here: for a guardrail it is the blocked content itself.
+	FaultMessage string `json:"error-message,omitempty"`
+	// FailingPolicy names the policy that caused the failure, and is empty when no policy
+	// did — an infrastructure failure, for instance. Empty means "not caused by a policy",
+	// never "unknown".
+	FailingPolicy string `json:"failing-policy,omitempty"`
 }
 
 // parseFlowConfig parses flow configuration from request/response parameters.
@@ -249,6 +274,78 @@ func (p *LogMessagePolicy) OnResponseBody(ctx context.Context, respCtx *policy.R
 	// Continue with the response unchanged.
 	return policy.DownstreamResponseModifications{}
 }
+
+// OnFault implements policy.FaultPolicy, which is what makes this policy usable in an API's
+// fault sequence. Recording a failure is exactly what this policy is for, so the fault path
+// is the one place it has the most to say.
+//
+// It returns nil — "no action". This policy never modifies traffic, and on the fault path
+// the client is already receiving an error; a notify-only policy has nothing to add to the
+// response.
+//
+// It also cannot fail the request. Every read below tolerates a nil, the logging call
+// already swallows its own marshal errors, and nil is returned on every path — so there is
+// no way for this policy to turn one failure into a second.
+func (p *LogMessagePolicy) OnFault(ctx context.Context, faultCtx *policy.FaultContext, params map[string]interface{}) *policy.FaultResponse {
+	if faultCtx == nil {
+		// Nothing to record, and certainly nothing worth panicking over.
+		return nil
+	}
+
+	// Read from the `fault` block, never `response`. An attachment lives under either
+	// `policies:` or `globalFaultPolicies:`, never both, so a fault attachment carries
+	// `fault` and nothing else; the schema rejects a params object declaring both.
+	//
+	// The record itself is written whether or not the block is present: the operator asked
+	// for this policy in the fault sequence, and a fault policy that silently does nothing
+	// would be the worse surprise. The config only decides whether the error payload and
+	// headers are included — and those are the parts worth an explicit opt-in, since an
+	// error body can carry detail a healthy response would not.
+	config := p.parseFlowConfig(params, faultPhaseKey)
+
+	logRecord := LogRecord{
+		MediationFlow:  MediationFlowFault,
+		OriginalStatus: faultCtx.OriginalStatus,
+		FailingPolicy:  faultCtx.Policy,
+	}
+
+	// The failure is read from faultCtx rather than re-derived: the gateway already
+	// determined what failed, including for a router failure where no policy did.
+	if faultCtx.Fault != nil {
+		logRecord.FaultCode = faultCtx.Fault.Code
+		logRecord.FaultType = faultCtx.Fault.Type
+		logRecord.FaultMessage = faultCtx.Fault.Message
+	}
+
+	// FaultContext declares its response fields directly rather than embedding a response
+	// context, so there is no longer a pointer to guard: reading ResponseStatus or
+	// ResponseHeaders cannot panic, and both helpers below already treat a nil Headers as
+	// "nothing to report". ResponseBody stays checked because it is still a pointer, and a
+	// failure raised before any body existed leaves it nil.
+	logRecord.Status = faultCtx.ResponseStatus
+
+	ds := faultCtx.DownstreamRequest()
+	logRecord.HTTPMethod = ds.Method
+	logRecord.ResourcePath = ds.Path
+	logRecord.RequestID = p.getResponseRequestIDv2(faultCtx.ResponseHeaders)
+
+	if config.logHeaders {
+		logRecord.Headers = p.buildHeadersMap(faultCtx.ResponseHeaders, config.excludedHeaders)
+	}
+	if config.logPayload && faultCtx.ResponseBody != nil && faultCtx.ResponseBody.Present &&
+		len(faultCtx.ResponseBody.Content) > 0 {
+		logRecord.Payload = string(faultCtx.ResponseBody.Content)
+	}
+
+	p.logMessage(logRecord)
+	return nil
+}
+
+// Compile-time check that this policy satisfies the fault-path contract. Without it, a
+// signature drift would only surface at runtime, where the gateway drops the fault entry
+// with "[chain-build] skipping fault-policies policy that does not implement OnFault" — it
+// fails loudly, but the policy also silently never runs.
+var _ policy.FaultPolicy = (*LogMessagePolicy)(nil)
 
 // ─── Streaming (SSE) support ──────────────────────────────────────────────────
 //
