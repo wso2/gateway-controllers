@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +41,10 @@ import (
 	"github.com/wso2/gateway-controllers/tests/it/common/gateway"
 	"github.com/wso2/gateway-controllers/tests/it/common/runsuites"
 )
+
+// buildSecondsVariable carries the time the gateway build took from build-gateway, through the
+// environment file the suites boot from, so the timeline can report it.
+const buildSecondsVariable = "IT_GATEWAY_BUILD_SECONDS"
 
 func main() {
 	os.Exit(run())
@@ -53,6 +58,7 @@ func run() int {
 	db := flag.String("db", "", "limit each suite to one database (sqlite, postgres or sqlserver)")
 	blockParallel := flag.Int("block-parallel", 1, "the most blocks that run at the same time across all suites")
 	timeout := flag.Duration("timeout", 40*time.Minute, "the time limit of each block")
+	timeline := flag.String("timeline", "", "the file to write the time each block took to, as JSON")
 	flag.Parse()
 
 	names := splitList(*policies)
@@ -80,6 +86,7 @@ func run() int {
 		timeout:     *timeout,
 		builds:      map[string]*build{},
 		items:       map[string]item{},
+		recorder:    runsuites.NewRecorder(),
 	}
 
 	var jobs []runsuites.Job
@@ -95,6 +102,7 @@ func run() int {
 		blocks = onlyDatabase(blocks, *db)
 		if len(blocks) == 0 {
 			r.say("[%s] nothing to run on gateway %s\n", policy, *version)
+			r.recorder.Skip(policy)
 			continue
 		}
 		for _, block := range blocks {
@@ -107,6 +115,12 @@ func run() int {
 
 	failed := runsuites.Schedule(jobs, *blockParallel, r.run)
 	failed = append(failed, broken...)
+	if *timeline != "" {
+		buildSeconds, _ := strconv.ParseFloat(os.Getenv(buildSecondsVariable), 64)
+		if err := runsuites.WriteTimeline(*timeline, r.recorder.Timeline(*version, *blockParallel, buildSeconds)); err != nil {
+			fmt.Fprintln(os.Stderr, "run-suites: writing the timeline:", err)
+		}
+	}
 	if len(failed) > 0 {
 		fmt.Printf("Failed integration blocks: %s\n", strings.Join(failed, " "))
 		return 1
@@ -137,6 +151,8 @@ type runner struct {
 	// items maps a job name to what it runs. It is complete before the first job starts.
 	items map[string]item
 
+	recorder *runsuites.Recorder
+
 	// printing keeps the lines of blocks that run at the same time from splitting each other.
 	printing sync.Mutex
 
@@ -154,8 +170,10 @@ func (r *runner) run(job runsuites.Job) error {
 	out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+job.Name+"] ")
 	defer out.Flush()
 
+	started := time.Now()
 	if err := r.warm(it.policy); err != nil {
 		fmt.Fprintf(out, "cannot build the suite: %v\n", err)
+		r.recorder.Block(job.Slot, it.policy, it.block, started, false)
 		return err
 	}
 	args := []string{
@@ -171,13 +189,13 @@ func (r *runner) run(job runsuites.Job) error {
 	cmd.Stderr = out
 
 	fmt.Fprintf(out, "=== started on gateway %s ===\n", r.version)
-	started := time.Now()
 	err := cmd.Run()
 	result := "passed"
 	if err != nil {
 		result = "failed: " + err.Error()
 	}
 	fmt.Fprintf(out, "=== %s in %.0fs ===\n", result, time.Since(started).Seconds())
+	r.recorder.Block(job.Slot, it.policy, it.block, started, err == nil)
 	return err
 }
 
@@ -200,7 +218,9 @@ func (r *runner) warm(policy string) error {
 		cmd.Dir = r.policyDir(policy)
 		cmd.Stdout = out
 		cmd.Stderr = out
+		started := time.Now()
 		b.err = cmd.Run()
+		r.recorder.Compile(policy, started, b.err == nil)
 	})
 	return b.err
 }

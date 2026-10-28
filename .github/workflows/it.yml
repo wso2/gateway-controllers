@@ -51,6 +51,7 @@ jobs:
           set -euo pipefail
           python3 scripts/it/test_changed_policies.py
           python3 scripts/it/test_scaffold.py
+          python3 scripts/it/test_render_timeline.py
           if [[ -n "$REQUESTED_POLICIES" ]]; then
             python3 scripts/it/changed-policies.py --policies "$REQUESTED_POLICIES"
           else
@@ -150,6 +151,7 @@ jobs:
           GATEWAY_HOST: ${{ matrix.gateway_host }}
           POLICIES: ${{ needs.detect.outputs.policies }}
           BLOCK_PARALLEL: ${{ inputs.block_parallel || vars.IT_BLOCK_PARALLEL }}
+          IT_TIMELINE: ${{ github.workspace }}/it-timeline-${{ matrix.gateway_version }}.json
         run: |
           set -euo pipefail
           # Record the runner's memory and load while the suites run, to choose BLOCK_PARALLEL from.
@@ -161,7 +163,20 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           make it POLICIES="$POLICIES" GATEWAY_VERSION="$GATEWAY_VERSION" GATEWAY_HOST="$GATEWAY_HOST" \
-            ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} 2>&1 | tee "$GITHUB_WORKSPACE/policy-it-$GATEWAY_VERSION.log"
+            ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} IT_TIMELINE="$IT_TIMELINE" \
+            2>&1 | tee "$GITHUB_WORKSPACE/policy-it-$GATEWAY_VERSION.log"
+
+      # The time each policy suite took on this gateway version, in the run summary. It is best
+      # effort and never fails the job.
+      - name: Summarize the suite timing
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GATEWAY_VERSION: ${{ matrix.gateway_version }}
+        run: |
+          python3 gateway-controllers/scripts/it/render-timeline.py \
+            --input "$GITHUB_WORKSPACE/it-timeline-$GATEWAY_VERSION.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the test output
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -171,6 +186,7 @@ jobs:
           path: |
             policy-it-${{ matrix.gateway_version }}.log
             resource-usage-${{ matrix.gateway_version }}.log
+            it-timeline-${{ matrix.gateway_version }}.json
           if-no-files-found: ignore
           retention-days: 7
 

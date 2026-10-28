@@ -57,7 +57,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "build-gateway:", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*envFile, environmentLines(images), 0o644); err != nil {
+	lines := append(environmentLines(images), fmt.Appendf(nil, "IT_GATEWAY_BUILD_SECONDS=%.1f\n", time.Since(started).Seconds())...)
+	if err := os.WriteFile(*envFile, lines, 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "build-gateway:", err)
 		os.Exit(1)
 	}

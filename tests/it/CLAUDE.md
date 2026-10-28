@@ -20,6 +20,7 @@ tests needs only that policy's folder and the shared code in `tests/it/common`.
 | The code that builds the gateway the suites boot | `tests/it/common/gateway/`, `tests/it/cmd/build-gateway/` |
 | The code that runs the blocks of the selected suites, several at a time | `tests/it/common/runsuites/`, `tests/it/cmd/run-suites/` |
 | Selecting the policies a pull request runs | `scripts/it/changed-policies.py` |
+| The run summary of the time each suite took | `scripts/it/render-timeline.py` |
 | The pull request workflow | `.github/workflows/it.yml` |
 
 A suite has one block, named for the policy. It names no policy tree: the gateway it boots is not
@@ -76,6 +77,7 @@ go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args -gateway-vers
 | `GATEWAY_POLICIES` | Comma-separated policies to build into the shared gateway. Defaults to every policy of the repository. |
 | `DB` | Limit the run to `sqlite`, `postgres` or `sqlserver`. All three run by default. |
 | `BLOCK_PARALLEL` | How many blocks run at the same time across all selected suites; a block starts as soon as another ends. Each block boots its own gateway, testbench and database, so size it to the machine. Default `7`, at least `1`. `make it` ignores the `parallel` of the suite files; a suite run directly with `go test` still uses it. |
+| `IT_TIMELINE` | A file path. When set, the run writes how long each block took, and when it started, to that file as JSON. The workflow sets it and renders it into the run summary. |
 
 - `latest` is the gateway built from api-platform `main`; it can change between two runs, and its
   `main-<sha>` tag identifies what a run used. It is pulled again on every run.
@@ -84,6 +86,21 @@ go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args -gateway-vers
 - Other targets: `make it-standards` checks the shared steps and each policy's steps, features and
   suite file against the framework standards; `make it-unit` runs the unit tests of the shared
   steps and of each policy's own steps. Both take `POLICIES` too.
+
+## How long the suites took
+
+`BLOCK_PARALLEL` is a number of runners. Each runner runs one block at a time and takes the next
+waiting block when it ends the last one. Every workflow leg, one per gateway version, adds an
+"Integration suites on gateway <version>: execution map" section to its run summary. It draws one
+lane per runner with the blocks the runner ran, in order, each with its name (and so its policy), its
+time and its start and end counted from the start of the run. A runner ends with its completion
+time and its busy time, and the diagram ends with the completion time of the whole run. Below it are
+a table of the runners and, collapsed, a table of every policy's suite: wall time from its first
+block's start to its last block's end, the added-up time of its blocks, its slowest block and the time
+to compile it. The same data is the `it-timeline-<version>.json` file in the leg's test output
+artifact, next to `resource-usage-<version>.log`, which samples the runner's memory and load.
+To get the summary for a local run, `make it ... IT_TIMELINE=/tmp/timeline.json`, then
+`python3 scripts/it/render-timeline.py --input /tmp/timeline.json`.
 
 ## Add tests to a policy that has none
 

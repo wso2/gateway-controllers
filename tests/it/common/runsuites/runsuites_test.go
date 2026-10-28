@@ -20,6 +20,7 @@ package runsuites
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -127,6 +128,49 @@ func TestScheduleStartsTheNextJobAsSoonAsAnyJobEnds(t *testing.T) {
 	}
 }
 
+func TestScheduleGivesEveryJobTheNumberOfTheRunnerThatRunsIt(t *testing.T) {
+	var mu sync.Mutex
+	slots := map[int][]string{}
+	Schedule(names(30), 4, func(job Job) error {
+		time.Sleep(time.Millisecond)
+		mu.Lock()
+		slots[job.Slot] = append(slots[job.Slot], job.Name)
+		mu.Unlock()
+		return nil
+	})
+
+	total := 0
+	for slot, ran := range slots {
+		if slot < 1 || slot > 4 {
+			t.Errorf("a job ran on runner %d, want 1 to 4", slot)
+		}
+		total += len(ran)
+	}
+	if total != 30 {
+		t.Fatalf("%d jobs ran, want 30", total)
+	}
+}
+
+func TestScheduleRunsOnlyOneJobAtATimeOnARunner(t *testing.T) {
+	var mu sync.Mutex
+	active := map[int]int{}
+	overlapped := false
+	Schedule(names(24), 3, func(job Job) error {
+		mu.Lock()
+		active[job.Slot]++
+		overlapped = overlapped || active[job.Slot] > 1
+		mu.Unlock()
+		time.Sleep(2 * time.Millisecond)
+		mu.Lock()
+		active[job.Slot]--
+		mu.Unlock()
+		return nil
+	})
+	if overlapped {
+		t.Fatal("a runner ran two jobs at the same time")
+	}
+}
+
 func TestScheduleRunsJobsOneAtATimeWhenTheLimitIsBelowOne(t *testing.T) {
 	for _, limit := range []int{0, -3} {
 		var g gauge
@@ -143,7 +187,7 @@ func TestScheduleRunsJobsOneAtATimeWhenTheLimitIsBelowOne(t *testing.T) {
 }
 
 func TestScheduleStartsTheHighestPriorityFirst(t *testing.T) {
-	jobs := []Job{{"low", 1}, {"high-a", 5}, {"middle", 3}, {"high-b", 5}}
+	jobs := []Job{{Name: "low", Priority: 1}, {Name: "high-a", Priority: 5}, {Name: "middle", Priority: 3}, {Name: "high-b", Priority: 5}}
 	var order []string
 	Schedule(jobs, 1, func(job Job) error {
 		order = append(order, job.Name)
@@ -389,5 +433,93 @@ func TestLineWritersSharingAMutexNeverSplitALine(t *testing.T) {
 		if line != "[a] a whole line of output" && line != "[b] a whole line of output" && line != "[c] a whole line of output" {
 			t.Fatalf("a line was split or mixed: %q", line)
 		}
+	}
+}
+
+func TestRecorderOrdersBlocksByStartAndReportsTheRun(t *testing.T) {
+	r := NewRecorder()
+	now := time.Now()
+	r.Block(2, "cors", "cors/postgres", now.Add(20*time.Millisecond), true)
+	r.Block(1, "basic-auth", "basic-auth/sqlite", now.Add(-10*time.Millisecond), false)
+	r.Compile("cors", now, true)
+	r.Compile("basic-auth", now, false)
+	r.Skip("jwt-auth")
+	r.Skip("auth-a")
+
+	timeline := r.Timeline("1.2.0", 7, 190.4)
+
+	if timeline.SchemaVersion != TimelineSchema || timeline.GatewayVersion != "1.2.0" || timeline.BlockParallel != 7 || timeline.BuildSeconds != 190.4 {
+		t.Fatalf("timeline header = %+v", timeline)
+	}
+	if got := []string{timeline.Blocks[0].Block, timeline.Blocks[1].Block}; !reflect.DeepEqual(got, []string{"basic-auth/sqlite", "cors/postgres"}) {
+		t.Fatalf("blocks = %v, want them in the order they started", got)
+	}
+	if timeline.Blocks[0].Slot != 1 || timeline.Blocks[1].Slot != 2 {
+		t.Fatalf("slots = %d %d, want 1 then 2", timeline.Blocks[0].Slot, timeline.Blocks[1].Slot)
+	}
+	if timeline.Blocks[0].Passed || !timeline.Blocks[1].Passed {
+		t.Fatalf("results = %v %v, want the failed one first", timeline.Blocks[0].Passed, timeline.Blocks[1].Passed)
+	}
+	if timeline.Compiles[0].Policy != "basic-auth" || timeline.Compiles[1].Policy != "cors" {
+		t.Fatalf("compiles = %+v, want them in name order", timeline.Compiles)
+	}
+	if want := []string{"auth-a", "jwt-auth"}; !reflect.DeepEqual(timeline.Skipped, want) {
+		t.Fatalf("skipped = %v, want %v", timeline.Skipped, want)
+	}
+	if timeline.WallMs < 0 {
+		t.Fatalf("wall = %d ms, want it not to be negative", timeline.WallMs)
+	}
+}
+
+func TestRecorderIsSafeForConcurrentUse(t *testing.T) {
+	r := NewRecorder()
+	var wg sync.WaitGroup
+	for i := range 50 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Block(i%3+1, "p", fmt.Sprintf("p/%d", i), time.Now(), true)
+			r.Compile("p", time.Now(), true)
+		}()
+	}
+	wg.Wait()
+	timeline := r.Timeline("latest", 3, 0)
+	if len(timeline.Blocks) != 50 || len(timeline.Compiles) != 50 {
+		t.Fatalf("recorded %d blocks and %d compiles, want 50 of each", len(timeline.Blocks), len(timeline.Compiles))
+	}
+}
+
+func TestWriteTimelineWritesTheJSONTheRendererReads(t *testing.T) {
+	r := NewRecorder()
+	r.Block(1, "cors", "cors/sqlite", time.Now(), true)
+	path := filepath.Join(t.TempDir(), "timeline.json")
+
+	if err := WriteTimeline(path, r.Timeline("1.1.0", 4, 0)); err != nil {
+		t.Fatalf("WriteTimeline: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the timeline: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("the timeline is not JSON: %v", err)
+	}
+	for _, key := range []string{"schemaVersion", "gatewayVersion", "blockParallel", "wallMs", "blocks", "compiles", "skipped"} {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("the timeline has no %q", key)
+		}
+	}
+	if _, ok := fields["buildSeconds"]; ok {
+		t.Error("an unknown build time should be left out")
+	}
+	block := fields["blocks"].([]any)[0].(map[string]any)
+	for _, key := range []string{"slot", "policy", "block", "startMs", "durationMs", "passed"} {
+		if _, ok := block[key]; !ok {
+			t.Errorf("a block has no %q", key)
+		}
+	}
+	if err := WriteTimeline(filepath.Join(t.TempDir(), "missing", "timeline.json"), Timeline{}); err == nil {
+		t.Error("WriteTimeline into a missing folder returned no error")
 	}
 }
