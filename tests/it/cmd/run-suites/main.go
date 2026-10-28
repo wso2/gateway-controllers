@@ -46,6 +46,9 @@ import (
 // environment file the suites boot from, so the timeline can report it.
 const buildSecondsVariable = "IT_GATEWAY_BUILD_SECONDS"
 
+// sampleInterval is how often the machine's processor and memory use is recorded.
+const sampleInterval = 5 * time.Second
+
 func main() {
 	os.Exit(run())
 }
@@ -113,7 +116,9 @@ func run() int {
 	}
 	r.say("running %d blocks of %d suites on gateway %s, at most %d at the same time\n", len(jobs), len(names)-len(broken), *version, *blockParallel)
 
+	stopSampling := r.recorder.StartSampling(sampleInterval)
 	failed := runsuites.Schedule(jobs, *blockParallel, r.run)
+	stopSampling()
 	failed = append(failed, broken...)
 	if *timeline != "" {
 		buildSeconds, _ := strconv.ParseFloat(os.Getenv(buildSecondsVariable), 64)

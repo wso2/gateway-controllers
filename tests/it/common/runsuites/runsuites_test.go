@@ -128,7 +128,7 @@ func TestScheduleStartsTheNextJobAsSoonAsAnyJobEnds(t *testing.T) {
 	}
 }
 
-func TestScheduleGivesEveryJobTheNumberOfTheRunnerThatRunsIt(t *testing.T) {
+func TestScheduleGivesEveryJobTheNumberOfTheLaneThatRunsIt(t *testing.T) {
 	var mu sync.Mutex
 	slots := map[int][]string{}
 	Schedule(names(30), 4, func(job Job) error {
@@ -142,7 +142,7 @@ func TestScheduleGivesEveryJobTheNumberOfTheRunnerThatRunsIt(t *testing.T) {
 	total := 0
 	for slot, ran := range slots {
 		if slot < 1 || slot > 4 {
-			t.Errorf("a job ran on runner %d, want 1 to 4", slot)
+			t.Errorf("a job ran on lane %d, want 1 to 4", slot)
 		}
 		total += len(ran)
 	}
@@ -151,7 +151,7 @@ func TestScheduleGivesEveryJobTheNumberOfTheRunnerThatRunsIt(t *testing.T) {
 	}
 }
 
-func TestScheduleRunsOnlyOneJobAtATimeOnARunner(t *testing.T) {
+func TestScheduleRunsOnlyOneJobAtATimeOnALane(t *testing.T) {
 	var mu sync.Mutex
 	active := map[int]int{}
 	overlapped := false
@@ -167,7 +167,7 @@ func TestScheduleRunsOnlyOneJobAtATimeOnARunner(t *testing.T) {
 		return nil
 	})
 	if overlapped {
-		t.Fatal("a runner ran two jobs at the same time")
+		t.Fatal("a lane ran two jobs at the same time")
 	}
 }
 
@@ -505,7 +505,7 @@ func TestWriteTimelineWritesTheJSONTheRendererReads(t *testing.T) {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		t.Fatalf("the timeline is not JSON: %v", err)
 	}
-	for _, key := range []string{"schemaVersion", "gatewayVersion", "blockParallel", "wallMs", "blocks", "compiles", "skipped"} {
+	for _, key := range []string{"schemaVersion", "gatewayVersion", "blockParallel", "wallMs", "cores", "blocks", "compiles", "skipped", "samples"} {
 		if _, ok := fields[key]; !ok {
 			t.Errorf("the timeline has no %q", key)
 		}
@@ -521,5 +521,158 @@ func TestWriteTimelineWritesTheJSONTheRendererReads(t *testing.T) {
 	}
 	if err := WriteTimeline(filepath.Join(t.TempDir(), "missing", "timeline.json"), Timeline{}); err == nil {
 		t.Error("WriteTimeline into a missing folder returned no error")
+	}
+}
+
+const procStatSample = "cpu  100 10 50 800 40 5 5 0 0 0\ncpu0 50 5 25 400 20 2 3 0 0 0\nintr 1 2 3\n"
+
+func TestReadCPUCountsEverythingButIdleAndWaitingAsBusy(t *testing.T) {
+	got, err := readCPU(strings.NewReader(procStatSample))
+	if err != nil {
+		t.Fatalf("readCPU: %v", err)
+	}
+	if got.total != 1010 || got.busy != 170 {
+		t.Fatalf("readCPU = %+v, want total 1010 and busy 170", got)
+	}
+}
+
+func TestReadCPURejectsWhatIsNotAProcessorLine(t *testing.T) {
+	for name, input := range map[string]string{
+		"empty":      "",
+		"other line": "intr 1 2 3 4 5 6\n",
+		"too short":  "cpu 1 2\n",
+		"not number": "cpu 1 2 3 x 5\n",
+	} {
+		if _, err := readCPU(strings.NewReader(input)); err == nil {
+			t.Errorf("%s: readCPU returned no error", name)
+		}
+	}
+}
+
+func TestCPUPercentIsTheBusyShareBetweenTwoReadings(t *testing.T) {
+	before := cpuTimes{busy: 170, total: 1010}
+	if got := cpuPercent(before, cpuTimes{busy: 270, total: 1210}); got != 50 {
+		t.Fatalf("cpuPercent = %v, want 50", got)
+	}
+	if got := cpuPercent(before, before); got != 0 {
+		t.Fatalf("cpuPercent of an unchanged reading = %v, want 0", got)
+	}
+	if got := cpuPercent(before, cpuTimes{busy: 100, total: 900}); got != 0 {
+		t.Fatalf("cpuPercent of a reading that went back = %v, want 0", got)
+	}
+}
+
+func TestReadMemoryReturnsTheTotalAndTheAvailableMegabytes(t *testing.T) {
+	total, available, err := readMemory(strings.NewReader("MemTotal:       16384000 kB\nMemFree: 1 kB\nMemAvailable:    8192000 kB\nBuffers: 5 kB\n"))
+	if err != nil {
+		t.Fatalf("readMemory: %v", err)
+	}
+	if total != 16000 || available != 8000 {
+		t.Fatalf("readMemory = %d, %d, want 16000 and 8000", total, available)
+	}
+}
+
+func TestReadMemoryRejectsIncompleteInformation(t *testing.T) {
+	for name, input := range map[string]string{
+		"empty":             "",
+		"no available line": "MemTotal: 1024 kB\n",
+		"no value":          "MemTotal:\nMemAvailable: 1 kB\n",
+		"not a number":      "MemTotal: x kB\nMemAvailable: 1 kB\n",
+	} {
+		if _, _, err := readMemory(strings.NewReader(input)); err == nil {
+			t.Errorf("%s: readMemory returned no error", name)
+		}
+	}
+}
+
+func writeProc(t *testing.T, stat string, availableKB int) (statPath, meminfoPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	statPath = filepath.Join(dir, "stat")
+	meminfoPath = filepath.Join(dir, "meminfo")
+	if err := os.WriteFile(statPath, []byte(stat), 0o644); err != nil {
+		t.Fatalf("writing the processor file: %v", err)
+	}
+	meminfo := fmt.Sprintf("MemTotal: 16384000 kB\nMemAvailable: %d kB\n", availableKB)
+	if err := os.WriteFile(meminfoPath, []byte(meminfo), 0o644); err != nil {
+		t.Fatalf("writing the memory file: %v", err)
+	}
+	return statPath, meminfoPath
+}
+
+func TestTakeSampleReportsTheLoadSinceTheLastReading(t *testing.T) {
+	statPath, meminfoPath := writeProc(t, procStatSample, 8192000)
+	_, first, err := takeSample(statPath, meminfoPath, cpuTimes{}, 0)
+	if err != nil {
+		t.Fatalf("takeSample: %v", err)
+	}
+	if err := os.WriteFile(statPath, []byte("cpu  200 10 50 900 40 5 5 0 0 0\n"), 0o644); err != nil {
+		t.Fatalf("writing the processor file: %v", err)
+	}
+
+	sample, _, err := takeSample(statPath, meminfoPath, first, 5*time.Second)
+	if err != nil {
+		t.Fatalf("takeSample: %v", err)
+	}
+	if sample.AtMs != 5000 || sample.CPUPercent != 50 || sample.MemUsedMB != 8000 || sample.MemTotalMB != 16000 {
+		t.Fatalf("sample = %+v, want 5000 ms, 50%%, 8000 of 16000 MB", sample)
+	}
+}
+
+func TestTakeSampleReportsAnUnreadableFile(t *testing.T) {
+	statPath, meminfoPath := writeProc(t, procStatSample, 1)
+	missing := filepath.Join(t.TempDir(), "missing")
+	if _, _, err := takeSample(missing, meminfoPath, cpuTimes{}, 0); err == nil {
+		t.Error("a missing processor file returned no error")
+	}
+	if _, _, err := takeSample(statPath, missing, cpuTimes{}, 0); err == nil {
+		t.Error("a missing memory file returned no error")
+	}
+}
+
+func TestRecorderSamplesTheMachineUntilStopped(t *testing.T) {
+	statPath, meminfoPath := writeProc(t, procStatSample, 8192000)
+	r := NewRecorder()
+	stop := r.startSampling(statPath, meminfoPath, 5*time.Millisecond)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		count := len(r.samples)
+		r.mu.Unlock()
+		if count >= 3 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stop()
+	timeline := r.Timeline("1.2.0", 4, 0)
+	if len(timeline.Samples) < 3 {
+		t.Fatalf("recorded %d samples, want at least 3", len(timeline.Samples))
+	}
+	for i := 1; i < len(timeline.Samples); i++ {
+		if timeline.Samples[i].AtMs < timeline.Samples[i-1].AtMs {
+			t.Fatalf("samples are not in time order: %+v", timeline.Samples)
+		}
+	}
+	if timeline.Cores < 1 {
+		t.Fatalf("cores = %d, want at least 1", timeline.Cores)
+	}
+
+	count := len(timeline.Samples)
+	time.Sleep(30 * time.Millisecond)
+	if after := len(r.Timeline("1.2.0", 4, 0).Samples); after != count {
+		t.Fatalf("sampling went on after stop: %d samples became %d", count, after)
+	}
+}
+
+func TestRecorderRecordsNothingWhereTheMachineCannotBeRead(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	r := NewRecorder()
+	stop := r.startSampling(missing, missing, time.Millisecond)
+	time.Sleep(10 * time.Millisecond)
+	stop()
+	if samples := r.Timeline("1.2.0", 1, 0).Samples; len(samples) != 0 {
+		t.Fatalf("samples = %v, want none", samples)
 	}
 }

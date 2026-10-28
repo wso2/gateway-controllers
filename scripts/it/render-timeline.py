@@ -2,11 +2,11 @@
 """Print the execution map of one gateway version's integration run, as GitHub job summary markdown.
 
 Input is the timeline JSON `run-suites -timeline` writes (schemaVersion 1). A run keeps `blockParallel`
-runners busy: each runner runs one block at a time and takes the next waiting block when it ends the
-last. The map draws one lane per runner with the blocks it ran, in order, each with its policy, its
-time and its start and end, then the runner's own completion time and the completion time of the whole
-run. A missing or unreadable timeline prints a note and exits zero, so a reporting problem never
-fails the job.
+lanes busy: each lane runs one block at a time and takes the next waiting block when it ends the
+last. The map draws every lane with the blocks it ran, in order, each with its policy, its
+time, its start and end and the machine's CPU and memory while it ran, then the lane's own completion
+time and the completion time of the whole run. A missing or unreadable timeline prints a note and exits
+zero, so a reporting problem never fails the job.
 
 Usage: python3 scripts/it/render-timeline.py --input it-timeline-1.2.0.json >> "$GITHUB_STEP_SUMMARY"
 """
@@ -49,6 +49,40 @@ def clock(milliseconds):
     return f"{hours}:{minutes:02d}:{seconds:02d}" if hours else f"{minutes}:{seconds:02d}"
 
 
+def gigabytes(megabytes):
+    """Return megabytes as gigabytes with one decimal."""
+    return f"{megabytes / 1024:.1f} GB"
+
+
+def load(samples, start, end):
+    """Return the machine's load between two moments of the run, or None without a sample.
+
+    The result holds the average and peak CPU and the average and peak memory in use of the samples
+    taken in the window. A window shorter than the sampling interval may hold none, and then the
+    sample nearest its middle stands in for it.
+    """
+    if not samples:
+        return None
+    inside = [s for s in samples if start <= s["atMs"] <= end]
+    if not inside:
+        middle = (start + end) / 2
+        inside = [min(samples, key=lambda s: abs(s["atMs"] - middle))]
+    return {
+        "cpuAvg": sum(s["cpuPercent"] for s in inside) / len(inside),
+        "cpuPeak": max(s["cpuPercent"] for s in inside),
+        "memAvg": sum(s["memUsedMb"] for s in inside) / len(inside),
+        "memPeak": max(s["memUsedMb"] for s in inside),
+        "memTotal": max(s["memTotalMb"] for s in inside),
+    }
+
+
+def load_line(stats):
+    """Return the CPU and memory of a window as one line for a card, or "" without a sample."""
+    if not stats:
+        return ""
+    return f"<br/>CPU {stats['cpuAvg']:.0f}% · RAM {gigabytes(stats['memPeak'])}"
+
+
 def label(value, width=LABEL_WIDTH):
     """Escape a name for a diagram label and wrap a long one, without inserting diagram syntax."""
     parts = re.findall(r".{1,%d}(?:[- /]|$)|.{1,%d}" % (width, width), str(value))
@@ -67,31 +101,31 @@ def end_of(block):
     return block["startMs"] + block["durationMs"]
 
 
-def runners(report):
-    """Return the runners as (number, blocks) pairs, with each runner's blocks in the order it ran them.
+def lanes(report):
+    """Return the lanes as (number, blocks) pairs, with each lane's blocks in the order it ran them.
 
-    The timeline records the runner of every block. For a timeline that does not, blocks are placed on
-    the first runner that is free when they start.
+    The timeline records the lane of every block. For a timeline that does not, blocks are placed on
+    the first lane that is free when they start.
     """
     blocks = sorted(report["blocks"], key=lambda b: (b["startMs"], b["block"]))
     if blocks and all(b.get("slot", 0) >= 1 for b in blocks):
-        lanes = {}
+        by_number = {}
         for block in blocks:
-            lanes.setdefault(block["slot"], []).append(block)
-        return sorted(lanes.items())
-    lanes = []
+            by_number.setdefault(block["slot"], []).append(block)
+        return sorted(by_number.items())
+    placed = []
     for block in blocks:
-        for lane in lanes:
+        for lane in placed:
             if end_of(lane[-1]) <= block["startMs"]:
                 lane.append(block)
                 break
         else:
-            lanes.append([block])
-    return [(number, lane) for number, lane in enumerate(lanes, start=1)]
+            placed.append([block])
+    return [(number, lane) for number, lane in enumerate(placed, start=1)]
 
 
 def lane_totals(blocks):
-    """Return how long a runner was busy and when it finished its last block."""
+    """Return how long a lane was busy and when it finished its last block."""
     return sum(b["durationMs"] for b in blocks), max(end_of(b) for b in blocks)
 
 
@@ -99,43 +133,52 @@ def card(node, text, status):
     return f'  {node}("{text}"):::{status}\n'
 
 
-def lane_body(number, blocks):
-    """Return the diagram lines of one runner's lane, and the id of its last node."""
+def lane_body(number, blocks, samples):
+    """Return the diagram lines of one lane, and the id of its last node."""
     busy, finished = lane_totals(blocks)
     failed = sum(1 for b in blocks if not b["passed"])
-    body = f'  subgraph lane{number}["Runner {number}"]\n    direction LR\n'
+    body = f'  subgraph lane{number}["Lane {number}"]\n    direction LR\n'
     ids = []
     for index, block in enumerate(blocks):
         node = f"r{number}b{index}"
         ids.append(node)
         icon = "✅" if block["passed"] else "❌"
         text = (f'{icon} {label(block_name(block))}<br/>{duration(block["durationMs"])}'
-                f'<br/>{clock(block["startMs"])} → {clock(end_of(block))}')
+                f'<br/>{clock(block["startMs"])} → {clock(end_of(block))}'
+                f'{load_line(load(samples, block["startMs"], end_of(block)))}')
         body += card(node, text, "pass" if block["passed"] else "fail")
     end = f"r{number}end"
-    text = (f"Runner {number} done<br/>finished at {duration(finished)} · busy {duration(busy)}"
-            f"<br/>{len(blocks)} blocks")
+    first = min(b["startMs"] for b in blocks)
+    text = (f"Lane {number} done<br/>finished at {duration(finished)} · busy {duration(busy)}"
+            f"<br/>{len(blocks)} blocks{load_line(load(samples, first, finished))}")
     body += card(end, text, "fail" if failed else "neutral")
     body += "  end\n"
     body += f"  style lane{number} fill:#f6f8fa,stroke:#d1d9e0,color:#1f2328,rx:8,ry:8\n"
     return body, ids + [end]
 
 
-def diagram(lanes, report):
-    """Return one fenced diagram that holds the given runners."""
+def diagram(group, report):
+    """Return one fenced diagram that holds the given lanes."""
     version = report["gatewayVersion"]
     blocks = report["blocks"]
     failed = sum(1 for b in blocks if not b["passed"])
     start = f"Run start<br/>gateway {label(version)}"
     if report.get("buildSeconds"):
         start += f"<br/>gateway built in {duration(report['buildSeconds'] * 1000)}"
-    start += f"<br/>{report['blockParallel']} runners"
+    start += f"<br/>{report['blockParallel']} lanes"
+    samples = report.get("samples", [])
+    whole = load(samples, 0, report["wallMs"])
+    if whole:
+        start += f"<br/>machine: {report.get('cores', 0)} cores · {gigabytes(whole['memTotal'])} RAM"
     body = card("start", start, "neutral")
     done = (f"All blocks done<br/>{len(blocks)} blocks · {len(blocks) - failed} passed · {failed} failed"
             f"<br/>total {duration(report['wallMs'])}")
+    if whole:
+        done += (f"<br/>CPU avg {whole['cpuAvg']:.0f}% · peak {whole['cpuPeak']:.0f}%"
+                 f"<br/>RAM avg {gigabytes(whole['memAvg'])} · peak {gigabytes(whole['memPeak'])}")
     body += card("done", done, "fail" if failed else "neutral")
-    for number, lane in lanes:
-        lane_text, ids = lane_body(number, lane)
+    for number, lane in group:
+        lane_text, ids = lane_body(number, lane, samples)
         body += lane_text
         nodes = ["start"] + ids + ["done"]
         body += "".join(f"  {a} --> {b}\n" for a, b in zip(nodes, nodes[1:]))
@@ -148,13 +191,13 @@ def fenced(graph):
 
 
 def diagrams(report):
-    """Yield the map as one fenced diagram, or as several when the runners do not fit in one.
+    """Yield the map as one fenced diagram, or as several when the lanes do not fit in one.
 
-    A diagram is bounded by the size and the edge count the summary can render, so the runners are
+    A diagram is bounded by the size and the edge count the summary can render, so the lanes are
     split over as many diagrams as needed, each with the run's start and end.
     """
     group = []
-    for lane in runners(report):
+    for lane in lanes(report):
         candidate = group + [lane]
         graph = diagram(candidate, report)
         if group and (len(graph) > MAX_DIAGRAM_CHARS or graph.count(" --> ") > MAX_DIAGRAM_EDGES):
@@ -170,7 +213,7 @@ def suites(report):
     """Group the blocks by policy and return the suites, the slowest first.
 
     A suite's wall time runs from the start of its first block to the end of its last one, so it
-    includes the time its blocks waited for a free runner.
+    includes the time its blocks waited for a free lane.
     """
     compiles = {c["policy"]: c["durationMs"] for c in report["compiles"]}
     grouped = {}
@@ -202,7 +245,7 @@ def render(report):
         out.append("No block ran.\n")
         return "".join(out)
 
-    lanes = runners(report)
+    lane_list = lanes(report)
     failed = sum(1 for b in blocks if not b["passed"])
     block_ms = sum(b["durationMs"] for b in blocks)
     wall_ms = report["wallMs"]
@@ -211,19 +254,28 @@ def render(report):
         ("Gateway build", duration(report["buildSeconds"] * 1000) if report.get("buildSeconds") else "not recorded"),
         ("Suites", f"{len(suite_rows)}" + (f" ({len(report['skipped'])} with nothing to run on this version)" if report.get("skipped") else "")),
         ("Blocks", f"{len(blocks)} ({len(blocks) - failed} passed, {failed} failed)"),
-        ("Runners (blocks at the same time, at most)", f"{report['blockParallel']} ({len(lanes)} used)"),
+        ("Lanes (blocks at the same time, at most)", f"{report['blockParallel']} ({len(lane_list)} used)"),
         ("Time running the suites", duration(wall_ms)),
         ("Time of all blocks added up", duration(block_ms)),
     ]
     out.append("| | |\n| --- | --- |\n" + "".join(f"| {k} | {v} |\n" for k, v in facts))
-    out.append("\nEach lane is a runner. It runs one block at a time and takes the next waiting block when it "
-               "ends the last one. Arrows show the order a runner ran its blocks, not the time scale; each "
+    out.append("\nEach lane runs one block at a time and takes the next waiting block when it "
+               "ends the last one. Arrows show the order a lane ran its blocks, not the time scale; each "
                "block shows its time and its start and end, counted from the start of the run. A block's "
-               "time includes waiting for its policy's test binary to compile.\n\n")
+               "time includes waiting for its policy's test binary to compile. CPU and RAM are the whole "
+               "machine's while the block, lane or run was going: CPU is the average share of all cores "
+               "that was busy, RAM the most memory in use. The lanes share the machine, so they cannot "
+               "be told apart.\n\n")
     out.extend(diagrams(report))
+    whole = load(report.get("samples", []), 0, wall_ms)
+    if whole:
+        out.append("#### Machine during the run\n\n| Cores | RAM | CPU average | CPU peak | RAM average | RAM peak |\n"
+                   "| ---: | ---: | ---: | ---: | ---: | ---: |\n"
+                   f"| {report.get('cores', 0)} | {gigabytes(whole['memTotal'])} | {whole['cpuAvg']:.0f}% | "
+                   f"{whole['cpuPeak']:.0f}% | {gigabytes(whole['memAvg'])} | {gigabytes(whole['memPeak'])} |\n\n")
 
-    out.append("#### Time per runner\n\n| Runner | Blocks | Busy | Finished at | Busy share |\n| ---: | ---: | ---: | ---: | ---: |\n")
-    for number, lane in lanes:
+    out.append("#### Time per lane\n\n| Lane | Blocks | Busy | Finished at | Busy share |\n| ---: | ---: | ---: | ---: | ---: |\n")
+    for number, lane in lane_list:
         busy, finished = lane_totals(lane)
         share = f"{round(100 * busy / finished)}%" if finished else ""
         out.append(f"| {number} | {len(lane)} | {duration(busy)} | {duration(finished)} | {share} |\n")

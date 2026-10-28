@@ -21,6 +21,7 @@ package runsuites
 import (
 	"encoding/json"
 	"os"
+	"runtime"
 	"sort"
 	"sync"
 	"time"
@@ -36,12 +37,14 @@ type Timeline struct {
 	BlockParallel  int        `json:"blockParallel"`
 	BuildSeconds   float64    `json:"buildSeconds,omitempty"`
 	WallMs         int64      `json:"wallMs"`
+	Cores          int        `json:"cores"`
 	Blocks         []BlockRun `json:"blocks"`
 	Compiles       []Compile  `json:"compiles"`
 	Skipped        []string   `json:"skipped"`
+	Samples        []Sample   `json:"samples"`
 }
 
-// BlockRun is one block of a suite and how long it ran, and the runner (Slot, from 1) that ran it.
+// BlockRun is one block of a suite and how long it ran, and the lane (Slot, from 1) that ran it.
 // The time of a policy's first blocks includes the wait for its test binary to compile.
 type BlockRun struct {
 	Slot       int    `json:"slot"`
@@ -66,6 +69,7 @@ type Recorder struct {
 	blocks   []BlockRun
 	compiles []Compile
 	skipped  []string
+	samples  []Sample
 }
 
 // NewRecorder starts the clock of a run.
@@ -73,7 +77,7 @@ func NewRecorder() *Recorder {
 	return &Recorder{start: time.Now()}
 }
 
-// Block records a block that runner slot ran, which began at started and ended now.
+// Block records a block that lane slot ran, which began at started and ended now.
 func (r *Recorder) Block(slot int, policy, block string, started time.Time, passed bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -111,6 +115,7 @@ func (r *Recorder) Timeline(gatewayVersion string, blockParallel int, buildSecon
 	sort.Slice(compiles, func(i, j int) bool { return compiles[i].Policy < compiles[j].Policy })
 	skipped := append([]string{}, r.skipped...)
 	sort.Strings(skipped)
+	samples := append([]Sample{}, r.samples...)
 	return Timeline{
 		SchemaVersion:  TimelineSchema,
 		GatewayVersion: gatewayVersion,
@@ -120,6 +125,8 @@ func (r *Recorder) Timeline(gatewayVersion string, blockParallel int, buildSecon
 		Blocks:         blocks,
 		Compiles:       compiles,
 		Skipped:        skipped,
+		Cores:          runtime.NumCPU(),
+		Samples:        samples,
 	}
 }
 

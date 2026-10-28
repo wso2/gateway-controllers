@@ -36,7 +36,7 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # IT_TIMELINE, a file path, makes the run write how long each block took to that file, as JSON.
 GATEWAY_VERSION ?= 1.2.0
 ifeq ($(strip $(BLOCK_PARALLEL)),)
-override BLOCK_PARALLEL := 7
+override BLOCK_PARALLEL := 12
 endif
 IT_TIMELINE ?=
 comma := ,

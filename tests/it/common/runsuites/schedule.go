@@ -37,13 +37,13 @@ type Job struct {
 	// blocks from finishing last on their own.
 	Priority int
 
-	// Slot is the number of the runner that ran the job, counted from 1. Schedule sets it before it
-	// calls run; a runner is one of the limit workers, and takes the next job when it ends the last.
+	// Slot is the number of the lane that ran the job, counted from 1. Schedule sets it before it
+	// calls run; a lane is one of the limit workers, and takes the next job when it ends the last.
 	Slot int
 }
 
 // Schedule runs every job through run, at most limit at a time, and returns the names of the jobs
-// whose run returned an error, in name order. A job starts as soon as a runner is free, so limit jobs
+// whose run returned an error, in name order. A job starts as soon as a lane is free, so limit jobs
 // are running until fewer than limit are left. A limit below one counts as one.
 func Schedule(jobs []Job, limit int, run func(Job) error) []string {
 	limit = max(limit, 1)
