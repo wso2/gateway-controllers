@@ -34,7 +34,9 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # list, narrows it. BLOCK_PARALLEL is the number of blocks, each with its own gateway, testbench and
 # database, that run at once across all selected suites: as soon as one ends, the next starts.
 GATEWAY_VERSION ?= 1.2.0
-BLOCK_PARALLEL ?= 7
+ifeq ($(strip $(BLOCK_PARALLEL)),)
+override BLOCK_PARALLEL := 7
+endif
 comma := ,
 space := $(subst ,, )
 IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml)))

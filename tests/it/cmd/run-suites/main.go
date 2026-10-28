@@ -17,7 +17,7 @@
  */
 
 // Command run-suites runs the integration suites of the named policies against the gateway the
-// environment names. It runs every block of every suite as a process of its own and keeps
+// environment names. It runs every block of every suite under a go test of its own and keeps
 // -block-parallel of them running at the same time until none is left to start.
 //
 //	go run ./cmd/run-suites -policies-dir ../../policies -policies basic-auth,cors -version 1.2.0 -block-parallel 6
@@ -65,16 +65,16 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "run-suites:", err)
 		return 1
 	}
-	binaries, err := os.MkdirTemp("", "suite-binaries-")
+	scratch, err := os.MkdirTemp("", "suite-builds-")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "run-suites:", err)
 		return 1
 	}
-	defer os.RemoveAll(binaries)
+	defer os.RemoveAll(scratch)
 
 	r := &runner{
 		policiesDir: *policiesDir,
-		binaries:    binaries,
+		scratch:     scratch,
 		version:     *version,
 		host:        *host,
 		timeout:     *timeout,
@@ -120,17 +120,16 @@ type item struct {
 	block  string
 }
 
-// build is the test binary of one policy, compiled once.
+// build is the one compilation of a policy's suite.
 type build struct {
 	once sync.Once
-	path string
 	err  error
 }
 
 // runner runs the blocks of the suites.
 type runner struct {
 	policiesDir string
-	binaries    string
+	scratch     string
 	version     string
 	host        string
 	timeout     time.Duration
@@ -145,33 +144,35 @@ type runner struct {
 	builds map[string]*build
 }
 
-// run runs the block of the job in a process of its own, streaming its output with the block's
-// name in front of every line.
+// run runs the block of the job under a go test of its own, streaming its output with the block's
+// name in front of every line. Every block runs under its own go test, not as a child of this
+// command: testcontainers ties the containers and networks a test process starts to its parent
+// process, and removes them when that parent ends. Children of this command would share one
+// parent, and nothing would be removed until the whole run ended.
 func (r *runner) run(job runsuites.Job) error {
 	it := r.items[job.Name]
 	out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+job.Name+"] ")
 	defer out.Flush()
 
-	binary, err := r.binary(it.policy)
-	if err != nil {
+	if err := r.warm(it.policy); err != nil {
 		fmt.Fprintf(out, "cannot build the suite: %v\n", err)
 		return err
 	}
 	args := []string{
-		"-test.v", "-test.run=^TestIntegrationSuite$", "-test.timeout=" + r.timeout.String(),
-		"-blocks=" + it.block, "-gateway-version=" + r.version,
+		"test", ".", "-count=1", "-timeout=" + r.timeout.String(), "-v", "-run", "^TestIntegrationSuite$",
+		"-args", "-blocks=" + it.block, "-gateway-version=" + r.version,
 	}
 	if r.host != "" {
 		args = append(args, "-host="+r.host)
 	}
-	cmd := exec.Command(binary, args...)
+	cmd := exec.Command("go", args...)
 	cmd.Dir = r.policyDir(it.policy)
 	cmd.Stdout = out
 	cmd.Stderr = out
 
 	fmt.Fprintf(out, "=== started on gateway %s ===\n", r.version)
 	started := time.Now()
-	err = cmd.Run()
+	err := cmd.Run()
 	result := "passed"
 	if err != nil {
 		result = "failed: " + err.Error()
@@ -180,9 +181,10 @@ func (r *runner) run(job runsuites.Job) error {
 	return err
 }
 
-// binary returns the compiled test binary of the policy, compiling it on first use. Blocks of the
-// same policy wait for that one compilation.
-func (r *runner) binary(policy string) (string, error) {
+// warm compiles the policy's suite once, on first use, so that the go test of each of its blocks
+// finds everything it needs in the build cache instead of compiling it again at the same time.
+// Blocks of the same policy wait for that one compilation.
+func (r *runner) warm(policy string) error {
 	r.mu.Lock()
 	b, ok := r.builds[policy]
 	if !ok {
@@ -192,16 +194,15 @@ func (r *runner) binary(policy string) (string, error) {
 	r.mu.Unlock()
 
 	b.once.Do(func() {
-		b.path = filepath.Join(r.binaries, policy+".test")
 		out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+policy+" build] ")
 		defer out.Flush()
-		cmd := exec.Command("go", "test", "-c", "-o", b.path, ".")
+		cmd := exec.Command("go", "test", "-c", "-o", filepath.Join(r.scratch, policy+".test"), ".")
 		cmd.Dir = r.policyDir(policy)
 		cmd.Stdout = out
 		cmd.Stderr = out
 		b.err = cmd.Run()
 	})
-	return b.path, b.err
+	return b.err
 }
 
 func (r *runner) policyDir(policy string) string {
