@@ -33,6 +33,10 @@ type Block struct {
 
 	// Runners is the number of runners the block executes one after the other.
 	Runners int
+
+	// Database is the engine of the block's gateway: the matrix variant, or else the database the
+	// suite declares for the platform-gateway component. It is empty when neither names one.
+	Database string
 }
 
 // Blocks returns the blocks the suite in suiteFile boots under selection: its blocks with their
@@ -53,9 +57,37 @@ func Blocks(registry *components.Registry, suiteFile string, selection topology.
 	}
 	blocks := make([]Block, len(applied.Blocks))
 	for i, block := range applied.Blocks {
-		blocks[i] = Block{Name: block.Name, Runners: len(block.Runners)}
+		blocks[i] = Block{Name: block.Name, Runners: len(block.Runners), Database: database(block)}
 	}
 	return blocks, nil
+}
+
+// OnlyDatabase keeps the blocks whose gateway runs on the named database, whether the suite names it
+// in a matrix or declares it once for the block. An empty name keeps every block.
+func OnlyDatabase(blocks []Block, name string) []Block {
+	if name == "" {
+		return blocks
+	}
+	var kept []Block
+	for _, block := range blocks {
+		if block.Database == name {
+			kept = append(kept, block)
+		}
+	}
+	return kept
+}
+
+// database returns the engine the block's gateway runs on.
+func database(block topology.ResolvedBlock) string {
+	if block.DB != "" {
+		return string(block.DB)
+	}
+	for _, component := range block.Components {
+		if component.Def != nil && component.Def.Name == "platform-gateway" {
+			return string(component.DB)
+		}
+	}
+	return ""
 }
 
 // nothingToRun reports whether err says the selection left no block or runner to execute. The

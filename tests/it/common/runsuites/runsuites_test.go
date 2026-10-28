@@ -338,6 +338,99 @@ func TestBlocksExpandTheDatabaseMatrixAndDropExcludedVariants(t *testing.T) {
 	}
 }
 
+const fixedDatabaseSuiteFile = `suite: fixed
+defaults:
+  parallel: 1
+  components:
+    platform-gateway:
+      db: sqlite
+blocks:
+  - name: default-database
+    parallel: 1
+    components:
+      - name: platform-gateway
+      - name: testbench
+    runners:
+      - name: one
+        features:
+          - features/one.feature
+  - name: named-database
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: postgres
+      - name: testbench
+    runners:
+      - name: two
+        features:
+          - features/two.feature
+  - name: matrix-database
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, sqlserver]
+      - name: testbench
+    runners:
+      - name: three
+        features:
+          - features/three.feature
+`
+
+func databases(blocks []Block) map[string]string {
+	out := map[string]string{}
+	for _, block := range blocks {
+		out[block.Name] = block.Database
+	}
+	return out
+}
+
+func TestBlocksNameTheDatabaseOfEveryBlockWhetherMatrixOrFixed(t *testing.T) {
+	blocks, err := Blocks(registry(t), writeSuite(t, fixedDatabaseSuiteFile), topology.Selection{GatewayVersion: "1.2.0"})
+	if err != nil {
+		t.Fatalf("Blocks: %v", err)
+	}
+	want := map[string]string{
+		"default-database":          "sqlite",
+		"named-database":            "postgres",
+		"matrix-database/sqlite":    "sqlite",
+		"matrix-database/sqlserver": "sqlserver",
+	}
+	if got := databases(blocks); !reflect.DeepEqual(got, want) {
+		t.Fatalf("databases = %v, want %v", got, want)
+	}
+}
+
+func TestOnlyDatabaseKeepsFixedAndMatrixBlocksOnThatDatabase(t *testing.T) {
+	blocks, err := Blocks(registry(t), writeSuite(t, fixedDatabaseSuiteFile), topology.Selection{GatewayVersion: "1.2.0"})
+	if err != nil {
+		t.Fatalf("Blocks: %v", err)
+	}
+	tests := map[string][]string{
+		"sqlite":    {"default-database", "matrix-database/sqlite"},
+		"postgres":  {"named-database"},
+		"sqlserver": {"matrix-database/sqlserver"},
+		"mysql":     {},
+	}
+	for name, want := range tests {
+		got := blockNames(OnlyDatabase(blocks, name))
+		slices.Sort(want)
+		if len(got) == 0 && len(want) == 0 {
+			continue
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("OnlyDatabase(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+func TestOnlyDatabaseKeepsEveryBlockWithoutAName(t *testing.T) {
+	blocks := []Block{{Name: "a", Database: "sqlite"}, {Name: "b", Database: "postgres"}}
+	if got := OnlyDatabase(blocks, ""); len(got) != 2 {
+		t.Fatalf("OnlyDatabase with no name kept %d blocks, want 2", len(got))
+	}
+}
+
 func TestBlocksCountTheRunnersOfEachBlock(t *testing.T) {
 	blocks, err := Blocks(registry(t), writeSuite(t, suiteFile), topology.Selection{GatewayVersion: "1.2.0", Blocks: []string{"first/sqlite", "second/sqlite"}})
 	if err != nil {

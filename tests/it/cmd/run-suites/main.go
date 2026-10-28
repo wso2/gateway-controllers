@@ -74,16 +74,9 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "run-suites:", err)
 		return 1
 	}
-	scratch, err := os.MkdirTemp("", "suite-builds-")
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "run-suites:", err)
-		return 1
-	}
-	defer os.RemoveAll(scratch)
 
 	r := &runner{
 		policiesDir: *policiesDir,
-		scratch:     scratch,
 		version:     *version,
 		host:        *host,
 		timeout:     *timeout,
@@ -102,7 +95,7 @@ func run() int {
 			broken = append(broken, policy)
 			continue
 		}
-		blocks = onlyDatabase(blocks, *db)
+		blocks = runsuites.OnlyDatabase(blocks, *db)
 		if len(blocks) == 0 {
 			r.say("[%s] nothing to run on gateway %s\n", policy, *version)
 			r.recorder.Skip(policy)
@@ -148,7 +141,6 @@ type build struct {
 // runner runs the blocks of the suites.
 type runner struct {
 	policiesDir string
-	scratch     string
 	version     string
 	host        string
 	timeout     time.Duration
@@ -204,9 +196,9 @@ func (r *runner) run(job runsuites.Job) error {
 	return err
 }
 
-// warm compiles the policy's suite once, on first use, so that the go test of each of its blocks
-// finds everything it needs in the build cache instead of compiling it again at the same time.
-// Blocks of the same policy wait for that one compilation.
+// warm compiles the policy's suite once, on first use, and throws the binary away, so that the go
+// test of each of its blocks finds the compiled packages in the build cache instead of compiling
+// them again at the same time. Blocks of the same policy wait for that one compilation.
 func (r *runner) warm(policy string) error {
 	r.mu.Lock()
 	b, ok := r.builds[policy]
@@ -219,7 +211,7 @@ func (r *runner) warm(policy string) error {
 	b.once.Do(func() {
 		out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+policy+" build] ")
 		defer out.Flush()
-		cmd := exec.Command("go", "test", "-c", "-o", filepath.Join(r.scratch, policy+".test"), ".")
+		cmd := exec.Command("go", "test", "-c", "-o", os.DevNull, ".")
 		cmd.Dir = r.policyDir(policy)
 		cmd.Stdout = out
 		cmd.Stderr = out
@@ -247,20 +239,6 @@ func displayName(policy, block string) string {
 		return block
 	}
 	return policy + "/" + block
-}
-
-// onlyDatabase keeps the matrix variants that run on database. An empty database keeps every block.
-func onlyDatabase(blocks []runsuites.Block, database string) []runsuites.Block {
-	if database == "" {
-		return blocks
-	}
-	var kept []runsuites.Block
-	for _, block := range blocks {
-		if strings.HasSuffix(block.Name, "/"+database) {
-			kept = append(kept, block)
-		}
-	}
-	return kept
 }
 
 func splitList(value string) []string {

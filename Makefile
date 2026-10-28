@@ -46,14 +46,15 @@ IT_STANDARDS_IMPORTS = github.com/wso2/gateway-controllers/tests/it/
 
 it: ## Build the gateway once, then run the integration suites of the selected policies against it
 	@test -n "$(IT_POLICIES)" || { echo "no policy has an integration suite"; exit 2; }
+	@test "$(BLOCK_PARALLEL)" -ge 1 2>/dev/null || { echo "BLOCK_PARALLEL must be a whole number of at least 1"; exit 2; }
 	@envfile=$$(mktemp); \
 	(cd tests/it && go run ./cmd/build-gateway -policies-dir ../../policies -version $(GATEWAY_VERSION) \
-		$(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(GATEWAY_POLICIES),-policies $(GATEWAY_POLICIES)) \
+		$(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(GATEWAY_POLICIES),-policies "$(GATEWAY_POLICIES)") \
 		-env-file "$$envfile") || { rm -f "$$envfile"; exit 1; }; \
 	set -a; . "$$envfile"; set +a; rm -f "$$envfile"; \
 	cd tests/it && go run ./cmd/run-suites -policies-dir ../../policies -policies "$(subst $(space),$(comma),$(IT_POLICIES))" \
 		-version $(GATEWAY_VERSION) $(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(DB),-db $(DB)) \
-		$(if $(BLOCK_PARALLEL),-block-parallel $(BLOCK_PARALLEL)) $(if $(IT_TIMELINE),-timeline $(IT_TIMELINE))
+		$(if $(BLOCK_PARALLEL),-block-parallel $(BLOCK_PARALLEL)) $(if $(IT_TIMELINE),-timeline "$(abspath $(IT_TIMELINE))")
 
 it-unit: ## Run the unit tests of the shared steps and of the selected policies' own steps
 	cd tests/it && go test ./... -count=1
