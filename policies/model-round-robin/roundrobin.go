@@ -47,6 +47,18 @@ const (
 	// selected target specifies a provider.
 	MetadataKeyProviderRouting = "selected_provider"
 
+	// MetadataKeyPublishedRanking carries this policy's full rotation order for the request,
+	// per specs/001-model-failover-policy/contracts/target-preference-list.md. A failover
+	// policy traverses it after the leading target fails, so retries follow round-robin's own
+	// order instead of a separately configured list.
+	//
+	// The value is []map[string]string with keys "model" and optional "provider" — BUILT-IN
+	// TYPES ONLY. The consumer lives in a different Go module, and a Go type assertion matches
+	// identical named types rather than structurally compatible ones, so publishing a struct
+	// here would be silently unreadable. The single-selection keys above are plain strings for
+	// the same reason.
+	MetadataKeyPublishedRanking = "model_routing.published_ranking"
+
 	// suspensionKeySeparator separates provider and model in the composite
 	// suspension key so the same model name on different providers is tracked
 	// independently. A NUL byte can never appear in a provider or model name.
@@ -264,6 +276,15 @@ func extractInt(value interface{}) (int, error) {
 
 // selectNextAvailableModel selects the next available model in round-robin fashion
 func (p *ModelRoundRobinPolicy) selectNextAvailableModel(models []ModelConfig) *ModelConfig {
+	selected, _ := p.selectNextAvailableModelAt(models)
+	return selected
+}
+
+// selectNextAvailableModelAt is selectNextAvailableModel plus the index it landed on, which is
+// what the published rotation has to start from. Returning the model alone would force a
+// search by value, and a configuration may legitimately list the same model twice under
+// different providers.
+func (p *ModelRoundRobinPolicy) selectNextAvailableModelAt(models []ModelConfig) (*ModelConfig, int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -273,7 +294,8 @@ func (p *ModelRoundRobinPolicy) selectNextAvailableModel(models []ModelConfig) *
 
 	for attemptCount < totalModels {
 		// Get current model (copy to avoid returning pointer to slice element)
-		selectedModel := models[p.currentIndex]
+		selectedIndex := p.currentIndex
+		selectedModel := models[selectedIndex]
 		key := suspensionKey(selectedModel.Provider, selectedModel.Model)
 
 		// Move to next index for next call
@@ -290,10 +312,39 @@ func (p *ModelRoundRobinPolicy) selectNextAvailableModel(models []ModelConfig) *
 			delete(p.suspendedModels, key)
 		}
 
-		return &selectedModel
+		return &selectedModel, selectedIndex
 	}
 
-	return nil
+	return nil, -1
+}
+
+// publishRotation renders the full rotation starting at the selected position into the
+// preference-list contract's wire representation.
+//
+// The whole rotation, not just the winner: a failover policy that only learned the winner would
+// have to invent what comes after it, and the point of the contract is that retries follow this
+// policy's own order. Starting at the selected position is what makes the order meaningful —
+// the leading entry is the target this request actually goes to.
+//
+// Published unconditionally, even for a single-model configuration, so a consumer never has to
+// distinguish "one model" from "this policy did not publish".
+func publishRotation(models []ModelConfig, selectedIndex int) []map[string]string {
+	if selectedIndex < 0 || len(models) == 0 {
+		return nil
+	}
+	rotation := make([]map[string]string, 0, len(models))
+	for offset := 0; offset < len(models); offset++ {
+		m := models[(selectedIndex+offset)%len(models)]
+		if m.Model == "" {
+			continue
+		}
+		entry := map[string]string{"model": m.Model}
+		if m.Provider != "" {
+			entry["provider"] = m.Provider
+		}
+		rotation = append(rotation, entry)
+	}
+	return rotation
 }
 
 // OnRequestHeaders selects the next model and applies the modification for header/queryParam/pathParam
@@ -304,7 +355,7 @@ func (p *ModelRoundRobinPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 	identifier := p.params.RequestModel.Identifier
 
 	// Select next available model in round-robin fashion
-	selectedModel := p.selectNextAvailableModel(p.params.Models)
+	selectedModel, selectedIndex := p.selectNextAvailableModelAt(p.params.Models)
 	if selectedModel == nil {
 		return policy.ImmediateResponse{
 			StatusCode: 503,
@@ -319,6 +370,13 @@ func (p *ModelRoundRobinPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 	reqCtx.Metadata[MetadataKeySelectedModel] = selectedModel.Model
 	reqCtx.Metadata[MetadataKeySelectedProvider] = selectedModel.Provider
 	reqCtx.Metadata[MetadataKeyHeadersProcessed] = true
+
+	// Publish the whole rotation for a failover policy to traverse. Set alongside the
+	// single-selection keys, never instead of them: every other consumer reads those, and a
+	// policy that has not adopted the contract must keep working unchanged.
+	if rotation := publishRotation(p.params.Models, selectedIndex); len(rotation) > 0 {
+		reqCtx.Metadata[MetadataKeyPublishedRanking] = rotation
+	}
 	slog.Debug("ModelRoundRobin: OnRequestHeaders selected model", "model", selectedModel.Model, "provider", selectedModel.Provider)
 
 	mods := policy.UpstreamRequestHeaderModifications{}
@@ -361,6 +419,12 @@ func (p *ModelRoundRobinPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 }
 
 // OnResponseHeaders suspends a model in the response header phase when an error is detected.
+//
+// Runs unchanged when a failover policy also governs the operation. The downstream chain is
+// entered once per client request, so the status seen here is the FINAL one: a request failover
+// rescued reports success and suspends nothing, and a 5xx only arrives once the whole chain is
+// exhausted — which means the target selected here failed too. The two health views are
+// independent and both correct, so neither needs to defer to the other.
 func (p *ModelRoundRobinPolicy) OnResponseHeaders(ctx context.Context, respCtx *policy.ResponseHeaderContext, params map[string]interface{}) policy.ResponseHeaderAction {
 	if respCtx.ResponseStatus >= 500 || respCtx.ResponseStatus == 429 {
 		selectedModel := ""
