@@ -27,7 +27,8 @@ import (
 	"github.com/wso2/gateway-controllers/policies/advanced-ratelimit/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// jwt-auth puts the token claims that authproperty keys read in the auth context.
+var config = suite.Config{Register: steps.Register, Companions: []string{"jwt-auth"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
