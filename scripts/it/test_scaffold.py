@@ -53,7 +53,7 @@ class ScaffoldTest(unittest.TestCase):
         )
         suite = (it / "it-suite.yaml").read_text()
         self.assertIn("suite: word-count-guardrail", suite)
-        self.assertIn("addPoliciesFrom: policies", suite)
+        self.assertNotIn("addPoliciesFrom", suite)
         self.assertIn("features/word_count_guardrail.feature", suite)
         self.assertIn("module github.com/wso2/gateway-controllers/policies/word-count-guardrail/it", (it / "go.mod").read_text())
         self.assertIn("policies/word-count-guardrail/it/steps", (it / "suite_test.go").read_text())

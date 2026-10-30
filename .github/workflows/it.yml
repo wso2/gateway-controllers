@@ -7,6 +7,10 @@ on:
         description: "Comma-separated policies to test, or 'all' for every policy with integration tests"
         required: true
         default: all
+      block_parallel:
+        description: "Most blocks that run at the same time across the selected suites; empty uses the IT_BLOCK_PARALLEL variable, then the Makefile default"
+        required: false
+        default: ""
   pull_request:
     branches:
       - main
@@ -47,6 +51,8 @@ jobs:
           set -euo pipefail
           python3 scripts/it/test_changed_policies.py
           python3 scripts/it/test_scaffold.py
+          python3 scripts/it/test_render_timeline.py
+          python3 scripts/it/test_resolve_framework_versions.py
           if [[ -n "$REQUESTED_POLICIES" ]]; then
             python3 scripts/it/changed-policies.py --policies "$REQUESTED_POLICIES"
           else
@@ -86,7 +92,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
-      max-parallel: 2
+      max-parallel: 3
       matrix:
         include:
           - gateway_version: "1.2.0"
@@ -118,24 +124,44 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
-      # One run per gateway version executes the suite of every selected policy in turn and fails
-      # if any of them fails.
-      # The suites run on the testbench image published with the pinned framework release. Pull it
-      # when this repository can, and otherwise build the same image from the pinned module's
-      # source, which is what the release publishes.
-      - name: Provide the testbench image
-        working-directory: gateway-controllers/tests/it
+      # A policy's it/framework-version file picks how its suite follows framework releases:
+      # latest (the default), minor (newest patch of the line its go.mod pins) or pinned.
+      - name: Resolve the framework version of each selected policy
+        working-directory: gateway-controllers
+        env:
+          POLICIES: ${{ needs.detect.outputs.policies }}
+        run: python3 scripts/it/resolve-framework-versions.py "$POLICIES"
+
+      # One run per gateway version builds the gateway once, from every policy of the repository on
+      # the base images of that version, then executes the suite of every selected policy in turn
+      # against that build and fails if any of them fails.
+      # Each suite runs on the testbench image published with the framework release its go.mod
+      # resolves to. Pull it when this repository can, and otherwise build the same image from that
+      # module's source, which is what the release publishes.
+      - name: Provide the testbench images
+        working-directory: gateway-controllers
+        env:
+          POLICIES: ${{ needs.detect.outputs.policies }}
         run: |
           set -euo pipefail
           module=github.com/wso2/api-platform/tests/framework
-          go mod download "$module"
-          version="$(go list -m -f '{{.Version}}' "$module")"
-          image="ghcr.io/wso2/api-platform/testbench:${version#v}"
-          if docker pull "$image"; then
-            exit 0
-          fi
-          dir="$(go list -m -f '{{.Dir}}' "$module")"
-          docker build -f "$dir/testbench/Dockerfile" -t "$image" "$dir"
+          declare -A provided=()
+          IFS=',' read -r -a policies <<< "$POLICIES"
+          for policy in "${policies[@]}"; do
+            [[ -n "$policy" ]] || continue
+            pushd "policies/${policy}/it" > /dev/null
+            version="$(go list -m -f '{{.Version}}' "$module")"
+            if [[ -z "${provided[$version]:-}" ]]; then
+              provided[$version]=1
+              go mod download "$module"
+              image="ghcr.io/wso2/api-platform/testbench:${version#v}"
+              if ! docker pull "$image"; then
+                dir="$(go list -m -f '{{.Dir}}' "$module")"
+                docker build -f "$dir/testbench/Dockerfile" -t "$image" "$dir"
+              fi
+            fi
+            popd > /dev/null
+          done
 
       - name: Run the integration suites of the selected policies
         working-directory: gateway-controllers
@@ -144,17 +170,43 @@ jobs:
           GATEWAY_VERSION: ${{ matrix.gateway_version }}
           GATEWAY_HOST: ${{ matrix.gateway_host }}
           POLICIES: ${{ needs.detect.outputs.policies }}
+          BLOCK_PARALLEL: ${{ inputs.block_parallel || vars.IT_BLOCK_PARALLEL }}
+          IT_TIMELINE: ${{ github.workspace }}/it-timeline-${{ matrix.gateway_version }}.json
         run: |
           set -euo pipefail
+          # Record the runner's memory and load while the suites run, to choose BLOCK_PARALLEL from.
+          usage="$GITHUB_WORKSPACE/resource-usage-$GATEWAY_VERSION.log"
+          (while true; do
+            echo "$(date -u +%H:%M:%S) $(free -m | awk '/^Mem:/ {print "used_mb=" $3 " available_mb=" $7}') load=$(cut -d' ' -f1-3 /proc/loadavg) containers=$(docker ps -q | wc -l)"
+            sleep 10
+          done) >> "$usage" &
+          sampler=$!
+          trap 'kill "$sampler" 2>/dev/null || true' EXIT
           make it POLICIES="$POLICIES" GATEWAY_VERSION="$GATEWAY_VERSION" GATEWAY_HOST="$GATEWAY_HOST" \
+            ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} IT_TIMELINE="$IT_TIMELINE" \
             2>&1 | tee "$GITHUB_WORKSPACE/policy-it-$GATEWAY_VERSION.log"
+
+      # The time each policy suite took on this gateway version, in the run summary. It is best
+      # effort and never fails the job.
+      - name: Summarize the suite timing
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GATEWAY_VERSION: ${{ matrix.gateway_version }}
+        run: |
+          python3 gateway-controllers/scripts/it/render-timeline.py \
+            --input "$GITHUB_WORKSPACE/it-timeline-$GATEWAY_VERSION.json" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload the test output
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: gateway-controller-policy-test-output-${{ matrix.gateway_version }}
-          path: policy-it-${{ matrix.gateway_version }}.log
+          path: |
+            policy-it-${{ matrix.gateway_version }}.log
+            resource-usage-${{ matrix.gateway_version }}.log
+            it-timeline-${{ matrix.gateway_version }}.json
           if-no-files-found: ignore
           retention-days: 7
 

@@ -16,9 +16,8 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the pii-masking-regex policy. The gateway under test is built from this
-# policy and the policies the gateway controller requires (tests/it/common/suite), staged as the
-# policy tree that addPoliciesFrom names. Feature paths are relative to this directory.
+# The integration suite of the pii-masking-regex policy. Feature paths are relative to this
+# directory.
 
 suite: pii-masking-regex
 
@@ -40,7 +39,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: pii-masking-regex

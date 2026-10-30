@@ -29,23 +29,32 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 #   make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0
 # POLICIES is a comma-separated list and defaults to every policy that has a suite. DB limits the run
 # to one database (sqlite, postgres or sqlserver); GATEWAY_HOST replaces the image repository prefix.
+# One run builds the gateway once, on the base images of GATEWAY_VERSION, and every selected suite
+# boots that build. It carries every policy of the repository; GATEWAY_POLICIES, a comma-separated
+# list, narrows it. BLOCK_PARALLEL is the number of blocks, each with its own gateway, testbench and
+# database, that run at once across all selected suites: as soon as one ends, the next starts.
+# IT_TIMELINE, a file path, makes the run write how long each block took to that file, as JSON.
 GATEWAY_VERSION ?= 1.2.0
+ifeq ($(strip $(BLOCK_PARALLEL)),)
+override BLOCK_PARALLEL := 12
+endif
+IT_TIMELINE ?=
 comma := ,
 space := $(subst ,, )
 IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml)))
 IT_STANDARDS_IMPORTS = github.com/wso2/gateway-controllers/tests/it/
 
-it: ## Run the integration suites of the selected policies against a released gateway
+it: ## Build the gateway once, then run the integration suites of the selected policies against it
 	@test -n "$(IT_POLICIES)" || { echo "no policy has an integration suite"; exit 2; }
-	@failed=""; \
-	for policy in $(IT_POLICIES); do \
-		echo "=== Integration suite of $$policy on gateway $(GATEWAY_VERSION) ==="; \
-		(cd policies/$$policy/it && go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args \
-			$(if $(DB),-blocks=$$policy/$(DB)) \
-			-gateway-version=$(GATEWAY_VERSION) \
-			$(if $(GATEWAY_HOST),-host=$(GATEWAY_HOST))) || failed="$$failed $$policy"; \
-	done; \
-	test -z "$$failed" || { echo "Failed integration suites:$$failed"; exit 1; }
+	@test "$(BLOCK_PARALLEL)" -ge 1 2>/dev/null || { echo "BLOCK_PARALLEL must be a whole number of at least 1"; exit 2; }
+	@envfile=$$(mktemp); \
+	(cd tests/it && go run ./cmd/build-gateway -policies-dir ../../policies -version $(GATEWAY_VERSION) \
+		$(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(GATEWAY_POLICIES),-policies "$(GATEWAY_POLICIES)") \
+		-env-file "$$envfile") || { rm -f "$$envfile"; exit 1; }; \
+	set -a; . "$$envfile"; set +a; rm -f "$$envfile"; \
+	cd tests/it && go run ./cmd/run-suites -policies-dir ../../policies -policies "$(subst $(space),$(comma),$(IT_POLICIES))" \
+		-version $(GATEWAY_VERSION) $(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(DB),-db $(DB)) \
+		$(if $(BLOCK_PARALLEL),-block-parallel $(BLOCK_PARALLEL)) $(if $(IT_TIMELINE),-timeline "$(abspath $(IT_TIMELINE))")
 
 it-unit: ## Run the unit tests of the shared steps and of the selected policies' own steps
 	cd tests/it && go test ./... -count=1
