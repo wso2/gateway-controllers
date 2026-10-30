@@ -140,7 +140,9 @@ use the new model-matching behavior. The published schema exposes the new names.
 
 ## Model and provider rewriting
 
-The system-provided `requestModel` setting identifies where the model appears
+The gateway controller merges `requestModel` from the LLM provider template into
+regular policy parameters. It is required at runtime but does not need to be
+supplied in the policy attachment. This setting identifies where the model appears
 in the upstream request. Supported locations are `payload` (with `body` as a
 backward-compatible alias), `header`, `queryParam`, and `pathParam`. Requested-
 model matching and rewriting use that location. Payload identifiers are

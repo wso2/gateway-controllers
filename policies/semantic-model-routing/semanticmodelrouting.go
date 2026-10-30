@@ -441,7 +441,7 @@ func parseParams(params map[string]interface{}, p *SemanticModelRoutingPolicy) e
 	}
 	p.defaultProvider = defaultProvider
 
-	// Parse requestModel config (system parameter)
+	// Parse the model mapping merged into params from the provider template.
 	if err := parseRequestModelConfig(params, p); err != nil {
 		return err
 	}

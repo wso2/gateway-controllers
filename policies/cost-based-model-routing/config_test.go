@@ -184,7 +184,7 @@ func TestParseConfigValidationErrors(t *testing.T) {
 		{
 			name:     "missing requestModel",
 			mutate:   func(p map[string]interface{}) { delete(p, "requestModel") },
-			contains: "'requestModel' system parameter is required",
+			contains: "'requestModel' provider-template parameter is required",
 		},
 		{
 			name: "invalid model location",

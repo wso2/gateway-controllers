@@ -1,5 +1,5 @@
 name: cost-based-model-routing
-version: v0.9.0
+version: v0.9.1
 displayName: Cost-Based Model Routing
 description: |
   Routes each request using its exact model budget, shared across callers.
@@ -19,6 +19,31 @@ parameters:
   required:
     - modelBudgets
   properties:
+    requestModel:
+      type: object
+      additionalProperties: false
+      description: |
+        Provider-template location of the model in the upstream request. The
+        selected model is written to this location.
+      required:
+        - location
+        - identifier
+      properties:
+        location:
+          type: string
+          description: |
+            Where the model lives in the request. "body" is accepted as a
+            backwards-compatible alias for "payload".
+          enum: [payload, body, header, queryParam, pathParam]
+        identifier:
+          type: string
+          description: |
+            JSONPath for payload (for example "$.model"), header name, query
+            parameter name, or a regular expression with a capture group
+            selecting the model segment for pathParam. A simple leading positive
+            lookbehind expression, such as "(?<=models/)[a-zA-Z0-9.\\-]+",
+            is also supported for pathParam.
+          minLength: 1
     modelBudgets:
       title: Model-budgets
       type: array
@@ -149,33 +174,7 @@ parameters:
 systemParameters:
   type: object
   additionalProperties: false
-  required:
-    - requestModel
   properties:
-    requestModel:
-      type: object
-      additionalProperties: false
-      description: |
-        Provider-template location of the model in the upstream request. The
-        selected model is written to this location.
-      required:
-        - location
-        - identifier
-      properties:
-        location:
-          type: string
-          description: |
-            Where the model lives in the request. "body" is accepted as a
-            backwards-compatible alias for "payload".
-          enum: [payload, body, header, queryParam, pathParam]
-        identifier:
-          type: string
-          description: |
-            JSONPath for payload (for example "$.model"), header name, query
-            parameter name, or a regular expression with a capture group
-            selecting the model segment for pathParam.
-          minLength: 1
-
     costScaleFactor:
       type: integer
       description: |
