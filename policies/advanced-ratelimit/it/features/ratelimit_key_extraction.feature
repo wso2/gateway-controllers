@@ -656,3 +656,191 @@ Feature: Advanced rate limit key extraction strategies
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
+
+  Scenario: A match condition limits a quota to requests whose header value matches
+    Given I generate a unique value from "arl-match-header" and store it as "apiName"
+    And I generate a unique API version from "arl-match-header" and store it as "apiVersion"
+    And I generate a unique API context from "/arl-match-header" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}         |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"GET","path":"/checkout","policies":[{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"guest-and-partner-checkout","limits":[{"limit":3,"duration":"1h"}],"keyExtraction":[{"type":"header","key":"X-App-ID","match":{"type":"regex","value":"^(guest-.*\|channel-partner)$"}}]}]}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+
+    # A matching value is counted against its own bucket.
+    When I set header "X-App-ID" to "guest-42"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+
+    # Another matching value gets a separate bucket.
+    When I set header "X-App-ID" to "channel-partner"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    # A value that does not match skips the quota, so it is never throttled.
+    When I set header "X-App-ID" to "internal-app-1"
+    And I send 6 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
+
+  Scenario: Each quota counts only requests matching its own pattern, against its own limit
+    Given I generate a unique value from "arl-match-per-customer" and store it as "apiName"
+    And I generate a unique API version from "arl-match-per-customer" and store it as "apiVersion"
+    And I generate a unique API context from "/arl-match-per-customer" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}         |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"GET","path":"/checkout","policies":[{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"customer-abc","limits":[{"limit":2,"duration":"1h"}],"keyExtraction":[{"type":"header","key":"X-App-ID","match":{"type":"regex","value":"^abc-.*$"}}]},{"name":"customer-xyz","limits":[{"limit":3,"duration":"1h"}],"keyExtraction":[{"type":"header","key":"X-App-ID","match":{"type":"regex","value":"^xyz-.*$"}}]}]}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+
+    # customer-abc allows 2 requests.
+    When I set header "X-App-ID" to "abc-1"
+    And I send 2 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+
+    # customer-xyz allows 3, unaffected by customer-abc being exhausted.
+    When I set header "X-App-ID" to "xyz-1"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    # customer-xyz's traffic did not touch customer-abc's bucket.
+    When I set header "X-App-ID" to "abc-1"
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    # A value matching neither pattern is never throttled.
+    When I set header "X-App-ID" to "internal-app-1"
+    And I send 6 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
+
+  # jwt-auth runs before advanced-ratelimit and puts the token's claims in the auth context,
+  # where an authproperty key reads them.
+  Scenario: A match condition on an authproperty key limits a quota to tokens whose claim matches
+    Given I generate a unique value from "arl-match-authproperty" and store it as "apiName"
+    And I generate a unique API version from "arl-match-authproperty" and store it as "apiVersion"
+    And I generate a unique API context from "/arl-match-authproperty" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}         |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"GET","path":"/checkout","policies":[{"name":"jwt-auth","version":"v1","params":{"issuers":["mock-jwks"]}},{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"guest-and-partner-checkout","limits":[{"limit":3,"duration":"1h"}],"keyExtraction":[{"type":"authproperty","key":"app_id","match":{"type":"regex","value":"^(guest-.*\|channel-partner)$"}}]}]}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout" until status 401
+
+    # A token whose app_id matches is counted against its own bucket.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "app_id=guest-42" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+
+    # Another matching app_id gets a separate bucket.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "app_id=channel-partner" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    # An app_id that does not match skips the quota, so it is never throttled.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "app_id=internal-app-1" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I send 6 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
+
+  Scenario: A match on one claim filters the quota while the bucket counts by another claim
+    Given I generate a unique value from "arl-match-filter-count" and store it as "apiName"
+    And I generate a unique API version from "arl-match-filter-count" and store it as "apiVersion"
+    And I generate a unique API context from "/arl-match-filter-count" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}         |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"GET","path":"/checkout","policies":[{"name":"jwt-auth","version":"v1","params":{"issuers":["mock-jwks"]}},{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"guests-per-user","limits":[{"limit":3,"duration":"1h"}],"keyExtraction":[{"type":"authproperty","key":"app_id","match":{"type":"regex","value":"^123$"}},{"type":"authproperty","key":"user_id"}]}]}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout" until status 401
+
+    # app_id 123 matches, so alice's requests are counted.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "app_id=123,user_id=alice" and store it as "aliceToken"
+    And I set header "Authorization" to "Bearer ${CTX:aliceToken}"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+
+    # bob has the same app_id but his own bucket.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "app_id=123,user_id=bob" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    # bob's traffic did not touch alice's bucket.
+    When I set header "Authorization" to "Bearer ${CTX:aliceToken}"
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    # app_id 456 does not match, so alice is not throttled there: a 4th request still passes,
+    # which a separate bucket of 3 would not allow.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "app_id=456,user_id=alice" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I send 4 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 200
+
+    # The non-matching traffic did not touch alice's app_id 123 bucket either.
+    When I set header "Authorization" to "Bearer ${CTX:aliceToken}"
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/checkout"
+    Then the response status code should be 429
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
