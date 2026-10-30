@@ -42,11 +42,16 @@ import "time"
 //
 // Suspended targets are excluded throughout, and a target that resolves to nothing is skipped
 // rather than failing the deployment (FR-006a).
+// It also returns the targets it SKIPPED on health grounds. A skip is invisible in the
+// resulting chain — the request simply leads with a different target — so without reporting it
+// an operator cannot tell a chain that was short by configuration from one that was short
+// because half its members were suspended. Those are very different incidents.
 func resolveChain(published []Target, target Target, fallbacks []Target,
-	health HealthStore, now time.Time) []Target {
+	health HealthStore, now time.Time) (chain []Target, skipped []Target) {
 
 	seen := make(map[string]struct{}, len(published)+len(fallbacks)+1)
-	chain := make([]Target, 0, len(published)+len(fallbacks)+1)
+	skippedSeen := make(map[string]struct{})
+	chain = make([]Target, 0, len(published)+len(fallbacks)+1)
 
 	appendUnseen := func(targets []Target) {
 		for _, candidate := range targets {
@@ -61,7 +66,12 @@ func resolveChain(published []Target, target Target, fallbacks []Target,
 			if !health.Healthy(candidate, now) {
 				// Suspended: excluded from this request's chain. Deliberately NOT marked
 				// seen, so it re-enters a later request's chain the moment its suspension
-				// expires (FR-019).
+				// expires (FR-019). Recorded once for telemetry even if it appears in both
+				// the published ranking and the configured chain.
+				if _, dup := skippedSeen[key]; !dup {
+					skippedSeen[key] = struct{}{}
+					skipped = append(skipped, candidate)
+				}
 				continue
 			}
 			seen[key] = struct{}{}
@@ -80,5 +90,5 @@ func resolveChain(published []Target, target Target, fallbacks []Target,
 	}
 	appendUnseen([]Target{target})
 
-	return chain
+	return chain, skipped
 }

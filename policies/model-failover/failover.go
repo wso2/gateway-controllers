@@ -52,6 +52,12 @@ const (
 	metadataKeySelectedProvider = "model_failover.selected_provider"
 	metadataKeyRequestStart     = "model_failover.request_start"
 	metadataKeyChain            = "model_failover.chain"
+	// Request-time facts the response phase cannot recompute: by then the published
+	// ranking has served its purpose and the health store has moved on, so which targets
+	// were skipped and where the order came from would both be lost.
+	metadataKeySkipped        = "model_failover.skipped"
+	metadataKeyRankingSource  = "model_failover.ranking_source"
+	metadataKeyRequestedModel = "model_failover.requested_model"
 
 	// attemptCountHeader is populated by Envoy on the downstream response when the virtual
 	// host sets include_attempt_count_in_response.
@@ -178,7 +184,7 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		return policy.UpstreamRequestModifications{}
 	}
 
-	resolved := resolveChain(published, first, fallbacks, p.health, now)
+	resolved, skipped := resolveChain(published, first, fallbacks, p.health, now)
 
 	metadata := buildFailoverMetadata(resolved, p.params.ProviderClusters)
 	if metadata == nil {
@@ -199,6 +205,15 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		reqCtx.Metadata[metadataKeyChain] = resolved
 		reqCtx.Metadata[metadataKeySelectedModel] = leading.Model
 		reqCtx.Metadata[metadataKeySelectedProvider] = leading.Provider
+		reqCtx.Metadata[metadataKeyRequestedModel] = requestedModel
+		rankingSource := rankingSourceConfigured
+		if len(published) > 0 {
+			rankingSource = rankingSourceRoutingPolicy
+		}
+		reqCtx.Metadata[metadataKeyRankingSource] = rankingSource
+		if len(skipped) > 0 {
+			reqCtx.Metadata[metadataKeySkipped] = skipped
+		}
 	}
 
 	slog.Debug("ModelFailover: published failover chain",
@@ -273,18 +288,60 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 		target = chain[idx]
 	}
 
+	failed := append([]Target{}, chain[:min(attempts-1, len(chain))]...)
+
+	outcome := outcomeServed
 	switch {
 	case p.isFailoverWorthy(status):
 		if event := p.health.RecordFailure(target, latency, now); event != nil {
 			p.logSuspension(event)
 		}
+		// The last target answered with a failure too, so the chain is spent. That is the
+		// one outcome the client actually sees as an error.
+		outcome = outcomeExhausted
+		failed = append(failed, target)
 	default:
 		// Any non-failover-worthy status counts as a success for health purposes: the target
 		// answered. A 400 is the client's problem, not the provider's.
-		p.health.RecordSuccess(target, latency, now)
+		if event := p.health.RecordSuccess(target, latency, now); event != nil {
+			p.logRecovery(event)
+		}
+		if attempts > 1 {
+			outcome = outcomeRescued
+		}
 	}
 
-	return policy.DownstreamResponseHeaderModifications{}
+	record := attemptRecord{
+		RequestedModel: stringFromMetadata(respCtx.Metadata, metadataKeyRequestedModel),
+		Attempts:       attempts,
+		ChainLength:    len(chain),
+		Outcome:        outcome,
+		ServingTarget:  target,
+		RankingSource:  stringFromMetadata(respCtx.Metadata, metadataKeyRankingSource),
+		FailedTargets:  failed,
+		SkippedTargets: targetsFromMetadata(respCtx.Metadata, metadataKeySkipped),
+	}
+	record.log()
+
+	return policy.DownstreamResponseHeaderModifications{
+		AnalyticsMetadata: record.analytics(),
+	}
+}
+
+func stringFromMetadata(metadata map[string]interface{}, key string) string {
+	if metadata == nil {
+		return ""
+	}
+	value, _ := metadata[key].(string)
+	return value
+}
+
+func targetsFromMetadata(metadata map[string]interface{}, key string) []Target {
+	if metadata == nil {
+		return nil
+	}
+	targets, _ := metadata[key].([]Target)
+	return targets
 }
 
 // publishedRanking reads the ordered target preference list a routing policy published for
@@ -412,6 +469,18 @@ func (p *Policy) logSuspension(event *SuspensionEvent) {
 		"observed", event.Observed,
 		"sample_size", event.SampleSize,
 		"duration_seconds", event.DurationSeconds,
+		"escalation_step", event.EscalationStep)
+}
+
+// logRecovery reports a target returning to rotation. INFO, like a suspension: an operator
+// tracking a flapping provider needs both ends of the cycle, and a recovery that is never
+// reported leaves the suspension line looking permanent.
+func (p *Policy) logRecovery(event *RecoveryEvent) {
+	slog.Info("ModelFailover: target recovered",
+		"model", event.Target.Model,
+		"provider", event.Target.Provider,
+		"probes_required", event.ProbesRequired,
+		"suspended_for_seconds", event.SuspendedForSeconds,
 		"escalation_step", event.EscalationStep)
 }
 

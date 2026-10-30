@@ -44,7 +44,8 @@ func openHealth() HealthStore {
 }
 
 func resolved(published []Target, target Target, fallbacks []Target) string {
-	return names(resolveChain(published, target, fallbacks, openHealth(), time.Now()))
+	chain, _ := resolveChain(published, target, fallbacks, openHealth(), time.Now())
+	return names(chain)
 }
 
 // THE rule, as decided 2026-10-29: when A fails the retry goes to B — the fallback the
@@ -105,7 +106,8 @@ func TestResolveChain_SuspendedTargetsAreExcluded(t *testing.T) {
 	now := time.Now()
 	health.RecordFailure(m("A"), 0, now) // A is now suspended
 
-	got := names(resolveChain([]Target{m("A"), m("D")}, m("A"), []Target{m("B")}, health, now))
+	chain, _ := resolveChain([]Target{m("A"), m("D")}, m("A"), []Target{m("B")}, health, now)
+	got := names(chain)
 	if strings.Contains(got, "A") {
 		t.Fatalf("chain = %q, want the suspended target excluded", got)
 	}

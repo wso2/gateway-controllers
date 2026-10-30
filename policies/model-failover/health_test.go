@@ -456,3 +456,57 @@ func TestHealth_PublicationDoesNotConsumeAProbe(t *testing.T) {
 		t.Fatal("publication consumed the probe slot")
 	}
 }
+
+// A recovery that is never reported leaves the suspension line looking permanent, so an
+// operator tracking a flapping provider needs both ends of the cycle.
+func TestHealth_RecoveryIsReportedOnceWhenTheProbeRunCompletes(t *testing.T) {
+	s := testSuspension()
+	s.DurationSeconds = 60
+	s.ConsecutiveFailures = 1
+	s.clamp()
+	store := NewHealthStore(s)
+	target := Target{Model: "claude-3", Provider: "anthropic"}
+
+	start := time.Now()
+	store.RecordFailure(target, 0, start)
+
+	later := start.Add(61 * time.Second)
+	required := s.RecoverAfterSuccesses
+
+	var events int
+	var last *RecoveryEvent
+	for i := 0; i < required; i++ {
+		if !store.Healthy(target, later) {
+			t.Fatalf("probe %d was not admitted", i+1)
+		}
+		if event := store.RecordSuccess(target, 0, later); event != nil {
+			events++
+			last = event
+		}
+	}
+
+	// Once, on the LAST probe. Reporting every successful probe would read as several
+	// recoveries where there was one.
+	if events != 1 {
+		t.Fatalf("got %d recovery events over %d probes, want exactly 1", events, required)
+	}
+	if last.Target != target {
+		t.Fatalf("event names %+v, want %+v", last.Target, target)
+	}
+	if last.ProbesRequired != required {
+		t.Fatalf("probes_required = %d, want %d — a reader cannot otherwise tell a one-probe "+
+			"recovery from the run that actually happened", last.ProbesRequired, required)
+	}
+	if last.SuspendedForSeconds != 60 {
+		t.Fatalf("suspended_for_seconds = %d, want 60 so the line matches the suspension it ends",
+			last.SuspendedForSeconds)
+	}
+}
+
+// A plain success on a healthy target is not a recovery, or every request would report one.
+func TestHealth_NoRecoveryEventWithoutASuspension(t *testing.T) {
+	store := NewHealthStore(testSuspension())
+	if event := store.RecordSuccess(Target{Model: "gpt-4o"}, 0, time.Now()); event != nil {
+		t.Fatalf("got a recovery event for a target that was never suspended: %+v", event)
+	}
+}

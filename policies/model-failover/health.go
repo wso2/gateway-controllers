@@ -34,6 +34,24 @@ const (
 	ReasonLatency             SuspensionReason = "latency_p95"
 )
 
+// RecoveryEvent reports a target returning to normal rotation after suspension.
+//
+// Emitted only on the LAST probe of the run, not on each one: a target is either in rotation
+// or not, and reporting every successful probe would read as several recoveries where there
+// was one. ProbesRequired is carried so a reader can tell a one-probe recovery from the
+// several-probe run that actually happened.
+type RecoveryEvent struct {
+	Target         Target
+	ProbesRequired int
+	// SuspendedForSeconds is the duration that had been applied, so a recovery line can be
+	// matched to the suspension line it ends.
+	SuspendedForSeconds int
+	// EscalationStep is where the target sits on the backoff ladder as it returns. A target
+	// recovering at step 3 has been round this loop before and is worth attention even
+	// though it is, right now, healthy.
+	EscalationStep int
+}
+
 // SuspensionEvent describes one suspension, for telemetry.
 type SuspensionEvent struct {
 	Target Target
@@ -100,8 +118,10 @@ const probeLeaseSeconds = 30
 type HealthStore interface {
 	// Healthy reports whether the target may receive traffic now.
 	Healthy(target Target, now time.Time) bool
-	// RecordSuccess clears the consecutive-failure count and feeds the window.
-	RecordSuccess(target Target, latency time.Duration, now time.Time)
+	// RecordSuccess clears the consecutive-failure count and feeds the window. It returns a
+	// non-nil event when this success completed a probe run and returned the target to
+	// rotation.
+	RecordSuccess(target Target, latency time.Duration, now time.Time) *RecoveryEvent
 	// RecordFailure feeds every suspension criterion and returns a non-nil event if this
 	// outcome suspended the target.
 	RecordFailure(target Target, latency time.Duration, now time.Time) *SuspensionEvent
@@ -217,7 +237,7 @@ func (m *memoryHealthStore) reportableLocked(target Target, now time.Time) bool 
 	return h.suspendedUntil.IsZero() && !h.halfOpen
 }
 
-func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, now time.Time) {
+func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, now time.Time) *RecoveryEvent {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -235,8 +255,14 @@ func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, 
 			h.halfOpen = false
 			h.probeSuccesses = 0
 			h.healthySince = now
+			return &RecoveryEvent{
+				Target:              target,
+				ProbesRequired:      m.suspension.RecoverAfterSuccesses,
+				SuspendedForSeconds: h.currentDurationSeconds,
+				EscalationStep:      h.escalationStep,
+			}
 		}
-		return
+		return nil
 	}
 
 	// A target that has stayed healthy long enough earns its escalation back to the base
@@ -247,6 +273,8 @@ func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, 
 		h.currentDurationSeconds = m.suspension.DurationSeconds
 		h.escalationStep = 0
 	}
+
+	return nil
 }
 
 func (m *memoryHealthStore) RecordFailure(target Target, latency time.Duration, now time.Time) *SuspensionEvent {
