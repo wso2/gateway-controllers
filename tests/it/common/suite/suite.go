@@ -43,6 +43,7 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/suiterun"
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 
+	"github.com/wso2/gateway-controllers/tests/it/common/resources"
 	"github.com/wso2/gateway-controllers/tests/it/common/steps"
 	"github.com/wso2/gateway-controllers/tests/it/common/steps/platformgateway"
 )
@@ -71,6 +72,10 @@ type Config struct {
 	// Register binds the steps only this policy needs, after the shared steps are bound. It is
 	// optional. A step defined here must not repeat a shared one.
 	Register func(sc *godog.ScenarioContext, topo *frameworkruntime.Topology)
+
+	// RegisterWithBase is Register for steps that build on the shared request steps. It also
+	// receives the shared steps' base, and runs after Register. It is optional.
+	RegisterWithBase func(sc *godog.ScenarioContext, base *steps.Base, topo *frameworkruntime.Topology)
 }
 
 // Main parses the suite flags and runs the tests. Call it from TestMain.
@@ -138,6 +143,9 @@ func Run(t *testing.T, cfg Config) {
 	}
 	if err := StageOverlays(dir, workspace); err != nil {
 		t.Fatalf("staging the overlays: %v", err)
+	}
+	if err := stagePlatformAPI(filepath.Join(dir, suiterun.DefaultSuiteFile), workspace); err != nil {
+		t.Fatalf("staging the platform-api files: %v", err)
 	}
 	if reason := excludedEverywhere(suiterun.Selection(), filepath.Join(dir, suiterun.DefaultSuiteFile)); reason != nil {
 		t.Skipf("nothing to run: %v", reason)
@@ -216,6 +224,34 @@ func StageOverlays(suiteDir, workspace string) error {
 	return copyTree(source, filepath.Join(workspace, overlaysDir))
 }
 
+var platformAPIComponent = regexp.MustCompile(`(?m)^\s*-\s*name:\s*platform-api\s*$`)
+
+// stagePlatformAPI stages the shared Platform API files at the workspace root when the suite file
+// runs the platform-api component, which the framework module cannot run without them.
+func stagePlatformAPI(suiteFile, workspace string) error {
+	content, err := os.ReadFile(suiteFile)
+	if err != nil {
+		return err
+	}
+	if !platformAPIComponent.Match(content) {
+		return nil
+	}
+	for name, path := range resources.PlatformAPIFiles {
+		file, err := resources.PlatformAPI.ReadFile("platformapi/" + name)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(workspace, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, file, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func stageOne(source, destination string) error {
 	if _, err := os.Stat(filepath.Join(source, "policy-definition.yaml")); err != nil {
 		return fmt.Errorf("%q is not a policy folder: %w", source, err)
@@ -263,6 +299,9 @@ func options(cfg Config) suiterun.Options {
 				shared.Register(sc)
 				if cfg.Register != nil {
 					cfg.Register(sc, topo)
+				}
+				if cfg.RegisterWithBase != nil {
+					cfg.RegisterWithBase(sc, shared.Base, topo)
 				}
 			}, nil
 		},

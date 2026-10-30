@@ -404,6 +404,56 @@ func TestPolicyParameterValue(t *testing.T) {
 	require.False(t, found)
 }
 
+func TestCheckAllHealthUntilUnhealthyConvergesOnFailure(t *testing.T) {
+	var routerUnhealthy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ready") {
+			if routerUnhealthy.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"healthy"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	definition := &components.Definition{
+		Name: "platform-gateway", Alias: "platform-gateway",
+		Endpoints: []components.Endpoint{
+			{Name: "admin", Port: port, Scheme: "http"},
+			{Name: "envoy-admin", Port: port, Scheme: "http"},
+			{Name: "policy-admin", Port: port, Scheme: "http"},
+		},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "localhost", map[int]int{port: port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+
+	steps := &Steps{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("health-until-runner"))
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		routerUnhealthy.Store(true)
+	}()
+
+	require.NoError(t, steps.checkAllHealthUntilUnhealthy(ctx, "router"))
+
+	stored, ok := tcontext.Get(ctx, healthResultsKey)
+	require.True(t, ok)
+	results, ok := stored.(map[string]healthResult)
+	require.True(t, ok)
+	require.False(t, results["router"].healthy)
+}
+
 func TestHealthyStatus(t *testing.T) {
 	tests := []struct {
 		name string
