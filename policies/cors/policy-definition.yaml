@@ -1,9 +1,11 @@
 name: cors
-version: v1.0.2
+version: v1.1.0
 description: |
   Applies Cross-Origin Resource Sharing (CORS) rules by handling preflight
   requests and adding CORS headers to responses. Controls cross-origin access
   through configured origins, methods, headers, credentials, and cache settings.
+  Optionally rejects requests from disallowed (or missing) origins with 403,
+  which also protects WebSocket APIs against cross-site WebSocket hijacking.
 
 parameters:
   type: object
@@ -91,9 +93,52 @@ parameters:
       description: Specifies whether unmatched preflight requests are forwarded
         upstream instead of handled by this policy.
       default: false
+    rejectDisallowedOrigins:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >
+        When true, a non-preflight request whose Origin is not in allowedOrigins
+        is rejected with 403 instead of being forwarded without CORS headers.
+        Browsers apply CORS only to what a page may read, and never to a
+        WebSocket handshake, so enable this to stop pages on other origins from
+        using a user's cookies against the API (cross-site WebSocket hijacking).
+        Requires allowedOrigins to list origins rather than "*"; each entry must
+        then be scheme://host[:port] (or https://*.example.com), and "null" is
+        refused. Requests without an Origin header are still allowed unless
+        rejectMissingOrigin is set. Preflight requests (OPTIONS with
+        Access-Control-Request-Method) keep the normal CORS answer, which browsers treat as a refusal for a disallowed origin;
+        only with forwardPreflight is a disallowed origin's preflight rejected
+        with 403 rather than forwarded.
+      default: false
+    rejectMissingOrigin:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: >
+        When true, a non-preflight request (including an OPTIONS without
+        Access-Control-Request-Method) with no Origin header is rejected with
+        403. Browsers always send Origin on a WebSocket handshake, but omit it on
+        ordinary same-origin GET and HEAD requests (page navigations among them),
+        so this can also reject browser requests. Leave it false when those
+        requests, or servers and apps that omit Origin, must reach the API.
+      default: false
 
   required:
     - allowedOrigins
+  # With rejectDisallowedOrigins, every allowed origin must be a bare
+  # scheme://host[:port] (or a subdomain wildcard), so "*", "null", paths and
+  # trailing slashes are refused when the API is deployed rather than when the
+  # policy is first loaded.
+  if:
+    properties:
+      rejectDisallowedOrigins:
+        const: true
+    required:
+      - rejectDisallowedOrigins
+  then:
+    properties:
+      allowedOrigins:
+        items:
+          pattern: '^https?://(?:(?:\*\.)?[^/?#@\s*:\[\]%]+|\[(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){7}|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){5}:(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,6})?|[0-9A-Fa-f]{1,4}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,5})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,4})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){2}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,3})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){3}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,2})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){4}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,1})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){5}::(?:[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){0,0})?|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){6}::|::(?:[0-9A-Fa-f]{1,4}:){0,5}(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|[0-9A-Fa-f]{1,4}::(?:[0-9A-Fa-f]{1,4}:){0,4}(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){1}::(?:[0-9A-Fa-f]{1,4}:){0,3}(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){2}::(?:[0-9A-Fa-f]{1,4}:){0,2}(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){3}::(?:[0-9A-Fa-f]{1,4}:){0,1}(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])|[0-9A-Fa-f]{1,4}(?::[0-9A-Fa-f]{1,4}){4}::(?:(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9]{2}|[1-9]?[0-9]))\])(?::(?:0|[1-9][0-9]{0,3}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?$'
 
 systemParameters:
   type: object

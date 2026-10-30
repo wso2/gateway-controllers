@@ -2,7 +2,9 @@ package cors
 
 import (
 	"context"
+	"os"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -338,6 +340,71 @@ func TestCorsPolicy_OnRequestHeaders_PreflightFailure_Forwarded(t *testing.T) {
 	}
 }
 
+// With forwardPreflight, a failed preflight is forwarded to the backend; a
+// disallowed origin's preflight must not be while rejectDisallowedOrigins is
+// set. An allowed origin's failed preflight is still forwarded, and without
+// forwardPreflight the usual 204 answer is unchanged.
+func TestCorsPolicy_OnRequestHeaders_PreflightRejectsDisallowedOriginWhenForwarding(t *testing.T) {
+	preflight := func(origin string) *policy.RequestHeaderContext {
+		return newCorsRequestHeaderContext("OPTIONS", map[string][]string{
+			"Origin":                        {origin},
+			"Access-Control-Request-Method": {"DELETE"},
+		})
+	}
+	params := map[string]any{
+		"allowedOrigins":          []any{"https://allowed.example.com"},
+		"allowedMethods":          []any{"GET"},
+		"forwardPreflight":        true,
+		"rejectDisallowedOrigins": true,
+	}
+	p := mustGetCorsPolicy(t, params)
+
+	resp, ok := p.OnRequestHeaders(context.Background(), preflight("https://blocked.example.com"), nil).(policy.ImmediateResponse)
+	if !ok || resp.StatusCode != 403 {
+		t.Fatalf("expected a 403 for a disallowed origin's preflight, got %#v", resp)
+	}
+
+	if _, ok := p.OnRequestHeaders(context.Background(), preflight("https://allowed.example.com"), nil).(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("an allowed origin's failed preflight should still be forwarded")
+	}
+
+	params["forwardPreflight"] = false
+	p = mustGetCorsPolicy(t, params)
+	resp, ok = p.OnRequestHeaders(context.Background(), preflight("https://blocked.example.com"), nil).(policy.ImmediateResponse)
+	if !ok || resp.StatusCode != 204 || len(resp.Headers) != 0 {
+		t.Fatalf("without forwardPreflight a disallowed preflight keeps the 204 with no CORS headers, got %#v", resp)
+	}
+}
+
+// An OPTIONS without Access-Control-Request-Method is not a CORS preflight, so
+// the reject options apply to it; a real preflight keeps the preflight answer.
+func TestCorsPolicy_OnRequestHeaders_NonPreflightOptionsFollowsRejectOptions(t *testing.T) {
+	strict := mustGetCorsPolicy(t, map[string]any{
+		"allowedOrigins":          []any{"https://allowed.example.com"},
+		"rejectDisallowedOrigins": true,
+		"rejectMissingOrigin":     true,
+	})
+	for name, headers := range map[string]map[string][]string{
+		"no Origin":         nil,
+		"disallowed Origin": {"Origin": {"https://blocked.example.com"}},
+	} {
+		resp, ok := strict.OnRequestHeaders(context.Background(), newCorsRequestHeaderContext("OPTIONS", headers), nil).(policy.ImmediateResponse)
+		if !ok || resp.StatusCode != 403 {
+			t.Errorf("%s: expected a 403 for a non-preflight OPTIONS, got %#v", name, resp)
+		}
+	}
+
+	preflight := newCorsRequestHeaderContext("OPTIONS", map[string][]string{"Access-Control-Request-Method": {"GET"}})
+	if resp, ok := strict.OnRequestHeaders(context.Background(), preflight, nil).(policy.ImmediateResponse); !ok || resp.StatusCode != 204 {
+		t.Errorf("a preflight keeps the preflight answer, got %#v", resp)
+	}
+
+	lenient := mustGetCorsPolicy(t, map[string]any{"allowedOrigins": []any{"https://allowed.example.com"}})
+	if resp, ok := lenient.OnRequestHeaders(context.Background(), newCorsRequestHeaderContext("OPTIONS", nil), nil).(policy.ImmediateResponse); !ok || resp.StatusCode != 204 {
+		t.Errorf("without the reject options an OPTIONS is handled as before, got %#v", resp)
+	}
+}
+
 func TestCorsPolicy_OnRequestHeaders_NonPreflightAllowedOrigin(t *testing.T) {
 	p := mustGetCorsPolicy(t, map[string]any{
 		"allowedOrigins":   []any{"https://allowed.example.com"},
@@ -544,5 +611,169 @@ func newCorsRequestHeaderContext(method string, headers map[string][]string) *po
 		},
 		Headers: policy.NewHeaders(headers),
 		Method:  method,
+	}
+}
+
+func TestCorsPolicy_GetPolicy_RejectDisallowedOriginsConfig(t *testing.T) {
+	for _, origins := range [][]any{
+		{"*"},
+		{"https://app.example.com", "*"},
+		{"null"},
+		{"https://app.example.com/"},
+		{"https://app.example.com/path"},
+		{"https://app.example.com?x=1"},
+		{"https://user@app.example.com"},
+		{"app.example.com"},
+		{"ftp://app.example.com"},
+		{"https://:8443"},
+		{"https://*.:8443"},
+		{"https://[1:2:3]"},
+		{"https://[1.2.3.4]"},
+		{"https://*.[::1]"},
+		{"https://[fe80::1%25eth0]"},
+		{"https://app.example.com:65536"},
+		{"https://app.example.com:08443"},
+		{"https://app.example.com:"},
+		{"https://bad%zz.example"},
+	} {
+		if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]any{
+			"allowedOrigins": origins, "rejectDisallowedOrigins": true,
+		}); err == nil {
+			t.Errorf("expected allowedOrigins %v to be refused with rejectDisallowedOrigins", origins)
+		}
+	}
+
+	p := mustGetCorsPolicy(t, map[string]any{
+		"allowedOrigins":          []any{"https://app.example.com", "http://localhost:3000", "https://*.example.org", "http://[::1]:8443"},
+		"rejectDisallowedOrigins": true,
+	})
+	if !p.RejectDisallowedOrigins || p.RejectMissingOrigin {
+		t.Fatalf("unexpected flags: reject=%t missing=%t", p.RejectDisallowedOrigins, p.RejectMissingOrigin)
+	}
+
+	// Without rejection the existing, lenient handling of entries is unchanged.
+	mustGetCorsPolicy(t, map[string]any{"allowedOrigins": []any{"https://app.example.com/"}})
+}
+
+func TestCorsPolicy_OnRequestHeaders_RejectDisallowedOrigins(t *testing.T) {
+	p := mustGetCorsPolicy(t, map[string]any{
+		"allowedOrigins":          []any{"https://app.example.com", "https://*.example.org"},
+		"rejectDisallowedOrigins": true,
+	})
+
+	for _, origin := range []string{"https://app.example.com", "https://chat.example.org"} {
+		ctx := newCorsRequestHeaderContext("GET", map[string][]string{"Origin": {origin}})
+		if _, ok := p.OnRequestHeaders(context.Background(), ctx, nil).(policy.UpstreamRequestHeaderModifications); !ok {
+			t.Errorf("origin %q: expected the request to be forwarded", origin)
+		}
+		if _, ok := ctx.Metadata["cors_headers"]; !ok {
+			t.Errorf("origin %q: expected CORS headers for an allowed origin", origin)
+		}
+	}
+
+	for _, origin := range []string{
+		"https://evil.example.net",
+		"https://app.example.com.evil.net",
+		"https://evil.net/?x=https://app.example.com",
+		"http://app.example.com",
+		"null",
+	} {
+		ctx := newCorsRequestHeaderContext("GET", map[string][]string{"Origin": {origin}})
+		resp, ok := p.OnRequestHeaders(context.Background(), ctx, nil).(policy.ImmediateResponse)
+		if !ok {
+			t.Errorf("origin %q: expected an immediate 403", origin)
+			continue
+		}
+		if resp.StatusCode != 403 {
+			t.Errorf("origin %q: expected 403, got %d", origin, resp.StatusCode)
+		}
+		if strings.Contains(string(resp.Body), origin) {
+			t.Errorf("origin %q: the rejection must not echo the origin, got %s", origin, resp.Body)
+		}
+	}
+
+	ctx := newCorsRequestHeaderContext("GET", nil)
+	if _, ok := p.OnRequestHeaders(context.Background(), ctx, nil).(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Errorf("a request without Origin is allowed unless rejectMissingOrigin is set")
+	}
+}
+
+func TestCorsPolicy_OnRequestHeaders_RejectMissingOrigin(t *testing.T) {
+	strict := mustGetCorsPolicy(t, map[string]any{
+		"allowedOrigins":          []any{"https://app.example.com"},
+		"rejectDisallowedOrigins": true,
+		"rejectMissingOrigin":     true,
+	})
+	resp, ok := strict.OnRequestHeaders(context.Background(), newCorsRequestHeaderContext("GET", nil), nil).(policy.ImmediateResponse)
+	if !ok || resp.StatusCode != 403 {
+		t.Fatalf("expected a missing Origin to be rejected with 403, got %#v", resp)
+	}
+
+	// rejectMissingOrigin works on its own too, even with every origin allowed.
+	anyOrigin := mustGetCorsPolicy(t, map[string]any{"allowedOrigins": []any{"*"}, "rejectMissingOrigin": true})
+	if _, ok := anyOrigin.OnRequestHeaders(context.Background(), newCorsRequestHeaderContext("GET", nil), nil).(policy.ImmediateResponse); !ok {
+		t.Errorf("expected a missing Origin to be rejected")
+	}
+	ctx := newCorsRequestHeaderContext("GET", map[string][]string{"Origin": {"https://anything.example"}})
+	if _, ok := anyOrigin.OnRequestHeaders(context.Background(), ctx, nil).(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Errorf("with allowedOrigins \"*\" any present Origin passes")
+	}
+}
+
+// Defaults keep the existing behaviour: a disallowed origin is forwarded with
+// CORS headers stripped, and preflight handling is untouched by the new options.
+func TestCorsPolicy_RejectOptionsOffByDefaultAndPreflightUnchanged(t *testing.T) {
+	lenient := mustGetCorsPolicy(t, map[string]any{"allowedOrigins": []any{"https://app.example.com"}})
+	ctx := newCorsRequestHeaderContext("GET", map[string][]string{"Origin": {"https://evil.example.net"}})
+	if _, ok := lenient.OnRequestHeaders(context.Background(), ctx, nil).(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("without rejectDisallowedOrigins a disallowed origin is still forwarded")
+	}
+	if ctx.Metadata["cors_strip"] != true {
+		t.Fatalf("expected cors_strip for the forwarded disallowed origin")
+	}
+
+	strict := mustGetCorsPolicy(t, map[string]any{
+		"allowedOrigins": []any{"https://app.example.com"}, "rejectDisallowedOrigins": true, "rejectMissingOrigin": true,
+	})
+	preflight := newCorsRequestHeaderContext("OPTIONS", map[string][]string{
+		"Origin":                        {"https://app.example.com"},
+		"Access-Control-Request-Method": {"GET"},
+	})
+	if _, ok := strict.OnRequestHeaders(context.Background(), preflight, nil).(policy.ImmediateResponse); !ok {
+		t.Fatalf("an allowed preflight is still answered by the policy")
+	}
+}
+
+// The policy-definition schema refuses enforced origins when an API is
+// deployed, and validateEnforcedOrigin refuses them when the policy loads; the
+// two must agree, or an origin passes one check and fails the other.
+func TestCorsPolicy_EnforcedOriginSchemaMatchesValidation(t *testing.T) {
+	raw, err := os.ReadFile("policy-definition.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := regexp.MustCompile(`(?m)^\s*pattern: '([^']+)'`).FindSubmatch(raw)
+	if m == nil {
+		t.Fatal("no allowedOrigins pattern in policy-definition.yaml")
+	}
+	schema := regexp.MustCompile(string(m[1]))
+	for _, origin := range []string{
+		"https://app.example.com", "http://localhost:3000", "https://app.example.com:8443",
+		"https://*.example.org", "https://*.example.org:443", "http://[::1]", "https://[::1]:8443",
+		"https://[2001:db8::1]", "https://[::ffff:192.0.2.1]", "http://[::]",
+		"https://:8443", "https://*.:8443", "https://[1:2:3]", "https://[:::]", "https://[...]",
+		"https://[1.2.3.4]", "https://*.[::1]", "https://[::1", "https://[fe80::1%25eth0]",
+		"https://[1:2:3:4:5:6:7:8:9]", "https://[::ffff:256.0.0.1]",
+		"https://app.example.com/", "https://user@app.example.com", "ftp://app.example.com", "null",
+		"https://app.example.com:0", "https://app.example.com:65535", "https://app.example.com:65536",
+		"https://app.example.com:99999", "https://app.example.com:08443", "https://app.example.com:",
+		"https://[::1]:70000", "https://[::1]:", "https://*.example.org:99999",
+		"https://bad%zz.example", "https://bad%41.example",
+	} {
+		schemaOK := schema.MatchString(origin)
+		codeOK := validateEnforcedOrigin(origin) == nil
+		if schemaOK != codeOK {
+			t.Errorf("%q: schema accepts=%t, validateEnforcedOrigin accepts=%t", origin, schemaOK, codeOK)
+		}
 	}
 }
