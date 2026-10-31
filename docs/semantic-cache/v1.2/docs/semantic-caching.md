@@ -15,7 +15,7 @@ Cache entries are scoped to the authenticated caller (application/subscriber ide
 
 - **Vector-based similarity matching**: Uses embeddings to find semantically similar requests, not just exact matches
 - **Multiple embedding provider support**: Works with OpenAI, Mistral, and Azure OpenAI embedding services
-- **Multiple vector database support**: Supports Redis and Milvus as vector storage backends
+- **Multiple vector database support**: Supports Redis, Valkey (valkey-bundle), and Milvus as vector storage backends
 - **Configurable similarity threshold**: Control cache hit sensitivity (0.0 to 1.0)
 - **JSONPath extraction**: Extract specific fields from request body for embedding generation
 - **Per-caller cache isolation**: Cache entries are bound to the authenticated caller identity; no cross-caller sharing by default
@@ -48,13 +48,17 @@ These parameters are usually set at the gateway level and automatically applied,
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `vectorStoreProvider` | string | Yes | Vector database provider. Must be one of: `REDIS`, `MILVUS` |
+| `vectorStoreProvider` | string | Yes | Vector database provider. Must be one of: `REDIS` (supports Redis Stack and Valkey with valkey-search), `MILVUS` |
 | `dbHost` | string | Yes | Vector database host address |
 | `dbPort` | integer | Yes | Vector database port number |
 | `username` | string | No | Database username for authentication (if required) |
 | `password` | string | No | Database password for authentication (if required) |
-| `database` | string | No | Database name or index number (for Redis) |
+| `database` | string | No | Database name or index number (for Redis / Valkey) |
 | `ttl` | integer | No | Time-to-live for cache entries in seconds. Default is 3600 (1 hour). Set to 0 for no expiration. |
+
+> **Note on Valkey Support:**
+> Valkey is supported as an open-source, drop-in replacement for Redis when `vectorStoreProvider` is set to `REDIS`.
+> To enable vector similarity search, ensure the Valkey instance has the `valkey-search` module loaded (for example, using the official `valkey/valkey-bundle` container image).
 
 #### Optional TypeSafe Jev Configuration
 
@@ -78,7 +82,7 @@ embedding_provider_model = "mistral-embed"
 embedding_provider_dimension = 1024
 embedding_provider_api_key = ""
 
-vector_db_provider = "REDIS" # Supported: REDIS, MILVUS
+vector_db_provider = "REDIS" # Supported: REDIS (including Valkey), MILVUS
 vector_db_provider_host = "redis"
 vector_db_provider_port = 6379
 vector_db_provider_database = "0"
