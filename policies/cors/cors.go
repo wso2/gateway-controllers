@@ -118,16 +118,43 @@ func GetPolicy(
 	return p, nil
 }
 
-// compileAllowedOrigin matches configured origins literally, except for
-// scheme-specific subdomain wildcards. Every expression is anchored so a
-// matching origin cannot be embedded in a different host, path, or query.
+// regexOnlyMetaChars are Go regular expression metacharacters that never
+// appear in a serialized origin (scheme://host[:port], including bracketed
+// IPv6 hosts).
+const regexOnlyMetaChars = `\^$|?*+(){}`
+
+// compileAllowedOrigin builds the matcher for a configured origin. Supported
+// forms, checked in order, are:
+//   - scheme-specific subdomain wildcards such as "https://*.example.com",
+//   - Go regular expressions such as `https://.*\.example\.com`, and
+//   - exact origins, which are matched literally.
+//
+// Every expression is anchored so a matching origin cannot be embedded in a
+// different host, path, or query.
 func compileAllowedOrigin(origin string) (*regexp.Regexp, error) {
 	if pattern, isWildcard := subdomainWildcardPattern(origin); isWildcard {
 		return regexp.Compile(`\A(?:` + pattern + `)\z`)
 	}
 
+	if isRegexOrigin(origin) {
+		regex, err := regexp.Compile(`\A(?:` + origin + `)\z`)
+		if err == nil {
+			return regex, nil
+		}
+		// Fall back to an exact match so that values which are not valid regular
+		// expressions, and were accepted as exact origins by v1.0.2, keep working.
+		slog.Warn("CORS: allowed origin is not a valid regular expression; matching it literally",
+			"origin", origin, "error", err)
+	}
+
 	pattern := regexp.QuoteMeta(origin)
 	return regexp.Compile(`\A(?:` + pattern + `)\z`)
+}
+
+// isRegexOrigin reports whether the configured origin should be interpreted as
+// a Go regular expression rather than an exact origin.
+func isRegexOrigin(origin string) bool {
+	return strings.ContainsAny(origin, regexOnlyMetaChars)
 }
 
 // subdomainWildcardPattern converts <scheme>://*.example.com[:port] into a
