@@ -9,6 +9,11 @@ with `go mod tidy`), suite_test.go, the policy's own step definitions in steps/ 
 <policy>_steps.go and steps_test.go) and features/<policy>.feature. The feature deploys a REST API with the policy attached and an empty
 parameter set; fill in the policy's configuration and the assertions. Nothing is overwritten: if
 any file exists the command stops and changes nothing.
+
+The suite's go.mod does not name the test framework: tests/it/go.mod pins its version for every
+suite, and the workspace file tests/it/it.work, generated from the suite folders, joins the suite's
+module to it. The tidy runs outside the workspace, so it needs the framework required for a moment,
+at the version tests/it/go.mod pins, and the line is removed again.
 """
 
 import re
@@ -18,6 +23,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 POLICIES_DIR = "policies"
+FRAMEWORK = "github.com/wso2/api-platform/tests/framework"
+FRAMEWORK_REQUIRE_RE = re.compile(r"^\s*(?:require\s+)?" + re.escape(FRAMEWORK) + r"\s+(v\S+)\s*$", re.MULTILINE)
+FRAMEWORK_LINE_RE = re.compile(r"^[ \t]*" + re.escape(FRAMEWORK) + r"[ \t]+v\S+[ \t]*\n", re.MULTILINE)
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 VERSION_RE = re.compile(r"^version:\s*v?(\d+)\.", re.MULTILINE)
 
@@ -100,7 +108,6 @@ go 1.26.5
 
 require (
 	github.com/cucumber/godog v0.16.0
-	github.com/wso2/api-platform/tests/framework v0.1.0
 	github.com/wso2/gateway-controllers/tests/it v0.0.0
 )
 
@@ -245,6 +252,15 @@ class ScaffoldError(Exception):
     """The skeleton cannot be created; nothing was written."""
 
 
+def pinned_framework_version(repo_root):
+    """Return the framework version tests/it/go.mod pins for every suite."""
+    go_mod = Path(repo_root) / "tests" / "it" / "go.mod"
+    match = FRAMEWORK_REQUIRE_RE.search(go_mod.read_text(encoding="utf-8")) if go_mod.is_file() else None
+    if not match:
+        raise ScaffoldError(f"tests/it/go.mod does not require {FRAMEWORK}")
+    return match.group(1)
+
+
 def scaffold(repo_root, name, tidy=True):
     """Create the suite skeleton for policy `name` and return the paths written.
 
@@ -280,17 +296,25 @@ def scaffold(repo_root, name, tidy=True):
     existing = [str(path.relative_to(repo_root)) for path in targets if path.exists()]
     if existing:
         raise ScaffoldError("refusing to overwrite: " + ", ".join(existing))
+    framework_version = pinned_framework_version(repo_root)
 
     for path, text in targets.items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     written = list(targets)
     if tidy:
+        go_mod = it / "go.mod"
+        untidied = go_mod.read_text(encoding="utf-8")
+        go_mod.write_text(
+            untidied.replace("require (\n", f"require (\n\t{FRAMEWORK} {framework_version}\n", 1), encoding="utf-8"
+        )
         result = subprocess.run(["go", "mod", "tidy"], cwd=it, capture_output=True, text=True)
         if result.returncode != 0:
+            go_mod.write_text(untidied, encoding="utf-8")
             raise ScaffoldError(
                 f"created policies/{name}/it, but `go mod tidy` failed there: {result.stderr.strip()}"
             )
+        go_mod.write_text(FRAMEWORK_LINE_RE.sub("", go_mod.read_text(encoding="utf-8")), encoding="utf-8")
         written += [it / "go.sum"]
     return written
 

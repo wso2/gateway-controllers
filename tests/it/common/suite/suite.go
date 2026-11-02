@@ -27,10 +27,12 @@
 package suite
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -80,45 +82,55 @@ func Main(m *testing.M, cfg Config) {
 
 const (
 	testbenchRepository = "ghcr.io/wso2/api-platform/testbench"
-	frameworkModule     = `github\.com/wso2/api-platform/tests/framework`
+	frameworkModule     = "github.com/wso2/api-platform/tests/framework"
 )
 
-var (
-	frameworkRequire = regexp.MustCompile(`(?m)^\s*(?:require\s+)?` + frameworkModule + `\s+v(\d+\.\d+\.\d+)\s*$`)
-	// Matches the framework replaced inside a replace block, or on a replace line, with or
-	// without the version on the left of the arrow.
-	frameworkReplace = regexp.MustCompile(`(?m)^\s*(?:replace\s+)?` + frameworkModule + `(?:\s+v\S+)?\s*=>`)
-)
+// releasedVersion matches a tagged release, not a pre-release or an untagged revision.
+var releasedVersion = regexp.MustCompile(`^v(\d+\.\d+\.\d+)$`)
 
 // pinTestbenchImage points the framework at the testbench image published with the framework
-// release that the suite's go.mod pins, unless the environment already names one. The framework
-// chooses that image from the module versions embedded in the running binary, and a binary built
-// by `go test` embeds none, so left alone it asks for an image that only a local build creates.
+// release the suites run on, unless the environment already names one. The framework chooses that
+// image from the module versions embedded in the running binary, and a binary built by `go test`
+// embeds none, so left alone it asks for an image that only a local build creates. The release is
+// the one the Go workspace resolves (`make it-workspace` generates it): a suite's own go.mod does
+// not name the framework, only tests/it/go.mod does.
 func pinTestbenchImage() {
 	if os.Getenv(testbench.EnvImageTestbench) != "" {
 		return
 	}
-	goMod, err := os.ReadFile("go.mod")
+	listing, err := exec.Command("go", "list", "-m", "-json", frameworkModule).Output()
 	if err != nil {
 		return
 	}
-	if image, ok := pinnedTestbenchImage(goMod); ok {
+	if image, ok := pinnedTestbenchImage(listing); ok {
 		os.Setenv(testbench.EnvImageTestbench, image)
 	}
 }
 
-// pinnedTestbenchImage returns the testbench image of the released framework a go.mod requires.
-// A go.mod that replaces the framework with a local checkout, or requires an untagged revision,
-// has none: the framework then uses the image that checkout builds.
-func pinnedTestbenchImage(goMod []byte) (string, bool) {
-	if frameworkReplace.Match(goMod) {
+// pinnedTestbenchImage returns the testbench image of the released framework that the output of
+// `go list -m -json` describes. A framework replaced with a local checkout or another module, or
+// at an untagged revision or a pre-release, has none: the framework then uses the image that
+// checkout builds.
+func pinnedTestbenchImage(listing []byte) (string, bool) {
+	var module struct {
+		Version string
+		Replace *struct{ Path, Version string }
+	}
+	if err := json.Unmarshal(listing, &module); err != nil {
 		return "", false
 	}
-	match := frameworkRequire.FindSubmatch(goMod)
+	version := module.Version
+	if module.Replace != nil {
+		if module.Replace.Path != frameworkModule {
+			return "", false
+		}
+		version = module.Replace.Version
+	}
+	match := releasedVersion.FindStringSubmatch(version)
 	if match == nil {
 		return "", false
 	}
-	return testbenchRepository + ":" + string(match[1]), true
+	return testbenchRepository + ":" + match[1], true
 }
 
 // Run executes the suite declared in it-suite.yaml in the working directory, which `go test` sets

@@ -31,6 +31,11 @@ class ScaffoldTest(unittest.TestCase):
         self._dir = tempfile.TemporaryDirectory()
         self.root = Path(self._dir.name)
         self.addCleanup(self._dir.cleanup)
+        (self.root / "tests/it").mkdir(parents=True)
+        (self.root / "tests/it/go.mod").write_text(
+            f"module github.com/wso2/gateway-controllers/tests/it\n\nrequire (\n\t{scaffold.FRAMEWORK} v0.4.2\n)\n",
+            encoding="utf-8",
+        )
 
     def test_creates_a_suite_the_policy_owns(self):
         make_policy(self.root, "word-count-guardrail", "v1.4.0")
@@ -56,6 +61,7 @@ class ScaffoldTest(unittest.TestCase):
         self.assertNotIn("addPoliciesFrom", suite)
         self.assertIn("features/word_count_guardrail.feature", suite)
         self.assertIn("module github.com/wso2/gateway-controllers/policies/word-count-guardrail/it", (it / "go.mod").read_text())
+        self.assertNotIn("tests/framework", (it / "go.mod").read_text(), "tests/it/go.mod alone pins the framework")
         self.assertIn("policies/word-count-guardrail/it/steps", (it / "suite_test.go").read_text())
         self.assertIn("package steps", (it / "steps/register.go").read_text())
         self.assertIn("the word-count-guardrail policy example step runs", (it / "steps/word_count_guardrail_steps.go").read_text())
@@ -65,6 +71,12 @@ class ScaffoldTest(unittest.TestCase):
         self.assertIn('"name":"word-count-guardrail","version":"v1"', text)
         self.assertIn("${CTX:gatewaySpecVersion}", text)
         self.assertTrue(changed.has_tests(self.root, "word-count-guardrail"))
+
+    def test_the_framework_version_is_the_one_tests_it_pins(self):
+        self.assertEqual("v0.4.2", scaffold.pinned_framework_version(self.root))
+        (self.root / "tests/it/go.mod").write_text("module x\n", encoding="utf-8")
+        with self.assertRaises(scaffold.ScaffoldError):
+            scaffold.pinned_framework_version(self.root)
 
     def test_the_policy_major_version_comes_from_the_definition(self):
         make_policy(self.root, "time-routing", "v0.3.0")

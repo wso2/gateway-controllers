@@ -51,6 +51,8 @@ jobs:
           set -euo pipefail
           python3 scripts/it/test_changed_policies.py
           python3 scripts/it/test_scaffold.py
+          python3 scripts/it/test_check_framework_pin.py
+          python3 scripts/it/test_generate_workspace.py
           python3 scripts/it/test_render_timeline.py
           if [[ -n "$REQUESTED_POLICIES" ]]; then
             python3 scripts/it/changed-policies.py --policies "$REQUESTED_POLICIES"
@@ -126,7 +128,8 @@ jobs:
       # One run per gateway version builds the gateway once, from every policy of the repository on
       # the base images of that version, then executes the suite of every selected policy in turn
       # against that build and fails if any of them fails.
-      # The suites run on the testbench image published with the pinned framework release. Pull it
+      # The suites run on the testbench image published with the framework release that
+      # tests/it/go.mod pins, the one version every suite shares. Pull it
       # when this repository can, and otherwise build the image from the pinned module's source,
       # which has the testbench of the release, not of a later rebuild of its published image.
       - name: Provide the testbench image

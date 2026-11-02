@@ -16,7 +16,7 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: generate-catalog validate-catalog it it-unit it-standards it-scaffold
+.PHONY: generate-catalog validate-catalog it it-unit it-standards it-scaffold it-framework-pin it-workspace
 
 generate-catalog: ## Generate docs/README.md policy catalog from metadata.json files
 	python3 scripts/generate-policy-catalog.py
@@ -34,6 +34,10 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # list, narrows it. BLOCK_PARALLEL is the number of blocks, each with its own gateway, testbench and
 # database, that run at once across all selected suites: as soon as one ends, the next starts.
 # IT_TIMELINE, a file path, makes the run write how long each block took to that file, as JSON.
+# The suites are Go modules that share one framework version, the one tests/it/go.mod requires. The
+# workspace file tests/it/it.work joins them: it-workspace generates it from the suite folders, the
+# targets below depend on that and select the file through GOWORK, and it is not committed. It is not
+# named go.work, so a go command run in a policy's own module is left alone.
 GATEWAY_VERSION ?= 1.2.0
 ifeq ($(strip $(BLOCK_PARALLEL)),)
 override BLOCK_PARALLEL := 12
@@ -43,6 +47,8 @@ comma := ,
 space := $(subst ,, )
 IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml)))
 IT_STANDARDS_IMPORTS = github.com/wso2/gateway-controllers/tests/it/
+it it-unit it-standards: export GOWORK = $(abspath tests/it/it.work)
+it it-unit it-standards: it-workspace
 
 it: ## Build the gateway once, then run the integration suites of the selected policies against it
 	@test -n "$(IT_POLICIES)" || { echo "no policy has an integration suite"; exit 2; }
@@ -62,7 +68,13 @@ it-unit: ## Run the unit tests of the shared steps and of the selected policies'
 		(cd policies/$$policy/it && go test ./steps/... -count=1) || exit 1; \
 	done
 
-it-standards: ## Check the shared steps and the selected policies' suites against the framework standards
+it-workspace: ## Generate tests/it/it.work, the Go workspace of tests/it and every policy's suite module
+	python3 scripts/it/generate-workspace.py
+
+it-framework-pin: ## Check that tests/it/go.mod alone pins the framework version
+	python3 scripts/it/check-framework-pin.py
+
+it-standards: it-framework-pin ## Check the shared steps and the selected policies' suites against the framework standards
 	cd tests/it && go tool standards -root common -unit-root common -steps common/steps \
 		-scripts "" -suites "" -docs "" -approved-imports $(IT_STANDARDS_IMPORTS)
 	@for policy in $(IT_POLICIES); do \
