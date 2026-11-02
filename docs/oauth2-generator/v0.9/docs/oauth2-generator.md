@@ -22,7 +22,7 @@ Configure exactly one of two mutually exclusive auth paths:
 
 The credential is injected into `headerName` (default `Authorization`) with
 `valuePrefix` (default `Bearer`) prepended. Token-endpoint tokens are cached
-in-process, and optionally shared across gateway-runtime replicas via Redis
+in-process, and optionally shared across gateway-runtime replicas via Redis / Valkey
 (`cacheStrategy: redis`). A token rejected by the upstream backend
 (`tokenPurgeStatusCodes`, default `[401]`) is purged from the cache so the
 next request fetches a fresh one. The token-endpoint call itself also
@@ -83,7 +83,7 @@ shared across every policy instance.
 
 ### System Parameters (From config.toml)
 
-Redis connection settings for the shared cache tier are operator/gateway-level,
+Redis / Valkey connection settings for the shared cache tier are operator/gateway-level,
 not something an individual API publisher sets — they resolve from the
 gateway's own `config.toml`, entirely under this policy's own
 `policy_configurations.oauth2_generator_v1.redis` section. This section is

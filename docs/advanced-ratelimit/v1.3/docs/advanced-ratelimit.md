@@ -16,7 +16,7 @@ The Rate Limiting policy controls the rate of requests to your APIs by enforcing
 - Flexible key extraction (headers, metadata, auth-context/JWT properties, IP, API name, route name)
 - Conditional key matching — restrict a quota to requests whose key component matches a pattern; non-matching requests bypass the quota entirely, with no counting or enforcement
 - Three storage backends: in-memory (single instance), Redis (distributed, exact), or Redis-local-async (distributed, local-first counting with asynchronous Redis reconcile — lower per-request latency and Redis load, with a small bounded overshoot)
-- Shared Redis client across all rate-limit policy instances (one connection pool per Redis endpoint per replica)
+- Shared Redis/Valkey client across all rate-limit policy instances (one connection pool per Redis/Valkey endpoint per replica)
 - Graceful degradation with fail-open/fail-closed modes for Redis failures
 - Comprehensive rate limit headers (X-RateLimit-*, IETF RateLimit, Retry-After)
 - Customizable error responses
@@ -33,14 +33,15 @@ These parameters are set by the administrator and apply globally to all rate lim
 |-----------|------|----------|---------|-------------|
 | `algorithm` | string | No | `"fixed-window"` | Rate limiting algorithm: `"gcra"` (smooth rate limiting with burst support) or `"fixed-window"` (simple counter per time window). |
 | `backend` | string | No | `"memory"` | Storage backend: `"memory"` (single-instance), `"redis"` (distributed, exact — one Redis call per request), or `"redis-local-async"` (distributed, local-first hot path that reconciles to Redis asynchronously every `local.syncInterval`; lower per-request latency and Redis load, at the cost of a small bounded overshoot). |
-| `redis` | ```Redis``` object | No | - | Redis configuration (used when `backend=redis` or `backend=redis-local-async`). |
+| `redis` | ```Redis``` object | No | - | Redis / Valkey configuration (used when `backend=redis` or `backend=redis-local-async`). |
 | `memory` | ```Memory``` object | No | - | In-memory storage configuration (only used when `backend=memory`). |
 | `local` | ```Local``` object | No | - | Local-first hot-path configuration (only used when `backend=redis-local-async`). |
 | `headers` | ```Headers``` object | No | - | Control which rate limit headers are included in responses. |
 
-#### Redis Configuration
+#### Redis / Valkey Configuration
 
-When using the `redis` or `redis-local-async` backend, the following parameters can be configured under `redis`:
+When using the `redis` or `redis-local-async` backend, the following parameters can be configured under `redis`. Valkey is fully supported as an open-source, wire-compatible drop-in replacement for Redis:
+
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
