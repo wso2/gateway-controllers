@@ -12,7 +12,9 @@ canonical resource templates and the code that runs a suite. They began as copie
 [test framework's](https://github.com/wso2/api-platform/tree/main/tests/framework) Platform Gateway
 steps and are owned here, so a policy's tests never need api-platform's step code. The framework
 itself, a Go module published by api-platform, supplies the engine that boots the containers and is
-pinned in each suite's `go.mod`; its testbench image is pulled from GHCR on the first run.
+pinned in each suite's `go.mod`; its testbench image is pulled from GHCR on the first run, and is
+rebuilt under the same version tag when the testbench changes (see the framework dependency in
+[CLAUDE.md](CLAUDE.md)).
 
 **[CLAUDE.md](CLAUDE.md) is the guide**: how to run the tests, how to add tests to a policy that
 has none, how to write scenarios and steps, and what a pull request runs.

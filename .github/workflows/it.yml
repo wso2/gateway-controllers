@@ -127,8 +127,8 @@ jobs:
       # the base images of that version, then executes the suite of every selected policy in turn
       # against that build and fails if any of them fails.
       # The suites run on the testbench image published with the pinned framework release. Pull it
-      # when this repository can, and otherwise build the same image from the pinned module's
-      # source, which is what the release publishes.
+      # when this repository can, and otherwise build the image from the pinned module's source,
+      # which has the testbench of the release, not of a later rebuild of its published image.
       - name: Provide the testbench image
         working-directory: gateway-controllers/tests/it
         run: |

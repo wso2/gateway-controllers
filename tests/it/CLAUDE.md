@@ -209,6 +209,16 @@ steps, features and suite file. A manual run takes `policies` (comma-separated, 
   `dir=$(cd tests/it && go list -m -f '{{.Dir}}' github.com/wso2/api-platform/tests/framework)`
   then `docker build -f "$dir/testbench/Dockerfile" -t ghcr.io/wso2/api-platform/testbench:<version> "$dir"`.
   Set `APIP_IT_IMAGE_TESTBENCH` to use any other image.
+- A change to the testbench does not need a new framework release. api-platform's "Tests Framework
+  Release" workflow has a `rebuild-testbench` mode that rebuilds the image of the latest release with
+  the current testbench code and pushes it under the same version tag, without a new git tag, so the
+  `go.mod` files keep resolving the same version and need no change. A new framework release is rare
+  and is the only reason to move the pinned versions.
+- Only the latest release is rebuilt, so keep the suites on the latest framework release: a suite
+  that stays on an older version keeps that version's image as it was.
+- A rebuild moves the tag. An image already on your machine is not replaced by itself, so
+  `docker pull ghcr.io/wso2/api-platform/testbench:<version>` to pick up a rebuild. The image built
+  from the module source, as above, has the testbench of the release, not of a later rebuild.
 
 ## Troubleshooting
 
@@ -216,6 +226,9 @@ steps, features and suite file. A manual run takes `policies` (comma-separated, 
   the testbench image could not be pulled, so no block booted. Build it as described under "The
   framework dependency", and check the tag in the message against the framework version in
   `go.mod`.
+- A scenario that needs a recent testbench behaviour fails on your machine but passes in CI: your
+  local testbench image is older than the rebuilt one. `docker pull` it again, as described under
+  "The framework dependency".
 - `failed to connect to the docker API` or `rootless Docker not found`: Docker is not running, or
   `DOCKER_HOST` and `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` are not set for Rancher Desktop or
   Colima.
