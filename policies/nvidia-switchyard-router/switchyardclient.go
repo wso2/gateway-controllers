@@ -118,8 +118,8 @@ func (c *switchyardClient) decide(ctx context.Context, inputFormat string, reque
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, maxDecisionBytes))
-		if resp.StatusCode == http.StatusNotFound {
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxDecisionBytes))
+		if resp.StatusCode == http.StatusNotFound && isUnknownRoute(raw) {
 			return d, errProfileNotFound
 		}
 		return d, fmt.Errorf("switchyard-server returned status %d", resp.StatusCode)
@@ -131,4 +131,16 @@ func (c *switchyardClient) decide(ctx context.Context, inputFormat string, reque
 		return d, fmt.Errorf("%w: no selected target", errInvalidDecision)
 	}
 	return d, nil
+}
+
+// isUnknownRoute reports whether a 404 body is switchyard-server's answer for a
+// profile it has no route for. Any other 404, such as a wrong endpoint path, is
+// a server problem rather than a missing profile.
+func isUnknownRoute(body []byte) bool {
+	var reply struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(body, &reply) == nil && reply.Error.Code == "model_not_found"
 }

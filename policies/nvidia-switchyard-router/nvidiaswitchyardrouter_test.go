@@ -207,6 +207,7 @@ func TestFallsBackWhenDecisionUnusable(t *testing.T) {
 	}{
 		{"server error", 502, `{"error":{"message":"boom"}}`, reasonUnavailable},
 		{"unknown profile", 404, `{"error":{"message":"No route registered for model coding-agents","code":"model_not_found"}}`, reasonProfileNotFound},
+		{"wrong endpoint path", 404, `404 page not found`, reasonUnavailable},
 		{"not json", 200, `not json`, reasonInvalidDecision},
 		{"no selected target", 200, `{"fallbacks":[]}`, reasonInvalidDecision},
 		{"target is not a tier", 200, selected("strong", "weak"), reasonInvalidDecision},
@@ -614,7 +615,7 @@ func TestResponseHeaders(t *testing.T) {
 			map[string]string{headerTier: "efficient", headerOutcome: "fallback", headerError: "unavailable"}},
 		{"observed", 200, selected("capable", "efficient"), "observe_only",
 			map[string]string{headerTier: "capable", headerOutcome: "observed"}},
-		{"observe failure", 404, "", "observe_only",
+		{"observe failure", 404, `{"error":{"code":"model_not_found"}}`, "observe_only",
 			map[string]string{headerOutcome: "decision_failed", headerError: "profile_not_found"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

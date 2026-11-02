@@ -7,7 +7,7 @@ The NVIDIA Switchyard Router policy picks the model for each request by asking N
 - **efficient**: cheaper models for routine work, such as writing and editing with no recent errors
 - **capable**: stronger models for exploration, planning, and recovering from errors
 
-The policy owns the model pool. It maps the tier to a pooled model of that tier, chosen by `tierBalancing`, rewrites the model in the request, and selects that model's provider as the upstream. Switchyard only returns the tier. It never calls the selected model, never holds provider credentials, and runs in your own network; no request is sent to NVIDIA.
+The policy owns the model pool. It maps the tier to a pooled model of that tier, chosen by `tierBalancing`, rewrites the model in the request, and selects that model's provider as the upstream. Switchyard only returns the tier. It never calls the selected model and never holds the credentials of the providers that serve requests; it runs in your own network, and no request is sent to NVIDIA. A profile with a judge is the exception to keeping content local: the judge is an LLM that the server calls with its own credentials (for example `JUDGE_API_KEY`), so the conversation content that `promptDisclosure` lets through goes to the judge's provider.
 
 ## Features
 
@@ -235,7 +235,7 @@ In 0.3.0, built-in tool names cannot be remapped in `tool_semantics`, `capable_h
 
 The policy needs `switchyard-server` 0.3.0, which you run yourself, next to the gateway. NVIDIA publishes it as source only: there is no prebuilt binary or container image. Use 0.3.0 exactly; the policy is tested against that release, and later versions, including the 0.4.0 pre-releases, change the server's configuration.
 
-NVIDIA describes the standalone server as a demo and evaluation component, validated on Ubuntu 24.04 on x86_64. Start with `mode: observe_only` and review the decisions before routing traffic with it.
+NVIDIA describes the standalone `switchyard-server` 0.3.0 as a demo and evaluation component, not for production use, validated on Ubuntu 24.04 on x86_64. Evaluate it with `mode: observe_only` and review the decisions before routing traffic with it.
 
 ### 1. Install the server
 
@@ -410,12 +410,14 @@ operationPolicies:
           promptDisclosure: tool_activity
           modelPool:
             - { provider: openai-provider, model: gpt-4o-mini, tier: efficient }
-            - { provider: anthropic-provider, model: claude-sonnet-5-5, tier: capable }
+            - { provider: openai-provider, model: gpt-4o, tier: capable }
           fallback:
             mode: model
             provider: openai-provider
             model: gpt-4o-mini
 ```
+
+The policy changes only the model and the upstream provider; it does not translate the request or the response. A pooled model on a provider with a different API format, such as an Anthropic provider behind an OpenAI chat proxy, needs that provider's transformer, for example [`openai-to-anthropic-transformer`](../../../openai-to-anthropic-transformer/v0.9/docs/openai-to-anthropic-transformer.md).
 
 ## Errors
 

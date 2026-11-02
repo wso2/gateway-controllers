@@ -62,10 +62,10 @@ Feature: Switchyard router policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  Scenario Outline: Records why no decision was made: <reason>
-    Given I generate a unique value from "sy-<reason>" and store it as "apiName"
-    And I generate a unique API version from "sy-<reason>" and store it as "apiVersion"
-    And I generate a unique API context from "/sy-<reason>" and store it as "apiContext"
+  Scenario Outline: Records why no decision was made: <case>
+    Given I generate a unique value from "sy-<slug>" and store it as "apiName"
+    And I generate a unique API version from "sy-<slug>" and store it as "apiVersion"
+    And I generate a unique API context from "/sy-<slug>" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}  |
       | name                   | ${CTX:apiName}             |
@@ -91,11 +91,13 @@ Feature: Switchyard router policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
+    # Only a 404 carrying switchyard-server's model_not_found code means an unknown profile; the
+    # echo service's bare 404, like a wrong endpoint path, is a server problem.
     Examples:
-      | reason            | endpoint                              |
-      | unavailable       | http://testbench:3002/status/503      |
-      | profile_not_found | http://testbench:3002/status/404      |
-      | invalid_decision  | http://testbench:3002/json            |
+      | case                          | slug         | endpoint                         | reason           |
+      | server error                  | status-503   | http://testbench:3002/status/503 | unavailable      |
+      | 404 without a profile error   | status-404   | http://testbench:3002/status/404 | unavailable      |
+      | answer that is not a decision | not-decision | http://testbench:3002/json       | invalid_decision |
 
   Scenario: Rejects the request when the fallback mode is error
     Given I generate a unique value from "sy-reject" and store it as "apiName"
