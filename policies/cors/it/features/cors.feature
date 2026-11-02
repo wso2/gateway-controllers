@@ -305,3 +305,195 @@ Feature: CORS policy behavior
     When I delete the API "${CTX:apiName11}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext11}/v1.0/test/test" until status 404
+
+
+  Scenario: Preflight request allows origin matching a Go regex pattern
+    Given I generate a unique value from "cors-12" and store it as "apiName12"
+    And I generate a unique API context from "/cors-12" and store it as "apiContext12"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName12}                 |
+      | spec.displayName       | CORS Regex Preflight API          |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext12}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["http://example.com","https://*.example.com","http://localhost:[0-9]+"],"allowedMethods":["GET","POST"],"allowedHeaders":["Content-Type"]}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"},{"method":"OPTIONS","path":"/{country_code}/{city}"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext12}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "http://localhost:5173"
+    And I set header "Access-Control-Request-Method" to "POST"
+    And I set header "Access-Control-Request-Headers" to "Content-Type"
+    And I send a "OPTIONS" request to "${CTX:apiContext12}/v1.0/us/seattle"
+    Then the response status code should be 204
+    And the response header "Access-Control-Allow-Origin" should be "http://localhost:5173"
+    And the response header "Access-Control-Allow-Methods" should contain "POST"
+    When I delete the API "${CTX:apiName12}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext12}/v1.0/test/test" until status 404
+
+
+  Scenario: Simple GET from origin matching a Go regex pattern gets CORS response headers
+    Given I generate a unique value from "cors-13" and store it as "apiName13"
+    And I generate a unique API context from "/cors-13" and store it as "apiContext13"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName13}                 |
+      | spec.displayName       | CORS Regex Simple Request API     |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext13}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["http://example.com","https://[a-z]+-[0-9]+[.]regex[.]example[.]org"],"allowedMethods":["GET","POST"]}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "https://qa-1.regex.example.org"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/us/seattle"
+    Then the response status code should be 200
+    And the response header "Access-Control-Allow-Origin" should be "https://qa-1.regex.example.org"
+    And the response header "Vary" should contain "Origin"
+    When I delete the API "${CTX:apiName13}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/test/test" until status 404
+
+
+  Scenario: Simple GET from origin not matching a Go regex pattern has upstream CORS headers stripped
+    Given I generate a unique value from "cors-14" and store it as "apiName14"
+    And I generate a unique API context from "/cors-14" and store it as "apiContext14"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName14}                 |
+      | spec.displayName       | CORS Regex Simple Request API     |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext14}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["http://example.com","https://[a-z]+-[0-9]+[.]regex[.]example[.]org"],"allowedMethods":["GET","POST"]}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext14}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "https://qa-1.regex.example.org.evil.io"
+    And I send a "GET" request to "${CTX:apiContext14}/v1.0/us/seattle"
+    Then the response status code should be 200
+    And the response header "Access-Control-Allow-Origin" should not exist
+    When I delete the API "${CTX:apiName14}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext14}/v1.0/test/test" until status 404
+
+
+  # Restores the regex preflight case removed from the api-platform suite by wso2/api-platform#2787.
+  # The "\\\\." in the table cell reaches the policy as "\." (Gherkin unescapes "\\" to "\", then YAML
+  # unescapes "\\" to "\"), which also exercises a backslash-escaped regex surviving API deployment.
+  Scenario: Preflight request allows configured origin based on regex
+    Given I generate a unique value from "cors-15" and store it as "apiName15"
+    And I generate a unique API context from "/cors-15" and store it as "apiContext15"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName15}                 |
+      | spec.displayName       | CORS Regex Preflight API          |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext15}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["http://example.com","^https://[^.]+\\\\.example\\\\.com$","http://localhost:5000"],"allowedMethods":["GET","POST"],"allowedHeaders":["Content-Type"],"exposedHeaders":["X-Content-Type-Options"]}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"},{"method":"GET","path":"/alerts/active"},{"method":"OPTIONS","path":"/{country_code}/{city}"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext15}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "https://app.example.com"
+    And I set header "Access-Control-Request-Method" to "GET"
+    And I set header "Access-Control-Request-Headers" to "Content-Type"
+    And I send a "OPTIONS" request to "${CTX:apiContext15}/v1.0/us/seattle"
+    Then the response status code should be 204
+    And the response header "Access-Control-Allow-Origin" should be "https://app.example.com"
+    And the response header "Access-Control-Allow-Methods" should contain "GET"
+    And the response header "Access-Control-Allow-Methods" should contain "POST"
+    And the response header "Access-Control-Allow-Headers" should contain "Content-Type"
+    When I delete the API "${CTX:apiName15}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext15}/v1.0/test/test" until status 404
+
+
+  # Restores the regex simple-request case removed from the api-platform suite by wso2/api-platform#2787.
+  Scenario: Simple GET matching regex origin gets CORS headers
+    Given I generate a unique value from "cors-16" and store it as "apiName16"
+    And I generate a unique API context from "/cors-16" and store it as "apiContext16"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName16}                 |
+      | spec.displayName       | CORS Regex Simple Request API     |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext16}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["http://example.com","^https://[^.]+\\\\.example\\\\.com$"],"allowedMethods":["GET","POST"],"allowedHeaders":["Content-Type"],"exposedHeaders":["X-Custom-Header"],"allowCredentials":true}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"},{"method":"GET","path":"/alerts/active"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext16}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "https://app.example.com"
+    And I send a "GET" request to "${CTX:apiContext16}/v1.0/us/seattle"
+    Then the response status code should be 200
+    And the response header "Access-Control-Allow-Origin" should be "https://app.example.com"
+    And the response header "Vary" should contain "Origin"
+    And the response header "Access-Control-Allow-Credentials" should be "true"
+    And the response header "Access-Control-Expose-Headers" should be "X-Custom-Header"
+    When I delete the API "${CTX:apiName16}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext16}/v1.0/test/test" until status 404
+
+
+  # Guards against the regex being mangled on its way to the policy: if "\." arrived as ".", the
+  # origin below would be allowed; if it arrived as "\\.", no subdomain would match at all.
+  Scenario: Preflight request fails for origin that only matches when regex escapes are lost
+    Given I generate a unique value from "cors-17" and store it as "apiName17"
+    And I generate a unique API context from "/cors-17" and store it as "apiContext17"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName17}                 |
+      | spec.displayName       | CORS Regex Preflight API          |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext17}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["http://example.com","^https://[^.]+\\\\.example\\\\.com$","http://localhost:5000"],"allowedMethods":["GET","POST"],"allowedHeaders":["Content-Type"],"exposedHeaders":["X-Content-Type-Options"]}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"},{"method":"GET","path":"/alerts/active"},{"method":"OPTIONS","path":"/{country_code}/{city}"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext17}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "https://appXexample.com"
+    And I set header "Access-Control-Request-Method" to "GET"
+    And I set header "Access-Control-Request-Headers" to "Content-Type"
+    And I send a "OPTIONS" request to "${CTX:apiContext17}/v1.0/us/seattle"
+    Then the response status code should be 204
+    And the response header "Access-Control-Allow-Origin" should not exist
+    And the response header "Access-Control-Allow-Methods" should not exist
+    And the response header "Access-Control-Allow-Headers" should not exist
+    When I delete the API "${CTX:apiName17}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext17}/v1.0/test/test" until status 404
+
+
+  # A value that looks like a regex but does not compile was accepted as an exact origin by v1.0.2.
+  # The API must still deploy and serve the other configured origins.
+  Scenario: API with an invalid regex origin still deploys and serves its other origins
+    Given I generate a unique value from "cors-18" and store it as "apiName18"
+    And I generate a unique API context from "/cors-18" and store it as "apiContext18"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName18}                 |
+      | spec.displayName       | CORS Invalid Regex API            |
+      | spec.version           | v1.0                              |
+      | spec.context           | ${CTX:apiContext18}/$version     |
+      | spec.upstream.main.url | http://testbench:3000/api/v1     |
+      | spec.policies          | [{"name":"cors","version":"v1","params":{"allowedOrigins":["https://(broken.example.com","http://example.com"],"allowedMethods":["GET","POST"]}}] |
+      | spec.operations        | [{"method":"GET","path":"/{country_code}/{city}"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext18}/v1.0/test/test" until status 200
+
+    When I set header "Origin" to "http://example.com"
+    And I send a "GET" request to "${CTX:apiContext18}/v1.0/us/seattle"
+    Then the response status code should be 200
+    And the response header "Access-Control-Allow-Origin" should be "http://example.com"
+    When I delete the API "${CTX:apiName18}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext18}/v1.0/test/test" until status 404
