@@ -1,5 +1,13 @@
 name: pii-masking-regex
 version: v1.0.6
+
+# Safe to run once per upstream RETRY ATTEMPT, not only once per client request.
+# Rewrites the request body to mask matched spans. Re-running it on an already
+# masked body matches nothing further, so a retry neither double-masks nor leaks.
+# Without this declaration the gateway refuses to attach the policy per upstream, so a
+# policy with side effects cannot be repeated by a failover without someone deciding it
+# is safe.
+executionClass: per-attempt
 description: |
   Masks or redacts Personally Identifiable Information (PII) in request and
   response payloads.

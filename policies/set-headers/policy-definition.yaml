@@ -1,5 +1,13 @@
 name: set-headers
 version: v1.2.0
+
+# Safe to run once per upstream RETRY ATTEMPT, not only once per client request.
+# Sets headers on the request. Idempotent -- the same headers are set whichever
+# target an attempt goes to, and setting them again on a retry changes nothing.
+# Without this declaration the gateway refuses to attach the policy per upstream, so a
+# policy with side effects cannot be repeated by a failover without someone deciding it
+# is safe.
+executionClass: per-attempt
 description: |
   Sets or appends configured headers on requests and/or responses. In "set" mode
   (the default), an existing header with the same name is overwritten; if the same
