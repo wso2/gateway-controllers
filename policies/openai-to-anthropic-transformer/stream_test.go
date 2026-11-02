@@ -652,8 +652,8 @@ func TestNeedsMoreResponseData_SSEBoundaries(t *testing.T) {
 	if p.NeedsMoreResponseData(nil) {
 		t.Error("an empty accumulator should not request more data")
 	}
-	if p.NeedsMoreResponseData([]byte(`{"error":{"message":"boom"}}`)) {
-		t.Error("non-SSE data must not stall the stream")
+	if !p.NeedsMoreResponseData([]byte(`{"error":{"message":"boom"}}`)) {
+		t.Error("a body that is not an event stream must accumulate until the upstream closes")
 	}
 	if !p.NeedsMoreResponseData([]byte(strings.ReplaceAll(frame, "\n", "\r\n")[:len(frame)])) {
 		t.Error("a partial CRLF frame should request more data")
@@ -687,9 +687,11 @@ func TestOnResponseHeaders_RewritesStreamingHeaders(t *testing.T) {
 	}
 }
 
-// TestStream_NonSSEChunksPassThrough guards the buffered-fallback boundary: a
-// non-stream body must not be mangled by the chunk path.
-func TestStream_NonSSEChunksPassThrough(t *testing.T) {
+// TestStream_NonSSEBodyIsTranslated covers the framing the gateway cannot tell
+// apart from a stream: an ordinary JSON reply sent without content-length is
+// routed through the chunk path, and must still be translated rather than
+// forwarded in the provider's own format.
+func TestStream_NonSSEBodyIsTranslated(t *testing.T) {
 	p := testPolicy()
 	respCtx := &policy.ResponseStreamContext{
 		SharedContext:   &policy.SharedContext{RequestID: "req-json", Metadata: map[string]interface{}{}},
@@ -698,13 +700,55 @@ func TestStream_NonSSEChunksPassThrough(t *testing.T) {
 	}
 
 	action := p.OnResponseBodyChunk(context.Background(), respCtx,
-		&policy.StreamBody{Chunk: []byte(`{"id":"msg_1"}`), EndOfStream: true}, nil)
+		&policy.StreamBody{Chunk: []byte(anthropicBufferedBody), EndOfStream: true}, nil)
 	forward, ok := action.(policy.ForwardResponseChunk)
 	if !ok {
 		t.Fatalf("expected ForwardResponseChunk, got %T", action)
 	}
-	if forward.Body != nil {
-		t.Errorf("non-SSE chunks must pass through untouched, got %q", forward.Body)
+	if forward.Body == nil {
+		t.Fatal("a non-stream JSON body must be translated, not forwarded untouched")
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(forward.Body, &out); err != nil {
+		t.Fatalf("translated body is not JSON: %v", err)
+	}
+	if out["object"] != "chat.completion" {
+		t.Errorf("object = %v, want chat.completion", out["object"])
+	}
+	choices, _ := out["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("choices = %v, want one entry", out["choices"])
+	}
+	msg, _ := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "hi" {
+		t.Errorf("content = %v, want hi", msg["content"])
+	}
+}
+
+// TestStream_NonSSEBodyTruncatedByAccumulatorCap covers the one case where a
+// non-stream body reaches the chunk path incomplete: the policy engine's stream
+// accumulator cap forces a flush before the upstream closes. The document is cut
+// mid-body, so the stream is closed rather than a fragment emitted.
+func TestStream_NonSSEBodyTruncatedByAccumulatorCap(t *testing.T) {
+	p := testPolicy()
+	respCtx := &policy.ResponseStreamContext{
+		SharedContext:   &policy.SharedContext{RequestID: "req-trunc", Metadata: map[string]interface{}{}},
+		ResponseHeaders: policy.NewHeaders(map[string][]string{"content-type": {"application/json"}}),
+		ResponseStatus:  200,
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx,
+		&policy.StreamBody{Chunk: []byte(anthropicBufferedBody[:20]), EndOfStream: false}, nil)
+	term, ok := action.(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("expected TerminateResponseChunk for a truncated body, got %T", action)
+	}
+	if term.Body == nil {
+		t.Error("Body must be an empty slice, not nil: a nil body leaves the chain " +
+			"carrying the truncated document and delivers it to the client")
+	}
+	if len(term.Body) != 0 {
+		t.Errorf("a truncated body must not be forwarded, got %q", term.Body)
 	}
 }
 

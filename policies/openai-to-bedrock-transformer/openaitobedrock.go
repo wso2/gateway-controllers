@@ -210,20 +210,30 @@ func (p *TranslatorPolicy) OnResponseBody(
 
 // ─── Streaming response phase ─────────────────────────────────────────────────
 
-// NeedsMoreResponseData keeps the kernel accumulating until its buffer ends on a
-// clean event-stream frame boundary. That guarantees OnResponseBodyChunk always
-// receives a whole number of complete frames and never a split one, so no
-// cross-chunk carry buffer (which would be unsafe on a shared policy instance)
-// is required.
+// NeedsMoreResponseData tells the kernel when to keep accumulating instead of
+// delivering what it has.
+//
+// For an event stream it holds until the buffer ends on a clean frame boundary.
+// That guarantees OnResponseBodyChunk always receives a whole number of complete
+// frames and never a split one, so no cross-chunk carry buffer (which would be
+// unsafe on a shared policy instance) is required.
+//
+// For a body that is not event-stream framed it holds until the upstream closes.
+// The gateway routes a response through this path whenever the upstream framing
+// is chunked, and an ordinary Converse JSON reply is framed that way whenever the
+// provider omits content-length — so a complete, non-streamed document arrives
+// here in pieces. Releasing those pieces would hand OnResponseBodyChunk a
+// fragment of a JSON document it cannot parse; holding them reassembles the
+// document so the buffered translation can run on it.
 func (p *TranslatorPolicy) NeedsMoreResponseData(accumulated []byte) bool {
 	if len(accumulated) == 0 {
 		return false
 	}
 	_, hasPartial, ok := eventStreamBoundary(accumulated)
 	if !ok {
-		// Not event-stream framing (e.g. a JSON error body streamed through) —
-		// don't stall the stream waiting for a boundary that will never come.
-		return false
+		// Not event-stream framing — accumulate the whole body and translate it
+		// once, rather than emit fragments of a document that is not a stream.
+		return true
 	}
 	return hasPartial
 }
@@ -241,6 +251,13 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 		return policy.ForwardResponseChunk{}
 	}
 
+	if !isEventStreamFlush(respCtx, chunk) {
+		// A Converse JSON body, not a ConverseStream event stream.
+		// NeedsMoreResponseData holds such a body until the upstream closes, so
+		// this flush carries the complete document.
+		return p.translateBufferedFlush(respCtx, chunk)
+	}
+
 	model := effectiveModel(respCtx.SharedContext, p.params.Model)
 	sse := eventStreamToSSE(chunk.Chunk, chunk.EndOfStream,
 		p.completionID(requestID(respCtx.SharedContext)), model)
@@ -251,6 +268,79 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 		sse = []byte{}
 	}
 	return policy.ForwardResponseChunk{Body: sse}
+}
+
+// isEventStreamFlush reports whether this flush belongs to an Amazon event
+// stream rather than a buffered Converse JSON body. The content-type decides it
+// when the upstream sets one; otherwise the bytes are sniffed. An empty flush
+// counts as event-stream framing, because that is how the upstream's close
+// arrives and it still has to emit the terminating [DONE].
+func isEventStreamFlush(
+	respCtx *policy.ResponseStreamContext, chunk *policy.StreamBody,
+) bool {
+	if isEventStreamContentType(headerValue(respCtx.ResponseHeaders, "content-type")) {
+		return true
+	}
+	if len(chunk.Chunk) == 0 {
+		return true
+	}
+	return looksLikeEventStream(chunk.Chunk)
+}
+
+// translateBufferedFlush translates a complete, non-event-stream response body
+// that was delivered on the streaming path. NeedsMoreResponseData keeps the
+// kernel accumulating such a body until the upstream closes, so the flush that
+// reaches here is the whole document. The one exception is the kernel's stream
+// accumulator cap, which forces a flush mid-body and can only hand over a
+// truncated document.
+func (p *TranslatorPolicy) translateBufferedFlush(
+	respCtx *policy.ResponseStreamContext, chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
+	if !chunk.EndOfStream {
+		// The accumulator cap fired. The document is cut mid-body, so there is
+		// nothing correct to emit — close the stream rather than forward a
+		// fragment the client cannot parse. The status and the headers went out
+		// long ago, so this is the only way left to report the failure.
+		slog.Warn(PolicyName+": response exceeded the policy engine's stream accumulator "+
+			"limit before the upstream closed; the body is truncated and cannot be translated",
+			"flush_bytes", len(chunk.Chunk), "status", respCtx.ResponseStatus)
+		// Body is an explicitly empty slice, not nil: the chain executor only
+		// replaces the bytes it is carrying when an action supplies a non-nil
+		// body, so a nil here would deliver the truncated document to the client
+		// instead of suppressing it.
+		//
+		// The policy SDK pinned here (sdk/core v0.2.14) has no IsFault on this
+		// action, so the close cannot be declared a failure to the fault flow;
+		// the warning above is the record of it.
+		return policy.TerminateResponseChunk{Body: []byte{}}
+	}
+	if len(chunk.Chunk) == 0 {
+		return policy.ForwardResponseChunk{}
+	}
+
+	slog.Debug(PolicyName+": translating a buffered response on the streaming path",
+		"status", respCtx.ResponseStatus, "bytes", len(chunk.Chunk))
+	return bufferedActionToChunk(translateConverseResponse(chunk.Chunk, respCtx.ResponseStatus,
+		effectiveModel(respCtx.SharedContext, p.params.Model),
+		p.completionID(requestID(respCtx.SharedContext))))
+}
+
+// bufferedActionToChunk adapts an action from the buffered translator to the
+// streaming path, where the status and the headers are already committed and
+// only the body can still change. A modification contributes its new body, a
+// pass-through (nil body) leaves the provider bytes alone, and an immediate
+// response can only be delivered as a final body before the stream closes.
+func bufferedActionToChunk(action policy.ResponseAction) policy.StreamingResponseAction {
+	switch a := action.(type) {
+	case policy.DownstreamResponseModifications:
+		if a.Body == nil {
+			return policy.ForwardResponseChunk{}
+		}
+		return policy.ForwardResponseChunk{Body: a.Body}
+	case policy.ImmediateResponse:
+		return policy.TerminateResponseChunk{Body: a.Body}
+	}
+	return policy.ForwardResponseChunk{}
 }
 
 // ─── Routing / selection ──────────────────────────────────────────────────────
