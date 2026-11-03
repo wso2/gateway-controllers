@@ -35,7 +35,7 @@ See [Customizing Gateway Policies](https://github.com/wso2/api-platform/blob/mai
 
 ## Integration Tests
 
-Each policy can own an integration test suite in `policies/<name>/it/`, with its own scenarios and step definitions on the shared steps in `tests/it/common`. Every pull request runs the suites of all policies against gateway 1.2.0, 1.1.0 and the latest gateway image. See [tests/it/CLAUDE.md](tests/it/CLAUDE.md) for how to add and run them.
+Each policy can own an integration test suite in `policies/<name>/it/`, with its own scenarios and step definitions on the shared steps in `tests/it/common`. Pull requests to `main` that change `policies/`, `tests/it/`, `scripts/it/`, the `Makefile` or the integration test workflow run the suites of all policies against gateway 1.2.0, 1.1.0 and the latest gateway image. See [tests/it/CLAUDE.md](tests/it/CLAUDE.md) for how to add and run them.
 
 ## Policy Catalog
 
