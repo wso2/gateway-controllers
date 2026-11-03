@@ -464,6 +464,44 @@ func TestInterceptorUnavailableDeclaresFault(t *testing.T) {
 	}
 }
 
+// The response-phase rejection declares the same fault, with the response direction.
+func TestOnResponseBody_InterceptorFailureDeclaresFault(t *testing.T) {
+	srv := newServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"err":"boom"}`))
+	})
+	defer srv.Close()
+
+	p := mustGetPolicy(t, map[string]interface{}{
+		"endpoint": srv.URL,
+		"response": map[string]interface{}{"passthroughOnError": false},
+	})
+	action := p.OnResponseBody(context.Background(), respCtx(`{"k":1}`, 200, nil), nil)
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if resp.StatusCode != interceptorErrorStatus || string(resp.Body) != interceptorErrorBody {
+		t.Fatalf("client response changed: %d %s", resp.StatusCode, resp.Body)
+	}
+	if resp.Headers["Content-Type"] != contentTypeJSON {
+		t.Fatalf("content type changed: %+v", resp.Headers)
+	}
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", resp.IsFault, resp.Fault)
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed || resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("fault = %s/%s, want %s/%s", resp.Fault.Code, resp.Fault.Type,
+			policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	}
+	if resp.Fault.Direction != policy.DirectionResponse {
+		t.Fatalf("direction = %q, want %q", resp.Fault.Direction, policy.DirectionResponse)
+	}
+	if resp.Fault.Description == "" || strings.Contains(string(resp.Body), resp.Fault.Description) {
+		t.Fatalf("Description missing or leaked into the client body: %q", resp.Fault.Description)
+	}
+}
+
 // This policy carries the external interceptor's own status, headers and body; it describes
 // nothing of its own, because it did not decide anything.
 //

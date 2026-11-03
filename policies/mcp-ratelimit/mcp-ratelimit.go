@@ -27,6 +27,7 @@
 package mcpratelimit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -760,14 +761,17 @@ func buildJsonRpcErrorBody(requestID json.RawMessage, code int, message string, 
 // The id is carried as json.RawMessage because this policy never needed to interpret it, only
 // to copy it into a body it wrote. Describing it instead means handing over a real value, and
 // JSON-RPC permits a string, a number, or null — so the decoded form is whatever the client
-// sent. An absent or unparseable id becomes nil, which renders as the null the spec requires
+// sent. A number is kept as a json.Number, so an integer beyond float64 precision is re-emitted
+// exactly. An absent or unparseable id becomes nil, which renders as the null the spec requires
 // for a request whose id could not be determined.
 func decodeRequestID(requestID json.RawMessage) any {
 	if len(requestID) == 0 {
 		return nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(requestID))
+	dec.UseNumber()
 	var id any
-	if err := json.Unmarshal(requestID, &id); err != nil {
+	if err := dec.Decode(&id); err != nil {
 		return nil
 	}
 	return id

@@ -1698,16 +1698,19 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 		if !resp.IsFault {
 			t.Fatalf("expected IsFault=true on a misconfigured auth policy")
 		}
-		if resp.Fault == nil || resp.Fault.Code != policy.FaultCodeAuthGeneral {
-			t.Fatalf("expected Error.Code=%q, got %+v", policy.FaultCodeAuthGeneral, resp.Fault)
+		if resp.Fault == nil || resp.Fault.Code != policy.FaultCodeMediationFailed ||
+			resp.Fault.Type != policy.FaultTypeConfiguration {
+			t.Fatalf("expected fault %s/%s, got %+v", policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, resp.Fault)
+		}
+		want := `{"error":"Internal Server Error","message":"bad config"}`
+		if resp.StatusCode != 500 || string(resp.Body) != want {
+			t.Fatalf("client response changed: %d %s", resp.StatusCode, resp.Body)
 		}
 	})
 
 	t.Run("well-known metadata response is not a fault", func(t *testing.T) {
 		// A protected-resource-metadata discovery response is a successful 200. Marking
 		// it a fault would notify on every MCP client that reads the metadata.
-		privateKey, _ := generateRSATestKeys(t)
-		_ = privateKey
 		p := &McpAuthPolicy{
 			OnFailureStatusCode: 401,
 			ErrorMessageFormat:  "json",
@@ -1753,6 +1756,7 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 				t.Fatalf("%s: expected an immediate rejection", reason)
 			}
 			assertMalformedRequestFault(t, resp, wantCode)
+			assertFallbackBodyAgrees(t, resp)
 		}
 	})
 
@@ -1766,6 +1770,7 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 			t.Fatalf("expected an immediate rejection")
 		}
 		assertMalformedRequestFault(t, resp, JSONRPCHeaderMismatch)
+		assertFallbackBodyAgrees(t, resp)
 		// Declaring the fault leaves the body the client receives as it was.
 		want := `{"error":{"code":-32020,"data":"` + headerMcpMethod + ` header is required","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}`
 		if string(resp.Body) != want {

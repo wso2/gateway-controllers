@@ -337,4 +337,5 @@ This policy is not a fault policy: it does not run under an API's fault policies
 replace the response of a failure that another policy reports.
 
 The fault's `Description` carries the internal reason, for example `headers[0].name cannot be empty`.
-It is passed to fault policies and analytics only, never to the client.
+The response body's `message` field carries the same reason, as it did in v1.0, so the client
+receives it; the fault's `Message` is the generic `Configuration Error`.

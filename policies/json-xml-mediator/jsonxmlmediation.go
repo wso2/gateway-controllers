@@ -603,8 +603,9 @@ func (p *JSONXMLMediationPolicy) handleInternalServerError(message string) polic
 			Type:      policy.FaultTypeMediation,
 			Direction: policy.DirectionRequest,
 			Message:   "Payload conversion failed",
-			// message can quote the caller's own payload, so it stays in Description,
-			// which the renderer withholds from the client body.
+			// message can quote the caller's own payload. The body above has always
+			// carried it; the fault keeps it in Description, not Message, so a
+			// gateway renderer does not repeat it.
 			Description: message,
 		},
 	}
@@ -642,8 +643,9 @@ func (p *JSONXMLMediationPolicy) handleInternalServerErrorResponse(message strin
 			Type:      policy.FaultTypeMediation,
 			Direction: policy.DirectionResponse,
 			Message:   "Payload conversion failed",
-			// message can quote the upstream's payload, so it stays in Description,
-			// which the renderer withholds from the client body.
+			// message can quote the upstream's payload. The body above has always
+			// carried it; the fault keeps it in Description, not Message, so a
+			// gateway renderer does not repeat it.
 			Description: message,
 		},
 	}

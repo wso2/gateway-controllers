@@ -520,7 +520,8 @@ token is passed through unchanged, with its code and type.
 |------|--------|------|------|
 | `jwt-auth` rejects the token (missing, malformed, expired, failing signature or audience) | `onFailureStatusCode` (default `401`) | `jwt-auth`'s code, passed through (for example `900902` missing, `900901` invalid, `900903` expired) | `jwt-auth`'s type, passed through |
 | Protected resource metadata is requested but no key manager or matching issuer is configured | `onFailureStatusCode` | `900900` | `authentication` |
-| The policy is misconfigured (`onFailureStatusCode` or `errorMessageFormat` invalid), or `jwt-auth` cannot be loaded | `500` | `900900` | `authentication` |
+| The policy is misconfigured: `onFailureStatusCode` or `errorMessageFormat` is invalid, or a `keyManagers` entry cannot be read when protected resource metadata is requested | `500` | `960000` | `configuration` |
+| `jwt-auth` cannot be loaded | `500` | `900900` | `authentication` |
 | The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
 | A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one (`-32020`) | `400` | `960001` | `validation` |
 
@@ -528,5 +529,6 @@ The protected resource metadata document is a successful response and is not a f
 malformed request's fault also carries its JSON-RPC error code.
 
 The fault's `Description` carries the internal reason, for example `no matching issuers found`, or
-for a malformed request the JSON-RPC error's `data`. It is passed to fault policies and analytics
-only, never to the client.
+for a malformed request the JSON-RPC error's `data`. The response body carries the same reason,
+as it did in v1.4 (except with `errorMessageFormat: minimal`), so the client receives it; the
+fault's `Message` is a generic one.

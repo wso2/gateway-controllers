@@ -106,4 +106,5 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | The `host` parameter is missing, not a string, or empty | `500` | `960000` | `configuration` |
 
 The fault's `Description` carries the internal reason, for example `host parameter cannot be empty`.
-It is passed to fault policies and analytics only, never to the client.
+The response body's `message` field carries the same reason, as it did in v1.0, so the client
+receives it; the fault's `Message` is the generic `Configuration Error`.

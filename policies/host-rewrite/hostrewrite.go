@@ -94,8 +94,8 @@ func (p *HostRewritePolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy
 				Type:      policy.FaultTypeConfiguration,
 				Direction: policy.DirectionRequest,
 				Message:   "Configuration Error",
-				// err names the operator's own configuration mistake; the renderer
-				// withholds Description from the client body.
+				// err names the operator's own configuration mistake. The body above
+				// has always carried it; the fault keeps it in Description, not Message.
 				Description: err.Error(),
 			},
 		}

@@ -33,10 +33,14 @@ func TestRejectionsDeclareFault(t *testing.T) {
 		status   int
 		code     string
 		faultTyp string
+		body     string
 	}{
-		{"bad request", badRequest("request body must be a JSON object"), 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
-		{"budget state unavailable", serviceUnavailable("budget state is unavailable"), 503, policy.FaultCodeMediationFailed, policy.FaultTypeMediation},
-		{"budget exhausted", budgetExhaustedResponse(), 429, policy.FaultCodeThrottledCustomPolicy, policy.FaultTypeThrottling},
+		{"bad request", badRequest("request body must be a JSON object"), 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
+			`{"error":"request body must be a JSON object"}`},
+		{"budget state unavailable", serviceUnavailable("budget state is unavailable"), 503, policy.FaultCodeMediationFailed, policy.FaultTypeMediation,
+			`{"error":"budget state is unavailable"}`},
+		{"budget exhausted", budgetExhaustedResponse(), 429, policy.FaultCodeThrottledCustomPolicy, policy.FaultTypeThrottling,
+			`{"code":"cost_based_model_routing_budget_exhausted","error":"requested model has no available budget or the fallback budget is missing or exhausted"}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -51,6 +55,9 @@ func TestRejectionsDeclareFault(t *testing.T) {
 			}
 			if c.resp.Fault.Direction != policy.DirectionRequest || c.resp.Fault.Message == "" {
 				t.Errorf("direction %q, message %q", c.resp.Fault.Direction, c.resp.Fault.Message)
+			}
+			if string(c.resp.Body) != c.body {
+				t.Errorf("body = %s, want %s", c.resp.Body, c.body)
 			}
 		})
 	}

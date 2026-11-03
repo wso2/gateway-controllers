@@ -440,8 +440,8 @@ func buildInvalidConfigResponse(message string) policy.RequestAction {
 		Body:    body,
 		IsFault: true,
 		Fault: &policy.FaultDetails{
-			Code:        policy.FaultCodeAuthGeneral,
-			Type:        policy.FaultTypeAuthentication,
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeConfiguration,
 			Direction:   policy.DirectionRequest,
 			Message:     "Authentication could not be performed",
 			Description: message,

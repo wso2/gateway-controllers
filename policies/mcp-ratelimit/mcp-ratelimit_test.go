@@ -19,6 +19,7 @@
 package mcpratelimit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"slices"
@@ -1626,8 +1627,12 @@ func TestDecodeRequestID(t *testing.T) {
 	if got := decodeRequestID(json.RawMessage(`"req-1"`)); got != "req-1" {
 		t.Fatalf("expected string id req-1, got %#v", got)
 	}
-	if got := decodeRequestID(json.RawMessage(`1`)); got != float64(1) {
+	if got := decodeRequestID(json.RawMessage(`1`)); got != json.Number("1") {
 		t.Fatalf("expected numeric id 1, got %#v", got)
+	}
+	// An integer beyond float64 precision must not be rounded.
+	if got := decodeRequestID(json.RawMessage(`9007199254740993`)); got != json.Number("9007199254740993") {
+		t.Fatalf("expected numeric id 9007199254740993, got %#v", got)
 	}
 	// Absent, explicit null, and unparseable all collapse to nil, which the gateway renders
 	// as the null JSON-RPC requires for an id it could not determine.
@@ -1688,6 +1693,23 @@ func TestRateLimitedResponsePropagatesDelegateFault(t *testing.T) {
 	if resp.Fault.Code == "" {
 		t.Fatalf("expected Error.Code to be carried through")
 	}
+	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeRateLimited, "1")
+}
+
+// A large numeric id reaches the description exactly as the client sent it.
+func TestRateLimitedResponseKeepsLargeNumericID(t *testing.T) {
+	p := newToolPolicy(t, "toolA", 1)
+	body := []byte(`{"jsonrpc":"2.0","id":9007199254740993,"method":"tools/call","params":{"name":"toolA"}}`)
+
+	p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, body), nil)
+	resp, ok := p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, body), nil).(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse on limit breach")
+	}
+	if !strings.Contains(string(resp.Body), `"id":9007199254740993`) {
+		t.Fatalf("expected the raw id in the body, got %s", resp.Body)
+	}
+	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeRateLimited, json.Number("9007199254740993"))
 }
 
 // TestMalformedRequestDeclaresFault covers this policy's own rejection: a body it cannot
@@ -1712,6 +1734,7 @@ func TestMalformedRequestDeclaresFault(t *testing.T) {
 	if resp.Fault.Type != policy.FaultTypeValidation {
 		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeValidation, resp.Fault.Type)
 	}
+	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeParseError, nil)
 }
 
 // assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels alongside the
@@ -1747,7 +1770,9 @@ func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&envelope); err != nil {
 		t.Fatalf("Fallback body is not a JSON-RPC envelope: %v (%q)", err, raw)
 	}
 	if envelope.JSONRPC != "2.0" {
@@ -1770,9 +1795,8 @@ func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
 	}
 }
 
-// sameJSONRPCID compares two decoded JSON-RPC ids. A number survives json.Unmarshal as
-// float64 but reaches the description as whatever the policy parsed, so compare through the
-// JSON encoding rather than with ==.
+// sameJSONRPCID compares two decoded JSON-RPC ids through their JSON encoding rather than
+// with ==, so the comparison does not depend on how each side decoded a number.
 func sameJSONRPCID(fromBody, described any) bool {
 	a, errA := json.Marshal(fromBody)
 	b, errB := json.Marshal(described)

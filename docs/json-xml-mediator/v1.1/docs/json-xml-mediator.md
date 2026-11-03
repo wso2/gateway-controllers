@@ -300,4 +300,5 @@ the response direction. A streaming (SSE) response is passed through unconverted
 
 The fault's `Description` carries the internal reason, for example
 `Content-Type must be application/json for downstream payload format json`. It can quote the
-payload, so it is passed to fault policies and analytics only, never to the client.
+payload. The response body's `message` field carries the same reason, as it did in v1.0, so the
+client receives it; the fault's `Message` is the generic `Payload conversion failed`.

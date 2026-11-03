@@ -290,5 +290,6 @@ An invalid `pathRewrite` regex or an unsupported path rewrite type is not a reje
 is left unchanged and the request is forwarded.
 
 The fault's `Description` carries the internal reason, for example
-`invalid methodRewrite value: unsupported method: FETCH`. It is passed to fault policies and
-analytics only, never to the client.
+`invalid methodRewrite value: unsupported method: FETCH`. The response body's `message` field
+carries the same reason, as it did in v1.0, so the client receives it; the fault's `Message` is
+the generic `Configuration Error`.
