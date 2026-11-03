@@ -1,0 +1,10 @@
+{
+  "name": "dpop",
+  "displayName": "DPoP",
+  "version": "0.9",
+  "provider": "WSO2",
+  "categories": [
+    "Security"
+  ],
+  "description": "Enforces OAuth 2.0 Demonstrating Proof of Possession (DPoP, RFC 9449). The gateway\nverifies the DPoP proof JWT sent with each request and confirms that it was\nsigned by the key the access token is bound to, so a leaked or stolen access\ntoken cannot be replayed without the client's private key."
+}
