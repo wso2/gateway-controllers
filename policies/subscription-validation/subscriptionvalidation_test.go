@@ -716,6 +716,9 @@ func TestRejectionErrorCodes(t *testing.T) {
 		if resp.Fault.Code != policy.FaultCodeAuthMissingCredentials {
 			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeAuthMissingCredentials, resp.Fault.Code)
 		}
+		if resp.Fault.Type != policy.FaultTypeAuthentication {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+		}
 	})
 
 	// The gateway not supplying what the policy needs is the policy failing to do its

@@ -754,6 +754,9 @@ func TestRejectionDeclaresFault(t *testing.T) {
 			if resp.Fault.Direction != policy.DirectionRequest {
 				t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
 			}
+			if resp.Fault.Message != tt.wantMessage {
+				t.Fatalf("expected Error.Message=%q, got %q", tt.wantMessage, resp.Fault.Message)
+			}
 			// The body the client receives is unchanged by the fault declaration.
 			var body map[string]string
 			if err := json.Unmarshal(resp.Body, &body); err != nil {

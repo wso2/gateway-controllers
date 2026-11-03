@@ -130,9 +130,13 @@ func assertFailure(t *testing.T, reqCtx *policy.RequestHeaderContext, action pol
 }
 
 // assertRejectionCode asserts the rejection declares a fault and carries exactly the
-// wanted code and type.
+// wanted code and type, and that the client receives the configured body with none of the
+// internal reason in it.
 func assertRejectionCode(t *testing.T, ir policy.ImmediateResponse, wantCode, wantType string) {
 	t.Helper()
+	if want := `{"error":"Unauthorized","message":"Authentication failed"}`; string(ir.Body) != want {
+		t.Fatalf("body = %s, want %s", ir.Body, want)
+	}
 	if ir.Fault.Code != wantCode {
 		t.Fatalf("expected Error.Code=%q, got %q", wantCode, ir.Fault.Code)
 	}

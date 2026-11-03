@@ -684,6 +684,9 @@ func TestSigningFailureDeclaresFault(t *testing.T) {
 			if strings.Contains(string(resp.Body), resp.Fault.Description) {
 				t.Fatalf("Description leaked into the client body: %q", resp.Fault.Description)
 			}
+			if strings.Contains(string(resp.Body), "boom") {
+				t.Fatalf("underlying error leaked into the client body: %s", resp.Body)
+			}
 		})
 	}
 }
