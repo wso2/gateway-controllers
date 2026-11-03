@@ -39,14 +39,12 @@ jobs:
       - name: Checkout gateway-controllers
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
-          fetch-depth: 0
           persist-credentials: false
 
       - name: Select the policies to test
         id: select
         env:
           REQUESTED_POLICIES: ${{ inputs.policies }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           set -euo pipefail
           python3 scripts/it/test_changed_policies.py
@@ -54,10 +52,10 @@ jobs:
           python3 scripts/it/test_check_framework_pin.py
           python3 scripts/it/test_generate_workspace.py
           python3 scripts/it/test_render_timeline.py
-          if [[ -n "$REQUESTED_POLICIES" ]]; then
-            python3 scripts/it/changed-policies.py --policies "$REQUESTED_POLICIES"
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            python3 scripts/it/changed-policies.py --policies all
           else
-            python3 scripts/it/changed-policies.py --base "$BASE_SHA"
+            python3 scripts/it/changed-policies.py --policies "$REQUESTED_POLICIES"
           fi
 
   standards:
@@ -80,7 +78,7 @@ jobs:
             gateway-controllers/tests/it/go.sum
             gateway-controllers/policies/*/it/go.sum
 
-      - name: Check the shared steps and the changed policies' suites against the framework standards
+      - name: Check the shared steps and the selected policies' suites against the framework standards
         working-directory: gateway-controllers
         env:
           POLICIES: ${{ needs.detect.outputs.policies }}

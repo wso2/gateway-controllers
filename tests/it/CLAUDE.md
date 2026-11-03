@@ -151,8 +151,8 @@ A policy without `it/it-suite.yaml` has no integration tests, and the pull reque
    send the requests that show the policy's effect, and assert them.
 4. Run `make it POLICIES=<name> GATEWAY_VERSION=1.2.0`, then the same for `1.1.0` and `latest`, then
    `make it-standards POLICIES=<name>`.
-5. Commit the `it/` folder with the policy change. A pull request that changes any file in the
-   policy's folder now runs these tests on all three gateway versions.
+5. Commit the `it/` folder with the policy change. Every pull request now runs these tests on all
+   three gateway versions.
 
 ## Write the scenarios
 
@@ -204,13 +204,19 @@ steps does not reach it by itself, so port it when a policy needs it.
 
 ## What a pull request runs
 
-`scripts/it/changed-policies.py` selects every policy whose folder has a changed file, plus the
-policies that depend on one of them through a `go.mod` require, limited to policies that have an
-`it/it-suite.yaml`. A change to the workflow, these scripts, `tests/it` or the Makefile runs the
-smoke policy instead. One workflow run builds the gateway once for each of gateway 1.2.0, 1.1.0 and
-latest and executes the suite of every selected policy on it, each on all three databases (SQL
-Server only from 1.2.0). The standards check runs on the shared steps and on the selected policies'
-steps, features and suite file. A manual run takes `policies` (comma-separated, or `all`).
+Every pull request that touches `policies/`, `tests/it`, `scripts/it`, the Makefile or the workflow
+runs the suite of every policy that has an `it/it-suite.yaml`, whichever files it changes. A policy
+can import another one through its `go.mod`, use another one beside it in its scenarios, or rely on
+the policies the gateway controller requires. A change to any of them can break its tests, so they
+all run.
+
+One workflow run builds the gateway once for each of gateway 1.2.0, 1.1.0 and latest and executes
+every suite on it, each on all three databases (SQL Server only from 1.2.0). The standards check
+runs on the shared steps and on every policy's steps, features and suite file.
+
+The workflow selects them with `scripts/it/changed-policies.py --policies all`. A manual run takes
+`policies` (comma-separated, or `all`) and passes it to the same script. The script rejects an
+unknown policy and skips a policy that has no `it/it-suite.yaml`.
 
 ## The framework dependency
 
