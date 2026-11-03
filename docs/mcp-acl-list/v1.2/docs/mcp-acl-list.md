@@ -262,7 +262,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 |------|--------|------|------|
 | The request body could not be read: broken JSON (JSON-RPC `-32700`), or not a single JSON-RPC request object, a member of the wrong type or a member named twice (`-32600`) | `400` | `960001` | `validation` |
 | A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one (`-32020`) | `400` | `960001` | `validation` |
-| The request's `params` is not an object, or names no capability (`-32602`) | `400` | `960001` | `validation` |
+| A `tools/call`, `resources/read` or `prompts/get` request's `params` is not an object, or names no tool, resource or prompt (`-32602`) | `400` | `960001` | `validation` |
 | The tool, resource or prompt is denied by the access control list (`-32000`) | `400` | `900908` | `authorization` |
 
 A JSON-RPC rejection's fault also carries the JSON-RPC error code shown above and the request id,

@@ -3,7 +3,6 @@ describe it, and the body the client receives is the same as without the contrac
 from __future__ import annotations
 
 import importlib
-import json
 import sys
 import types
 import unittest
@@ -57,6 +56,19 @@ class FaultContractTest(unittest.TestCase):
             self.assertEqual("nvidia-nemoguard-content-safety",
                              result.fault.guardrail.intervening_guardrail)
 
+    def test_mixed_verdict_reports_the_blocked_category(self) -> None:
+        params = {"categories": {"violence": False, "profanity": True}}
+        result = self.block_request(policy, "Violence, Profanity", {"request": params})
+        self.assertTrue(result.is_fault)
+        self.assertEqual("906007", result.fault.code, "violence is not blocked, so it did not cause this")
+
+        base.FakeRequests.reset(response=base.nemoguard_response(
+            "safe", response_safety="unsafe", categories="Violence, Profanity"))
+        ctx = base.response_context(response_payload=RESPONSE, request_payload=REQUEST)
+        result = make(policy).on_response_body(None, ctx, {"response": {"enabled": True, **params}})
+        self.assertTrue(result.is_fault)
+        self.assertEqual("906007", result.fault.code)
+
     def test_response_block_is_a_fault_despite_its_200(self) -> None:
         base.FakeRequests.reset(response=base.nemoguard_response(
             "safe", response_safety="unsafe", categories="Violence"))
@@ -76,12 +88,25 @@ class FaultContractTest(unittest.TestCase):
         self.assertTrue(result.is_fault)
         self.assertEqual("960000", result.fault.code)
         self.assertEqual("mediation", result.fault.type)
+        self.assertEqual("Request", result.fault.direction)
+
+    def test_response_service_unavailable_is_a_response_fault(self) -> None:
+        base.FakeRequests.reset(error=ConnectionError("Connection refused"))
+        ctx = base.response_context(response_payload=RESPONSE, request_payload=REQUEST)
+        result = make(policy).on_response_body(None, ctx, {"response": {"enabled": True}})
+
+        self.assertEqual(503, result.status_code)
+        self.assertTrue(result.is_fault)
+        self.assertEqual("960000", result.fault.code)
+        self.assertEqual("mediation", result.fault.type)
+        self.assertEqual("Response", result.fault.direction)
 
     def test_client_body_is_unchanged_by_the_contract(self) -> None:
         for params in ({}, {"request": {"showAssessment": True}}):
             with_contract = self.block_request(policy, "Violence", params)
             without = self.block_request(base.policy, "Violence", params)
-            self.assertEqual(json.loads(without.body), json.loads(with_contract.body))
+            self.assertEqual(without.body, with_contract.body)
+            self.assertEqual(without.headers, with_contract.headers)
             self.assertEqual(without.status_code, with_contract.status_code)
 
 

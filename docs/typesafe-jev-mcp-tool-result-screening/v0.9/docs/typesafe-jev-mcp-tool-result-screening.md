@@ -306,7 +306,7 @@ default) are not faults.
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| A question's answer crosses its threshold and the result is withheld | `200` | `906008` | `guardrail` |
+| A question's answer crosses its threshold and the result is withheld | `200` | `906000` | `guardrail` |
 | The Jev API call fails, times out or returns an incomplete answer, and the rule fails closed | `200` | `960000` | `mediation` |
 | The result is larger than `maxResultBytes`, is not a valid tool result, or the response cannot be read as a JSON-RPC message, and the rule fails closed | `200` | `960000` | `mediation` |
 

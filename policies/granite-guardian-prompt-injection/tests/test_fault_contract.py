@@ -3,7 +3,6 @@ describe it, and the body the client receives is the same as without the contrac
 from __future__ import annotations
 
 import importlib
-import json
 import sys
 import types
 import unittest
@@ -68,6 +67,7 @@ class FaultContractTest(unittest.TestCase):
         self.assertTrue(result.is_fault)
         self.assertEqual("960000", result.fault.code)
         self.assertEqual("mediation", result.fault.type)
+        self.assertEqual("Request", result.fault.direction)
 
     def test_client_body_is_unchanged_by_the_contract(self) -> None:
         for response, error in ((base.guardian_response("Yes", confidence=0.9), None),
@@ -76,7 +76,8 @@ class FaultContractTest(unittest.TestCase):
             with_contract = run(policy, {"riskNames": ["jailbreak"], "threshold": 0.5})
             base.FakeRequests.reset(response=response, error=error)
             without = run(base.policy, {"riskNames": ["jailbreak"], "threshold": 0.5})
-            self.assertEqual(json.loads(without.body), json.loads(with_contract.body))
+            self.assertEqual(without.body, with_contract.body)
+            self.assertEqual(without.headers, with_contract.headers)
             self.assertEqual(without.status_code, with_contract.status_code)
 
 

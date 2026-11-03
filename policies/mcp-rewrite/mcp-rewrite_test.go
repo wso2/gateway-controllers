@@ -458,6 +458,11 @@ func TestOnResponse_RewritesAndFiltersConfiguredListItems(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected UpstreamResponseModifications, got %T", action)
 	}
+	// Rewriting a successful response is a transformation, not a failure: a fault here would
+	// notify on every successful listing.
+	if mods.IsFault || mods.Fault != nil {
+		t.Fatalf("a successful response rewrite must not be a fault")
+	}
 
 	updated := mustJSONMap(t, mods.Body)
 	result := updated["result"].(map[string]any)
@@ -1162,7 +1167,7 @@ func TestMirroredMethodMismatch(t *testing.T) {
 // The split is the point: blocking a capability by policy is an authorization decision and
 // a malformed request is a validation failure, so the two carry different codes.
 func TestRejectionsDeclareFault(t *testing.T) {
-	assertFault := func(t *testing.T, action policy.RequestAction, wantCode, wantType string) {
+	assertFault := func(t *testing.T, action policy.RequestAction, wantRPC int, wantCode, wantType string) {
 		t.Helper()
 		resp, ok := action.(policy.ImmediateResponse)
 		if !ok {
@@ -1183,41 +1188,73 @@ func TestRejectionsDeclareFault(t *testing.T) {
 		if resp.Fault.Direction != policy.DirectionRequest {
 			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
 		}
+		if resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil || *resp.Fault.JSONRPC.Code != wantRPC {
+			t.Fatalf("expected JSON-RPC code %d, got %+v", wantRPC, resp.Fault.JSONRPC)
+		}
+		assertFallbackBodyAgrees(t, resp)
 	}
 
-	p := &McpRewritePolicy{}
-	headers := policy.NewHeaders(map[string][]string{})
+	modern := map[string][]string{
+		"mcp-protocol-version": {"2026-07-28"},
+		"mcp-method":           {"tools/call"},
+	}
+	tests := []struct {
+		name     string
+		headers  map[string][]string
+		body     []byte
+		unusable string
+		wantRPC  int
+		wantCode string
+		wantType string
+	}{
+		{name: "broken JSON", body: []byte(`{"jsonrpc":"2.0","method":`), wantRPC: -32700,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "body the resolver could not read", unusable: "not-an-object", wantRPC: -32600,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "mirrored name disagrees with the body",
+			headers:  map[string][]string{"mcp-protocol-version": {"2026-07-28"}, "mcp-method": {"tools/call"}, "mcp-name": {"other"}},
+			wantRPC:  -32020,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "params is not an object",
+			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":"toolA"}`),
+			wantRPC:  -32602,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "missing capability name", headers: modern,
+			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{}}`),
+			wantRPC:  -32602,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "capability blocked by policy",
+			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"other"}}`),
+			wantRPC:  -32602,
+			wantCode: policy.FaultCodeAuthForbidden, wantType: policy.FaultTypeAuthorization},
+	}
 
-	t.Run("malformed request", func(t *testing.T) {
-		assertFault(t, p.buildRequestErrorResponse(headers, 400, -32700, "Invalid JSON", nil,
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation),
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, params := rewriteToolA(t)
+			ctx := toolCallContext(t, tc.headers)
+			if tc.body != nil {
+				ctx.Body = &policy.Body{Content: tc.body, Present: true}
+			}
+			if tc.unusable != "" {
+				ctx.SharedContext.ResolutionAttributes = policy.NewResolutionAttributes(map[string]string{
+					"mcp.body.present":  "true",
+					"mcp.body.unusable": tc.unusable,
+				})
+			}
+			assertFault(t, p.(*McpRewritePolicy).OnRequestBody(context.Background(), ctx, params),
+				tc.wantRPC, tc.wantCode, tc.wantType)
+		})
+	}
 
-	t.Run("capability blocked by policy", func(t *testing.T) {
-		assertFault(t, p.buildRequestErrorResponse(headers, 403, -32602, "not allowed", "1",
-			policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization),
-			policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
-	})
-
+	// Re-marshalling a payload that json.Unmarshal produced cannot fail, so this branch is not
+	// reachable through OnRequestBody; the builder is called with the arguments that branch passes.
 	t.Run("rewrite failed", func(t *testing.T) {
-		assertFault(t, p.buildRequestErrorResponse(headers, 500, -32603, "Failed to update MCP request", "1",
-			policy.FaultCodeMediationFailed, policy.FaultTypeMediation),
-			policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+		p := &McpRewritePolicy{}
+		assertFault(t, p.buildRequestErrorResponse(policy.NewHeaders(map[string][]string{}), 500, -32603,
+			"Failed to update MCP request", "1", policy.FaultCodeMediationFailed, policy.FaultTypeMediation),
+			-32603, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 	})
-}
-
-// TestResponseRewriteIsNotAFault covers this policy's category-C path: it rewrites
-// capability names in a successful MCP response. That is a transformation of a healthy
-// response, so neither field is set — a fault there would notify on every successful call.
-func TestResponseRewriteIsNotAFault(t *testing.T) {
-	mods := policy.DownstreamResponseModifications{Body: []byte(`{"jsonrpc":"2.0"}`)}
-	if mods.IsFault {
-		t.Fatalf("a response rewrite must not be a fault")
-	}
-	if mods.Fault != nil {
-		t.Fatalf("a response rewrite must not describe an error")
-	}
 }
 
 // assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels alongside the

@@ -37,6 +37,9 @@ func TestErrorResponseDeclaresFault(t *testing.T) {
 	if f.Code != policy.FaultCodeInvalidRequestBody || f.Type != policy.FaultTypeValidation {
 		t.Errorf("fault = %s/%s", f.Code, f.Type)
 	}
+	if f.Direction != policy.DirectionRequest {
+		t.Errorf("direction = %v, want %v", f.Direction, policy.DirectionRequest)
+	}
 	if f.Message != "Request body is not a single JSON-RPC request object" {
 		t.Errorf("message = %q", f.Message)
 	}

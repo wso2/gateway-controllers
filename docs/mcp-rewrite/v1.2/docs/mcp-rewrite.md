@@ -263,7 +263,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 |------|--------|------|------|
 | The request body could not be read: broken JSON (JSON-RPC `-32700`), or not a single JSON-RPC request object, a member of the wrong type or a member named twice (`-32600`) | `400` | `960001` | `validation` |
 | `Mcp-Method` or `Mcp-Name` is missing while the body names one, cannot be decoded, or disagrees with the body (`-32020`) | `400` | `960001` | `validation` |
-| The request's `params` is not an object, or names no capability (`-32602`) | `400` | `960001` | `validation` |
+| A `tools/call`, `resources/read` or `prompts/get` request's `params` is not an object, or names no tool, resource or prompt (`-32602`) | `400` | `960001` | `validation` |
 | The tool, resource or prompt is not one the policy defines (`-32602`) | `403` | `900908` | `authorization` |
 | The rewritten request could not be serialised (`-32603`) | `500` | `960000` | `mediation` |
 

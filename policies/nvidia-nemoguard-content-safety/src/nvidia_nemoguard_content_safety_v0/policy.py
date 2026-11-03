@@ -243,7 +243,9 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
                 status_code=req_params.request.block_status_code,
                 headers={"content-type": "application/json"},
                 body=json.dumps({"type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY", "message": msg}).encode(),
-                **_intervention_fault("Request", category_codes, msg.get("assessments")),
+                **_intervention_fault(
+                    "Request", category_codes, req_params.request.blocked_codes, msg.get("assessments")
+                ),
             )
 
         return _PASSTHROUGH_REQUEST
@@ -322,29 +324,36 @@ class NemoGuardContentSafetyPolicy(RequestPolicy, ResponsePolicy):
                 status_code=200,
                 headers={"content-type": "application/json"},
                 body=json.dumps({"type": "NVIDIA_NEMOGUARD_CONTENT_SAFETY", "message": msg}).encode(),
-                **_intervention_fault("Response", category_codes, msg.get("assessments")),
+                **_intervention_fault(
+                    "Response", category_codes, req_params.response.blocked_codes, msg.get("assessments")
+                ),
             )
 
         return _PASSTHROUGH_RESPONSE
 
 
-def _guardrail_code(category_codes: list[str]) -> str:
-    """The guardrail code for the first category NemoGuard reported."""
+def _guardrail_code(category_codes: list[str], blocked_codes: frozenset[str] | None) -> str:
+    """The guardrail code for the first reported category the operator blocks (all categories
+    when blocked_codes is None); a reported category that is not blocked did not cause the block."""
     for category in category_codes:
+        if blocked_codes is not None and category not in blocked_codes:
+            continue
         name = _CATEGORY_GUARDRAIL_CODE.get(category)
         if name:
             return getattr(GuardrailCode, name)
     return GuardrailCode.UNSAFE_CONTENT
 
 
-def _intervention_fault(direction: str, category_codes: list[str], assessments: dict | None) -> dict[str, Any]:
+def _intervention_fault(
+    direction: str, category_codes: list[str], blocked_codes: frozenset[str] | None, assessments: dict | None
+) -> dict[str, Any]:
     """The fault fields for blocked content; empty on an SDK without the fault contract."""
     if FaultDetails is None:
         return {}
     return {
         "is_fault": True,
         "fault": FaultDetails(
-            code=_guardrail_code(category_codes),
+            code=_guardrail_code(category_codes, blocked_codes),
             type=FaultType.GUARDRAIL,
             direction=direction,
             message="Unsafe content detected.",

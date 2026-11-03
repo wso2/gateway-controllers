@@ -1086,6 +1086,7 @@ func TestRejectionsDeclareFault(t *testing.T) {
 		if resp.Fault.Direction != policy.DirectionRequest {
 			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
 		}
+		assertFallbackBodyAgrees(t, resp)
 		return resp
 	}
 

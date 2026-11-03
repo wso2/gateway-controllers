@@ -301,7 +301,8 @@ responses with no fault attached.
 
 
 A blocked request or response reports the guardrail code for the first category NeMo Guard
-returned. The response-phase block keeps status `200`, so the fault is what marks it as a
+returned that the phase's `categories` blocks; a returned category that is not blocked is skipped.
+The response-phase block keeps status `200`, so the fault is what marks it as a
 failure.
 
 | When | Status | Code | Type |

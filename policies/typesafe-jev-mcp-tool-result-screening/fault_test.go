@@ -36,7 +36,7 @@ func TestFault_WithheldResultIsAGuardrailFault(t *testing.T) {
 		t.Fatalf("a withheld result keeps its 200, so it must declare the fault: IsFault=%v %+v", mods.IsFault, mods.Fault)
 	}
 	f := mods.Fault
-	if f.Code != policy.GuardrailCodePromptInjection || f.Type != policy.FaultTypeGuardrail || f.Direction != policy.DirectionResponse {
+	if f.Code != policy.GuardrailCodeIntervened || f.Type != policy.FaultTypeGuardrail || f.Direction != policy.DirectionResponse {
 		t.Fatalf("fault = %+v", f)
 	}
 	if f.Guardrail == nil || f.Guardrail.InterveningGuardrail != guardrailName || f.Guardrail.Assessments != nil {
@@ -72,7 +72,7 @@ func TestFault_WithheldEventStreamResultIsAFault(t *testing.T) {
 	p := newPolicy(t, jev.server.URL, nil)
 	stream := "event: message\ndata: " + injectedResult + "\n\n"
 	mods := mustModifications(t, p.OnResponseBody(context.Background(), mcpResponse(fetchCall, stream, "text/event-stream"), nil))
-	if !mods.IsFault || mods.Fault == nil || mods.Fault.Code != policy.GuardrailCodePromptInjection {
+	if !mods.IsFault || mods.Fault == nil || mods.Fault.Code != policy.GuardrailCodeIntervened {
 		t.Fatalf("IsFault=%v fault=%+v", mods.IsFault, mods.Fault)
 	}
 }
@@ -112,6 +112,9 @@ func TestFault_CheckThatCouldNotRunIsTheGatewaysFailure(t *testing.T) {
 			}
 			if f.Guardrail != nil || f.Message != uncheckedText {
 				t.Fatalf("fault = %+v, want no guardrail verdict and the client's text as message", f)
+			}
+			if mods.StatusCode != nil {
+				t.Fatalf("status changed to %d, want it left unchanged", *mods.StatusCode)
 			}
 		})
 	}

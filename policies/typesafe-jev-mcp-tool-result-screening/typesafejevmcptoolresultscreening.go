@@ -503,9 +503,9 @@ func (p *TypesafeJevMcpToolResultScreeningPolicy) screen(ctx context.Context, sh
 
 // withheldFault describes a withheld result. The client still gets a 200 with a
 // tool result marked isError, so IsFault is what says the result was refused.
-// The default battery looks for instructions aimed at the AI, so the verdict is
-// reported as prompt injection. The assessments are carried only where
-// showAssessment put them in the body.
+// The questions are operator-configurable and need not be about prompt
+// injection, so the verdict is reported with the generic guardrail code. The
+// assessments are carried only where showAssessment put them in the body.
 func withheldFault(call *toolCallRequest, failed, assessments []map[string]interface{}) *policy.FaultDetails {
 	questions := make([]string, 0, len(failed))
 	for _, f := range failed {
@@ -522,7 +522,7 @@ func withheldFault(call *toolCallRequest, failed, assessments []map[string]inter
 		guardrail.Assessments = map[string]any{"assessments": assessments}
 	}
 	return &policy.FaultDetails{
-		Code:        policy.GuardrailCodePromptInjection,
+		Code:        policy.GuardrailCodeIntervened,
 		Type:        policy.FaultTypeGuardrail,
 		Direction:   policy.DirectionResponse,
 		Message:     withheldText,
