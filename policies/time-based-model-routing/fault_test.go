@@ -42,13 +42,14 @@ func TestRejectionsDeclareFault(t *testing.T) {
 		code        string
 		faultTyp    string
 		body        string
+		message     string
 	}{
 		{"empty body", "", 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
-			`{"error":"request body must contain a JSON object"}`},
+			`{"error":"request body must contain a JSON object"}`, "request body must contain a JSON object"},
 		{"malformed JSON", `{"model":`, 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
-			`{"error":"request body contains malformed JSON"}`},
+			`{"error":"request body contains malformed JSON"}`, "request body contains malformed JSON"},
 		{"not a JSON object", `[]`, 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
-			`{"error":"request body must be a JSON object"}`},
+			`{"error":"request body must be a JSON object"}`, "request body must be a JSON object"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -69,8 +70,8 @@ func TestRejectionsDeclareFault(t *testing.T) {
 			if resp.Fault.Code != c.code || resp.Fault.Type != c.faultTyp {
 				t.Errorf("fault = %s/%s, want %s/%s", resp.Fault.Code, resp.Fault.Type, c.code, c.faultTyp)
 			}
-			if resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Message == "" {
-				t.Errorf("direction %q, message %q", resp.Fault.Direction, resp.Fault.Message)
+			if resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Message != c.message {
+				t.Errorf("direction %q, message %q, want %q", resp.Fault.Direction, resp.Fault.Message, c.message)
 			}
 		})
 	}

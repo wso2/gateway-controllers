@@ -996,6 +996,9 @@ func TestStreamExceptionDeclaresFault(t *testing.T) {
 	}
 	// What the client receives: every event of the stream, then [DONE] on the final chunk.
 	want := createdField.ReplaceAllString(string(eventStreamToSSE(stream, true, p.completionID("req-exc"), "nova")), "")
+	if !strings.Contains(want, `"type":"server_error"`) {
+		t.Fatalf("expected the translated error event in the body, got %q", want)
+	}
 
 	for _, endOfStream := range []bool{false, true} {
 		action := p.OnResponseBodyChunk(context.Background(),
