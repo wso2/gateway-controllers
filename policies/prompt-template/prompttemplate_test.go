@@ -681,8 +681,8 @@ func baseParams() map[string]interface{} {
 }
 
 // TestRejectionsDeclareFault covers how this policy labels what it refuses: a request
-// body it cannot parse is the caller's failure, and a transformation it cannot apply is its
-// own. The client response is the same for both.
+// body it cannot parse, or one without the jsonPath target, is the caller's failure, and a
+// transformation it cannot apply is its own. The client response is the same for both.
 func TestRejectionsDeclareFault(t *testing.T) {
 	assertFault := func(t *testing.T, action policy.RequestAction, wantMessage, wantCode, wantType string) {
 		t.Helper()
@@ -720,9 +720,22 @@ func TestRejectionsDeclareFault(t *testing.T) {
 			"Error parsing JSON payload: "+parseErr.Error(), policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	})
 
-	t.Run("transformation failure", func(t *testing.T) {
-		p := &PromptTemplatePolicy{}
-		assertFault(t, p.buildErrorResponse("Error updating JSONPath", fmt.Errorf("unexpected token")),
-			"Error updating JSONPath: unexpected token", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	t.Run("jsonPath does not resolve in the request body", func(t *testing.T) {
+		p := mustGetPromptTemplatePolicy(t, map[string]interface{}{
+			"templates": baseTemplatesArray(),
+			"jsonPath":  "$.prompt",
+		})
+		assertFault(t, p.OnRequestBody(context.Background(), newRequestContextWithBody(`{"messages":[]}`), nil),
+			"Error extracting value from JSONPath: key not found: prompt", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("template cannot be resolved", func(t *testing.T) {
+		p := mustGetPromptTemplatePolicy(t, map[string]interface{}{
+			"templates": baseTemplatesArray(),
+			"jsonPath":  "$.prompt",
+		})
+		ctx := newRequestContextWithBody(`{"prompt":"template://unknown?name=Ann"}`)
+		assertFault(t, p.OnRequestBody(context.Background(), ctx, nil),
+			`Error resolving templates: template "unknown" not found`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 	})
 }

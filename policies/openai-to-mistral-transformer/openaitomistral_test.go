@@ -453,13 +453,13 @@ func TestErrResponseDirectionAndCode(t *testing.T) {
 // OnRequestBody and checks the fault it declares, and that the client body is unchanged.
 func TestOnRequestBody_RejectionsDeclareFault(t *testing.T) {
 	cases := []struct {
-		name       string
-		body       *policy.Body
-		bodyPrefix string
+		name     string
+		body     *policy.Body
+		wantBody string
 	}{
 		{"missing body", nil, `{"error":"Request body is empty."}`},
 		{"empty body", &policy.Body{Present: true}, `{"error":"Request body is empty."}`},
-		{"invalid JSON", &policy.Body{Present: true, Content: []byte(`{"messages":`)}, `{"error":"Invalid JSON in request body: `},
+		{"invalid JSON", &policy.Body{Present: true, Content: []byte(`{"messages":`)}, `{"error":"Invalid JSON in request body: unexpected end of JSON input"}`},
 		{"unresolvable model", &policy.Body{Present: true, Content: []byte(`{"model":42,"messages":[]}`)}, `{"error":"request field 'model' must be a string"}`},
 	}
 	for _, c := range cases {
@@ -473,7 +473,7 @@ func TestOnRequestBody_RejectionsDeclareFault(t *testing.T) {
 			if !ok || resp.StatusCode != 400 {
 				t.Fatalf("expected a 400 ImmediateResponse, got %#v", action)
 			}
-			if resp.Headers["Content-Type"] != "application/json" || !strings.HasPrefix(string(resp.Body), c.bodyPrefix) {
+			if resp.Headers["Content-Type"] != "application/json" || string(resp.Body) != c.wantBody {
 				t.Fatalf("client response changed: headers %v, body %s", resp.Headers, resp.Body)
 			}
 			if !resp.IsFault || resp.Fault == nil {

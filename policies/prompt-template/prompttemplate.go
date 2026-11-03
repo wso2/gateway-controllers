@@ -363,7 +363,7 @@ func (p *PromptTemplatePolicy) OnRequestBody(ctx context.Context, reqCtx *policy
 
 	extractedValue, err := p.extractStringAtPath(content, p.params.JsonPath)
 	if err != nil {
-		return p.buildErrorResponse("Error extracting value from JSONPath", err)
+		return p.buildInvalidBodyResponse("Error extracting value from JSONPath", err)
 	}
 
 	updatedValue, err := p.resolveTemplatesInText(extractedValue, false)
@@ -394,9 +394,9 @@ func (p *PromptTemplatePolicy) buildErrorResponse(reason string, validationError
 		policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Prompt template resolution failed")
 }
 
-// buildInvalidBodyResponse refuses a request payload the policy could not read. That is
-// the caller's failure rather than the policy's, so it is declared as one; the client
-// response is the same as buildErrorResponse's.
+// buildInvalidBodyResponse refuses a request payload the policy could not read, or one
+// without the jsonPath target. That is the caller's failure rather than the policy's, so
+// it is declared as one; the client response is the same as buildErrorResponse's.
 func (p *PromptTemplatePolicy) buildInvalidBodyResponse(reason string, validationError error) policy.RequestAction {
 	return p.buildFaultResponse(reason, validationError,
 		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, "Invalid request body")

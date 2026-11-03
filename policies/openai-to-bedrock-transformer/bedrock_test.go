@@ -91,21 +91,26 @@ func TestOnRequestBody_FallsBackToRequestModel(t *testing.T) {
 
 func TestOnRequestBody_RejectsMissingFallbackModel(t *testing.T) {
 	p := &TranslatorPolicy{params: PolicyParams{}}
-	for _, body := range []string{
-		`{"messages":[]}`,
-		`{"model":"","messages":[]}`,
-		`{"model":42,"messages":[]}`,
+	const missingModel = `{"error":{"message":"a Bedrock model must be provided in either the policy configuration or request body","type":"invalid_request_error"}}`
+	const nonStringModel = `{"error":{"message":"request field 'model' must be a string","type":"invalid_request_error"}}`
+	for _, tc := range []struct{ body, want string }{
+		{`{"messages":[]}`, missingModel},
+		{`{"model":"","messages":[]}`, missingModel},
+		{`{"model":42,"messages":[]}`, nonStringModel},
 	} {
 		action := p.OnRequestBody(context.Background(), &policy.RequestContext{
 			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
-			Body:          &policy.Body{Present: true, Content: []byte(body)},
+			Body:          &policy.Body{Present: true, Content: []byte(tc.body)},
 		}, nil)
 		response, ok := action.(policy.ImmediateResponse)
 		if !ok || response.StatusCode != 400 {
-			t.Errorf("expected a 400 response for body %s, got %#v", body, action)
+			t.Errorf("expected a 400 response for body %s, got %#v", tc.body, action)
 			continue
 		}
 		assertRequestValidationFault(t, response)
+		if string(response.Body) != tc.want {
+			t.Errorf("client body changed for %s: got %s, want %s", tc.body, response.Body, tc.want)
+		}
 	}
 }
 
@@ -686,7 +691,8 @@ func TestOnRequestBody_RejectsFileIDWith400(t *testing.T) {
 			`{"type":"text","text":"read this"},{"type":"file","file":{"file_id":"file-abc123"}}]}]}`)},
 	}, nil)
 	resp, ok := action.(policy.ImmediateResponse)
-	if !ok || resp.StatusCode != 400 || !strings.Contains(string(resp.Body), "file_id is not supported") {
+	want := `{"error":{"message":"file_id is not supported for Bedrock; send the file inline as a base64 data URI in file_data","type":"invalid_request_error"}}`
+	if !ok || resp.StatusCode != 400 || string(resp.Body) != want {
 		t.Fatalf("expected a 400 naming file_id, got %#v", action)
 	}
 	assertRequestValidationFault(t, resp)

@@ -281,7 +281,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 |------|--------|------|------|
 | A template reference cannot be resolved: the `template://` reference is malformed, the template does not exist and `onMissingTemplate` is `error`, or a placeholder has no value and `onUnresolvedPlaceholder` is `error` | `500` | `960000` | `mediation` |
 | `jsonPath` is set and the request body is not valid JSON | `500` | `960001` | `validation` |
-| `jsonPath` is set and does not resolve to a string in the request body | `500` | `960000` | `mediation` |
+| `jsonPath` is set and does not resolve to a string in the request body | `500` | `960001` | `validation` |
 | The resolved prompt cannot be written back to the request body | `500` | `960000` | `mediation` |
 
 The fault's `Description` carries the internal reason, for example

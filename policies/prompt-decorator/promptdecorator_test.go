@@ -719,8 +719,8 @@ func newRequestContextWithBody(body string) *policy.RequestContext {
 }
 
 // TestRejectionsDeclareFault covers how this policy labels what it refuses: a request
-// body it cannot parse is the caller's failure, and a transformation it cannot apply is its
-// own. The client response is the same for both.
+// body it cannot parse, or one without the jsonPath target, is the caller's failure, and a
+// transformation it cannot apply is its own. The client response is the same for both.
 func TestRejectionsDeclareFault(t *testing.T) {
 	assertFault := func(t *testing.T, action policy.RequestAction, wantMessage, wantCode, wantType string) {
 		t.Helper()
@@ -769,9 +769,29 @@ func TestRejectionsDeclareFault(t *testing.T) {
 			"Empty request body", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	})
 
-	t.Run("transformation failure", func(t *testing.T) {
-		p := &PromptDecoratorPolicy{}
-		assertFault(t, p.buildErrorResponse("Error updating JSONPath", fmt.Errorf("unexpected token")),
-			"Error updating JSONPath: unexpected token", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	t.Run("jsonPath does not resolve in the request body", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"text": "x",
+			},
+			"jsonPath": "$.missing.path",
+		})
+		ctx := newRequestContextWithBody(`{"messages":[{"role":"user","content":"hello"}]}`)
+		assertFault(t, p.OnRequestBody(context.Background(), ctx, nil),
+			"Error extracting value from JSONPath: key not found: missing", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("decorated array cannot be written back", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": "system", "content": "x"},
+				},
+			},
+			"jsonPath": "$.items.*",
+		})
+		ctx := newRequestContextWithBody(`{"items":[{"role":"user","content":"hi"}]}`)
+		assertFault(t, p.OnRequestBody(context.Background(), ctx, nil),
+			"Error updating JSONPath: invalid structure for key: *", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 	})
 }

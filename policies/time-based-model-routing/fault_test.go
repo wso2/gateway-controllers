@@ -19,6 +19,7 @@
 package timebasedmodelrouting
 
 import (
+	"context"
 	"testing"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -27,33 +28,49 @@ import (
 // Every rejection declares the fault and describes it with an SDK code, while the body the
 // client receives is unchanged.
 func TestRejectionsDeclareFault(t *testing.T) {
+	fixedNow(t, "2026-08-30T01:00:00Z") // 06:30 in Asia/Colombo, inside the morning schedule.
+	raw, err := GetPolicy(policy.PolicyMetadata{}, testParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := raw.(*TimeBasedModelRoutingPolicy)
+
 	cases := []struct {
-		name     string
-		resp     policy.ImmediateResponse
-		status   int
-		code     string
-		faultTyp string
-		body     string
+		name        string
+		requestBody string
+		status      int
+		code        string
+		faultTyp    string
+		body        string
 	}{
-		{"bad request", badRequest("request body must be a JSON object"), 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
+		{"empty body", "", 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
+			`{"error":"request body must contain a JSON object"}`},
+		{"malformed JSON", `{"model":`, 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
+			`{"error":"request body contains malformed JSON"}`},
+		{"not a JSON object", `[]`, 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
 			`{"error":"request body must be a JSON object"}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if c.resp.StatusCode != c.status {
-				t.Fatalf("status = %d, want %d", c.resp.StatusCode, c.status)
+			action := p.OnRequestBody(context.Background(), requestContext(c.requestBody), nil)
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
 			}
-			if string(c.resp.Body) != c.body || c.resp.Headers["Content-Type"] != "application/json" {
-				t.Fatalf("client response changed: headers %v, body %s", c.resp.Headers, c.resp.Body)
+			if resp.StatusCode != c.status {
+				t.Fatalf("status = %d, want %d", resp.StatusCode, c.status)
 			}
-			if !c.resp.IsFault || c.resp.Fault == nil {
-				t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", c.resp.IsFault, c.resp.Fault)
+			if string(resp.Body) != c.body || resp.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("client response changed: headers %v, body %s", resp.Headers, resp.Body)
 			}
-			if c.resp.Fault.Code != c.code || c.resp.Fault.Type != c.faultTyp {
-				t.Errorf("fault = %s/%s, want %s/%s", c.resp.Fault.Code, c.resp.Fault.Type, c.code, c.faultTyp)
+			if !resp.IsFault || resp.Fault == nil {
+				t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", resp.IsFault, resp.Fault)
 			}
-			if c.resp.Fault.Direction != policy.DirectionRequest || c.resp.Fault.Message == "" {
-				t.Errorf("direction %q, message %q", c.resp.Fault.Direction, c.resp.Fault.Message)
+			if resp.Fault.Code != c.code || resp.Fault.Type != c.faultTyp {
+				t.Errorf("fault = %s/%s, want %s/%s", resp.Fault.Code, resp.Fault.Type, c.code, c.faultTyp)
+			}
+			if resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Message == "" {
+				t.Errorf("direction %q, message %q", resp.Fault.Direction, resp.Fault.Message)
 			}
 		})
 	}

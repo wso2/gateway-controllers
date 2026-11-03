@@ -306,7 +306,7 @@ func (p *PromptDecoratorPolicy) processRequestBody(reqCtx *policy.RequestContext
 	extractedValue, err := utils.ExtractValueFromJsonpath(payloadData, p.params.JsonPath)
 	if err != nil {
 		slog.Debug("PromptDecorator: Error extracting value from JSONPath", "jsonPath", p.params.JsonPath, "error", err)
-		return p.buildErrorResponse("Error extracting value from JSONPath", err)
+		return p.buildInvalidBodyResponse("Error extracting value from JSONPath", err)
 	}
 
 	// Check if we're decorating a string content field or an array of messages
@@ -422,9 +422,9 @@ func (p *PromptDecoratorPolicy) buildErrorResponse(reason string, validationErro
 		policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Prompt decoration failed")
 }
 
-// buildInvalidBodyResponse refuses a request payload the policy could not read. That is
-// the caller's failure rather than the policy's, so it is declared as one; the client
-// response is the same as buildErrorResponse's.
+// buildInvalidBodyResponse refuses a request payload the policy could not read, or one
+// without the jsonPath target. That is the caller's failure rather than the policy's, so
+// it is declared as one; the client response is the same as buildErrorResponse's.
 func (p *PromptDecoratorPolicy) buildInvalidBodyResponse(reason string, validationError error) policy.RequestAction {
 	return p.buildFaultResponse(reason, validationError,
 		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, "Invalid request body")

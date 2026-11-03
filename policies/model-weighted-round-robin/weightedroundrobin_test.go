@@ -498,7 +498,7 @@ func baseWeightedModels() []interface{} {
 // TestModelWeightedRoundRobin_RejectionsDeclareFault covers the conditions this policy refuses on, and pins
 // which code each takes.
 func TestModelWeightedRoundRobin_RejectionsDeclareFault(t *testing.T) {
-	assertFault := func(t *testing.T, action interface{}, wantStatus int, wantBodyPrefix, wantCode, wantType string) {
+	assertFault := func(t *testing.T, action interface{}, wantStatus int, wantBody, wantCode, wantType string) {
 		t.Helper()
 		resp, ok := action.(policy.ImmediateResponse)
 		if !ok {
@@ -511,8 +511,8 @@ func TestModelWeightedRoundRobin_RejectionsDeclareFault(t *testing.T) {
 		if resp.Headers["Content-Type"] != "application/json" {
 			t.Fatalf("unexpected headers: %v", resp.Headers)
 		}
-		if !strings.HasPrefix(string(resp.Body), wantBodyPrefix) {
-			t.Fatalf("expected body to start with %s, got %s", wantBodyPrefix, resp.Body)
+		if string(resp.Body) != wantBody {
+			t.Fatalf("expected body %s, got %s", wantBody, resp.Body)
 		}
 		if !resp.IsFault {
 			t.Fatalf("expected IsFault=true on a rejection")
@@ -555,8 +555,27 @@ func TestModelWeightedRoundRobin_RejectionsDeclareFault(t *testing.T) {
 			},
 			Body: &policy.Body{Content: []byte("{not json"), Present: true},
 		}
+		var v map[string]interface{}
+		parseErr := json.Unmarshal([]byte("{not json"), &v)
+		if parseErr == nil {
+			t.Fatalf("expected the test body to be invalid JSON")
+		}
 		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
-			`{"error":"Invalid JSON in request body: `, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+			`{"error":"Invalid JSON in request body: `+parseErr.Error()+`"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("model path is not in the request body", func(t *testing.T) {
+		p := &ModelWeightedRoundRobinPolicy{}
+		p.params.RequestModel.Location = "payload"
+		p.params.RequestModel.Identifier = "$.nested.model"
+		reqCtx := &policy.RequestContext{
+			SharedContext: &policy.SharedContext{
+				Metadata: map[string]interface{}{MetadataKeySelectedModel: "gpt-4"},
+			},
+			Body: &policy.Body{Content: []byte(`{"model":"test"}`), Present: true},
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
+			`{"error":"Invalid or missing model at '$.nested.model': key not found: nested"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	})
 
 	t.Run("all models suspended", func(t *testing.T) {
