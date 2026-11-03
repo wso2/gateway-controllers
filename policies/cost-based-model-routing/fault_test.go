@@ -59,6 +59,9 @@ func TestRejectionsDeclareFault(t *testing.T) {
 			if string(c.resp.Body) != c.body {
 				t.Errorf("body = %s, want %s", c.resp.Body, c.body)
 			}
+			if ct := c.resp.Headers["Content-Type"]; ct != "application/json" {
+				t.Errorf("Content-Type = %q, want application/json", ct)
+			}
 		})
 	}
 }

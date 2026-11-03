@@ -1690,8 +1690,8 @@ func TestRateLimitedResponsePropagatesDelegateFault(t *testing.T) {
 	if resp.Fault.Type != "throttling" {
 		t.Fatalf("expected Error.Type=%q, got %q", "throttling", resp.Fault.Type)
 	}
-	if resp.Fault.Code == "" {
-		t.Fatalf("expected Error.Code to be carried through")
+	if resp.Fault.Code != policy.FaultCodeThrottledAPI {
+		t.Fatalf("expected Error.Code %q, got %q", policy.FaultCodeThrottledAPI, resp.Fault.Code)
 	}
 	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeRateLimited, "1")
 }

@@ -488,7 +488,7 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		keyManagersRaw, ok := params["keyManagers"]
 		if !ok {
 			slog.Debug("MCP Auth Policy: Key managers not configured in params")
-			return p.handleAuthFailure(reqCtx.SharedContext, p.OnFailureStatusCode, p.ErrorMessageFormat, "key managers not configured", policy.FaultCodeAuthGeneral)
+			return p.handleKeyManagerConfigFailure(reqCtx.SharedContext, "key managers not configured")
 		}
 
 		slog.Debug("MCP Auth Policy: Starting to parse key managers configuration")
@@ -497,7 +497,7 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			return buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
 		}
 		if len(issuers) == 0 {
-			return p.handleAuthFailure(reqCtx.SharedContext, p.OnFailureStatusCode, p.ErrorMessageFormat, "no valid key managers found", policy.FaultCodeAuthGeneral)
+			return p.handleKeyManagerConfigFailure(reqCtx.SharedContext, "no valid key managers found")
 		}
 
 		if len(p.Issuers) > 0 {
@@ -512,7 +512,7 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		}
 
 		if len(issuers) == 0 {
-			return p.handleAuthFailure(reqCtx.SharedContext, p.OnFailureStatusCode, p.ErrorMessageFormat, "no matching issuers found", policy.FaultCodeAuthGeneral)
+			return p.handleKeyManagerConfigFailure(reqCtx.SharedContext, "no matching issuers found")
 		}
 
 		prm := ProtectedResourceMetadata{
@@ -823,6 +823,16 @@ func ensureSharedMetadata(shared *policy.SharedContext) bool {
 		shared.Metadata = map[string]any{}
 	}
 	return true
+}
+
+// handleKeyManagerConfigFailure answers exactly as handleAuthFailure does, but describes the
+// fault as the policy's own key manager configuration being unusable, not as the caller
+// failing to authenticate.
+func (p *McpAuthPolicy) handleKeyManagerConfigFailure(shared *policy.SharedContext, reason string) policy.ImmediateResponse {
+	resp := p.handleAuthFailure(shared, p.OnFailureStatusCode, p.ErrorMessageFormat, reason, policy.FaultCodeMediationFailed)
+	resp.Fault.Type = policy.FaultTypeConfiguration
+	resp.Fault.Message = "Authentication could not be performed"
+	return resp
 }
 
 // handleAuthFailure constructs an authentication failure response.

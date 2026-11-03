@@ -519,7 +519,7 @@ token is passed through unchanged, with its code and type.
 | When | Status | Code | Type |
 |------|--------|------|------|
 | `jwt-auth` rejects the token (missing, malformed, expired, failing signature or audience) | `onFailureStatusCode` (default `401`) | `jwt-auth`'s code, passed through (for example `900902` missing, `900901` invalid, `900903` expired) | `jwt-auth`'s type, passed through |
-| Protected resource metadata is requested but no key manager or matching issuer is configured | `onFailureStatusCode` | `900900` | `authentication` |
+| Protected resource metadata is requested but no key manager or matching issuer is configured | `onFailureStatusCode` | `960000` | `configuration` |
 | The policy is misconfigured: `onFailureStatusCode` or `errorMessageFormat` is invalid, or a `keyManagers` entry cannot be read when protected resource metadata is requested | `500` | `960000` | `configuration` |
 | `jwt-auth` cannot be loaded | `500` | `900900` | `authentication` |
 | The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |

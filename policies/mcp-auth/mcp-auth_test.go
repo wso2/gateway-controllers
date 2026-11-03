@@ -1706,6 +1706,9 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 		if resp.StatusCode != 500 || string(resp.Body) != want {
 			t.Fatalf("client response changed: %d %s", resp.StatusCode, resp.Body)
 		}
+		if ct := resp.Headers["content-type"]; ct != "application/json" {
+			t.Fatalf("client response header changed: content-type=%q", ct)
+		}
 	})
 
 	t.Run("well-known metadata response is not a fault", func(t *testing.T) {
@@ -1740,6 +1743,41 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 		}
 		if resp.IsFault {
 			t.Fatalf("the metadata discovery response must not be a fault")
+		}
+	})
+
+	// No usable key manager or issuer for the metadata document is the operator's
+	// configuration, not the caller failing to authenticate. The client still gets the 401.
+	t.Run("key manager configuration unusable", func(t *testing.T) {
+		km := []interface{}{map[string]interface{}{"name": "km", "issuer": "https://issuer.example.com"}}
+		cases := []struct {
+			name    string
+			issuers []string
+			params  map[string]interface{}
+			reason  string
+		}{
+			{"missing", nil, map[string]interface{}{}, "key managers not configured"},
+			{"empty", nil, map[string]interface{}{"keyManagers": []interface{}{}}, "no valid key managers found"},
+			{"no matching issuer", []string{"other"}, map[string]interface{}{"keyManagers": km}, "no matching issuers found"},
+		}
+		for _, c := range cases {
+			p := &McpAuthPolicy{OnFailureStatusCode: 401, ErrorMessageFormat: "json", Issuers: c.issuers}
+			ctx := createMockRequestHeaderContext(map[string][]string{})
+			ctx.Path = WellKnownEndpointPath
+			ctx.OperationPath = WellKnownEndpointPath
+			ctx.Method = "GET"
+			resp, ok := p.OnRequestHeaders(context.Background(), ctx, c.params).(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("%s: expected ImmediateResponse", c.name)
+			}
+			if !resp.IsFault || resp.Fault == nil || resp.Fault.Code != policy.FaultCodeMediationFailed ||
+				resp.Fault.Type != policy.FaultTypeConfiguration || resp.Fault.Description != c.reason {
+				t.Fatalf("%s: expected fault %s/%s, got %+v", c.name, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, resp.Fault)
+			}
+			want := `{"error":"Unauthorized","message":"MCP authentication failed: ` + c.reason + `"}`
+			if resp.StatusCode != 401 || string(resp.Body) != want || resp.Headers["content-type"] != "application/json" {
+				t.Fatalf("%s: client response changed: %d %v %s", c.name, resp.StatusCode, resp.Headers, resp.Body)
+			}
 		}
 	})
 
