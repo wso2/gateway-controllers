@@ -214,6 +214,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.echoedHeaderEquals)
 	sc.Step(`^the response should contain echoed header "([^"]*)" with exact value:$`,
 		b.echoedHeaderEqualsDoc)
+	sc.Step(`^the response should contain echoed header "([^"]*)" containing "([^"]*)"$`,
+		b.echoedHeaderContains)
 	sc.Step(`^the response should not contain echoed header "([^"]*)"$`, b.echoedHeaderAbsent)
 	sc.Step(`^the JSON response should have field "([^"]*)"$`, b.jsonFieldExists)
 	sc.Step(`^the JSON response field "([^"]*)" should not exist$`, b.jsonFieldAbsent)
@@ -1405,6 +1407,58 @@ func (b *Base) assertEchoedHeader(ctx context.Context, name, want string) error 
 		return fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
 	}
 	return nil
+}
+
+// echoedHeaderContains asserts the gateway forwarded a header upstream with a value that
+// contains the given text.
+func (b *Base) echoedHeaderContains(ctx context.Context, name, want string) error {
+	values, resolved, err := b.echoedHeaderValues(ctx, name, want)
+	if err != nil {
+		return err
+	}
+	for _, value := range values {
+		if strings.Contains(value, resolved) {
+			return nil
+		}
+	}
+	return fmt.Errorf("expected echoed header %q to contain %q, got %q", name, resolved, values)
+}
+
+// echoedHeaderValues returns every value of an echoed header and the expanded expectation.
+func (b *Base) echoedHeaderValues(ctx context.Context, name, want string) ([]string, string, error) {
+	resp, err := httpx.Published(ctx)
+	if err != nil {
+		return nil, "", err
+	}
+	resolved, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return nil, "", err
+	}
+	headers, err := echoedHeaders(resp)
+	if err != nil {
+		return nil, "", err
+	}
+	value, found := lookupEchoed(headers, name)
+	if !found {
+		return nil, "", fmt.Errorf("expected echoed header %q to exist in response", name)
+	}
+
+	// A JSON echo may render a header as a string or an array of values.
+	switch v := value.(type) {
+	case string:
+		return []string{v}, resolved, nil
+	case []any:
+		if len(v) == 0 {
+			return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
+		}
+		values := make([]string, len(v))
+		for i, item := range v {
+			values[i] = fmt.Sprintf("%v", item)
+		}
+		return values, resolved, nil
+	default:
+		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+	}
 }
 
 // echoedHeaders pulls the request headers the backend reflected back in its JSON body.

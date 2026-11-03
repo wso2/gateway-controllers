@@ -50,6 +50,24 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/mcp_auth.feature
+      - name: mcp-gateway-url-precedence
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mcp_gateway_url_precedence.feature
       - name: mcp-auth
         features:
           - features/mcp_auth_error_compatibility.feature
+
+  - name: mcp-auth-gateway-host
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        addPoliciesFrom: policies
+        overlay: overlays/mcp-auth-gateway-host.toml
+      - name: testbench
+    runners:
+      - name: mcp-auth-gateway-host
+        features:
+          - features/mcp_auth_gateway_host.feature

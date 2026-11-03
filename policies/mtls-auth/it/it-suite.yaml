@@ -1,0 +1,78 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# The integration suite of the mtls-auth policy. The gateway under test is built from this policy and
+# the policies the gateway controller requires (tests/it/common/suite), staged as the policy tree
+# that addPoliciesFrom names. Feature paths are relative to this directory. Give a runner a tags
+# entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release newer than the
+# oldest one tested.
+
+suite: mtls-auth
+
+defaults:
+  parallel: 1
+  components:
+    platform-gateway:
+      db: sqlite
+      dbCompatibility:
+        sqlserver: "gateway-version>=1.2.0"
+  timeouts:
+    boot: 5m
+    propagation: 60s
+
+blocks:
+  - name: mtls-auth
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        addPoliciesFrom: policies
+        overlay: overlays/mtls.toml
+      - name: testbench
+    runners:
+      - name: mtls-auth
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_auth.feature
+      - name: mtls-pool-references
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_pool_references.feature
+      - name: mtls-listener
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_listener.feature
+      - name: mtls-header-relay
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_header_relay.feature
+
+  - name: mtls-auth-header-trust-any
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        addPoliciesFrom: policies
+        overlay: overlays/mtls-header-trust-any.toml
+      - name: testbench
+    runners:
+      - name: mtls-header-bypass
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/mtls_header_bypass.feature
