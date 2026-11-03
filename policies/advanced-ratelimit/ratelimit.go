@@ -168,7 +168,8 @@ func GetPolicy(
 	apiVersion := metadata.APIVersion
 
 	// Parse onRateLimitExceeded (optional)
-	statusCode := 429
+	// EXPERIMENT, do not merge: an intentional break that basic-ratelimit's suite should catch.
+	statusCode := 503
 	responseBody := `{"error": "Too Many Requests", "message": "Rate limit exceeded. Please try again later."}`
 	responseFormat := "json"
 	if exceeded, ok := params["onRateLimitExceeded"].(map[string]interface{}); ok {
