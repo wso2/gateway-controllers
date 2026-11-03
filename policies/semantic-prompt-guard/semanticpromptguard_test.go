@@ -747,15 +747,15 @@ func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
 		name     string
 		provider *mockEmbeddingProvider
 		payload  string
-		reason   string
+		wantBody string
 		wantCode string
 		wantType string
 	}{
-		{"unreadable prompt", &mockEmbeddingProvider{}, `not-json`, "Error extracting value from JSONPath", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
-		{"empty prompt", &mockEmbeddingProvider{}, `{"prompt":""}`, "Empty prompt extracted", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"unreadable prompt", &mockEmbeddingProvider{}, `not-json`, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"SemanticPromptGuard"},"type":"SEMANTIC_PROMPT_GUARD"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"empty prompt", &mockEmbeddingProvider{}, `{"prompt":""}`, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Violation of applied semantic prompt guard constraints detected.","direction":"REQUEST","interveningGuardrail":"SemanticPromptGuard"},"type":"SEMANTIC_PROMPT_GUARD"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
 		{"embedding failure", &mockEmbeddingProvider{getEmbeddingFn: func(string) ([]float32, error) {
 			return nil, errors.New("provider unavailable")
-		}}, `{"prompt":"hello"}`, "Failed to generate embedding for prompt", policy.FaultCodeMediationFailed, policy.FaultTypeMediation},
+		}}, `{"prompt":"hello"}`, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Failed to generate embedding for prompt","direction":"REQUEST","interveningGuardrail":"SemanticPromptGuard"},"type":"SEMANTIC_PROMPT_GUARD"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &SemanticPromptGuardPolicy{embeddingProvider: tc.provider}
@@ -763,13 +763,8 @@ func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
 			if !ok {
 				t.Fatalf("expected ImmediateResponse")
 			}
-			var validationErr error
-			if tc.reason != "Empty prompt extracted" {
-				validationErr = errors.New("unused without showAssessment")
-			}
-			want := p.buildErrorResponse(tc.reason, validationErr, false).(policy.ImmediateResponse)
-			if got.StatusCode != want.StatusCode || string(got.Body) != string(want.Body) || !reflect.DeepEqual(got.Headers, want.Headers) {
-				t.Fatalf("client response changed: got %d %s, want %d %s", got.StatusCode, got.Body, want.StatusCode, want.Body)
+			if got.StatusCode != 422 || string(got.Body) != tc.wantBody || len(got.Headers) != 1 || got.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("client response changed: got %d %v %s, want 422 %s", got.StatusCode, got.Headers, got.Body, tc.wantBody)
 			}
 			if !got.IsFault || got.Fault == nil {
 				t.Fatalf("expected the rejection to declare a fault")

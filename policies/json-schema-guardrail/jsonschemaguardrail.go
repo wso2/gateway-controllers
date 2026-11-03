@@ -392,16 +392,17 @@ func (p *JSONSchemaGuardrailPolicy) validatePayload(payload []byte, params JSONS
 		documentLoader = gojsonschema.NewBytesLoader(payload)
 	}
 
-	result, err := gojsonschema.Validate(schemaLoader, documentLoader)
+	// Compile the schema once, so a schema that cannot be loaded (the operator's
+	// parameter) is told apart from content that is not JSON.
+	schema, err := gojsonschema.NewSchema(schemaLoader)
 	if err != nil {
 		slog.Debug("JSONSchemaGuardrail: Error validating schema", "error", err, "isResponse", isResponse)
-		// Validate fails either because the configured schema cannot be loaded, or because
-		// the content is not JSON. Only the first is the policy's own failure.
-		fault := extractionFault("Error validating schema", err, isResponse)
-		if _, schemaErr := gojsonschema.NewSchema(schemaLoader); schemaErr != nil {
-			fault = checkFailureFault(policy.FaultTypeConfiguration, "Error validating schema", err, isResponse)
-		}
-		return withFault(p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil), fault)
+		return withFault(p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil), checkFailureFault(policy.FaultTypeConfiguration, "Error validating schema", err, isResponse))
+	}
+	result, err := schema.Validate(documentLoader)
+	if err != nil {
+		slog.Debug("JSONSchemaGuardrail: Error validating schema", "error", err, "isResponse", isResponse)
+		return withFault(p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil), extractionFault("Error validating schema", err, isResponse))
 	}
 
 	var validationPassed bool

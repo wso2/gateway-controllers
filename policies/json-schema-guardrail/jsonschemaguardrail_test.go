@@ -3,7 +3,6 @@ package jsonschemaguardrail
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -638,36 +637,39 @@ func TestJSONSchemaGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
 	params := JSONSchemaGuardrailPolicyParams{JsonPath: "$.text", Schema: `{"type":"string"}`}
 	for _, isResponse := range []bool{false, true} {
 		got := p.validatePayload([]byte(`not-json`), params, isResponse)
-		want := p.buildErrorResponse("Error extracting value from JSONPath", errors.New("unused without showAssessment"), isResponse, false, nil)
 		if isResponse {
-			assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
 		} else {
-			assertNoVerdictFault(t, got, want, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
 		}
 	}
 }
 
 // assertNoVerdictFault checks that a rejection made without a guardrail verdict declares
-// the given fault, carries no guardrail details, and leaves the client response unchanged.
-func assertNoVerdictFault(t *testing.T, got, want interface{}, wantCode, wantType, wantDirection string) {
+// the given fault, carries no guardrail details, and leaves the client response unchanged:
+// status 422, a JSON Content-Type, and wantBody.
+func assertNoVerdictFault(t *testing.T, got interface{}, wantBody, wantCode, wantType, wantDirection string) {
 	t.Helper()
 	var fault *policy.FaultDetails
 	var isFault bool
+	var status int
+	var headers map[string]string
+	var body []byte
 	switch g := got.(type) {
 	case policy.ImmediateResponse:
-		w := want.(policy.ImmediateResponse)
-		if g.StatusCode != w.StatusCode || string(g.Body) != string(w.Body) || !reflect.DeepEqual(g.Headers, w.Headers) {
-			t.Fatalf("client response changed: got %d %s, want %d %s", g.StatusCode, g.Body, w.StatusCode, w.Body)
-		}
+		status, headers, body = g.StatusCode, g.Headers, g.Body
 		fault, isFault = g.Fault, g.IsFault
 	case policy.DownstreamResponseModifications:
-		w := want.(policy.DownstreamResponseModifications)
-		if g.StatusCode == nil || *g.StatusCode != *w.StatusCode || string(g.Body) != string(w.Body) || !reflect.DeepEqual(g.HeadersToSet, w.HeadersToSet) {
-			t.Fatalf("client response changed: got %v %s, want %d %s", g.StatusCode, g.Body, *w.StatusCode, w.Body)
+		if g.StatusCode == nil {
+			t.Fatalf("expected a status code on the error response")
 		}
+		status, headers, body = *g.StatusCode, g.HeadersToSet, g.Body
 		fault, isFault = g.Fault, g.IsFault
 	default:
 		t.Fatalf("expected an error response, got %T", got)
+	}
+	if status != 422 || len(headers) != 1 || headers["Content-Type"] != "application/json" || string(body) != wantBody {
+		t.Fatalf("client response changed: got %d %v %s, want 422 map[Content-Type:application/json] %s", status, headers, body, wantBody)
 	}
 	if !isFault || fault == nil {
 		t.Fatalf("expected the rejection to declare a fault")
@@ -693,23 +695,26 @@ func TestJSONSchemaGuardrail_ValidateErrorDeclaresFault(t *testing.T) {
 		params := JSONSchemaGuardrailPolicyParams{Schema: `{"type":"not-a-type"}`}
 		for _, isResponse := range []bool{false, true} {
 			got := p.validatePayload([]byte(`{"a":1}`), params, isResponse)
-			want := p.buildErrorResponse("Error validating schema", errors.New("unused without showAssessment"), isResponse, false, nil)
+			wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"REQUEST","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+			if isResponse {
+				wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"RESPONSE","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+			}
 			wantDirection := policy.DirectionRequest
 			if isResponse {
 				wantDirection = policy.DirectionResponse
 			}
-			assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, wantDirection)
+			assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, wantDirection)
 		}
 	})
 
 	t.Run("content is not JSON", func(t *testing.T) {
 		params := JSONSchemaGuardrailPolicyParams{Schema: `{"type":"object"}`}
 		got := p.validatePayload([]byte(`not-json`), params, false)
-		want := p.buildErrorResponse("Error validating schema", errors.New("unused without showAssessment"), false, false, nil)
-		assertNoVerdictFault(t, got, want, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+		wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"REQUEST","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
 
 		got = p.validatePayload([]byte(`not-json`), params, true)
-		want = p.buildErrorResponse("Error validating schema", errors.New("unused without showAssessment"), true, false, nil)
-		assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+		wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"RESPONSE","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
 	})
 }
