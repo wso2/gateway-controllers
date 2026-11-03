@@ -200,6 +200,15 @@ func TestConfigurationIsValidatedUpFront(t *testing.T) {
 			"template": "just a string"}, "must be an object"},
 		{"mutually exclusive", map[string]interface{}{
 			"preset": "openai", "stringTemplate": "x"}, "only one of"},
+		{"underscore placeholder in template", map[string]interface{}{
+			"template": map[string]interface{}{"a": "${Request_ID}"}}, "Request_ID"},
+		{"underscore placeholder in stringTemplate", map[string]interface{}{
+			"stringTemplate": "<id>${Request_ID}</id>"}, "Request_ID"},
+		{"preset of the wrong type", map[string]interface{}{"preset": 42}, "preset must be a string"},
+		{"stringTemplate of the wrong type", map[string]interface{}{
+			"stringTemplate": []interface{}{"x"}}, "stringTemplate must be a string"},
+		{"contentType of the wrong type", map[string]interface{}{"contentType": true}, "contentType must be a string"},
+		{"escape of the wrong type", map[string]interface{}{"escape": 1.0}, "escape must be a string"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -335,8 +344,42 @@ func TestPresetSOAP11(t *testing.T) {
 	if env.Fault.Detail.FaultCode != "900902" {
 		t.Errorf("detail errorcode = %q", env.Fault.Detail.FaultCode)
 	}
-	if !strings.Contains(string(m.Body), "schemas.xmlsoap.org/soap/envelope") {
-		t.Errorf("wrong namespace for SOAP 1.1: %s", m.Body)
+	assertNamespaces(t, m.Body, map[string]string{
+		"Envelope": soap11NS, "Body": soap11NS, "Fault": soap11NS,
+		"faultcode": "", "faultstring": "", "detail": "", "errorcode": "",
+	})
+}
+
+const (
+	soap11NS = "http://schemas.xmlsoap.org/soap/envelope/"
+	soap12NS = "http://www.w3.org/2003/05/soap-envelope"
+)
+
+// assertNamespaces checks the resolved namespace of every element by local name. Matching
+// the URI anywhere in the body would pass a document that declares it but qualifies the wrong
+// elements, which is exactly what a SOAP stack rejects.
+func assertNamespaces(t *testing.T, body []byte, want map[string]string) {
+	t.Helper()
+	got := map[string]string{}
+	dec := xml.NewDecoder(strings.NewReader(string(body)))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			break
+		}
+		if se, ok := tok.(xml.StartElement); ok {
+			got[se.Name.Local] = se.Name.Space
+		}
+	}
+	for local, ns := range want {
+		space, ok := got[local]
+		if !ok {
+			t.Errorf("element %s missing: %s", local, body)
+			continue
+		}
+		if space != ns {
+			t.Errorf("element %s namespace = %q, want %q", local, space, ns)
+		}
 	}
 }
 
@@ -363,9 +406,11 @@ func TestPresetSOAP12(t *testing.T) {
 	if env.Fault.Text != "Upstream unavailable" {
 		t.Errorf("Reason/Text = %q", env.Fault.Text)
 	}
-	if !strings.Contains(string(m.Body), "www.w3.org/2003/05/soap-envelope") {
-		t.Errorf("wrong namespace for SOAP 1.2: %s", m.Body)
-	}
+	assertNamespaces(t, m.Body, map[string]string{
+		"Envelope": soap12NS, "Body": soap12NS, "Fault": soap12NS, "Code": soap12NS,
+		"Value": soap12NS, "Reason": soap12NS, "Text": soap12NS, "Detail": soap12NS,
+		"errorcode": "",
+	})
 	if !strings.Contains(string(m.Body), `xml:lang="en"`) {
 		t.Errorf("SOAP 1.2 Reason/Text requires xml:lang: %s", m.Body)
 	}

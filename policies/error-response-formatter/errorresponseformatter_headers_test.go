@@ -131,6 +131,38 @@ func TestHeaderValuesAcceptYAMLScalars(t *testing.T) {
 	}
 }
 
+// Header names are case-insensitive, so names differing only by case share one entry and the
+// later configured value wins.
+func TestHeaderNamesAreCaseInsensitive(t *testing.T) {
+	fault := render(t, map[string]interface{}{
+		"preset": "canonical",
+		"headersToSet": []interface{}{
+			map[string]interface{}{"name": "X-Error-Code", "value": "first"},
+			map[string]interface{}{"name": "x-error-code", "value": "second"},
+		},
+		"headersToAppend": []interface{}{
+			map[string]interface{}{"name": "X-Trace", "value": "a"},
+			map[string]interface{}{"name": "x-trace", "value": "b"},
+		},
+	}, faultCtx(500, nil, ""))
+
+	if len(fault.HeadersToSet) != 2 || fault.HeadersToSet["x-error-code"] != "second" {
+		t.Errorf("HeadersToSet = %v, want x-error-code: second plus content-type", fault.HeadersToSet)
+	}
+	if got := fault.HeadersToAppend["x-trace"]; len(fault.HeadersToAppend) != 1 || len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Errorf("HeadersToAppend = %v, want x-trace: [a b]", fault.HeadersToAppend)
+	}
+}
+
+// contentType is a header value too, so it gets the same line-break stripping.
+func TestContentTypeCannotSplitTheResponse(t *testing.T) {
+	fault := render(t, map[string]interface{}{"contentType": "application/json\r\nx-injected: 1"},
+		faultCtx(500, nil, ""))
+	if got := fault.HeadersToSet["content-type"]; strings.ContainsAny(got, "\r\n") {
+		t.Errorf("content-type = %q, must not contain CR or LF", got)
+	}
+}
+
 // Up-front rejections, when the chain is built. Each of these produces a working-looking deployment that misbehaves
 // only when a request actually fails, which is the worst time to discover it.
 func TestHeaderConfigurationIsValidatedUpFront(t *testing.T) {
@@ -166,6 +198,21 @@ func TestHeaderConfigurationIsValidatedUpFront(t *testing.T) {
 			"a header name that cannot be sent",
 			map[string]interface{}{"headersToSet": []interface{}{map[string]interface{}{"name": "x a: b", "value": "1"}}},
 			"cannot appear in one",
+		},
+		{
+			"a header name outside the token syntax",
+			map[string]interface{}{"headersToAppend": []interface{}{map[string]interface{}{"name": "x@code", "value": "1"}}},
+			"cannot appear in one",
+		},
+		{
+			"a placeholder in a header name",
+			map[string]interface{}{"headersToRemove": []interface{}{"${Code}"}},
+			"cannot appear in one",
+		},
+		{
+			"an underscore placeholder in a header value",
+			map[string]interface{}{"headersToSet": []interface{}{map[string]interface{}{"name": "x-a", "value": "${Request_ID}"}}},
+			"unknown placeholder",
 		},
 		{
 			"a non-scalar header value",

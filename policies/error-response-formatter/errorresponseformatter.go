@@ -98,8 +98,9 @@ const (
 	presetSOAP12    = "soap12"
 )
 
-// placeholderRe matches ${Field}.
-var placeholderRe = regexp.MustCompile(`\$\{([A-Za-z0-9]+)\}`)
+// placeholderRe matches ${Field}. The underscore is matched even though no field name has one,
+// so a misspelling such as ${Request_ID} is reported as unknown rather than sent verbatim.
+var placeholderRe = regexp.MustCompile(`\$\{([A-Za-z0-9_]+)\}`)
 
 // typedFields are placeholders that keep their natural JSON type when a structured leaf is
 // exactly the placeholder — a number stays a number, and an absent JSON-RPC id stays null
@@ -150,9 +151,15 @@ var _ policy.FaultPolicy = (*ErrorFormatterPolicy)(nil)
 // is already failing, and discovering a bad template there would replace a usable error with a
 // worse one.
 func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.Policy, error) {
-	preset := stringParam(params, paramPreset, "")
+	preset, err := stringParam(params, paramPreset, "")
+	if err != nil {
+		return nil, err
+	}
 	rawTemplate, hasTemplate := params[paramTemplate]
-	stringTemplate := stringParam(params, paramStringTemplate, "")
+	stringTemplate, err := stringParam(params, paramStringTemplate, "")
+	if err != nil {
+		return nil, err
+	}
 
 	set := 0
 	for _, on := range []bool{preset != "", hasTemplate, stringTemplate != ""} {
@@ -164,12 +171,16 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		return nil, fmt.Errorf("set only one of %s, %s or %s", paramPreset, paramTemplate, paramStringTemplate)
 	}
 
-	p := &ErrorFormatterPolicy{
-		contentType: stringParam(params, paramContentType, ""),
-		escape:      escapeMode(stringParam(params, paramEscape, string(escapeAuto))),
+	contentType, err := stringParam(params, paramContentType, "")
+	if err != nil {
+		return nil, err
 	}
+	escape, err := stringParam(params, paramEscape, string(escapeAuto))
+	if err != nil {
+		return nil, err
+	}
+	p := &ErrorFormatterPolicy{contentType: contentType, escape: escapeMode(escape)}
 
-	var err error
 	if p.headersToSet, err = headerEntries(params, paramHeadersToSet); err != nil {
 		return nil, err
 	}
@@ -333,9 +344,11 @@ func (p *ErrorFormatterPolicy) OnFault(
 	// not part of the body's syntax, so XML- or JSON-escaping it would put &quot; on the wire
 	// where the operator wrote a quote. What DOES have to be stripped is anything that could
 	// end the header — see sanitizeHeaderValue.
-	headersToSet := map[string]string{"content-type": p.contentType}
+	headersToSet := map[string]string{"content-type": sanitizeHeaderValue(p.contentType)}
 	for _, e := range p.headersToSet {
-		headersToSet[e.Name] = sanitizeHeaderValue(expand(e.Value, v, escapeNone))
+		// Keyed in lower case: header names are case-insensitive, so X-A and x-a must share
+		// one entry for the later one to win.
+		headersToSet[strings.ToLower(e.Name)] = sanitizeHeaderValue(expand(e.Value, v, escapeNone))
 	}
 	var headersToAppend map[string][]string
 	if len(p.headersToAppend) > 0 {
@@ -343,7 +356,8 @@ func (p *ErrorFormatterPolicy) OnFault(
 		for _, e := range p.headersToAppend {
 			// Repeated names accumulate rather than overwrite: that is what appending means,
 			// and the array shape exists so an operator can express it without nesting.
-			headersToAppend[e.Name] = append(headersToAppend[e.Name],
+			name := strings.ToLower(e.Name)
+			headersToAppend[name] = append(headersToAppend[name],
 				sanitizeHeaderValue(expand(e.Value, v, escapeNone)))
 		}
 	}
@@ -785,7 +799,6 @@ func collectStrings(v interface{}, out *[]string) {
 	}
 }
 
-// stringParam reads a string parameter, falling back to def when absent or the wrong type.
 // headerEntries reads the array-of-{name, value} shape every other header-writing policy in
 // this catalogue uses (respond, set-headers), rather than a YAML mapping.
 //
@@ -888,7 +901,7 @@ func validateHeaderNames(set, appended []headerEntry, removed []string) error {
 		if name == "" {
 			return fmt.Errorf("a header name must not be empty")
 		}
-		if strings.ContainsAny(name, " \t\r\n:") {
+		if !isToken(name) {
 			return fmt.Errorf("header name %q contains a character that cannot appear in one", name)
 		}
 		// The gateway's own content-type comes from contentType/preset, so accepting it here
@@ -942,13 +955,39 @@ func statusCodeParam(params map[string]interface{}) (int, error) {
 	return code, nil
 }
 
-func stringParam(params map[string]interface{}, key, def string) string {
-	if raw, ok := params[key]; ok {
-		if s, ok := raw.(string); ok && s != "" {
-			return s
+// isToken reports whether name is an HTTP field name: one or more RFC 9110 tchar characters.
+func isToken(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0:
+		default:
+			return false
 		}
 	}
-	return def
+	return true
+}
+
+// stringParam reads a string parameter, falling back to def when absent or empty. A value of
+// another type is an error rather than the default, so a malformed setting is refused instead
+// of quietly building a different policy.
+func stringParam(params map[string]interface{}, key, def string) (string, error) {
+	raw, ok := params[key]
+	if !ok || raw == nil {
+		return def, nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return "", fmt.Errorf("%s must be a string, got %T", key, raw)
+	}
+	if s == "" {
+		return def, nil
+	}
+	return s, nil
 }
 
 func orDefault(v, def string) string {

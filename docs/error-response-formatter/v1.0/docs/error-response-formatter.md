@@ -154,3 +154,5 @@ already been sent.
 - Header names cannot contain placeholders.
 - Line breaks and NUL characters are removed from substituted header values.
 - Set `Content-Type` with `contentType`, not `headersToSet`.
+- Header values are strings. Quote a value YAML would read as a number or boolean, such as
+  `"30"` or `"false"`.
