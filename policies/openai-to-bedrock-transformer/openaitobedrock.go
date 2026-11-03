@@ -189,13 +189,18 @@ func (p *TranslatorPolicy) OnResponseBody(
 
 	if isEventStreamContentType(contentType) || looksLikeEventStream(body) {
 		sse := eventStreamToSSE(body, true, p.completionID(requestID(respCtx.SharedContext)), model)
-		return policy.DownstreamResponseModifications{
+		mods := policy.DownstreamResponseModifications{
 			Body: sse,
 			HeadersToSet: map[string]string{
 				"content-type": "text/event-stream",
 			},
 			HeadersToRemove: []string{"content-length"},
 		}
+		if exceptionType, failed := streamException(body); failed {
+			mods.IsFault = true
+			mods.Fault = streamExceptionFault(exceptionType)
+		}
+		return mods
 	}
 
 	slog.Debug(PolicyName+": translating buffered JSON response", "status", respCtx.ResponseStatus)
@@ -244,6 +249,19 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 	// nothing for this flush, which is correct when a frame carried no delta.
 	if sse == nil {
 		sse = []byte{}
+	}
+	if exceptionType, failed := streamException(chunk.Chunk); failed {
+		// Bedrock sends nothing after an exception, so the stream ends here. Terminating
+		// is what lets the failure be declared; [DONE] is appended now rather than on a
+		// later final chunk, so the client receives the same events either way.
+		if !chunk.EndOfStream {
+			sse = append(sse, sseDonePayload...)
+		}
+		return policy.TerminateResponseChunk{
+			Body:    sse,
+			IsFault: true,
+			Fault:   streamExceptionFault(exceptionType),
+		}
 	}
 	return policy.ForwardResponseChunk{Body: sse}
 }

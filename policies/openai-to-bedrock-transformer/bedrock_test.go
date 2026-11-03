@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -962,4 +963,94 @@ func TestErrResponseDirectionAndCode(t *testing.T) {
 			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, resp.Fault.Direction)
 		}
 	})
+}
+
+// encodeExceptionFrame builds an event-stream exception frame, the way Bedrock ends a
+// Converse stream it cannot complete.
+func encodeExceptionFrame(exceptionType, payload string) []byte {
+	headers := encodeStringHeader(":exception-type", exceptionType)
+	headers = append(headers, encodeStringHeader(":message-type", "exception")...)
+
+	totalLen := 16 + len(headers) + len(payload)
+	frame := make([]byte, 0, totalLen)
+	frame = binary.BigEndian.AppendUint32(frame, uint32(totalLen))
+	frame = binary.BigEndian.AppendUint32(frame, uint32(len(headers)))
+	frame = binary.BigEndian.AppendUint32(frame, 0)
+	frame = append(frame, headers...)
+	frame = append(frame, payload...)
+	frame = binary.BigEndian.AppendUint32(frame, 0)
+	return frame
+}
+
+var createdField = regexp.MustCompile(`"created":\d+`)
+
+// TestStreamExceptionDeclaresFault pins the fault for a Converse stream Bedrock ends with an
+// exception, on the streaming and the buffered path, and that the client receives the same
+// events as before: the translated error event followed by a single [DONE].
+func TestStreamExceptionDeclaresFault(t *testing.T) {
+	stream := append(append([]byte{}, encodeFrame("messageStart", `{"role":"assistant"}`)...),
+		encodeExceptionFrame("throttlingException", `{"message":"Too many requests"}`)...)
+	p := &TranslatorPolicy{params: PolicyParams{Model: "nova"}}
+	shared := func() *policy.SharedContext {
+		return &policy.SharedContext{RequestID: "req-exc", Metadata: map[string]interface{}{}}
+	}
+	// What the client received before the fault was declared: every event of the stream,
+	// then [DONE] on the final chunk.
+	want := createdField.ReplaceAllString(string(eventStreamToSSE(stream, true, p.completionID("req-exc"), "nova")), "")
+
+	for _, endOfStream := range []bool{false, true} {
+		action := p.OnResponseBodyChunk(context.Background(),
+			&policy.ResponseStreamContext{SharedContext: shared(), ResponseStatus: 200},
+			&policy.StreamBody{Chunk: stream, EndOfStream: endOfStream}, nil)
+		terminate, ok := action.(policy.TerminateResponseChunk)
+		if !ok {
+			t.Fatalf("endOfStream=%v: expected TerminateResponseChunk, got %T", endOfStream, action)
+		}
+		assertExceptionFault(t, terminate.IsFault, terminate.Fault)
+		if got := createdField.ReplaceAllString(string(terminate.Body), ""); got != want {
+			t.Errorf("endOfStream=%v: body = %q, want %q", endOfStream, got, want)
+		}
+	}
+
+	buffered := p.OnResponseBody(context.Background(), &policy.ResponseContext{
+		SharedContext: shared(), ResponseStatus: 200,
+		ResponseBody: &policy.Body{Present: true, Content: stream},
+	}, nil)
+	mods, ok := buffered.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", buffered)
+	}
+	assertExceptionFault(t, mods.IsFault, mods.Fault)
+	if got := createdField.ReplaceAllString(string(mods.Body), ""); got != want {
+		t.Errorf("buffered body = %q, want %q", got, want)
+	}
+
+	// A stream without an exception is forwarded with no fault.
+	clean := p.OnResponseBodyChunk(context.Background(),
+		&policy.ResponseStreamContext{SharedContext: shared(), ResponseStatus: 200},
+		&policy.StreamBody{Chunk: bedrockStream(), EndOfStream: true}, nil)
+	if _, ok := clean.(policy.ForwardResponseChunk); !ok {
+		t.Errorf("a clean stream must be forwarded, got %T", clean)
+	}
+	cleanBuffered := p.OnResponseBody(context.Background(), &policy.ResponseContext{
+		SharedContext: shared(), ResponseStatus: 200,
+		ResponseBody: &policy.Body{Present: true, Content: bedrockStream()},
+	}, nil).(policy.DownstreamResponseModifications)
+	if cleanBuffered.IsFault || cleanBuffered.Fault != nil {
+		t.Errorf("a clean buffered stream must not declare a fault, got %+v", cleanBuffered.Fault)
+	}
+}
+
+func assertExceptionFault(t *testing.T, isFault bool, fault *policy.FaultDetails) {
+	t.Helper()
+	if !isFault || fault == nil {
+		t.Fatalf("expected a fault, got IsFault=%v Fault=%v", isFault, fault)
+	}
+	if fault.Code != policy.FaultCodeUpstreamGeneric || fault.Type != policy.FaultTypeMediation ||
+		fault.Direction != policy.DirectionResponse {
+		t.Errorf("fault = %s/%s/%s", fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Description != "Bedrock stream exception: throttlingException" {
+		t.Errorf("Description = %q", fault.Description)
+	}
 }

@@ -109,14 +109,19 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | No model can be resolved: the request's `model` is not a string or is blank, and none is configured | `400` | `960001` | `validation` |
 | The translated Gemini request body cannot be serialized | `500` | `960000` | `mediation` |
 | Response phase: the Gemini response or error body cannot be translated back to the OpenAI shape | `500` | `960000` | `mediation` |
-| Response phase, streaming: Gemini sends an `error` object, or an event that cannot be parsed, mid-stream | the stream's status, already sent | `101599` | `mediation` |
+| Response phase, event stream: Gemini sends an `error` object mid-stream | the stream's status, already sent | `101599` | `mediation` |
+| Response phase, event stream: Gemini sends an event that cannot be parsed | the stream's status, already sent | `960000` | `mediation` |
 
-A streaming rejection happens in the response phase after the response headers have been sent,
-so the client receives the translated error event and the stream closes with the status already
-sent; the fault records the failure.
+An event-stream rejection happens in the response phase after the response headers have been
+sent, so the client receives the translated error event and the stream closes with the status
+already sent; the fault records the failure. The same faults are declared when the event stream
+is translated in one piece rather than chunk by chunk (when another response policy in the chain
+cannot stream).
 
-These faults set no `Description`. For a rejected request or response the fault's `Message` is
-the error text the body already carries, for example `Request body is empty.`; for a terminated
-stream it is `The upstream stream ended with an error.`, and the provider's own detail is in the
-final SSE event the client receives. The fault itself is passed to fault policies and analytics
+For a rejected request or response the fault's `Message` is the error text the body already
+carries, for example `Request body is empty.`, and no `Description` is set. For a provider error in
+the event stream the `Message` is `The upstream stream ended with an error.`, and the provider's own
+detail is in the final SSE event the client receives. For an event that cannot be parsed the
+`Message` is `The upstream stream could not be translated.` and the `Description` is
+`malformed Gemini stream event`. The fault itself is passed to fault policies and analytics
 only, never to the client.

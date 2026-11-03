@@ -176,12 +176,19 @@ func (p *TranslatorPolicy) OnResponseBody(
 		slog.Debug(PolicyName+": translating buffered SSE response", "status", respCtx.ResponseStatus)
 		state := newStreamState(effectiveModel(respCtx.SharedContext, p.params.Model),
 			requestID(respCtx.SharedContext), respCtx.ResponseStatus)
-		sse, _ := translateSSEChunk(state, body, true)
-		return policy.DownstreamResponseModifications{
+		sse, terminate := translateSSEChunk(state, body, true)
+		mods := policy.DownstreamResponseModifications{
 			Body:            sse,
 			HeadersToSet:    map[string]string{"content-type": "text/event-stream"},
 			HeadersToRemove: []string{"content-length"},
 		}
+		if terminate {
+			// The same failure the streaming path reports, on the same bytes: the
+			// translated error event is already the body, so only the fault is added.
+			mods.IsFault = true
+			mods.Fault = streamFault(state.failure)
+		}
+		return mods
 	}
 
 	slog.Debug(PolicyName+": translating response", "status", respCtx.ResponseStatus)
@@ -245,17 +252,32 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 		return policy.TerminateResponseChunk{
 			Body:    sse,
 			IsFault: true,
-			Fault: &policy.FaultDetails{
-				Code:      policy.FaultCodeUpstreamGeneric,
-				Type:      policy.FaultTypeMediation,
-				Direction: policy.DirectionResponse,
-				Message:   "The upstream stream ended with an error.",
-				// The final SSE event already carries the provider's own detail to the
-				// client; nothing further is withheld here.
-			},
+			Fault:   streamFault(state.failure),
 		}
 	}
 	return policy.ForwardResponseChunk{Body: sse}
+}
+
+// streamFault describes a terminated stream by why it terminated. A provider error event
+// is the provider breaking mid-response, FaultCodeUpstreamGeneric as docs/error-codes.md
+// directs; a frame the translator could not parse is its own failure, FaultCodeMediationFailed.
+// The final SSE event already carries the detail to the client; nothing is withheld here.
+func streamFault(failure streamFailure) *policy.FaultDetails {
+	if failure == streamMalformedFrame {
+		return &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionResponse,
+			Message:     "The upstream stream could not be translated.",
+			Description: "malformed Gemini stream event",
+		}
+	}
+	return &policy.FaultDetails{
+		Code:      policy.FaultCodeUpstreamGeneric,
+		Type:      policy.FaultTypeMediation,
+		Direction: policy.DirectionResponse,
+		Message:   "The upstream stream ended with an error.",
+	}
 }
 
 // shouldRun reports whether the request should be translated. When no upstream

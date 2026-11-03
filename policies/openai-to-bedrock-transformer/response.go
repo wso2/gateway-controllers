@@ -191,6 +191,36 @@ func eventStreamToSSE(data []byte, endOfStream bool, id, model string) []byte {
 	return out
 }
 
+// streamException returns the exception type of the first exception frame among the
+// complete frames in data, and whether there is one. Bedrock ends a Converse stream after an
+// exception, so one means the provider broke off the response.
+func streamException(data []byte) (string, bool) {
+	frames, _, ok := decodeEventStreamFrames(data)
+	if !ok {
+		return "", false
+	}
+	for i := range frames {
+		if frames[i].MessageType == "exception" || frames[i].ExceptionType != "" {
+			return frames[i].ExceptionType, true
+		}
+	}
+	return "", false
+}
+
+// streamExceptionFault describes a Converse stream the provider ended with an exception:
+// the provider breaking mid-response, FaultCodeUpstreamGeneric as docs/error-codes.md directs.
+// The translated error event already carries the provider's message to the client; the
+// fault adds only the exception type.
+func streamExceptionFault(exceptionType string) *policy.FaultDetails {
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeUpstreamGeneric,
+		Type:        policy.FaultTypeMediation,
+		Direction:   policy.DirectionResponse,
+		Message:     "The upstream stream ended with an error.",
+		Description: "Bedrock stream exception: " + exceptionType,
+	}
+}
+
 // streamFrameToSSE maps a single Converse stream event to zero or more OpenAI
 // SSE events.
 func streamFrameToSSE(frame *eventStreamFrame, id, model string, created int64) []byte {

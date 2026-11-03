@@ -156,7 +156,16 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | A `file` content part cannot be sent to Bedrock: it has no `file` object, uses `file_id`, has no `file_data`, its `file_data` is not a base64 data URI (or is empty, contains whitespace, or is not valid base64), or its file type is not a supported document type | `400` | `960001` | `validation` |
 | A user message carries a file without a non-empty text part | `400` | `960001` | `validation` |
 | Response phase: the Bedrock Converse response or error body cannot be translated back to the OpenAI shape | `500` | `960000` | `mediation` |
+| Response phase, event stream: Bedrock ends the Converse stream with an exception | the stream's status, already sent | `101599` | `mediation` |
 
-These faults set no `Description`: the fault's `Message` is the error text the body already
-carries, for example `Request body is empty.`, so nothing is held back from the client. The fault
+An event-stream exception arrives after the response headers have been sent, so the client
+receives the translated error event followed by `data: [DONE]` and the stream closes with the
+status already sent; the fault records the failure, whether the stream is translated chunk by
+chunk or in one piece.
+
+For a rejected request or response the fault's `Message` is the error text the body already
+carries, for example `Request body is empty.`, and no `Description` is set, so nothing is held back
+from the client. For a stream exception the `Message` is `The upstream stream ended with an
+error.` and the `Description` is the exception type, for example
+`Bedrock stream exception: throttlingException`. The fault
 itself is passed to fault policies and analytics only, never to the client.
