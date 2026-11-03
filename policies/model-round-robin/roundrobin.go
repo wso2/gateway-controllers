@@ -436,8 +436,8 @@ func (p *ModelRoundRobinPolicy) OnRequestBody(ctx context.Context, reqCtx *polic
 				Type:      policy.FaultTypeValidation,
 				Direction: policy.DirectionRequest,
 				Message:   "Invalid JSON in request body.",
-				// err quotes the caller's own payload, so it stays in Description,
-				// which the renderer withholds from the client body.
+				// Body already returns err.Error() to the client; Description repeats
+				// it for fault policies and analytics.
 				Description: err.Error(),
 			},
 		}

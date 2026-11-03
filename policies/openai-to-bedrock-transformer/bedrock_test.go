@@ -100,9 +100,12 @@ func TestOnRequestBody_RejectsMissingFallbackModel(t *testing.T) {
 			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
 			Body:          &policy.Body{Present: true, Content: []byte(body)},
 		}, nil)
-		if response, ok := action.(policy.ImmediateResponse); !ok || response.StatusCode != 400 {
+		response, ok := action.(policy.ImmediateResponse)
+		if !ok || response.StatusCode != 400 {
 			t.Errorf("expected a 400 response for body %s, got %#v", body, action)
+			continue
 		}
+		assertRequestValidationFault(t, response)
 	}
 }
 
@@ -142,19 +145,45 @@ func TestOnRequestBody_RewritesAndRoutes(t *testing.T) {
 
 func TestOnRequestBody_RejectsBadBodies(t *testing.T) {
 	p := &TranslatorPolicy{params: PolicyParams{Model: "nova"}}
-	for _, body := range []*policy.Body{
-		nil,
-		{Present: true},
-		{Present: true, Content: []byte(`{"messages":`)},
+	for _, c := range []struct {
+		body       *policy.Body
+		bodyPrefix string
+	}{
+		{nil, `{"error":{"message":"Request body is empty.","type":"invalid_request_error"}}`},
+		{&policy.Body{Present: true}, `{"error":{"message":"Request body is empty.","type":"invalid_request_error"}}`},
+		{&policy.Body{Present: true, Content: []byte(`{"messages":`)}, `{"error":{"message":"Invalid JSON in request body: `},
 	} {
 		action := p.OnRequestBody(context.Background(), &policy.RequestContext{
 			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
-			Body:          body,
+			Body:          c.body,
 		}, nil)
 		resp, ok := action.(policy.ImmediateResponse)
 		if !ok || resp.StatusCode != 400 {
 			t.Errorf("expected a 400 ImmediateResponse, got %#v", action)
+			continue
 		}
+		if !strings.HasPrefix(string(resp.Body), c.bodyPrefix) {
+			t.Errorf("client body changed: got %s, want prefix %s", resp.Body, c.bodyPrefix)
+		}
+		assertRequestValidationFault(t, resp)
+	}
+}
+
+// assertRequestValidationFault checks that a refused request is declared as the caller's
+// unreadable payload, with the client-facing content type unchanged.
+func assertRequestValidationFault(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if resp.Headers["Content-Type"] != "application/json" {
+		t.Errorf("unexpected headers: %v", resp.Headers)
+	}
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected IsFault=true and Fault set, got %#v", resp)
+	}
+	if resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+		resp.Fault.Type != policy.FaultTypeValidation ||
+		resp.Fault.Direction != policy.DirectionRequest {
+		t.Errorf("unexpected fault code/type/direction: %q/%q/%q",
+			resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
 	}
 }
 
@@ -658,8 +687,9 @@ func TestOnRequestBody_RejectsFileIDWith400(t *testing.T) {
 	}, nil)
 	resp, ok := action.(policy.ImmediateResponse)
 	if !ok || resp.StatusCode != 400 || !strings.Contains(string(resp.Body), "file_id is not supported") {
-		t.Errorf("expected a 400 naming file_id, got %#v", action)
+		t.Fatalf("expected a 400 naming file_id, got %#v", action)
 	}
+	assertRequestValidationFault(t, resp)
 }
 
 func TestTranslateRequest_ToolChoiceNoneDropsTools(t *testing.T) {

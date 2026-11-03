@@ -541,11 +541,21 @@ func baseRRModels() []interface{} {
 // TestModelRoundRobin_RejectionsDeclareFault covers the conditions this policy refuses on, and pins
 // which code each takes.
 func TestModelRoundRobin_RejectionsDeclareFault(t *testing.T) {
-	assertFault := func(t *testing.T, action interface{}, wantCode, wantType string) {
+	assertFault := func(t *testing.T, action interface{}, wantStatus int, wantBodyPrefix, wantCode, wantType string) {
 		t.Helper()
 		resp, ok := action.(policy.ImmediateResponse)
 		if !ok {
 			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		// The client response is unchanged by the fault declaration.
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("expected status %d, got %d", wantStatus, resp.StatusCode)
+		}
+		if resp.Headers["Content-Type"] != "application/json" {
+			t.Fatalf("unexpected headers: %v", resp.Headers)
+		}
+		if !strings.HasPrefix(string(resp.Body), wantBodyPrefix) {
+			t.Fatalf("expected body to start with %s, got %s", wantBodyPrefix, resp.Body)
 		}
 		if !resp.IsFault {
 			t.Fatalf("expected IsFault=true on a rejection")
@@ -574,8 +584,8 @@ func TestModelRoundRobin_RejectionsDeclareFault(t *testing.T) {
 			},
 			Body: nil,
 		}
-		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil),
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
+			`{"error":"Request body is empty."}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	})
 
 	t.Run("request body is not JSON", func(t *testing.T) {
@@ -588,7 +598,26 @@ func TestModelRoundRobin_RejectionsDeclareFault(t *testing.T) {
 			},
 			Body: &policy.Body{Content: []byte("{not json"), Present: true},
 		}
-		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil),
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
+			`{"error":"Invalid JSON in request body: `, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("all models suspended", func(t *testing.T) {
+		p := mustGetRRPolicy(t, map[string]interface{}{
+			"models": baseRRModels(),
+			"requestModel": map[string]interface{}{
+				"location":   "header",
+				"identifier": "x-model",
+			},
+		})
+		until := time.Now().Add(10 * time.Minute)
+		p.suspendedModels[suspensionKey("", "gpt-4")] = until
+		p.suspendedModels[suspensionKey("", "gpt-35")] = until
+		ctx := &policy.RequestHeaderContext{
+			SharedContext: rrSharedContext(),
+			Headers:       policy.NewHeaders(map[string][]string{"x-model": {"orig"}}),
+		}
+		assertFault(t, p.OnRequestHeaders(context.Background(), ctx, nil), 503,
+			`{"error": "All models are currently unavailable"}`, policy.FaultCodeUpstreamUnavailable, policy.FaultTypeRouting)
 	})
 }

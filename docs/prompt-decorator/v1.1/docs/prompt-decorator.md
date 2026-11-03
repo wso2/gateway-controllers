@@ -296,7 +296,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| The request body is empty or is not valid JSON | `500` | `960000` | `mediation` |
+| The request body is empty or is not valid JSON | `500` | `960001` | `validation` |
 | `jsonPath` does not resolve in the request body | `500` | `960000` | `mediation` |
 | The decoration does not fit the target: `text` is not set for a string target, or `messages` is not set for an array target | `500` | `960000` | `mediation` |
 | The array at `jsonPath` contains an element that is not a message object | `500` | `960000` | `mediation` |

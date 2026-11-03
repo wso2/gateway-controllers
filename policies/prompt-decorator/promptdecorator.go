@@ -292,14 +292,14 @@ func (p *PromptDecoratorPolicy) processRequestBody(reqCtx *policy.RequestContext
 
 	// Check for empty or nil content before unmarshaling
 	if reqCtx.Body == nil || len(content) == 0 {
-		return p.buildErrorResponse("Empty request body", nil)
+		return p.buildInvalidBodyResponse("Empty request body", nil)
 	}
 
 	// Parse JSON payload
 	var payloadData map[string]interface{}
 	if err := json.Unmarshal(content, &payloadData); err != nil {
 		slog.Debug("PromptDecorator: Error parsing JSON payload", "error", err)
-		return p.buildErrorResponse("Error parsing JSON payload", err)
+		return p.buildInvalidBodyResponse("Error parsing JSON payload", err)
 	}
 
 	// Extract value using JSONPath
@@ -418,6 +418,19 @@ func (p *PromptDecoratorPolicy) processRequestBody(reqCtx *policy.RequestContext
 }
 
 func (p *PromptDecoratorPolicy) buildErrorResponse(reason string, validationError error) policy.RequestAction {
+	return p.buildFaultResponse(reason, validationError,
+		policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Prompt decoration failed")
+}
+
+// buildInvalidBodyResponse refuses a request payload the policy could not read. That is
+// the caller's failure rather than the policy's, so it is declared as one; the client
+// response is the same as buildErrorResponse's.
+func (p *PromptDecoratorPolicy) buildInvalidBodyResponse(reason string, validationError error) policy.RequestAction {
+	return p.buildFaultResponse(reason, validationError,
+		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, "Invalid request body")
+}
+
+func (p *PromptDecoratorPolicy) buildFaultResponse(reason string, validationError error, code, faultType, message string) policy.RequestAction {
 	errorMessage := reason
 	if validationError != nil {
 		errorMessage = fmt.Sprintf("%s: %v", reason, validationError)
@@ -441,12 +454,12 @@ func (p *PromptDecoratorPolicy) buildErrorResponse(reason string, validationErro
 		Body:    bodyBytes,
 		IsFault: true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeMediationFailed,
-			Type:      policy.FaultTypeMediation,
+			Code:      code,
+			Type:      faultType,
 			Direction: policy.DirectionRequest,
-			Message:   "Prompt decoration failed",
-			// errorMessage can quote the caller's own payload, so it stays in
-			// Description, which the renderer withholds from the client body.
+			Message:   message,
+			// The body already returns errorMessage to the client; Description
+			// repeats it for fault policies and analytics.
 			Description: errorMessage,
 		},
 	}

@@ -718,34 +718,60 @@ func newRequestContextWithBody(body string) *policy.RequestContext {
 	}
 }
 
-// TestMediationFailureDeclaresFault covers the one rejection this policy makes: it could
-// not apply its own transformation, so the request is refused rather than forwarded
-// half-transformed.
-func TestMediationFailureDeclaresFault(t *testing.T) {
-	p := &PromptDecoratorPolicy{}
-	action := p.buildErrorResponse("Error parsing JSON payload", fmt.Errorf("unexpected token"))
+// TestRejectionsDeclareFault covers how this policy labels what it refuses: a request
+// body it cannot parse is the caller's failure, and a transformation it cannot apply is its
+// own. The client response is the same for both.
+func TestRejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action policy.RequestAction, wantMessage, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		wantBody, _ := json.Marshal(map[string]interface{}{"type": "PROMPT_DECORATOR_ERROR", "message": wantMessage})
+		if resp.StatusCode != 500 || resp.Headers["Content-Type"] != "application/json" || string(resp.Body) != string(wantBody) {
+			t.Fatalf("client response changed: status %d, headers %v, body %s", resp.StatusCode, resp.Headers, resp.Body)
+		}
+		if !resp.IsFault || resp.Fault == nil {
+			t.Fatalf("expected IsFault=true and Fault set")
+		}
+		if resp.Fault.Code != wantCode || resp.Fault.Type != wantType || resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("unexpected fault code/type/direction: %q/%q/%q", resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
+		}
+		if resp.Fault.Description != wantMessage {
+			t.Fatalf("expected Description %q, got %q", wantMessage, resp.Fault.Description)
+		}
+	}
 
-	resp, ok := action.(policy.ImmediateResponse)
-	if !ok {
-		t.Fatalf("expected ImmediateResponse, got %T", action)
-	}
-	if !resp.IsFault {
-		t.Fatalf("expected IsFault=true on a mediation failure")
-	}
-	if resp.Fault == nil {
-		t.Fatalf("expected Error to be populated")
-	}
-	if resp.Fault.Code != policy.FaultCodeMediationFailed {
-		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
-	}
-	if resp.Fault.Type != policy.FaultTypeMediation {
-		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
-	}
-	if resp.Fault.Direction != policy.DirectionRequest {
-		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
-	}
-	// The detail can quote the caller's own payload, so it stays out of the client body.
-	if resp.Fault.Description == "" {
-		t.Fatalf("expected Error.Description to carry the failure detail")
-	}
+	t.Run("request body is not JSON", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"text": "x",
+			},
+		})
+		body := `{"target":`
+		var parseErr error
+		var v map[string]interface{}
+		if parseErr = json.Unmarshal([]byte(body), &v); parseErr == nil {
+			t.Fatalf("expected the test body to be invalid JSON")
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), newRequestContextWithBody(body), nil),
+			"Error parsing JSON payload: "+parseErr.Error(), policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("request body is empty", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"text": "x",
+			},
+		})
+		assertFault(t, p.OnRequestBody(context.Background(), newRequestContextWithBody(""), nil),
+			"Empty request body", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("transformation failure", func(t *testing.T) {
+		p := &PromptDecoratorPolicy{}
+		assertFault(t, p.buildErrorResponse("Error updating JSONPath", fmt.Errorf("unexpected token")),
+			"Error updating JSONPath: unexpected token", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	})
 }

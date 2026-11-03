@@ -448,3 +448,43 @@ func TestErrResponseDirectionAndCode(t *testing.T) {
 		}
 	})
 }
+
+// TestOnRequestBody_RejectionsDeclareFault drives each request rejection through
+// OnRequestBody and checks the fault it declares, and that the client body is unchanged.
+func TestOnRequestBody_RejectionsDeclareFault(t *testing.T) {
+	cases := []struct {
+		name       string
+		body       *policy.Body
+		bodyPrefix string
+	}{
+		{"missing body", nil, `{"error":"Request body is empty."}`},
+		{"empty body", &policy.Body{Present: true}, `{"error":"Request body is empty."}`},
+		{"invalid JSON", &policy.Body{Present: true, Content: []byte(`{"messages":`)}, `{"error":"Invalid JSON in request body: `},
+		{"unresolvable model", &policy.Body{Present: true, Content: []byte(`{"model":42,"messages":[]}`)}, `{"error":"request field 'model' must be a string"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &TranslatorPolicy{params: PolicyParams{}}
+			action := p.OnRequestBody(context.Background(), &policy.RequestContext{
+				SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+				Body:          c.body,
+			}, nil)
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok || resp.StatusCode != 400 {
+				t.Fatalf("expected a 400 ImmediateResponse, got %#v", action)
+			}
+			if resp.Headers["Content-Type"] != "application/json" || !strings.HasPrefix(string(resp.Body), c.bodyPrefix) {
+				t.Fatalf("client response changed: headers %v, body %s", resp.Headers, resp.Body)
+			}
+			if !resp.IsFault || resp.Fault == nil {
+				t.Fatalf("expected IsFault=true and Fault set")
+			}
+			if resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+				resp.Fault.Type != policy.FaultTypeValidation ||
+				resp.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("unexpected fault code/type/direction: %q/%q/%q",
+					resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
+			}
+		})
+	}
+}

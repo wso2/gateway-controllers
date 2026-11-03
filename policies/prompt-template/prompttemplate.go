@@ -358,7 +358,7 @@ func (p *PromptTemplatePolicy) OnRequestBody(ctx context.Context, reqCtx *policy
 	// jsonPath configured: resolve template references in the extracted string only.
 	var payloadData map[string]interface{}
 	if err := json.Unmarshal(content, &payloadData); err != nil {
-		return p.buildErrorResponse("Error parsing JSON payload", err)
+		return p.buildInvalidBodyResponse("Error parsing JSON payload", err)
 	}
 
 	extractedValue, err := p.extractStringAtPath(content, p.params.JsonPath)
@@ -390,6 +390,19 @@ func (p *PromptTemplatePolicy) OnRequestBody(ctx context.Context, reqCtx *policy
 
 // buildV1ErrorResponse builds an error response for the v1alpha OnRequest method.
 func (p *PromptTemplatePolicy) buildErrorResponse(reason string, validationError error) policy.RequestAction {
+	return p.buildFaultResponse(reason, validationError,
+		policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Prompt template resolution failed")
+}
+
+// buildInvalidBodyResponse refuses a request payload the policy could not read. That is
+// the caller's failure rather than the policy's, so it is declared as one; the client
+// response is the same as buildErrorResponse's.
+func (p *PromptTemplatePolicy) buildInvalidBodyResponse(reason string, validationError error) policy.RequestAction {
+	return p.buildFaultResponse(reason, validationError,
+		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, "Invalid request body")
+}
+
+func (p *PromptTemplatePolicy) buildFaultResponse(reason string, validationError error, code, faultType, message string) policy.RequestAction {
 	errorMessage := reason
 	if validationError != nil {
 		errorMessage = fmt.Sprintf("%s: %v", reason, validationError)
@@ -410,12 +423,12 @@ func (p *PromptTemplatePolicy) buildErrorResponse(reason string, validationError
 		Body:    bodyBytes,
 		IsFault: true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeMediationFailed,
-			Type:      policy.FaultTypeMediation,
+			Code:      code,
+			Type:      faultType,
 			Direction: policy.DirectionRequest,
-			Message:   "Prompt template resolution failed",
-			// errorMessage can quote the caller's own payload, so it stays in
-			// Description, which the renderer withholds from the client body.
+			Message:   message,
+			// The body already returns errorMessage to the client; Description
+			// repeats it for fault policies and analytics.
 			Description: errorMessage,
 		},
 	}

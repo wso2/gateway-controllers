@@ -33,13 +33,18 @@ func TestRejectionsDeclareFault(t *testing.T) {
 		status   int
 		code     string
 		faultTyp string
+		body     string
 	}{
-		{"bad request", badRequest("request body must be a JSON object"), 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"bad request", badRequest("request body must be a JSON object"), 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
+			`{"error":"request body must be a JSON object"}`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if c.resp.StatusCode != c.status {
 				t.Fatalf("status = %d, want %d", c.resp.StatusCode, c.status)
+			}
+			if string(c.resp.Body) != c.body || c.resp.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("client response changed: headers %v, body %s", c.resp.Headers, c.resp.Body)
 			}
 			if !c.resp.IsFault || c.resp.Fault == nil {
 				t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", c.resp.IsFault, c.resp.Fault)

@@ -99,5 +99,5 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | No deployment can be resolved: the request's `model` is not a string or is blank, and none is configured | `400` | `960001` | `validation` |
 
 These faults set no `Description`: the fault's `Message` is the error text the body already
-carries, for example `Request body is empty.`, so nothing is held back from the client. The fault
-itself is passed to fault policies and analytics only, never to the client.
+carries, for example `request field 'model' must be a string`, so nothing is held back from the
+client. The fault itself is passed to fault policies and analytics only, never to the client.
