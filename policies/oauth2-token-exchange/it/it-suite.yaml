@@ -16,10 +16,8 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the oauth2-token-exchange policy. The gateway under test is built from this policy and
-# the policies the gateway controller requires (tests/it/common/suite), staged as the policy tree
-# that addPoliciesFrom names, with jwt-auth and mcp-auth, which the chain scenarios attach in front
-# of it (suite_test.go). Feature and overlay paths are relative to this directory.
+# The integration suite of the oauth2-token-exchange policy. The chain scenarios attach jwt-auth and
+# mcp-auth in front of it (suite_test.go). Feature and overlay paths are relative to this directory.
 
 suite: oauth2-token-exchange
 
@@ -41,7 +39,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
         overlay: overlays/gateway.toml
       - name: testbench
     runners:

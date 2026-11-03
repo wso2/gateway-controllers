@@ -25,6 +25,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/wso2/api-platform/tests/framework/core/catalog/testbench"
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 )
 
@@ -32,56 +33,6 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
-}
-
-func TestStagePolicyCopiesTheWholePolicyExceptItsIntegrationTests(t *testing.T) {
-	repo := t.TempDir()
-	policy := filepath.Join(repo, "policies", "sample-policy")
-	writeFile(t, filepath.Join(policy, "policy-definition.yaml"), "name: sample-policy\n")
-	writeFile(t, filepath.Join(policy, "go.mod"), "module sample\n")
-	writeFile(t, filepath.Join(policy, "internal", "logic.go"), "package internal\n")
-	writeFile(t, filepath.Join(policy, "it", "it-suite.yaml"), "suite: sample\n")
-	writeFile(t, filepath.Join(policy, "it", "go.mod"), "module sample/it\n")
-	writeFile(t, filepath.Join(repo, "policies", "other-policy", "policy-definition.yaml"), "name: other-policy\n")
-	workspace := t.TempDir()
-
-	require.NoError(t, StagePolicy(filepath.Join(policy, "it"), workspace))
-
-	staged := filepath.Join(workspace, "policies", "sample-policy")
-	require.FileExists(t, filepath.Join(staged, "policy-definition.yaml"))
-	require.FileExists(t, filepath.Join(staged, "go.mod"))
-	require.FileExists(t, filepath.Join(staged, "internal", "logic.go"))
-	require.NoDirExists(t, filepath.Join(staged, "it"))
-
-	entries, err := os.ReadDir(filepath.Join(workspace, "policies"))
-	require.NoError(t, err)
-	require.Len(t, entries, 1, "the staged tree holds only this policy")
-}
-
-func TestStagePolicyAddsTheCompanionPolicies(t *testing.T) {
-	repo := t.TempDir()
-	for _, name := range []string{"sample-policy", "set-headers", "respond"} {
-		writeFile(t, filepath.Join(repo, "policies", name, "policy-definition.yaml"), "name: "+name+"\n")
-		writeFile(t, filepath.Join(repo, "policies", name, "it", "it-suite.yaml"), "suite: "+name+"\n")
-	}
-	writeFile(t, filepath.Join(repo, "policies", "unused", "policy-definition.yaml"), "name: unused\n")
-	workspace := t.TempDir()
-
-	// A companion named twice, or the policy itself, is staged once.
-	require.NoError(t, StagePolicy(filepath.Join(repo, "policies", "sample-policy", "it"), workspace,
-		"set-headers", "respond", "set-headers", "sample-policy"))
-
-	entries, err := os.ReadDir(filepath.Join(workspace, "policies"))
-	require.NoError(t, err)
-	var names []string
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	require.Equal(t, []string{"respond", "sample-policy", "set-headers"}, names)
-	require.NoDirExists(t, filepath.Join(workspace, "policies", "respond", "it"))
-
-	err = StagePolicy(filepath.Join(repo, "policies", "sample-policy", "it"), t.TempDir(), "missing")
-	require.ErrorContains(t, err, "not a policy folder")
 }
 
 func TestStageOverlaysCopiesTheSuiteOverlaysToTheWorkspaceRoot(t *testing.T) {
@@ -116,7 +67,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, sqlserver]
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: gated
@@ -146,70 +96,61 @@ func TestExcludedEverywhereLeavesOtherProblemsToTheRunner(t *testing.T) {
 		"a selection that names no block is an error for the runner to report")
 }
 
-func TestPinnedTestbenchImageFollowsTheFrameworkVersionTheModulePins(t *testing.T) {
-	const required = "module x\n\nrequire (\n\tgithub.com/cucumber/godog v0.16.0\n\tgithub.com/wso2/api-platform/tests/framework v0.1.0\n)\n"
+func TestPinnedTestbenchImageFollowsTheFrameworkVersionTheWorkspaceResolves(t *testing.T) {
 	tests := []struct {
 		name      string
-		goMod     string
+		listing   string
 		want      string
 		wantFound bool
 	}{
-		{name: "a released framework", goMod: required,
-			want: "ghcr.io/wso2/api-platform/testbench:0.1.0", wantFound: true},
-		{name: "a single-line require", goMod: "require github.com/wso2/api-platform/tests/framework v1.20.3\n",
-			want: "ghcr.io/wso2/api-platform/testbench:1.20.3", wantFound: true},
+		{name: "a released framework",
+			listing: `{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.1.0"}`,
+			want:    "ghcr.io/wso2/api-platform/testbench:0.1.0", wantFound: true},
+		{name: "a version replaced by another release of the framework",
+			listing: `{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.4.2",` +
+				`"Replace":{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.4.1"}}`,
+			want: "ghcr.io/wso2/api-platform/testbench:0.4.1", wantFound: true},
 		{name: "replaced by a local checkout",
-			goMod: required + "replace github.com/wso2/api-platform/tests/framework => ../../../api-platform/tests/framework\n"},
-		{name: "replaced for one version",
-			goMod: required + "replace github.com/wso2/api-platform/tests/framework v0.1.0 => ../framework\n"},
-		{name: "replaced inside a replace block",
-			goMod: required + "replace (\n\tgithub.com/wso2/gateway-controllers/tests/it => ../../../tests/it\n\tgithub.com/wso2/api-platform/tests/framework => ../framework\n)\n"},
-		{name: "replaced for one version inside a replace block",
-			goMod: required + "replace (\n\tgithub.com/wso2/api-platform/tests/framework v0.1.0 => ../framework\n)\n"},
-		{name: "another module replaced",
-			goMod: required + "replace github.com/wso2/gateway-controllers/tests/it => ../../../tests/it\n",
-			want:  "ghcr.io/wso2/api-platform/testbench:0.1.0", wantFound: true},
-		{name: "a commented-out replace",
-			goMod: required + "// replace github.com/wso2/api-platform/tests/framework => ../framework\n",
-			want:  "ghcr.io/wso2/api-platform/testbench:0.1.0", wantFound: true},
+			listing: `{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.1.0",` +
+				`"Replace":{"Path":"../framework","Dir":"/src/framework"}}`},
+		{name: "replaced by another module",
+			listing: `{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.1.0",` +
+				`"Replace":{"Path":"github.com/fork/framework","Version":"v0.1.0"}}`},
 		{name: "an untagged revision",
-			goMod: "require github.com/wso2/api-platform/tests/framework v0.1.1-0.20261014000000-abcdef123456\n"},
-		{name: "a pre-release", goMod: "require github.com/wso2/api-platform/tests/framework v0.2.0-rc1\n"},
-		{name: "another module of the repository",
-			goMod: "require github.com/wso2/api-platform/sdk/core v0.4.3\n"},
-		{name: "no framework", goMod: "module x\n"},
+			listing: `{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.1.1-0.20261014000000-abcdef123456"}`},
+		{name: "a pre-release",
+			listing: `{"Path":"github.com/wso2/api-platform/tests/framework","Version":"v0.2.0-rc1"}`},
+		{name: "no version", listing: `{"Path":"github.com/wso2/api-platform/tests/framework"}`},
+		{name: "output that is not a module", listing: "go: not a module"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			image, found := pinnedTestbenchImage([]byte(tt.goMod))
+			image, found := pinnedTestbenchImage([]byte(tt.listing))
 			require.Equal(t, tt.wantFound, found)
 			require.Equal(t, tt.want, image)
 		})
 	}
 }
 
+func TestPinTestbenchImageNamesTheReleaseTheModuleResolves(t *testing.T) {
+	t.Setenv(testbench.EnvImageTestbench, "")
+
+	pinTestbenchImage()
+
+	require.Regexp(t, `^ghcr\.io/wso2/api-platform/testbench:\d+\.\d+\.\d+$`, os.Getenv(testbench.EnvImageTestbench))
+}
+
+func TestPinTestbenchImageLeavesAnImageTheEnvironmentNames(t *testing.T) {
+	t.Setenv(testbench.EnvImageTestbench, "example.com/testbench:custom")
+
+	pinTestbenchImage()
+
+	require.Equal(t, "example.com/testbench:custom", os.Getenv(testbench.EnvImageTestbench))
+}
+
 func TestControllerPoliciesAreTheOnesTheControllerRequires(t *testing.T) {
 	require.ElementsMatch(t,
 		[]string{"api-key-auth", "host-rewrite", "oauth2-generator", "respond", "set-headers"}, ControllerPolicies)
-}
-
-func TestStagePolicyRejectsWhatIsNotAPolicyIntegrationFolder(t *testing.T) {
-	repo := t.TempDir()
-	policy := filepath.Join(repo, "policies", "sample-policy")
-	writeFile(t, filepath.Join(policy, "it", "it-suite.yaml"), "suite: sample\n")
-
-	require.ErrorContains(t, StagePolicy(filepath.Join(policy, "it"), t.TempDir()), "not a policy folder")
-	require.ErrorContains(t, StagePolicy(policy, t.TempDir()), "not a policy's it folder")
-}
-
-func TestStagePolicyRefusesSymlinks(t *testing.T) {
-	repo := t.TempDir()
-	policy := filepath.Join(repo, "policies", "sample-policy")
-	writeFile(t, filepath.Join(policy, "policy-definition.yaml"), "name: sample-policy\n")
-	writeFile(t, filepath.Join(policy, "it", "it-suite.yaml"), "suite: sample\n")
-	require.NoError(t, os.Symlink(filepath.Join(policy, "policy-definition.yaml"), filepath.Join(policy, "link.yaml")))
-
-	require.ErrorContains(t, StagePolicy(filepath.Join(policy, "it"), t.TempDir()), "symlink")
 }
 
 func TestStagePlatformAPIStagesTheSharedFilesOnlyForASuiteThatRunsPlatformAPI(t *testing.T) {

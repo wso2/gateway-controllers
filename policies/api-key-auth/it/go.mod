@@ -5,7 +5,6 @@ go 1.26.5
 require (
 	github.com/cucumber/godog v0.16.0
 	github.com/stretchr/testify v1.12.1
-	github.com/wso2/api-platform/tests/framework v0.3.1
 	github.com/wso2/gateway-controllers/tests/it v0.0.0
 )
 

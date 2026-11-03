@@ -1,0 +1,11 @@
+{
+  "name": "aws-bedrock-guardrail",
+  "displayName": "AWS Bedrock Guardrail",
+  "version": "1.3",
+  "provider": "WSO2",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request or response body content against AWS Bedrock Guardrails.\nSupports content filtering, topic detection, word filtering, and PII detection/masking.\nSupports per-attachment guardrail selection (region/guardrailID/guardrailVersion) alongside gateway-wide defaults.\nSupports per-attachment AWS identity (awsAuth) so a guardrail can live in a different AWS account, with four credential modes: IRSA, STS AssumeRole, default credential chain, or static access keys.\nSupports gateway-level allowlists restricting which regions, guardrails, roles, and credential modes an attachment may select.\nSupports JSONPath extraction to validate specific fields within JSON payloads.\nSupports separate configuration for request and response phases."
+}

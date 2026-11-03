@@ -1,5 +1,5 @@
 name: backend-jwt
-version: v1.0.1
+version: v1.1.0
 description: |
   Generates a signed JWT and injects it into the upstream request header. Can be used
   standalone or after an authentication policy (e.g. jwt-auth, basic-auth, api-key-auth).
@@ -9,6 +9,13 @@ description: |
   system claims (iss, iat, exp) and non-auth custom claims are included. Backend services
   can verify the JWT using the corresponding public key without needing access to the
   original client credential.
+
+  Signing key: when gateway signing keys are configured ([signing] in the gateway
+  configuration), the token is signed with the gateway's active key and carries its kid, so
+  backends can verify it from the gateway JWKS (/.well-known/jwks). In that case the
+  policy-level signingKey and algorithm are ignored and a warning is logged per deployment.
+  Without gateway signing keys, the policy-level signingKey and algorithm sign the token
+  exactly as before, with no kid.
 
 parameters:
   type: object
@@ -91,8 +98,10 @@ systemParameters:
     signingKey:
       type: object
       description: >-
-        Private key used to sign the generated JWT. Specify exactly one of 'inline'
-        (PEM-encoded key string) or 'path' (path to a PEM key file).
+        Private key used to sign the generated JWT when no gateway signing keys are
+        configured. Specify exactly one of 'inline' (PEM-encoded key string) or 'path'
+        (path to a PEM key file). Ignored, and not required, when gateway signing keys
+        ([signing]) are configured.
       additionalProperties: false
       "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.signingkey}"
       oneOf:
@@ -113,8 +122,10 @@ systemParameters:
     algorithm:
       type: string
       description: >-
-        JWT signing algorithm. Must match the type of the configured private key:
-        SHA256withRSA for RSA keys, ES256 for ECDSA keys, or NONE for unsigned tokens.
+        JWT signing algorithm for the policy-level signingKey. Must match the type of the
+        configured private key: SHA256withRSA for RSA keys, ES256 for ECDSA keys, or NONE for
+        unsigned tokens. Ignored when gateway signing keys ([signing]) are configured: the
+        gateway's active key decides the algorithm.
       default: SHA256withRSA
       "wso2/defaultValue": "${config.policy_configurations.backendjwt_v1.algorithm}"
       enum: ["SHA256withRSA", "ES256", "NONE"]

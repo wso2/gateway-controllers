@@ -36,13 +36,15 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: api-key-auth
         tags: "gateway-version>=1.1.0"
         features:
           - features/api_key_auth.feature
+      - name: api-key-auth-error-compatibility
+        features:
+          - features/api_key_auth_error_compatibility.feature
 
   - name: api-key-auth-restart
     parallel: 1
@@ -51,7 +53,6 @@ blocks:
         overlay: overlays/policy-engine-message-timeout.toml
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: api-key-auth-restart
@@ -69,7 +70,6 @@ blocks:
         dependsOn: [platform-api]
         replicas: 2
         db: sqlite
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: api-key-auth-multigateway

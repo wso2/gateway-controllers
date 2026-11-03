@@ -140,3 +140,27 @@ Feature: OpenAI to Azure OpenAI transformer
     Then the response should be successful
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+
+  # The response must match the expected error response recorded from the policy before a
+  # change (resources/expected-error-responses), so a change a client could observe fails.
+  Scenario: openai-to-azure-openai-transformer rejects a request that names no deployment anywhere
+    Given I generate a unique value from "compat-oz-nomodel" and store it as "apiName"
+    And I generate a unique API version from "compat-oz-nomodel" and store it as "apiVersion"
+    And I generate a unique API context from "/compat-oz-nomodel" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"openai-to-azure-openai-transformer","version":"v0","params":{"apiVersion":"2024-10-21"}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" with body:
+      """
+      {"messages":[{"role":"user","content":"Hello"}]}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "openai-to-azure-openai-transformer-model-missing"

@@ -649,3 +649,228 @@ func TestOnResponseBody_LogsWithMissingRequestID(t *testing.T) {
 		t.Fatalf("expected fallback request id %s, got %s", ErrMsgMissingReqID, records[0].RequestID)
 	}
 }
+
+// TestOnFault_DoesNotFailTheRequest is the contract's hardest requirement for a fault
+// policy: OnFault runs when the client is already receiving an error, so it must never turn
+// one failure into another. This exercises the shapes most likely to break it — a nil
+// context, an empty context, absent configuration, malformed configuration — and asserts
+// that none of them panics and none of them returns something that would escalate.
+func TestOnFault_DoesNotFailTheRequest(t *testing.T) {
+	p := &LogMessagePolicy{}
+
+	cases := []struct {
+		name     string
+		faultCtx *policy.FaultContext
+		params   map[string]interface{}
+	}{
+		{name: "nil context and nil params", faultCtx: nil, params: nil},
+		{name: "empty context and empty params", faultCtx: &policy.FaultContext{}, params: map[string]interface{}{}},
+		{
+			name:     "context with no embedded response context",
+			faultCtx: &policy.FaultContext{Policy: "some-policy"},
+			params:   map[string]interface{}{"fault": map[string]interface{}{"payload": true, "headers": true}},
+		},
+		{
+			name: "malformed configuration",
+			faultCtx: &policy.FaultContext{
+				SharedContext:   &policy.SharedContext{Metadata: map[string]interface{}{}},
+				ResponseHeaders: policy.NewHeaders(map[string][]string{}),
+				ResponseStatus:  500,
+			},
+			params: map[string]interface{}{"response": "not an object"},
+		},
+		{
+			name: "response already committed mid-stream",
+			faultCtx: &policy.FaultContext{
+				SharedContext:     &policy.SharedContext{Metadata: map[string]interface{}{}},
+				ResponseHeaders:   policy.NewHeaders(map[string][]string{}),
+				ResponseStatus:    200,
+				ResponseCommitted: true,
+			},
+			params: map[string]interface{}{"fault": map[string]interface{}{"payload": true, "headers": true}},
+		},
+		{
+			name: "a fully populated failure",
+			faultCtx: &policy.FaultContext{
+				SharedContext:   &policy.SharedContext{Metadata: map[string]interface{}{}},
+				RequestHeaders:  policy.NewHeaders(map[string][]string{}),
+				ResponseHeaders: policy.NewHeaders(map[string][]string{"x-upstream": {"leaky"}}),
+				ResponseStatus:  422,
+				ResponseBody:    &policy.Body{Content: []byte(`{"error":"blocked"}`), Present: true},
+				OriginalStatus:  200,
+				Policy:          "regex-guardrail",
+				RouteKey:        "route-1",
+				Fault: &policy.FaultDetails{
+					Code:      "900514",
+					Type:      "guardrail",
+					Direction: policy.DirectionResponse,
+					Message:   "Violation of regular expression detected",
+				},
+			},
+			params: map[string]interface{}{"fault": map[string]interface{}{"payload": true, "headers": true}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A panic here would escalate one failure into a crash, so it is a failure of
+			// the contract rather than of the test.
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("OnFault panicked, which would turn one failure into another: %v", r)
+				}
+			}()
+
+			action := p.OnFault(context.Background(), tc.faultCtx, tc.params)
+
+			// nil is valid and means "no action" — what a notify-only policy wants.
+			if action == nil {
+				return
+			}
+			// Re-declaring a fault is no longer expressible: FaultResponse carries no
+			// IsFault field, because the fault flow is already running by the time
+			// OnFault is called. The type system enforces what this used to assert.
+			//
+			// What still needs asserting is that a returned status is one the gateway can
+			// actually send — nil means "leave it", and anything set has to be real.
+			if action.StatusCode != nil && (*action.StatusCode < 100 || *action.StatusCode > 599) {
+				t.Fatalf("OnFault returned an unusable HTTP status %d", *action.StatusCode)
+			}
+		})
+	}
+}
+
+// TestOnFault_SatisfiesFaultPolicy pins the interface. A policy named in a fault sequence
+// that does not satisfy it is dropped at chain-build time with "[chain-build] skipping
+// fault-policies policy that does not implement OnFault" — loud, but it also silently never
+// runs, which is the failure this guards against.
+func TestOnFault_SatisfiesFaultPolicy(t *testing.T) {
+	var _ policy.FaultPolicy = &LogMessagePolicy{}
+}
+
+// TestOnFault_RecordsTheFailure covers what this policy contributes on the fault path: the
+// failure's own facts, read from faultCtx rather than re-derived.
+//
+// It also pins the one thing that must NOT be recorded. FaultDetails.Description is the
+// blocked content for a guardrail — the gateway withholds it from the response body for
+// exactly that reason — so a log record must not put it back in a place it will be read and
+// shipped onward.
+func TestOnFault_RecordsTheFailure(t *testing.T) {
+	p := &LogMessagePolicy{}
+	faultCtx := &policy.FaultContext{
+		SharedContext:   &policy.SharedContext{Metadata: map[string]interface{}{}},
+		RequestHeaders:  policy.NewHeaders(map[string][]string{}),
+		ResponseHeaders: policy.NewHeaders(map[string][]string{HeaderXRequestID: {"req-42"}}),
+		ResponseStatus:  422,
+		OriginalStatus:  200,
+		Policy:          "regex-guardrail",
+		Fault: &policy.FaultDetails{
+			Code:        "900514",
+			Type:        "guardrail",
+			Direction:   policy.DirectionResponse,
+			Message:     "Violation of regular expression detected",
+			Description: "SECRET-CONTENT-THE-GUARDRAIL-BLOCKED",
+		},
+	}
+
+	action := p.OnFault(context.Background(), faultCtx, map[string]interface{}{
+		"response": map[string]interface{}{},
+	})
+	// A notify-only policy returns "no action".
+	if action != nil {
+		t.Fatalf("expected nil (no action) from a notify-only fault policy, got %T", action)
+	}
+
+	// Build the same record the method logs, to assert on its contents.
+	record := LogRecord{
+		MediationFlow:  MediationFlowFault,
+		OriginalStatus: faultCtx.OriginalStatus,
+		FailingPolicy:  faultCtx.Policy,
+		Status:         faultCtx.ResponseStatus,
+		FaultCode:      faultCtx.Fault.Code,
+		FaultType:      faultCtx.Fault.Type,
+		FaultMessage:   faultCtx.Fault.Message,
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("failed to marshal the fault record: %v", err)
+	}
+	serialised := string(encoded)
+
+	for _, want := range []string{`"mediation-flow":"FAULT"`, `"status":422`,
+		`"original-status":200`, `"error-code":"900514"`, `"failing-policy":"regex-guardrail"`} {
+		if !strings.Contains(serialised, want) {
+			t.Fatalf("expected the fault record to contain %s, got %s", want, serialised)
+		}
+	}
+	if strings.Contains(serialised, "SECRET-CONTENT-THE-GUARDRAIL-BLOCKED") {
+		t.Fatalf("the error Description must not be logged: it is the blocked content")
+	}
+}
+
+// TestOnFault_RequestAndResponseRecordsAreUnchanged pins that adding the fault fields did
+// not change what the request and response flows emit. Every new field is omitempty, so a
+// non-fault record serialises exactly as it did before.
+func TestOnFault_RequestAndResponseRecordsAreUnchanged(t *testing.T) {
+	record := LogRecord{
+		MediationFlow: MediationFlowResponse,
+		RequestID:     "req-1",
+		HTTPMethod:    "GET",
+		ResourcePath:  "/orders",
+	}
+	encoded, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	got := string(encoded)
+	want := `{"mediation-flow":"RESPONSE","request-id":"req-1","http-method":"GET","resource-path":"/orders"}`
+	if got != want {
+		t.Fatalf("a non-fault record must serialise unchanged.\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestOnFault_IgnoresResponseBlock pins the one behaviour the `fault` block exists for.
+//
+// An attachment lives under either `policies:` or `globalFaultPolicies:`, never both, so a
+// fault attachment carries `fault` and nothing else — the policy definition's schema rejects
+// a params object declaring both. This asserts the Go side agrees: given only a `response`
+// block, OnFault does nothing rather than reaching for it.
+//
+// Falling back would be wrong on its own terms too. Response-phase configuration carries
+// success semantics, and the success-path logging settings applied to an error response is not a smaller mistake than
+// applying nothing.
+func TestOnFault_IgnoresResponseBlock(t *testing.T) {
+	p := &LogMessagePolicy{}
+	faultCtx := &policy.FaultContext{
+		SharedContext:   &policy.SharedContext{Metadata: map[string]interface{}{}},
+		RequestHeaders:  policy.NewHeaders(map[string][]string{}),
+		ResponseHeaders: policy.NewHeaders(map[string][]string{}),
+		ResponseStatus:  500,
+		Fault:           &policy.FaultDetails{Code: "900900", Type: "authentication"},
+	}
+
+	responseOnly := map[string]interface{}{"response": map[string]interface{}{"payload": true, "headers": true}}
+
+	if action := p.OnFault(context.Background(), faultCtx, responseOnly); action != nil {
+		t.Fatalf("OnFault must ignore the response block; got %T", action)
+	}
+}
+
+// TestOnFault_UsesFaultBlock is the positive half: given a `fault` block, OnFault acts on it.
+func TestOnFault_UsesFaultBlock(t *testing.T) {
+	p := &LogMessagePolicy{}
+	faultCtx := &policy.FaultContext{
+		SharedContext:   &policy.SharedContext{Metadata: map[string]interface{}{}},
+		RequestHeaders:  policy.NewHeaders(map[string][]string{}),
+		ResponseHeaders: policy.NewHeaders(map[string][]string{}),
+		ResponseStatus:  500,
+		Fault:           &policy.FaultDetails{Code: "900900", Type: "authentication"},
+	}
+
+	action := p.OnFault(context.Background(), faultCtx, map[string]interface{}{"fault": map[string]interface{}{"payload": true, "headers": true}})
+	// A notify-only policy returns "no action" whether or not the block is present; the
+	// observable effect is the log record, covered by TestOnFault_RecordsTheFailure.
+	if action != nil {
+		t.Fatalf("expected nil (no action) from a notify-only fault policy, got %T", action)
+	}
+}

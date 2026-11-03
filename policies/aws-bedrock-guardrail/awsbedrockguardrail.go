@@ -25,6 +25,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -125,11 +126,19 @@ type AWSBedrockGuardrailPolicy struct {
 }
 
 type AWSBedrockGuardrailPolicyParams struct {
-	Enabled            bool
-	JsonPath           string
-	RedactPII          bool
-	PassthroughOnError bool
-	ShowAssessment     bool
+	Enabled               bool
+	JsonPath              string
+	RedactPII             bool
+	PassthroughOnError    bool
+	ShowAssessment        bool
+	ApplicableStatusCodes []statusCodeRange
+}
+
+// statusCodeRange is an inclusive range of HTTP status codes. A single code is
+// a range whose min and max are equal.
+type statusCodeRange struct {
+	min int
+	max int
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -304,7 +313,76 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		}
 	}
 
+	// Extract optional applicableStatusCodes parameter (response phase only)
+	if applicableStatusCodesRaw, ok := params["applicableStatusCodes"]; ok && isResponse {
+		applicableStatusCodes, ok := applicableStatusCodesRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'applicableStatusCodes' must be a string")
+		}
+		if strings.TrimSpace(applicableStatusCodes) != "" {
+			ranges, err := parseStatusCodes(applicableStatusCodes)
+			if err != nil {
+				return result, fmt.Errorf("invalid 'applicableStatusCodes': %w", err)
+			}
+			result.ApplicableStatusCodes = ranges
+		}
+	}
+
 	return result, nil
+}
+
+// parseStatusCodes parses a comma-separated list of HTTP status codes and
+// inclusive ranges, such as "200-299,401,403".
+func parseStatusCodes(value string) ([]statusCodeRange, error) {
+	var ranges []statusCodeRange
+	for _, entry := range strings.Split(value, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			return nil, fmt.Errorf("empty entry in %q", value)
+		}
+
+		start, end, isRange := strings.Cut(entry, "-")
+		minCode, err := parseStatusCode(start)
+		if err != nil {
+			return nil, err
+		}
+		maxCode := minCode
+		if isRange {
+			if maxCode, err = parseStatusCode(end); err != nil {
+				return nil, err
+			}
+			if minCode > maxCode {
+				return nil, fmt.Errorf("range %q starts after it ends", entry)
+			}
+		}
+		ranges = append(ranges, statusCodeRange{min: minCode, max: maxCode})
+	}
+	return ranges, nil
+}
+
+// parseStatusCode parses a single HTTP status code between 100 and 599.
+func parseStatusCode(value string) (int, error) {
+	value = strings.TrimSpace(value)
+	code, err := strconv.Atoi(value)
+	if err != nil || code < 100 || code > 599 {
+		return 0, fmt.Errorf("%q is not a status code between 100 and 599", value)
+	}
+	return code, nil
+}
+
+// shouldValidateStatus reports whether a response with the given upstream
+// status goes through the guardrail. Every response is validated when no status
+// codes are configured, and 0 means the status is unknown, so it is validated.
+func (params AWSBedrockGuardrailPolicyParams) shouldValidateStatus(status int) bool {
+	if len(params.ApplicableStatusCodes) == 0 || status == 0 {
+		return true
+	}
+	for _, r := range params.ApplicableStatusCodes {
+		if status >= r.min && status <= r.max {
+			return true
+		}
+	}
+	return false
 }
 
 // getStringParam safely extracts a string parameter
@@ -1245,6 +1323,10 @@ func (p *AWSBedrockGuardrailPolicy) OnRequestBody(ctx context.Context, reqCtx *p
 // OnResponseBody validates response body using AWS Bedrock Guardrail.
 func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx *policy.ResponseContext, _ map[string]interface{}) policy.ResponseAction {
 	if !p.hasResponseParams || !p.responseParams.Enabled {
+		return policy.DownstreamResponseModifications{}
+	}
+	if !p.responseParams.shouldValidateStatus(respCtx.ResponseStatus) {
+		slog.Debug("AWSBedrockGuardrail: Response status not configured for validation, skipping", "status", respCtx.ResponseStatus)
 		return policy.DownstreamResponseModifications{}
 	}
 
