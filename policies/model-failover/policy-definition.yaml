@@ -22,6 +22,14 @@ description: |
   operation, that ranking is traversed first and this chain follows as a last-resort tail. See
   contracts/target-preference-list.md.
 
+  Health is learned per gateway instance and never shared. Each instance watches only the requests
+  it serves, so behind a load balancer with N instances a failing member can absorb up to N times
+  suspendAfterFailures before every instance has suspended it — with the default of 1 and four
+  instances, four failed requests rather than one. Suspension windows and their escalation are
+  per instance too, so the same member can be suspended on one instance and still be taking probe
+  traffic on another. Nothing is published between instances and no setting changes this; raising
+  suspendAfterFailures multiplies the total, it does not coordinate it.
+
   Known limit — a member whose host does not resolve is suspended but never failed over. The proxy
   answers such a request locally, before any upstream request exists, and a local answer is not
   retriable — so the chain stops there and the client receives the error. The member IS recorded as
