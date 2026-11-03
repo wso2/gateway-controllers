@@ -77,6 +77,26 @@ func TestFault_WithheldEventStreamResultIsAFault(t *testing.T) {
 	}
 }
 
+func TestFault_CustomQuestionWithheldIsAGuardrailFault(t *testing.T) {
+	jev := newMockJev(t, func(w http.ResponseWriter, _ int32) {
+		_, _ = w.Write([]byte(`{"answers":{"tone":{"type":"choice","choice":"hostile","probabilities":{"friendly":0.1,"hostile":0.9}}}}`))
+	})
+	p := newPolicy(t, jev.server.URL, map[string]interface{}{"questions": []interface{}{
+		map[string]interface{}{"key": "tone", "type": "choice", "instructions": "What is the tone of `result`?",
+			"criteria": []interface{}{"friendly", "hostile"}, "blockOn": []interface{}{"hostile"}, "threshold": 0.8},
+	}})
+	mods := mustModifications(t, p.OnResponseBody(context.Background(), jsonResponse(fetchCall, benignResult), nil))
+	if !mods.IsFault || mods.Fault == nil {
+		t.Fatalf("IsFault=%v fault=%+v", mods.IsFault, mods.Fault)
+	}
+	if f := mods.Fault; f.Code != policy.GuardrailCodeIntervened || f.Type != policy.FaultTypeGuardrail || f.Direction != policy.DirectionResponse {
+		t.Fatalf("fault = %+v", f)
+	}
+	if mods.StatusCode != nil {
+		t.Fatalf("status changed to %d, want it left unchanged", *mods.StatusCode)
+	}
+}
+
 func TestFault_CheckThatCouldNotRunIsTheGatewaysFailure(t *testing.T) {
 	failing := func(w http.ResponseWriter, _ int32) { w.WriteHeader(http.StatusInternalServerError) }
 	closed := map[string]interface{}{"passthroughOnError": false}

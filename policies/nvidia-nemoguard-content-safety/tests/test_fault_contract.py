@@ -80,6 +80,13 @@ class FaultContractTest(unittest.TestCase):
         self.assertEqual("906004", result.fault.code)
         self.assertEqual("Response", result.fault.direction)
 
+        base.FakeRequests.reset(response=base.nemoguard_response(
+            "safe", response_safety="unsafe", categories="Violence"))
+        ctx = base.response_context(response_payload=RESPONSE, request_payload=REQUEST)
+        without = make(base.policy).on_response_body(None, ctx, {"response": {"enabled": True}})
+        self.assertEqual(without.body, result.body)
+        self.assertEqual(without.headers, result.headers)
+
     def test_service_unavailable_is_the_gateways_failure(self) -> None:
         base.FakeRequests.reset(error=ConnectionError("Connection refused"))
         result = make(policy).on_request_body(None, base.request_context(REQUEST), {})
@@ -100,6 +107,12 @@ class FaultContractTest(unittest.TestCase):
         self.assertEqual("960000", result.fault.code)
         self.assertEqual("mediation", result.fault.type)
         self.assertEqual("Response", result.fault.direction)
+
+        base.FakeRequests.reset(error=ConnectionError("Connection refused"))
+        ctx = base.response_context(response_payload=RESPONSE, request_payload=REQUEST)
+        without = make(base.policy).on_response_body(None, ctx, {"response": {"enabled": True}})
+        self.assertEqual(without.body, result.body)
+        self.assertEqual(without.headers, result.headers)
 
     def test_client_body_is_unchanged_by_the_contract(self) -> None:
         for params in ({}, {"request": {"showAssessment": True}}):
