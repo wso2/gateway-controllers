@@ -120,6 +120,8 @@ switchyard_timeout = "1s"
 
 Profiles live in the server's TOML file and contain no real models. Each profile is a route whose targets are named `efficient` and `capable`; the policy maps those names to its own model pool. Targets use a placeholder client because the decision endpoint never calls them.
 
+This differs from Switchyard's own examples, where targets are real models that the server calls. Here the server only decides, and the real models go in the policy's `modelPool`. Name each route's two targets `efficient` and `capable`, and give them those same ids, as in `[targets.efficient]` with `id = "efficient"`. A target with any other name, such as a model id, is reported as `invalid_decision`, and every request takes the fallback.
+
 Two profiles cover most traffic: one for tool-using agents, decided by tool signals alone, and one for chat, where a judge decides the turns the signals cannot.
 
 ```toml
