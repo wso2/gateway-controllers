@@ -167,6 +167,7 @@ type cachedVerdict struct {
 	claims    jwt.MapClaims
 	scopes    []string
 	reason    string
+	code      string // the live failure's error code, so a cached verdict reports the same one
 	expiresAt time.Time
 }
 
@@ -2246,7 +2247,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	keyManagersRaw, ok := params["keyManagers"]
 	if !ok {
 		slog.Debug("JWT Auth Policy: Key managers not configured in params")
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "key managers not configured")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "key managers not configured", policy.FaultCodeAuthGeneral, policy.FaultTypeAuthentication)
 	}
 
 	userIssuers := getStringArrayParam(params, "issuers", []string{})
@@ -2256,12 +2257,12 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	scopeConstraints, scopeErr := resolveScopeConstraintsCached(params)
 	if scopeErr != nil {
 		slog.Warn("JWT Auth Policy: invalid 'scopes' configuration; denying request", "error", scopeErr)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid scopes configuration")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid scopes configuration", policy.FaultCodeAuthGeneral, policy.FaultTypeAuthentication)
 	}
 	claimConstraints, claimErr := resolveClaimConstraintsCached(params)
 	if claimErr != nil {
 		slog.Warn("JWT Auth Policy: invalid 'claims' configuration; denying request", "error", claimErr)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid claims configuration")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid claims configuration", policy.FaultCodeAuthGeneral, policy.FaultTypeAuthentication)
 	}
 	userClaimMappings := getStringMapParam(params, "claimMappings", map[string]string{})
 	userIdClaim := getStringParam(params, "userIdClaim", "sub")
@@ -2301,7 +2302,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 				"headerName", headerName,
 			)
 		}
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "missing authorization header")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "missing authorization header", policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
 	}
 
 	authHeader := authHeaders[0]
@@ -2319,7 +2320,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 				"authHeaderScheme", authHeaderScheme,
 			)
 		}
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid authorization header format")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid authorization header format", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	if debugEnabled() {
@@ -2356,7 +2357,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 					"expiresAt", verdict.expiresAt,
 				)
 			}
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, verdict.reason)
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, verdict.reason, verdict.code, policy.FaultTypeAuthentication)
 		}
 		if debugEnabled() {
 			slog.Debug("JWT Auth Policy: Token verdict cache miss, proceeding to full verification",
@@ -2531,7 +2532,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 
 	if len(keyManagers) == 0 {
 		slog.Debug("JWT Auth Policy: No key managers configured after parsing")
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no key managers configured")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no key managers configured", policy.FaultCodeAuthGeneral, policy.FaultTypeAuthentication)
 	}
 
 	if debugEnabled() {
@@ -2554,9 +2555,9 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 					"negativeCacheTtl", negativeCacheTtl,
 				)
 			}
-			p.putVerdict(ctx, cacheKey, cachedVerdict{ok: false, reason: "invalid token format", expiresAt: time.Now().Add(negativeCacheTtl)})
+			p.putVerdict(ctx, cacheKey, cachedVerdict{ok: false, reason: "invalid token format", code: policy.FaultCodeAuthInvalidCredentials, expiresAt: time.Now().Add(negativeCacheTtl)})
 		}
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid token format")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid token format", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	if debugEnabled() {
@@ -2576,6 +2577,10 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			)
 		}
 		failureReason := fmt.Sprintf("token validation failed: %v", err)
+		failureCode := policy.FaultCodeAuthInvalidCredentials
+		if errors.Is(err, errTokenExpired) {
+			failureCode = policy.FaultCodeAuthTokenExpired
+		}
 		if tokenCaching && errors.Is(err, errTokenExpired) {
 			if debugEnabled() {
 				slog.Debug("JWT Auth Policy: Caching negative verdict (token expired)",
@@ -2583,7 +2588,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 					"negativeCacheTtl", negativeCacheTtl,
 				)
 			}
-			p.putVerdict(ctx, cacheKey, cachedVerdict{ok: false, reason: failureReason, expiresAt: time.Now().Add(negativeCacheTtl)})
+			p.putVerdict(ctx, cacheKey, cachedVerdict{ok: false, reason: failureReason, code: failureCode, expiresAt: time.Now().Add(negativeCacheTtl)})
 		} else if tokenCaching {
 			if debugEnabled() {
 				slog.Debug("JWT Auth Policy: Token validation failure not cached (not a conservatively-cacheable reason)",
@@ -2591,7 +2596,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 				)
 			}
 		}
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, failureReason)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, failureReason, failureCode, policy.FaultTypeAuthentication)
 	}
 
 	slog.Debug("JWT Auth Policy: Token signature validated successfully")
@@ -2670,7 +2675,7 @@ func (p *JwtAuthPolicy) finishAuthentication(reqCtx *policy.RequestHeaderContext
 					"tokenAudiences", aud,
 				)
 			}
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no valid audience found in token")
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no valid audience found in token", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 		}
 		slog.Debug("JWT Auth Policy: Audience validation passed")
 	}
@@ -2695,7 +2700,7 @@ func (p *JwtAuthPolicy) finishAuthentication(reqCtx *policy.RequestHeaderContext
 				)
 			}
 			// Client message is generic; the specific reason stays in the debug log only.
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "required scopes not satisfied")
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "required scopes not satisfied", policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization)
 		}
 		slog.Debug("JWT Auth Policy: Scope validation passed")
 	}
@@ -2713,7 +2718,7 @@ func (p *JwtAuthPolicy) finishAuthentication(reqCtx *policy.RequestHeaderContext
 					"reason", reason,
 				)
 			}
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "required claims not satisfied")
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "required claims not satisfied", policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
 		}
 		slog.Debug("JWT Auth Policy: Claim validation passed")
 	}
@@ -2811,7 +2816,7 @@ func (p *JwtAuthPolicy) handleAuthSuccessHeaders(shared *policy.SharedContext, c
 }
 
 // handleAuthFailureHeaders handles JWT authentication failure in the header phase.
-func (p *JwtAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason string) policy.RequestHeaderAction {
+func (p *JwtAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason, code, errorType string) policy.RequestHeaderAction {
 	if debugEnabled() {
 		slog.Debug("JWT Auth Policy: handleAuthFailureHeaders called",
 			"statusCode", statusCode,
@@ -2849,5 +2854,15 @@ func (p *JwtAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, s
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       []byte(body),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: policy.DirectionRequest,
+			Message:   errorMessage,
+			// reason is the internal diagnostic; the renderer withholds Description from
+			// the client body and passes it to fault policies only.
+			Description: reason,
+		},
 	}
 }
