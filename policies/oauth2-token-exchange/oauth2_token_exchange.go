@@ -643,7 +643,7 @@ func (p *OAuth2TokenExchangePolicy) OnRequestBody(ctx context.Context, reqCtx *p
 			// issue where the forwarding policy hasn't run yet).
 			"liveHeaderNames", headerNamesForLog(reqCtx.Headers),
 		)
-		return unauthorized()
+		return unauthorized(subjectSchemeRejected(reqCtx.Headers, cfg.subjectSource))
 	}
 	if exchangeErr != nil {
 		trackingID := newTrackingID()
@@ -832,6 +832,21 @@ func extractSubjectToken(headers *policy.Headers, path string, src subjectTokenS
 	default:
 		return "", false
 	}
+}
+
+// subjectSchemeRejected reports whether the subject header is present but does
+// not start with the configured prefix: a credential was presented under a
+// scheme this policy does not accept, rather than no credential at all.
+func subjectSchemeRejected(headers *policy.Headers, src subjectTokenSource) bool {
+	if src.kind != "header" || src.prefix == "" {
+		return false
+	}
+	vals := getHeaderCaseInsensitive(headers, src.name)
+	if len(vals) == 0 {
+		return false
+	}
+	v := vals[0]
+	return len(v) < len(src.prefix) || !strings.EqualFold(v[:len(src.prefix)], src.prefix)
 }
 
 // subjectTokenRemovalMods computes the HeadersToRemove / QueryParametersToRemove
@@ -1220,20 +1235,26 @@ func maskToken(token string) string {
 	return token[:4] + "..." + token[len(token)-4:]
 }
 
-// unauthorized rejects a request that carries no subject token to exchange:
-// the caller's credential is missing.
-func unauthorized() policy.ImmediateResponse {
+// unauthorized rejects a request that carries no subject token to exchange.
+// The caller's credential is missing, or, when schemeRejected is true, was
+// presented under a scheme the policy does not accept. The body is the same
+// either way.
+func unauthorized(schemeRejected bool) policy.ImmediateResponse {
+	code, reason := policy.FaultCodeAuthMissingCredentials, "subject token missing or empty"
+	if schemeRejected {
+		code, reason = policy.FaultCodeAuthInvalidCredentials, "subject token header does not use the configured scheme"
+	}
 	return policy.ImmediateResponse{
 		StatusCode: 401,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       []byte(`{"error":"unauthorized","message":"Invalid or expired credentials."}`),
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
-			Code:        policy.FaultCodeAuthMissingCredentials,
+			Code:        code,
 			Type:        policy.FaultTypeAuthentication,
 			Direction:   policy.DirectionRequest,
 			Message:     "Invalid or expired credentials.",
-			Description: "subject token missing or empty",
+			Description: reason,
 		},
 	}
 }

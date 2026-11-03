@@ -18,6 +18,7 @@
 package oauth2generator
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -50,5 +51,26 @@ func TestAuthFailureDeclaresFault(t *testing.T) {
 		if strings.Contains(s, "hunter2") {
 			t.Fatalf("the cause leaked into the fault: %q", s)
 		}
+	}
+}
+
+// The request-header handler returns authFailure's response when it cannot obtain a token,
+// so the fault declaration reaches the client path, not only the helper.
+func TestOnRequestHeaders_TokenFetchFailureDeclaresFault(t *testing.T) {
+	p := newTestPolicy()
+	p.tokenFunc = func(context.Context) (*Token, error) {
+		return nil, errors.New("token endpoint returned invalid_client")
+	}
+
+	action := p.OnRequestHeaders(context.Background(), newRequestHeaderCtx(), nil)
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected fault metadata, got IsFault=%v Fault=%v", resp.IsFault, resp.Fault)
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed || resp.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("fault = %s/%s", resp.Fault.Code, resp.Fault.Type)
 	}
 }

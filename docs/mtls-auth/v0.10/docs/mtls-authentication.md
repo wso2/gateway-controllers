@@ -642,7 +642,7 @@ A gateway without fault policy support ignores the fault, and the policy behaves
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| The gateway did not pass the connection's TLS attributes to the policy | `onFailureStatusCode` (default `401`) | `900900` | `authentication` |
+| The gateway did not pass the connection's TLS attributes to the policy | `onFailureStatusCode` (default `401`) | `960000` | `mediation` |
 | No client certificate is presented (and no trusted relayed certificate header) | `onFailureStatusCode` | `900902` | `authentication` |
 | The client certificate has expired | `onFailureStatusCode` | `900903` | `authentication` |
 | The client certificate is not yet valid, cannot be parsed, is a CA certificate, or a relayed header carries more than one value | `onFailureStatusCode` | `900901` | `authentication` |

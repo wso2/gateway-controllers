@@ -763,4 +763,42 @@ func TestRejectionErrorCodes(t *testing.T) {
 		ir := assertFailure(t, reqCtx, action, 401)
 		assertRejectionCode(t, ir, policy.FaultCodeAuthTokenInactive, policy.FaultTypeAuthentication)
 	})
+
+	t.Run("no introspection providers configured", func(t *testing.T) {
+		params := map[string]interface{}{"introspectionProviders": []interface{}{}}
+		reqCtx, action := execute(t, newPolicy(), params, bearerHeader("tok"))
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
+	})
+
+	t.Run("no provider matches the configured issuers", func(t *testing.T) {
+		srv := newServer(t, activeResponder(map[string]interface{}{"active": true}))
+		params := baseParams(provider("idp", srv.URL, nil))
+		params["issuers"] = []interface{}{"nonexistent"}
+		reqCtx, action := execute(t, newPolicy(), params, bearerHeader("tok"))
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
+	})
+
+	unavailable := func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }
+
+	t.Run("no authorization server answers", func(t *testing.T) {
+		srv := newServer(t, unavailable)
+		params := baseParams(provider("idp", srv.URL, nil))
+		params["introspectionRetryCount"] = 0
+		reqCtx, action := execute(t, newPolicy(), params, bearerHeader("tok"))
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	})
+
+	// One server failing must not hide another's answer: the token was judged inactive.
+	t.Run("one server fails and another reports the token inactive", func(t *testing.T) {
+		down := newServer(t, unavailable)
+		up := newServer(t, activeResponder(map[string]interface{}{"active": false}))
+		params := baseParams(provider("down", down.URL, nil), provider("up", up.URL, nil))
+		params["introspectionRetryCount"] = 0
+		reqCtx, action := execute(t, newPolicy(), params, bearerHeader("tok"))
+		ir := assertFailure(t, reqCtx, action, 401)
+		assertRejectionCode(t, ir, policy.FaultCodeAuthTokenInactive, policy.FaultTypeAuthentication)
+	})
 }

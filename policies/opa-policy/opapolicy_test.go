@@ -23,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -203,14 +204,14 @@ func TestOnRequestHeaders_Deny(t *testing.T) {
 	if want := `{"error":"Forbidden","message":"The request was rejected by the OPA policy validation"}`; string(resp.Body) != want {
 		t.Errorf("body = %s, want %s", resp.Body, want)
 	}
-	assertFault(t, resp, policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
+	assertFault(t, resp, policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization, "The request was rejected by the OPA policy validation")
 	if want := `OPA policy "authz" rule "allow" denied the request`; resp.Fault.Description != want {
 		t.Errorf("Fault.Description = %q, want %q", resp.Fault.Description, want)
 	}
 }
 
-// assertFault asserts resp is declared as a fault with wantCode and wantType.
-func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantType string) {
+// assertFault asserts resp is declared as a fault with wantCode, wantType and wantMessage.
+func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantType, wantMessage string) {
 	t.Helper()
 	if !resp.IsFault {
 		t.Error("IsFault = false, want true")
@@ -227,8 +228,19 @@ func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantType
 	if resp.Fault.Direction != policy.DirectionRequest {
 		t.Errorf("Fault.Direction = %q, want %q", resp.Fault.Direction, policy.DirectionRequest)
 	}
+	if resp.Fault.Message != wantMessage {
+		t.Errorf("Fault.Message = %q, want %q", resp.Fault.Message, wantMessage)
+	}
 	if resp.Fault.Description == "" {
 		t.Error("Fault.Description is empty, want the internal reason")
+	}
+}
+
+// assertReason asserts the fault's internal reason names the failure that produced it.
+func assertReason(t *testing.T, resp policy.ImmediateResponse, wantPrefix string) {
+	t.Helper()
+	if !strings.HasPrefix(resp.Fault.Description, wantPrefix) {
+		t.Errorf("Fault.Description = %q, want prefix %q", resp.Fault.Description, wantPrefix)
 	}
 }
 
@@ -236,12 +248,13 @@ func TestOnRequestHeaders_Errors(t *testing.T) {
 	cases := map[string]struct {
 		status int
 		body   string
+		reason string
 	}{
-		"undefined decision": {200, `{}`},
-		"null decision":      {200, `{"result": null}`},
-		"non boolean":        {200, `{"result": "yes"}`},
-		"invalid json":       {200, `not-json`},
-		"server error":       {503, `{"result": true}`},
+		"undefined decision": {200, `{}`, "invalid OPA validation response:"},
+		"null decision":      {200, `{"result": null}`, "invalid OPA validation response:"},
+		"non boolean":        {200, `{"result": "yes"}`, "invalid OPA validation response:"},
+		"invalid json":       {200, `not-json`, "invalid OPA validation response:"},
+		"server error":       {503, `{"result": true}`, "OPA validation request failed:"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -254,7 +267,8 @@ func TestOnRequestHeaders_Errors(t *testing.T) {
 			if want := `{"error":"Internal Server Error","message":"Unable to validate the request with the OPA policy engine"}`; string(resp.Body) != want {
 				t.Errorf("body = %s, want %s", resp.Body, want)
 			}
-			assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+			assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Unable to validate the request with the OPA policy engine")
+			assertReason(t, resp, tc.reason)
 		})
 	}
 }
@@ -269,7 +283,8 @@ func TestOnRequestHeaders_UnreachableServer(t *testing.T) {
 	if !ok || resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %#v", resp)
 	}
-	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Unable to validate the request with the OPA policy engine")
+	assertReason(t, resp, "OPA validation request failed:")
 }
 
 func TestOnRequestHeaders_Timeout(t *testing.T) {

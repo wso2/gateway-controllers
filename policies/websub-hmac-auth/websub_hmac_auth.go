@@ -124,7 +124,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestHeaders(
 		slog.Debug("WebSubHMACAuth: signature header absent",
 			"header", p.signatureHeader,
 		)
-		return p.immediateUnauthorized("missing signature header: "+p.signatureHeader, policy.FaultCodeAuthMissingCredentials)
+		return p.immediateUnauthorized("missing signature header: "+p.signatureHeader, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
 	}
 	return policy.UpstreamRequestHeaderModifications{}
 }
@@ -146,7 +146,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 	// peer policy may have rewritten during the header phase.
 	sigVals := reqCtx.DownstreamHeaders().Get(p.signatureHeader)
 	if len(sigVals) == 0 {
-		return p.immediateRequestUnauthorized("missing signature header: "+p.signatureHeader, policy.FaultCodeAuthMissingCredentials)
+		return p.immediateRequestUnauthorized("missing signature header: "+p.signatureHeader, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
 	}
 
 	rawSig := sigVals[0]
@@ -158,7 +158,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 			"header", p.signatureHeader,
 			"error", err,
 		)
-		return p.immediateRequestUnauthorized("malformed signature header", policy.FaultCodeAuthInvalidCredentials)
+		return p.immediateRequestUnauthorized("malformed signature header", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	// Verify the algorithm token matches what is configured.
@@ -169,7 +169,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 		)
 		return p.immediateRequestUnauthorized(
 			fmt.Sprintf("algorithm mismatch: expected %s, got %s", p.algorithm, algorithm),
-			policy.FaultCodeAuthInvalidCredentials)
+			policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	// Determine the payload to sign.
@@ -181,7 +181,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 	secrets := webhooksecret.GetStoreInstance().GetAllByAPI(reqCtx.APIId)
 	if len(secrets) == 0 {
 		slog.Info("WebSubHMACAuth: no secrets configured", "apiId", reqCtx.APIId)
-		return p.immediateRequestUnauthorized("no webhook secrets configured for this API", policy.FaultCodeAuthGeneral)
+		return p.immediateRequestUnauthorized("no webhook secrets configured for this API", policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
 	}
 
 	// Accept if any secret produces a matching HMAC; reject only when all fail.
@@ -194,7 +194,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 		providedBytes, decErr := hex.DecodeString(providedHex)
 		if decErr != nil {
 			slog.Info("WebSubHMACAuth: invalid hex in signature header", "header", p.signatureHeader, "error", decErr)
-			return p.immediateRequestUnauthorized("malformed signature hex", policy.FaultCodeAuthInvalidCredentials)
+			return p.immediateRequestUnauthorized("malformed signature hex", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 		}
 		if hmac.Equal(mac, providedBytes) {
 			slog.Info("WebSubHMACAuth: signature verified successfully")
@@ -203,7 +203,7 @@ func (p *WebSubHMACAuthPolicy) OnRequestBody(
 	}
 
 	slog.Info("WebSubHMACAuth: signature mismatch against all secrets", "header", p.signatureHeader)
-	return p.immediateRequestUnauthorized("invalid HMAC signature", policy.FaultCodeAuthInvalidCredentials)
+	return p.immediateRequestUnauthorized("invalid HMAC signature", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 }
 
 // computeHMAC returns the raw HMAC bytes for the given payload using the
@@ -238,7 +238,7 @@ func parseSignatureHeader(value string) (algorithm, digest string, err error) {
 }
 
 // immediateUnauthorized returns an ImmediateResponse for the header phase.
-func (p *WebSubHMACAuthPolicy) immediateUnauthorized(reason, code string) policy.ImmediateResponse {
+func (p *WebSubHMACAuthPolicy) immediateUnauthorized(reason, code, faultType string) policy.ImmediateResponse {
 	slog.Debug("WebSubHMACAuth: rejecting request in header phase", "reason", reason)
 	body, _ := json.Marshal(map[string]string{
 		"error":   "Unauthorized",
@@ -251,7 +251,7 @@ func (p *WebSubHMACAuthPolicy) immediateUnauthorized(reason, code string) policy
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
 			Code:      code,
-			Type:      policy.FaultTypeAuthentication,
+			Type:      faultType,
 			Direction: policy.DirectionRequest,
 			// reason already goes to the client as the body message, so it is
 			// client-safe and belongs in Message rather than Description.
@@ -261,7 +261,7 @@ func (p *WebSubHMACAuthPolicy) immediateUnauthorized(reason, code string) policy
 }
 
 // immediateRequestUnauthorized returns an ImmediateResponse for the body phase.
-func (p *WebSubHMACAuthPolicy) immediateRequestUnauthorized(reason, code string) policy.ImmediateResponse {
+func (p *WebSubHMACAuthPolicy) immediateRequestUnauthorized(reason, code, faultType string) policy.ImmediateResponse {
 	slog.Info("WebSubHMACAuth: rejecting request in body phase", "reason", reason)
 	body, _ := json.Marshal(map[string]string{
 		"error":   "Unauthorized",
@@ -274,7 +274,7 @@ func (p *WebSubHMACAuthPolicy) immediateRequestUnauthorized(reason, code string)
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
 			Code:      code,
-			Type:      policy.FaultTypeAuthentication,
+			Type:      faultType,
 			Direction: policy.DirectionRequest,
 			// reason already goes to the client as the body message, so it is
 			// client-safe and belongs in Message rather than Description.

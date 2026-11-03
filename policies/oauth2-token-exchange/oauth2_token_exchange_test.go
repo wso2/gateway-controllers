@@ -526,6 +526,26 @@ func TestOnRequestBody_MissingSubjectToken_ReturnsUnauthorized(t *testing.T) {
 	assertFault(t, resp, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
 }
 
+// A subject header under another scheme is a credential that was presented and
+// rejected, not a missing one. The client still receives the same 401 body.
+func TestOnRequestBody_SubjectTokenWrongScheme_ReturnsUnauthorized(t *testing.T) {
+	p := newTestPolicy()
+	reqCtx := newRequestContext(map[string][]string{"Authorization": {"Basic dXNlcjpwYXNz"}}, "/pets")
+	result := p.OnRequestBody(context.Background(), reqCtx, baseParams("https://example.com/token"))
+
+	resp, ok := result.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", result)
+	}
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+	if string(resp.Body) != `{"error":"unauthorized","message":"Invalid or expired credentials."}` {
+		t.Errorf("unexpected body leaking detail: %s", resp.Body)
+	}
+	assertFault(t, resp, policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
+}
+
 func TestOnRequestBody_TokenEndpointNon2xx_ReturnsBadGatewayNoLeak(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "super secret internal stack trace and DB dsn", http.StatusInternalServerError)

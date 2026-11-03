@@ -81,6 +81,7 @@ A gateway without fault policy support ignores the fault, and the policy behaves
 |------|--------|------|------|
 | The policy configuration cannot be parsed | `500` | `960000` | `configuration` |
 | The subject token is missing when the request body phase runs | `401` | `900902` | `authentication` |
+| The subject token header is present but does not start with the configured prefix | `401` | `900901` | `authentication` |
 | The token exchange fails: the token endpoint is unreachable, returns a non-2xx status, or returns no usable token | `502` | `960000` | `mediation` |
 
 The fault's `Description` carries the internal reason, for example

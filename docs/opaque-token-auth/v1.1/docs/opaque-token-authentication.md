@@ -282,11 +282,11 @@ A gateway without fault policy support ignores the fault, and the policy behaves
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| The introspection providers are invalid or not configured, or none matches the configured issuers | `onFailureStatusCode` (default `401`) | `900900` | `authentication` |
+| The introspection providers are invalid or not configured, or none matches the configured issuers | `onFailureStatusCode` (default `401`) | `960000` | `configuration` |
 | The authorization header is missing | `onFailureStatusCode` | `900902` | `authentication` |
 | The header does not use the configured scheme, or no provider's `tokenPattern` matches the token | `onFailureStatusCode` | `900901` | `authentication` |
-| The token is inactive or not recognised | `onFailureStatusCode` | `900904` | `authentication` |
-| Introspection failed: no authorization server could answer | `onFailureStatusCode` | `900900` | `authentication` |
+| The token is inactive or not recognised by any authorization server that answered | `onFailureStatusCode` | `900904` | `authentication` |
+| Introspection failed: no authorization server could answer | `onFailureStatusCode` | `960000` | `mediation` |
 | The token has expired | `onFailureStatusCode` | `900903` | `authentication` |
 | The token is not yet valid, or no valid audience is found | `onFailureStatusCode` | `900901` | `authentication` |
 | The token does not contain any required scope | `onFailureStatusCode` | `900910` | `authorization` |

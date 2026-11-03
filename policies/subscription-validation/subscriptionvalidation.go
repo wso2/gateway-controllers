@@ -206,18 +206,18 @@ func (p *SubscriptionValidationPolicy) Mode() policy.ProcessingMode {
 // OnRequestHeaders validates the subscription in the request header phase.
 func (p *SubscriptionValidationPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
 	if ctx == nil || reqCtx == nil || reqCtx.SharedContext == nil {
-		return p.forbiddenResponse("request context is missing", policy.FaultCodeAuthGeneral).(policy.ImmediateResponse)
+		return p.forbiddenResponse("request context is missing", policy.FaultCodeMediationFailed, policy.FaultTypeMediation).(policy.ImmediateResponse)
 	}
 
 	apiID := reqCtx.SharedContext.APIId
 	if strings.TrimSpace(apiID) == "" {
 		slog.Error("subscriptionValidation: APIId is empty in SharedContext; failing validation")
-		return p.forbiddenResponse("API id is missing", policy.FaultCodeAuthGeneral).(policy.ImmediateResponse)
+		return p.forbiddenResponse("API id is missing", policy.FaultCodeMediationFailed, policy.FaultTypeMediation).(policy.ImmediateResponse)
 	}
 
 	if p.store == nil {
 		slog.Error("subscriptionValidation: subscription store is not initialized")
-		return p.forbiddenResponse("subscription store is not available", policy.FaultCodeAuthGeneral).(policy.ImmediateResponse)
+		return p.forbiddenResponse("subscription store is not available", policy.FaultCodeMediationFailed, policy.FaultTypeMediation).(policy.ImmediateResponse)
 	}
 
 	// Select the downstream snapshot first so the entitlement decision is made
@@ -281,11 +281,11 @@ func (p *SubscriptionValidationPolicy) OnRequestHeaders(ctx context.Context, req
 		}
 	}
 
-	return p.forbiddenResponse("no subscription token or application identity provided", policy.FaultCodeAuthMissingCredentials).(policy.ImmediateResponse)
+	return p.forbiddenResponse("no subscription token or application identity provided", policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication).(policy.ImmediateResponse)
 }
 
 // forbiddenResponse constructs an ImmediateResponse with status 403.
-func (p *SubscriptionValidationPolicy) forbiddenResponse(detail, code string) policy.RequestAction {
+func (p *SubscriptionValidationPolicy) forbiddenResponse(detail, code, faultType string) policy.RequestAction {
 	message := forbiddenMessage
 	if detail != "" {
 		message = fmt.Sprintf("%s: %s", message, detail)
@@ -309,7 +309,7 @@ func (p *SubscriptionValidationPolicy) forbiddenResponse(detail, code string) po
 		IsFault: true,
 		Fault: &policy.FaultDetails{
 			Code:      code,
-			Type:      policy.FaultTypeAuthentication,
+			Type:      faultType,
 			Direction: policy.DirectionRequest,
 			// message already goes to the client as the body message.
 			Message: message,
@@ -325,7 +325,7 @@ func (p *SubscriptionValidationPolicy) validateByToken(apiID, token string) (pol
 	if !active {
 		slog.Info("subscriptionValidation: no active subscription found (token)",
 			"apiId", apiID)
-		return p.forbiddenResponse("", policy.FaultCodeSubscriptionInactive), nil
+		return p.forbiddenResponse("", policy.FaultCodeSubscriptionInactive, policy.FaultTypeAuthentication), nil
 	}
 
 	if entry != nil && entry.ThrottleLimitCount > 0 && entry.ThrottleLimitUnit != "" {
@@ -385,7 +385,7 @@ func (p *SubscriptionValidationPolicy) validateByApplication(apiID, appID string
 		slog.Info("subscriptionValidation: no active subscription found (appId fallback)",
 			"apiId", apiID,
 			"applicationId", appID)
-		return p.forbiddenResponse("", policy.FaultCodeSubscriptionInactive), nil
+		return p.forbiddenResponse("", policy.FaultCodeSubscriptionInactive, policy.FaultTypeAuthentication), nil
 	}
 
 	if entry != nil && entry.ThrottleLimitCount > 0 && entry.ThrottleLimitUnit != "" {

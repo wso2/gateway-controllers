@@ -199,7 +199,7 @@ A gateway without fault policy support ignores the fault, and the policy behaves
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| The request context, the API id or the subscription store is missing | `403` | `900900` | `authentication` |
+| The request context, the API id or the subscription store is missing | `403` | `960000` | `mediation` |
 | No subscription token or application identity is presented | `403` | `900902` | `authentication` |
 | No active subscription is found for the token or the application | `403` | `900909` | `authentication` |
 | The subscription plan's request limit is exceeded | `429` | `900804` | `throttling` |

@@ -835,14 +835,15 @@ func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusC
 		body = string(bodyBytes)
 	}
 
+	code, faultType := faultForReason(reason)
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       []byte(body),
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
-			Code:        faultCodeForReason(reason),
-			Type:        policy.FaultTypeAuthentication,
+			Code:        code,
+			Type:        faultType,
 			Direction:   policy.DirectionRequest,
 			Message:     errorMessage,
 			Description: "client certificate rejected: " + reason,
@@ -850,21 +851,22 @@ func (p *MtlsAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusC
 	}
 }
 
-// faultCodeForReason maps a deny reason to its fault code. A request that
+// faultForReason maps a deny reason to its fault code and type. A request that
 // presented no certificate is missing its credential; an expired certificate
-// is a credential that was valid and is no longer; TLS attributes the policy
-// could not read leave it unable to authenticate at all. Every other reason is
-// a certificate that was presented and rejected.
-func faultCodeForReason(reason string) string {
+// is a credential that was valid and is no longer. TLS attributes the gateway
+// did not pass leave the policy unable to do its job, which is not the
+// caller's failure. Every other reason is a certificate that was presented and
+// rejected.
+func faultForReason(reason string) (code, faultType string) {
 	switch reason {
 	case reasonNoCertificate:
-		return policy.FaultCodeAuthMissingCredentials
+		return policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication
 	case reasonExpired:
-		return policy.FaultCodeAuthTokenExpired
+		return policy.FaultCodeAuthTokenExpired, policy.FaultTypeAuthentication
 	case reasonAttributeAbsent:
-		return policy.FaultCodeAuthGeneral
+		return policy.FaultCodeMediationFailed, policy.FaultTypeMediation
 	default:
-		return policy.FaultCodeAuthInvalidCredentials
+		return policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication
 	}
 }
 

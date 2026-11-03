@@ -576,13 +576,14 @@ func assertDenied(t *testing.T, p *MtlsAuthPolicy, reqCtx *policy.RequestHeaderC
 	if string(resp.Body) != wantBody {
 		t.Errorf("body = %q, want %q (deny body must be byte-identical regardless of reason %q)", resp.Body, wantBody, result.reason)
 	}
-	assertFault(t, resp, faultCodeForReason(wantReason), wantReason)
+	wantCode, wantType := faultForReason(wantReason)
+	assertFault(t, resp, wantCode, wantType, wantReason)
 }
 
-// assertFault asserts resp is declared as an authentication fault with
-// wantCode, carrying wantReason in its Description and the configured message
-// in its Message.
-func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantReason string) {
+// assertFault asserts resp is declared as a fault with wantCode and wantType,
+// carrying wantReason in its Description and the configured message in its
+// Message.
+func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantType, wantReason string) {
 	t.Helper()
 	if !resp.IsFault {
 		t.Error("IsFault = false, want true")
@@ -593,8 +594,8 @@ func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantReas
 	if resp.Fault.Code != wantCode {
 		t.Errorf("Fault.Code = %q, want %q", resp.Fault.Code, wantCode)
 	}
-	if resp.Fault.Type != policy.FaultTypeAuthentication {
-		t.Errorf("Fault.Type = %q, want %q", resp.Fault.Type, policy.FaultTypeAuthentication)
+	if resp.Fault.Type != wantType {
+		t.Errorf("Fault.Type = %q, want %q", resp.Fault.Type, wantType)
 	}
 	if resp.Fault.Direction != policy.DirectionRequest {
 		t.Errorf("Fault.Direction = %q, want %q", resp.Fault.Direction, policy.DirectionRequest)
@@ -607,21 +608,22 @@ func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantReas
 	}
 }
 
-// TestFaultCodeForReason pins the fault code each deny reason reports.
-func TestFaultCodeForReason(t *testing.T) {
-	for reason, want := range map[string]string{
-		reasonAttributeAbsent:      policy.FaultCodeAuthGeneral,
-		reasonNoCertificate:        policy.FaultCodeAuthMissingCredentials,
-		reasonExpired:              policy.FaultCodeAuthTokenExpired,
-		reasonNotYetValid:          policy.FaultCodeAuthInvalidCredentials,
-		reasonUntrustedChain:       policy.FaultCodeAuthInvalidCredentials,
-		reasonInvalidCert:          policy.FaultCodeAuthInvalidCredentials,
-		reasonAuthorityNotAccepted: policy.FaultCodeAuthInvalidCredentials,
-		reasonSANMismatch:          policy.FaultCodeAuthInvalidCredentials,
-		reasonThumbprintMismatch:   policy.FaultCodeAuthInvalidCredentials,
+// TestFaultForReason pins the fault code and type each deny reason reports.
+func TestFaultForReason(t *testing.T) {
+	authn := policy.FaultTypeAuthentication
+	for reason, want := range map[string][2]string{
+		reasonAttributeAbsent:      {policy.FaultCodeMediationFailed, policy.FaultTypeMediation},
+		reasonNoCertificate:        {policy.FaultCodeAuthMissingCredentials, authn},
+		reasonExpired:              {policy.FaultCodeAuthTokenExpired, authn},
+		reasonNotYetValid:          {policy.FaultCodeAuthInvalidCredentials, authn},
+		reasonUntrustedChain:       {policy.FaultCodeAuthInvalidCredentials, authn},
+		reasonInvalidCert:          {policy.FaultCodeAuthInvalidCredentials, authn},
+		reasonAuthorityNotAccepted: {policy.FaultCodeAuthInvalidCredentials, authn},
+		reasonSANMismatch:          {policy.FaultCodeAuthInvalidCredentials, authn},
+		reasonThumbprintMismatch:   {policy.FaultCodeAuthInvalidCredentials, authn},
 	} {
-		if got := faultCodeForReason(reason); got != want {
-			t.Errorf("faultCodeForReason(%q) = %q, want %q", reason, got, want)
+		if code, faultType := faultForReason(reason); code != want[0] || faultType != want[1] {
+			t.Errorf("faultForReason(%q) = %q, %q, want %q, %q", reason, code, faultType, want[0], want[1])
 		}
 	}
 }
@@ -637,14 +639,14 @@ func TestMtlsAuthPolicy_RejectionDeclaresFault(t *testing.T) {
 	if !ok {
 		t.Fatalf("OnRequestHeaders returned %T, want policy.ImmediateResponse", action)
 	}
-	assertFault(t, resp, policy.FaultCodeAuthGeneral, reasonAttributeAbsent)
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, reasonAttributeAbsent)
 
 	action = p.OnRequestHeaders(context.Background(), reqCtxWithTLS(&policy.DownstreamTLS{MTLS: false}), map[string]interface{}{})
 	resp, ok = action.(policy.ImmediateResponse)
 	if !ok {
 		t.Fatalf("OnRequestHeaders returned %T, want policy.ImmediateResponse", action)
 	}
-	assertFault(t, resp, policy.FaultCodeAuthMissingCredentials, reasonNoCertificate)
+	assertFault(t, resp, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication, reasonNoCertificate)
 }
 
 // assertAuthenticated asserts evaluate authenticated at wantEntryIndex and

@@ -671,6 +671,7 @@ func TestRejectionErrorCodes(t *testing.T) {
 		p := newPolicy(defaultCfg(), store)
 		ctx := headerCtxWithToken("api-1", "tok-wrong", "")
 		resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), ctx, make(map[string]interface{})))
+		assertBody(t, resp, `{"error":"forbidden","message":"Subscription required for this API"}`)
 		if resp.Fault.Code != policy.FaultCodeSubscriptionInactive {
 			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeSubscriptionInactive, resp.Fault.Code)
 		}
@@ -698,6 +699,7 @@ func TestRejectionErrorCodes(t *testing.T) {
 		if resp.StatusCode != 429 {
 			t.Fatalf("expected the throttled response, got status %d", resp.StatusCode)
 		}
+		assertBody(t, resp, `{"error":"rate_limit_exceeded","message":"Subscription quota exceeded: 1 requests per Min"}`)
 		if resp.Fault.Code != policy.FaultCodeThrottledSubscription {
 			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeThrottledSubscription, resp.Fault.Code)
 		}
@@ -710,10 +712,41 @@ func TestRejectionErrorCodes(t *testing.T) {
 		p := newPolicy(defaultCfg(), newStore(nil))
 		ctx := headerCtxWithToken("api-1", "", "")
 		resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), ctx, make(map[string]interface{})))
+		assertBody(t, resp, `{"error":"forbidden","message":"Subscription required for this API: no subscription token or application identity provided"}`)
 		if resp.Fault.Code != policy.FaultCodeAuthMissingCredentials {
 			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeAuthMissingCredentials, resp.Fault.Code)
 		}
 	})
+
+	// The gateway not supplying what the policy needs is the policy failing to do its
+	// job, not the caller failing to authenticate.
+	for name, tc := range map[string]struct {
+		store   *policyenginev1.SubscriptionStore
+		apiID   string
+		message string
+	}{
+		"API id is missing":                   {newStore(nil), "", "Subscription required for this API: API id is missing"},
+		"subscription store is not available": {nil, "api-1", "Subscription required for this API: subscription store is not available"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := newPolicy(defaultCfg(), tc.store)
+			ctx := headerCtxWithToken(tc.apiID, "tok-1", "")
+			resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), ctx, make(map[string]interface{})))
+			assertBody(t, resp, `{"error":"forbidden","message":"`+tc.message+`"}`)
+			if resp.Fault.Code != policy.FaultCodeMediationFailed || resp.Fault.Type != policy.FaultTypeMediation {
+				t.Fatalf("fault = %s/%s, want %s/%s", resp.Fault.Code, resp.Fault.Type, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+			}
+		})
+	}
+}
+
+// assertBody asserts the client receives exactly want: declaring the fault must not change
+// the body.
+func assertBody(t *testing.T, resp policy.ImmediateResponse, want string) {
+	t.Helper()
+	if string(resp.Body) != want {
+		t.Fatalf("body = %s, want %s", resp.Body, want)
+	}
 }
 
 func mustImmediate(t *testing.T, action policy.RequestHeaderAction) policy.ImmediateResponse {

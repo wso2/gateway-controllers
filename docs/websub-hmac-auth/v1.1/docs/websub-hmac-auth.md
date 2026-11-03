@@ -148,7 +148,7 @@ fault policy support ignores the fault, and the policy behaves exactly as v1.0.
 |------|--------|------|------|
 | The signature header is missing (header or body phase) | `401` | `900902` | `authentication` |
 | The signature header is malformed, names a different algorithm, or its digest is not valid hex | `401` | `900901` | `authentication` |
-| No webhook secrets are configured for the API | `401` | `900900` | `authentication` |
+| No webhook secrets are configured for the API | `401` | `960000` | `configuration` |
 | The HMAC does not match any configured secret | `401` | `900901` | `authentication` |
 
 The fault carries no `Description`: its `Message` is the reason the client already receives in the
