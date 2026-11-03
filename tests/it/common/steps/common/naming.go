@@ -86,6 +86,26 @@ func GenerateContextAndStore(ctx context.Context, base, key string) error {
 	})
 }
 
+// maxPayloadKiB bounds a generated payload so a mistyped size cannot exhaust the runner's memory.
+const maxPayloadKiB = 10 * 1024
+
+// payloadPattern is repeated to fill a generated payload. It is plain ASCII, so the payload's
+// size in bytes equals its length, and it needs no escaping inside a JSON string.
+const payloadPattern = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+// GeneratePayloadAndStore stores a deterministic ASCII payload of exactly kib KiB in the runner's
+// local scope. The same size always yields the same payload, so a scenario can assert values
+// derived from it, such as its hash.
+func GeneratePayloadAndStore(ctx context.Context, kib int, key string) error {
+	return generateAndStore(ctx, key, func() (string, error) {
+		if kib <= 0 || kib > maxPayloadKiB {
+			return "", fmt.Errorf("payload size must be between 1 and %d KiB, got %d", maxPayloadKiB, kib)
+		}
+		size := kib * 1024
+		return strings.Repeat(payloadPattern, size/len(payloadPattern)+1)[:size], nil
+	})
+}
+
 func generateAndStore(ctx context.Context, key string, generate func() (string, error)) error {
 	key = strings.TrimSpace(key)
 	if key == "" {

@@ -78,6 +78,70 @@ func TestGenerateAPIVersionAndStore(t *testing.T) {
 	require.Regexp(t, `^v1\.0\.[1-9][0-9]{0,5}$`, value)
 }
 
+func TestGeneratePayloadAndStore(t *testing.T) {
+	t.Run("stores a deterministic payload of the requested size", func(t *testing.T) {
+		ctx := commonContext()
+		require.NoError(t, GeneratePayloadAndStore(ctx, 1, "small"))
+		require.NoError(t, GeneratePayloadAndStore(ctx, 512, "large"))
+		require.NoError(t, GeneratePayloadAndStore(ctx, 512, "again"))
+
+		small, err := StoredValue(ctx, "small")
+		require.NoError(t, err)
+		assert.Len(t, small, 1024)
+		assert.True(t, strings.HasPrefix(small, payloadPattern))
+
+		large, err := StoredValue(ctx, "large")
+		require.NoError(t, err)
+		assert.Len(t, large, 512*1024)
+		again, err := StoredValue(ctx, "again")
+		require.NoError(t, err)
+		assert.Equal(t, large, again)
+		assert.Empty(t, strings.Trim(large, payloadPattern))
+	})
+
+	t.Run("accepts the maximum size", func(t *testing.T) {
+		ctx := commonContext()
+		require.NoError(t, GeneratePayloadAndStore(ctx, maxPayloadKiB, "max"))
+		value, err := StoredValue(ctx, "max")
+		require.NoError(t, err)
+		assert.Len(t, value, maxPayloadKiB*1024)
+	})
+
+	for _, kib := range []int{0, -1, maxPayloadKiB + 1} {
+		t.Run(fmt.Sprintf("rejects %d KiB", kib), func(t *testing.T) {
+			ctx := commonContext()
+			require.ErrorContains(t, GeneratePayloadAndStore(ctx, kib, "payload"), "payload size")
+			_, err := StoredValue(ctx, "payload")
+			require.Error(t, err)
+		})
+	}
+
+	t.Run("rejects an empty key and a missing runner context", func(t *testing.T) {
+		require.ErrorContains(t, GeneratePayloadAndStore(commonContext(), 1, " "), "empty key")
+		require.ErrorContains(t, GeneratePayloadAndStore(context.Background(), 1, "payload"), "runner context")
+	})
+
+	t.Run("is safe for concurrent use", func(t *testing.T) {
+		ctx := commonContext()
+		var wg sync.WaitGroup
+		for i := range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := GeneratePayloadAndStore(ctx, 4, fmt.Sprintf("payload%d", i)); err != nil {
+					t.Errorf("GeneratePayloadAndStore() error = %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+		for i := range 16 {
+			value, err := StoredValue(ctx, fmt.Sprintf("payload%d", i))
+			require.NoError(t, err)
+			assert.Len(t, value, 4*1024)
+		}
+	})
+}
+
 func TestGenerateAndStoreRejectsInvalidContext(t *testing.T) {
 	require.ErrorContains(t, GenerateAndStore(context.Background(), "api", "name"), "runner context")
 	require.ErrorContains(t, GenerateAndStore(commonContext(), "api", " "), "empty key")

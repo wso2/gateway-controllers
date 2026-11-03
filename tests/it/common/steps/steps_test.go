@@ -21,7 +21,9 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +31,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -551,6 +554,101 @@ func TestSendConcurrentLeavesNoPublishedResponse(t *testing.T) {
 	require.ErrorContains(t, err, "no response has been published")
 }
 
+func TestNumberedRequests(t *testing.T) {
+	gatewayURL := func(path string) (string, error) { return "http://gw" + path, nil }
+	shared := map[string]string{"Content-Type": "application/json"}
+	requests, err := numberedRequests(3, "POST", "/items/{i}", []byte(`{"order":{i},"note":"n-{i}"}`),
+		"host.local", shared, gatewayURL)
+	require.NoError(t, err)
+	require.Len(t, requests, 3)
+	for i, request := range requests {
+		n := strconv.Itoa(i + 1)
+		require.Equal(t, "POST", request.Method)
+		require.Equal(t, "http://gw/items/"+n, request.URL)
+		require.Equal(t, `{"order":`+n+`,"note":"n-`+n+`"}`, string(request.Body))
+		require.Equal(t, "host.local", request.Host)
+		require.Equal(t, shared, request.Headers)
+	}
+	requests[0].Headers["X-Changed"] = "1"
+	require.NotContains(t, requests[1].Headers, "X-Changed")
+	require.NotContains(t, shared, "X-Changed")
+
+	pathOnly, err := numberedRequests(2, "GET", "/items/{i}", nil, "", nil, gatewayURL)
+	require.NoError(t, err)
+	require.Equal(t, "http://gw/items/2", pathOnly[1].URL)
+	require.Empty(t, pathOnly[1].Body)
+	require.NotNil(t, pathOnly[1].Headers)
+
+	bodyOnly, err := numberedRequests(2, "POST", "/items", []byte(`{"order":{i}}`), "", nil, gatewayURL)
+	require.NoError(t, err)
+	require.Equal(t, "http://gw/items", bodyOnly[1].URL)
+	require.Equal(t, `{"order":2}`, string(bodyOnly[1].Body))
+
+	_, err = numberedRequests(2, "POST", "/items", []byte(`{"order":1}`), "", nil, gatewayURL)
+	require.ErrorContains(t, err, "must contain {i}")
+	_, err = numberedRequests(1, "GET", "/items/{i}", nil, "", nil,
+		func(string) (string, error) { return "", errors.New("no gateway") })
+	require.ErrorContains(t, err, "no gateway")
+}
+
+func TestSendConcurrentWithBodyRejectsInvalidInput(t *testing.T) {
+	ctx := publishedContext(t, &httpx.Response{StatusCode: http.StatusTeapot})
+	body := &godog.DocString{Content: `{"order":{i}}`}
+	for _, n := range []int{0, -1, maxConcurrentSendRequests + 1} {
+		require.ErrorContains(t, (&Base{}).sendConcurrentWithBody(ctx, n, "POST", "/items", body), "must be between")
+	}
+	require.ErrorContains(t, (&Base{}).sendConcurrentWithBody(ctx, 1, "POST", "/items", nil), "per-request body is required")
+}
+
+func TestSendConcurrentWithBodySendsEachNumberedRequest(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen[r.URL.Path] = r.Method + " " + r.Header.Get("Content-Type") + " " + string(body)
+		mu.Unlock()
+		if r.URL.Path == "/items/fail-2" {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+	stale := &httpx.Response{StatusCode: http.StatusTeapot}
+
+	ctx := publishedContext(t, stale)
+	require.NoError(t, base.sendConcurrentWithBody(ctx, 3, "post", "/items/{i}",
+		&godog.DocString{Content: `{"order":{i}}`}))
+	require.Equal(t, map[string]string{
+		"/items/1": `POST application/json {"order":1}`,
+		"/items/2": `POST application/json {"order":2}`,
+		"/items/3": `POST application/json {"order":3}`,
+	}, seen)
+	_, err = httpx.Published(ctx)
+	require.ErrorContains(t, err, "no response has been published")
+
+	ctx = publishedContext(t, stale)
+	require.ErrorContains(t, base.sendConcurrentWithBody(ctx, 2, "POST", "/items/fail-{i}",
+		&godog.DocString{Content: `{}`}), "request 2 of 2 returned")
+	_, err = httpx.Published(ctx)
+	require.ErrorContains(t, err, "no response has been published")
+}
+
 func publishedContext(t *testing.T, resp *httpx.Response) context.Context {
 	t.Helper()
 	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
@@ -600,6 +698,26 @@ func TestResponseHeaderNotEquals(t *testing.T) {
 	require.ErrorContains(t, base.responseHeaderNotEquals(ctx, "etag", "${CTX:same}"), "not to be")
 	require.NoError(t, base.responseHeaderNotEquals(ctx, "X-Absent", "anything"), "an absent header is not the value")
 	require.Error(t, base.responseHeaderNotEquals(ctx, "ETag", "${CTX:unknown}"))
+}
+
+func TestHeaderCondition(t *testing.T) {
+	response := &httpx.Response{StatusCode: 200, Headers: map[string][]string{"X-Aws-Access-Key-Id": {"ASIA1"}}}
+	absent := &httpx.Response{StatusCode: 403}
+
+	is := headerCondition("x-aws-access-key-id", "ASIA1", false)
+	require.True(t, is(response), "header names match case-insensitively")
+	require.False(t, is(absent))
+	require.False(t, is(nil))
+	require.False(t, headerCondition("X-Aws-Access-Key-Id", "ASIA2", false)(response))
+
+	isNot := headerCondition("X-Aws-Access-Key-Id", "ASIA1", true)
+	require.False(t, isNot(response))
+	require.True(t, headerCondition("X-Aws-Access-Key-Id", "ASIA2", true)(response))
+	require.True(t, isNot(absent), "an absent header is not the value")
+	require.False(t, isNot(nil), "no response satisfies either condition")
+
+	require.True(t, headerCondition("X-Absent", "", false)(response), "an absent header equals the empty value")
+	require.False(t, headerCondition("X-Absent", "", true)(response))
 }
 
 func TestExpectedErrorPathRejectsUnsafeSegments(t *testing.T) {
