@@ -985,8 +985,8 @@ func encodeExceptionFrame(exceptionType, payload string) []byte {
 var createdField = regexp.MustCompile(`"created":\d+`)
 
 // TestStreamExceptionDeclaresFault pins the fault for a Converse stream Bedrock ends with an
-// exception, on the streaming and the buffered path, and that the client receives the same
-// events as before: the translated error event followed by a single [DONE].
+// exception on the buffered path, and that the streaming path forwards the translated events
+// exactly as before, without terminating the stream or declaring a fault.
 func TestStreamExceptionDeclaresFault(t *testing.T) {
 	stream := append(append([]byte{}, encodeFrame("messageStart", `{"role":"assistant"}`)...),
 		encodeExceptionFrame("throttlingException", `{"message":"Too many requests"}`)...)
@@ -994,21 +994,20 @@ func TestStreamExceptionDeclaresFault(t *testing.T) {
 	shared := func() *policy.SharedContext {
 		return &policy.SharedContext{RequestID: "req-exc", Metadata: map[string]interface{}{}}
 	}
-	// What the client received before the fault was declared: every event of the stream,
-	// then [DONE] on the final chunk.
+	// What the client receives: every event of the stream, then [DONE] on the final chunk.
 	want := createdField.ReplaceAllString(string(eventStreamToSSE(stream, true, p.completionID("req-exc"), "nova")), "")
 
 	for _, endOfStream := range []bool{false, true} {
 		action := p.OnResponseBodyChunk(context.Background(),
 			&policy.ResponseStreamContext{SharedContext: shared(), ResponseStatus: 200},
 			&policy.StreamBody{Chunk: stream, EndOfStream: endOfStream}, nil)
-		terminate, ok := action.(policy.TerminateResponseChunk)
+		forward, ok := action.(policy.ForwardResponseChunk)
 		if !ok {
-			t.Fatalf("endOfStream=%v: expected TerminateResponseChunk, got %T", endOfStream, action)
+			t.Fatalf("endOfStream=%v: expected ForwardResponseChunk, got %T", endOfStream, action)
 		}
-		assertExceptionFault(t, terminate.IsFault, terminate.Fault)
-		if got := createdField.ReplaceAllString(string(terminate.Body), ""); got != want {
-			t.Errorf("endOfStream=%v: body = %q, want %q", endOfStream, got, want)
+		wantChunk := createdField.ReplaceAllString(string(eventStreamToSSE(stream, endOfStream, p.completionID("req-exc"), "nova")), "")
+		if got := createdField.ReplaceAllString(string(forward.Body), ""); got != wantChunk {
+			t.Errorf("endOfStream=%v: body = %q, want %q", endOfStream, got, wantChunk)
 		}
 	}
 

@@ -250,19 +250,6 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 	if sse == nil {
 		sse = []byte{}
 	}
-	if exceptionType, failed := streamException(chunk.Chunk); failed {
-		// Bedrock sends nothing after an exception, so the stream ends here. Terminating
-		// is what lets the failure be declared; [DONE] is appended now rather than on a
-		// later final chunk, so the client receives the same events either way.
-		if !chunk.EndOfStream {
-			sse = append(sse, sseDonePayload...)
-		}
-		return policy.TerminateResponseChunk{
-			Body:    sse,
-			IsFault: true,
-			Fault:   streamExceptionFault(exceptionType),
-		}
-	}
 	return policy.ForwardResponseChunk{Body: sse}
 }
 
