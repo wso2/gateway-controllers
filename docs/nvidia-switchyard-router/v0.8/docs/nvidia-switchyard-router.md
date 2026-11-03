@@ -392,6 +392,28 @@ A working server returns `200` with `"selected":{"target":"efficient", ...}`. A 
 
 Stage escalates on evidence: an agent that is reading or writing cleanly stays on the efficient tier, and repeated failures without progress move it to the capable tier. A single failed command, or failures mixed with steady file writes, usually does not.
 
+### 6. Check routing through the gateway
+
+Attach the policy to a proxy, then send a request through it and print the response headers:
+
+```bash
+curl -sk -D - -o /dev/null https://<gateway-host>:8443/<proxy-context>/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}]}' \
+  | grep -i '^x-switchyard'
+```
+
+A working setup returns `x-switchyard-outcome: routed` and an `x-switchyard-tier`. Add the proxy's API key header if it needs one. If the outcome is `fallback`, `rejected`, or `decision_failed`, `x-switchyard-error` says why:
+
+| `x-switchyard-error` | Cause | Fix |
+|----------------------|-------|-----|
+| `unavailable` | The gateway could not reach the server, or the server answered with an error, for example after a failed judge call. | Check that `switchyard_endpoint` is right and that the server is on the gateway's network, then check the server's logs. |
+| `timeout` | The server did not answer within `switchyardTimeout`. | Raise `switchyard_timeout`: at least `1s` without a judge, and above the judge's `timeout_ms` with one. |
+| `profile_not_found` | The server has no route named after the policy's `profile`. | Match `profile` to a route `id` in `switchyard.toml`, and restart the server after editing it. |
+| `invalid_decision` | The server selected a target that is not a tier. | Name the route's targets `efficient` and `capable`, with the same ids. See [Server Profiles](#server-profiles). |
+| `unknown_format` | The request path is not `/chat/completions`, `/responses`, or `/messages`, so the server was not asked. | Attach the policy to one of those paths. |
+| `invalid_request` | The policy could not build the decision request from the body. | Check that the body is a valid request for the path's API format. |
+
 ### Operating the server
 
 - The server reads its TOML only at startup. Adding or changing a profile needs a restart, which clears all session holds. Changing models in a proxy's policy needs no server change.
