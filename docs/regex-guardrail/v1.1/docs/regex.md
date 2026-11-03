@@ -293,18 +293,23 @@ for the analytics event and hands it to the API's fault policies (for example `l
 log the failure). The status and body the client receives are the same as in v1.0. A gateway
 without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
 
-Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
 It also names the intervening guardrail (`regex-guardrail`) and records that it intervened; the
 assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+A rejection made because the content could not be read is not a verdict and carries no guardrail
+details: it is reported as `960001` (`validation`) for a request body, which is the caller's, and
+`960000` (`mediation`) for a response body.
+A configured `regex` that is not a valid pattern is reported as `960000` (`configuration`).
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| Request or response: the value at `jsonPath` cannot be extracted | `422` | `906205` | `guardrail` |
-| Request or response: the configured `regex` is not a valid pattern | `422` | `906205` | `guardrail` |
+| Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
+| Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
+| Request or response: the configured `regex` is not a valid pattern | `422` | `960000` | `configuration` |
 | Request or response: the content does not match `regex` (or matches it, with `invert`) | `422` | `906205` | `guardrail` |
 | Streamed (SSE) response, with `invert`: the streamed content matches `regex` | the status already sent; the stream ends with an SSE error event | `906205` | `guardrail` |
 | Streamed (SSE) response, at the end of the stream: the streamed content does not match `regex` | the status already sent; the stream ends with an SSE error event | `906205` | `guardrail` |
-| Chunked (non-SSE) response: the complete body fails any of the first three checks | the status already sent; the stream ends with the error body | `906205` | `guardrail` |
+| Chunked (non-SSE) response: the complete body fails any of the response checks above | the status already sent; the stream ends with the error body | as in the matching response row above | as in the matching response row above |
 
 The fault's `Description` carries the internal reason, for example
 `Violated regular expression: <regex>`.

@@ -257,6 +257,61 @@ func (p *JSONSchemaGuardrailPolicy) buildGuardrailErrorResponse(reason string, v
 	}
 }
 
+// extractionFault describes a rejection made because the value at jsonPath could not be
+// read, so no check ran and there is no guardrail verdict to report. On a request the
+// payload is the caller's, so it is an invalid request body; on a response it is the
+// upstream's, and the policy could not do its job.
+func extractionFault(reason string, err error, isResponse bool) *policy.FaultDetails {
+	if isResponse {
+		return &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionResponse,
+			Message:     "The response body could not be read for the guardrail check",
+			Description: reason + ": " + err.Error(),
+		}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeInvalidRequestBody,
+		Type:        policy.FaultTypeValidation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The request body could not be read for the guardrail check",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// checkFailureFault describes a rejection made because the policy could not run its check
+// at all, so there is no guardrail verdict to report: the policy failed its own job.
+// faultType is policy.FaultTypeConfiguration when the policy's own parameters are what
+// cannot be used, otherwise policy.FaultTypeMediation.
+func checkFailureFault(faultType, reason string, err error, isResponse bool) *policy.FaultDetails {
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeMediationFailed,
+		Type:        faultType,
+		Direction:   direction,
+		Message:     "The guardrail check could not be completed",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// withFault replaces the fault an error response declares, leaving its status, headers
+// and body exactly as they are.
+func withFault(action interface{}, fault *policy.FaultDetails) interface{} {
+	switch a := action.(type) {
+	case policy.ImmediateResponse:
+		a.Fault = fault
+		return a
+	case policy.DownstreamResponseModifications:
+		a.Fault = fault
+		return a
+	}
+	return action
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *JSONSchemaGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, errors []gojsonschema.ResultError) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -330,7 +385,7 @@ func (p *JSONSchemaGuardrailPolicy) validatePayload(payload []byte, params JSONS
 		extractedValue, err := extractValueFromJSONPathForSchema(payload, params.JsonPath)
 		if err != nil {
 			slog.Debug("JSONSchemaGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-			return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil)
+			return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil), extractionFault("Error extracting value from JSONPath", err, isResponse))
 		}
 		documentLoader = gojsonschema.NewBytesLoader(extractedValue)
 	} else {
@@ -340,7 +395,13 @@ func (p *JSONSchemaGuardrailPolicy) validatePayload(payload []byte, params JSONS
 	result, err := gojsonschema.Validate(schemaLoader, documentLoader)
 	if err != nil {
 		slog.Debug("JSONSchemaGuardrail: Error validating schema", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil)
+		// Validate fails either because the configured schema cannot be loaded, or because
+		// the content is not JSON. Only the first is the policy's own failure.
+		fault := extractionFault("Error validating schema", err, isResponse)
+		if _, schemaErr := gojsonschema.NewSchema(schemaLoader); schemaErr != nil {
+			fault = checkFailureFault(policy.FaultTypeConfiguration, "Error validating schema", err, isResponse)
+		}
+		return withFault(p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil), fault)
 	}
 
 	var validationPassed bool

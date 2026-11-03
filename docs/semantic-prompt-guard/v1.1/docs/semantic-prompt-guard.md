@@ -366,9 +366,12 @@ for the analytics event and hands it to the API's fault policies (for example `l
 log the failure). The status and body the client receives are the same as in v1.0. A gateway
 without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
 
-Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
 It also names the intervening guardrail (`SemanticPromptGuard`) and records that it intervened; the
 assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+A rejection made without a similarity verdict carries no guardrail details: a prompt that cannot
+be read is reported as `960001` (`validation`), because it is the caller's, and a comparison the
+policy cannot compute as `960000` (`mediation`).
 
 The policy checks the request only.
 
@@ -376,8 +379,8 @@ The policy checks the request only.
 |------|--------|------|------|
 | The prompt's similarity to a denied phrase reaches `denySimilarityThreshold` | `422` | `906301` | `guardrail` |
 | The prompt's similarity to every allowed phrase is below `allowSimilarityThreshold` | `422` | `906301` | `guardrail` |
-| The value at `jsonPath` cannot be extracted, or the extracted prompt is empty | `422` | `906301` | `guardrail` |
-| The prompt's embedding cannot be generated, or its similarity cannot be calculated | `422` | `906301` | `guardrail` |
+| The value at `jsonPath` cannot be extracted, or the extracted prompt is empty | `422` | `960001` | `validation` |
+| The prompt's embedding cannot be generated, or its similarity cannot be calculated | `422` | `960000` | `mediation` |
 
 The fault's `Description` carries the internal reason, for example
 `prompt is too similar to denied phrase '<phrase>' (similarity=0.9123)`.

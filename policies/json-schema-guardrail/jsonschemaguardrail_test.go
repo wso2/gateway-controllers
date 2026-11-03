@@ -3,6 +3,7 @@ package jsonschemaguardrail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -626,4 +627,89 @@ func assertGuardrailError(t *testing.T, err *policy.FaultDetails, wantDirection 
 	if err.Guardrail.ActionReason == "" {
 		t.Fatalf("expected ActionReason to be set")
 	}
+}
+
+// TestJSONSchemaGuardrail_ExtractionFailureDeclaresFault pins the JSONPath extraction failure: no check
+// ran, so it is not a guardrail verdict. An unreadable request body is the caller's; an
+// unreadable response body leaves the policy unable to do its job. The client response is
+// the one the policy returned before the fault was declared.
+func TestJSONSchemaGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &JSONSchemaGuardrailPolicy{}
+	params := JSONSchemaGuardrailPolicyParams{JsonPath: "$.text", Schema: `{"type":"string"}`}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		want := p.buildErrorResponse("Error extracting value from JSONPath", errors.New("unused without showAssessment"), isResponse, false, nil)
+		if isResponse {
+			assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+		} else {
+			assertNoVerdictFault(t, got, want, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+		}
+	}
+}
+
+// assertNoVerdictFault checks that a rejection made without a guardrail verdict declares
+// the given fault, carries no guardrail details, and leaves the client response unchanged.
+func assertNoVerdictFault(t *testing.T, got, want interface{}, wantCode, wantType, wantDirection string) {
+	t.Helper()
+	var fault *policy.FaultDetails
+	var isFault bool
+	switch g := got.(type) {
+	case policy.ImmediateResponse:
+		w := want.(policy.ImmediateResponse)
+		if g.StatusCode != w.StatusCode || string(g.Body) != string(w.Body) || !reflect.DeepEqual(g.Headers, w.Headers) {
+			t.Fatalf("client response changed: got %d %s, want %d %s", g.StatusCode, g.Body, w.StatusCode, w.Body)
+		}
+		fault, isFault = g.Fault, g.IsFault
+	case policy.DownstreamResponseModifications:
+		w := want.(policy.DownstreamResponseModifications)
+		if g.StatusCode == nil || *g.StatusCode != *w.StatusCode || string(g.Body) != string(w.Body) || !reflect.DeepEqual(g.HeadersToSet, w.HeadersToSet) {
+			t.Fatalf("client response changed: got %v %s, want %d %s", g.StatusCode, g.Body, *w.StatusCode, w.Body)
+		}
+		fault, isFault = g.Fault, g.IsFault
+	default:
+		t.Fatalf("expected an error response, got %T", got)
+	}
+	if !isFault || fault == nil {
+		t.Fatalf("expected the rejection to declare a fault")
+	}
+	if fault.Code != wantCode || fault.Type != wantType || fault.Direction != wantDirection {
+		t.Fatalf("expected fault %s/%s/%s, got %s/%s/%s", wantCode, wantType, wantDirection, fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Guardrail != nil {
+		t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", fault.Guardrail)
+	}
+	if fault.Message == "" || fault.Description == "" {
+		t.Fatalf("expected Message and Description to be set, got %+v", fault)
+	}
+}
+
+// TestJSONSchemaGuardrail_ValidateErrorDeclaresFault pins the two ways gojsonschema.Validate
+// can fail before reaching a verdict: a configured schema that cannot be loaded is the
+// operator's, and content that is not JSON is read like a failed extraction.
+func TestJSONSchemaGuardrail_ValidateErrorDeclaresFault(t *testing.T) {
+	p := &JSONSchemaGuardrailPolicy{}
+
+	t.Run("unusable schema", func(t *testing.T) {
+		params := JSONSchemaGuardrailPolicyParams{Schema: `{"type":"not-a-type"}`}
+		for _, isResponse := range []bool{false, true} {
+			got := p.validatePayload([]byte(`{"a":1}`), params, isResponse)
+			want := p.buildErrorResponse("Error validating schema", errors.New("unused without showAssessment"), isResponse, false, nil)
+			wantDirection := policy.DirectionRequest
+			if isResponse {
+				wantDirection = policy.DirectionResponse
+			}
+			assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, wantDirection)
+		}
+	})
+
+	t.Run("content is not JSON", func(t *testing.T) {
+		params := JSONSchemaGuardrailPolicyParams{Schema: `{"type":"object"}`}
+		got := p.validatePayload([]byte(`not-json`), params, false)
+		want := p.buildErrorResponse("Error validating schema", errors.New("unused without showAssessment"), false, false, nil)
+		assertNoVerdictFault(t, got, want, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+
+		got = p.validatePayload([]byte(`not-json`), params, true)
+		want = p.buildErrorResponse("Error validating schema", errors.New("unused without showAssessment"), true, false, nil)
+		assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+	})
 }

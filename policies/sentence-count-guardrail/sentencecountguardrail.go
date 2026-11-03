@@ -389,6 +389,43 @@ func (p *SentenceCountGuardrailPolicy) buildGuardrailErrorResponse(reason string
 	}
 }
 
+// extractionFault describes a rejection made because the value at jsonPath could not be
+// read, so no check ran and there is no guardrail verdict to report. On a request the
+// payload is the caller's, so it is an invalid request body; on a response it is the
+// upstream's, and the policy could not do its job.
+func extractionFault(reason string, err error, isResponse bool) *policy.FaultDetails {
+	if isResponse {
+		return &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionResponse,
+			Message:     "The response body could not be read for the guardrail check",
+			Description: reason + ": " + err.Error(),
+		}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeInvalidRequestBody,
+		Type:        policy.FaultTypeValidation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The request body could not be read for the guardrail check",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// withFault replaces the fault an error response declares, leaving its status, headers
+// and body exactly as they are.
+func withFault(action interface{}, fault *policy.FaultDetails) interface{} {
+	switch a := action.(type) {
+	case policy.ImmediateResponse:
+		a.Fault = fault
+		return a
+	case policy.DownstreamResponseModifications:
+		a.Fault = fault
+		return a
+	}
+	return action
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *SentenceCountGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, min, max int) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -499,7 +536,7 @@ func (p *SentenceCountGuardrailPolicy) validatePayload(payload []byte, params Se
 	extractedValue, err := extractStringFromJSONPath(payload, params.JsonPath)
 	if err != nil {
 		slog.Debug("SentenceCountGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, params.Min, params.Max)
+		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, params.Min, params.Max), extractionFault("Error extracting value from JSONPath", err, isResponse))
 	}
 
 	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")

@@ -354,11 +354,14 @@ for the analytics event and hands it to the API's fault policies (for example `l
 log the failure). The status and body the client receives are the same as in v1.0. A gateway
 without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
 
-Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
 It also names the intervening guardrail (`azure-content-safety-content-moderation`) and records that it intervened; the
 assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+A rejection made because the policy could not run its check is not a verdict and carries no
+guardrail details: a request body that cannot be read is reported as `960001` (`validation`),
+because it is the caller's, and every other such failure as `960000` (`mediation`).
 
-With `passthroughOnError` enabled, the errors in the last row pass the request or response through
+With `passthroughOnError` enabled, the errors in the last three rows pass the request or response through
 instead of rejecting it, and no fault is reported.
 
 | When | Status | Code | Type |
@@ -367,7 +370,9 @@ instead of rejecting it, and no fault is reported.
 | Request or response: the `Sexual` severity reaches its threshold | `422` | `906002` | `guardrail` |
 | Request or response: the `SelfHarm` severity reaches its threshold | `422` | `906003` | `guardrail` |
 | Request or response: the `Violence` severity reaches its threshold | `422` | `906004` | `guardrail` |
-| Request or response: the value at `jsonPath` cannot be extracted, or the Azure Content Safety call fails | `422` | `906099` | `guardrail` |
+| Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
+| Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
+| Request or response: the Azure Content Safety call fails | `422` | `960000` | `mediation` |
 
 When more than one category reaches its threshold, the first one in Azure's response decides the code.
 

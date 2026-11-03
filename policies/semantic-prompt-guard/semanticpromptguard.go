@@ -380,6 +380,42 @@ func (p *SemanticPromptGuardPolicy) buildGuardrailErrorResponse(reason string, v
 	}
 }
 
+// unreadablePromptFault describes a rejection made because no prompt could be read at
+// jsonPath, so no comparison ran and there is no semantic verdict to report. The payload
+// is the caller's, so it is an invalid request body.
+func unreadablePromptFault(description string) *policy.FaultDetails {
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeInvalidRequestBody,
+		Type:        policy.FaultTypeValidation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The request body could not be read for the guardrail check",
+		Description: description,
+	}
+}
+
+// checkFailureFault describes a rejection made because the policy could not compare the
+// prompt at all (the embedding or the similarity could not be computed), so there is no
+// semantic verdict to report: the policy failed its own job.
+func checkFailureFault(reason string, err error) *policy.FaultDetails {
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeMediationFailed,
+		Type:        policy.FaultTypeMediation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The guardrail check could not be completed",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// withFault replaces the fault an error response declares, leaving its status, headers
+// and body exactly as they are.
+func withFault(action policy.RequestAction, fault *policy.FaultDetails) policy.RequestAction {
+	if resp, ok := action.(policy.ImmediateResponse); ok {
+		resp.Fault = fault
+		return resp
+	}
+	return action
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *SemanticPromptGuardPolicy) buildAssessmentObject(reason string, validationError error, showAssessment bool) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -466,17 +502,17 @@ func (p *SemanticPromptGuardPolicy) OnRequestBody(ctx context.Context, reqCtx *p
 func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params SemanticPromptGuardPolicyParams) interface{} {
 	prompt, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
 	if err != nil {
-		return p.buildErrorResponse("Error extracting value from JSONPath", err, params.ShowAssessment)
+		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, params.ShowAssessment), unreadablePromptFault("Error extracting value from JSONPath: "+err.Error()))
 	}
 
 	if prompt == "" {
-		return p.buildErrorResponse("Empty prompt extracted", nil, params.ShowAssessment)
+		return withFault(p.buildErrorResponse("Empty prompt extracted", nil, params.ShowAssessment), unreadablePromptFault("Empty prompt extracted"))
 	}
 
 	promptEmbedding, err := p.embeddingProvider.GetEmbedding(prompt)
 	if err != nil {
 		slog.Debug("SemanticPromptGuard: Error fetching prompt embedding", "error", err)
-		return p.buildErrorResponse("Failed to generate embedding for prompt", err, params.ShowAssessment)
+		return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", err, params.ShowAssessment), checkFailureFault("Failed to generate embedding for prompt", err))
 	}
 
 	if len(params.DeniedPhrases) > 0 && len(params.AllowedPhrases) == 0 {
@@ -489,14 +525,14 @@ func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params Seman
 			slog.Debug("SemanticPromptGuard: ALLOWED - prompt does not match denied phrases", "maxSimilarity", similarity, "threshold", params.DenySimilarityThreshold)
 		} else {
 			slog.Debug("SemanticPromptGuard: Error calculating similarity to denied phrases", "error", err)
-			return p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment)
+			return withFault(p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment), checkFailureFault("Error calculating semantic similarity", err))
 		}
 		return policy.UpstreamRequestModifications{}
 	} else if len(params.AllowedPhrases) > 0 && len(params.DeniedPhrases) == 0 {
 		allowedSimilarity, phrase, err := maxSimilarity(promptEmbedding, params.AllowedPhrases)
 		if err != nil {
 			slog.Debug("SemanticPromptGuard: Error calculating similarity to allowed phrases", "error", err)
-			return p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment)
+			return withFault(p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment), checkFailureFault("Error calculating semantic similarity", err))
 		}
 		if allowedSimilarity >= params.AllowSimilarityThreshold {
 			slog.Debug("SemanticPromptGuard: ALLOWED - prompt matches allowed phrase", "phrase", phrase.Phrase, "similarity", allowedSimilarity, "threshold", params.AllowSimilarityThreshold)
@@ -514,13 +550,13 @@ func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params Seman
 			}
 		} else {
 			slog.Debug("SemanticPromptGuard: Error calculating similarity to denied phrases", "error", err)
-			return p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment)
+			return withFault(p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment), checkFailureFault("Error calculating semantic similarity", err))
 		}
 
 		allowedSimilarity, phrase, err := maxSimilarity(promptEmbedding, params.AllowedPhrases)
 		if err != nil {
 			slog.Debug("SemanticPromptGuard: Error calculating similarity to allowed phrases", "error", err)
-			return p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment)
+			return withFault(p.buildErrorResponse("Error calculating semantic similarity", err, params.ShowAssessment), checkFailureFault("Error calculating semantic similarity", err))
 		}
 		if allowedSimilarity >= params.AllowSimilarityThreshold {
 			slog.Debug("SemanticPromptGuard: ALLOWED - prompt matches allowed phrase", "phrase", phrase.Phrase, "similarity", allowedSimilarity, "threshold", params.AllowSimilarityThreshold)

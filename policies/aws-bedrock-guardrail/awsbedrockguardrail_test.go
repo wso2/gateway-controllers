@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime"
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
 func TestAWSBedrockGuardrailPolicy_Mode(t *testing.T) {
@@ -986,13 +987,10 @@ func TestAWSBedrockGuardrail_InterventionDeclaresFault(t *testing.T) {
 }
 
 // TestAWSBedrockGuardrail_FailClosedDeclaresFault pins the path that runs when Bedrock
-// cannot be reached at all: the policy fails closed and refuses the call. That is a genuine
-// refusal, so it must reach the fault policies.
-//
-// Note the code is the same 900514 the policy's own published envelope already reports for
-// this path, even though the guardrail did not actually intervene. Splitting a
-// dependency-failure code out of an intervention code would change the published envelope,
-// which is a wider change than declaring the fault.
+// cannot be used at all: the policy fails closed and refuses the call. That is a genuine
+// refusal, so it must reach the fault policies, but no guardrail produced a verdict, so it
+// is declared as the policy failing its own job rather than as an intervention. The client
+// still receives the same envelope as before.
 func TestAWSBedrockGuardrail_FailClosedDeclaresFault(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 	params := AWSBedrockGuardrailPolicyParams{RedactPII: false, JsonPath: "$.text"}
@@ -1005,11 +1003,58 @@ func TestAWSBedrockGuardrail_FailClosedDeclaresFault(t *testing.T) {
 	if !mods.IsFault {
 		t.Fatalf("expected IsFault=true when the guardrail fails closed")
 	}
-	if mods.Fault == nil || mods.Fault.Code != policy.GuardrailCodeUnsafeContent {
-		t.Fatalf("expected Error.Code=%q, got %+v", policy.GuardrailCodeUnsafeContent, mods.Fault)
+	if mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %+v", policy.FaultCodeMediationFailed, mods.Fault)
+	}
+	if mods.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, mods.Fault.Type)
 	}
 	if mods.Fault.Direction != policy.DirectionResponse {
 		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, mods.Fault.Direction)
+	}
+	if mods.Fault.Guardrail != nil {
+		t.Fatalf("a failure to run the check is not an intervention, got Guardrail=%+v", mods.Fault.Guardrail)
+	}
+	if mods.StatusCode == nil || *mods.StatusCode != GuardrailErrorCode || !strings.Contains(string(mods.Body), "GUARDRAIL_INTERVENED") {
+		t.Fatalf("expected the unchanged %d guardrail envelope, got %v %s", GuardrailErrorCode, mods.StatusCode, mods.Body)
+	}
+}
+
+// TestAWSBedrockGuardrail_ExtractionFailureDeclaresFault pins the JSONPath extraction
+// failure: an unreadable request body is the caller's, an unreadable response body leaves
+// the policy unable to do its job. Neither is a guardrail verdict, and the client response
+// is the same one the policy returned before the fault was declared.
+func TestAWSBedrockGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &AWSBedrockGuardrailPolicy{}
+	params := AWSBedrockGuardrailPolicyParams{JsonPath: "$.text"}
+	payload := []byte(`not-json`)
+	_, extractErr := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	if extractErr == nil {
+		t.Fatalf("expected the payload to fail extraction")
+	}
+
+	reqAction := p.validatePayload(payload, params, false, map[string]interface{}{})
+	resp, ok := reqAction.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", reqAction)
+	}
+	want := p.buildErrorResponse("Error extracting value from JSONPath", extractErr, false, false, nil).(policy.ImmediateResponse)
+	if resp.StatusCode != want.StatusCode || string(resp.Body) != string(want.Body) {
+		t.Fatalf("client response changed: got %d %s, want %d %s", resp.StatusCode, resp.Body, want.StatusCode, want.Body)
+	}
+	if !resp.IsFault || resp.Fault == nil || resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+		resp.Fault.Type != policy.FaultTypeValidation || resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Guardrail != nil {
+		t.Fatalf("expected an invalid-request-body fault, got %+v", resp.Fault)
+	}
+
+	respAction := p.validatePayload(payload, params, true, map[string]interface{}{})
+	mods, ok := respAction.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", respAction)
+	}
+	if !mods.IsFault || mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed ||
+		mods.Fault.Type != policy.FaultTypeMediation || mods.Fault.Direction != policy.DirectionResponse || mods.Fault.Guardrail != nil {
+		t.Fatalf("expected a mediation fault, got %+v", mods.Fault)
 	}
 }
 

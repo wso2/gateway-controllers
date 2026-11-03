@@ -1279,6 +1279,61 @@ func (p *AWSBedrockGuardrailPolicy) buildGuardrailErrorResponse(reason string, v
 	}
 }
 
+// extractionFault describes a rejection made because the value at jsonPath could not be
+// read, so no check ran and there is no guardrail verdict to report. On a request the
+// payload is the caller's, so it is an invalid request body; on a response it is the
+// upstream's, and the policy could not do its job.
+func extractionFault(reason string, err error, isResponse bool) *policy.FaultDetails {
+	if isResponse {
+		return &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionResponse,
+			Message:     "The response body could not be read for the guardrail check",
+			Description: reason + ": " + err.Error(),
+		}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeInvalidRequestBody,
+		Type:        policy.FaultTypeValidation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The request body could not be read for the guardrail check",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// checkFailureFault describes a rejection made because the policy could not run its check
+// at all, so there is no guardrail verdict to report: the policy failed its own job.
+// Description carries the reason only: the service's error text can name the account's
+// resources, so it stays in the debug log.
+func checkFailureFault(reason string, isResponse bool) *policy.FaultDetails {
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeMediationFailed,
+		Type:        policy.FaultTypeMediation,
+		Direction:   direction,
+		Message:     "The guardrail check could not be completed",
+		Description: reason,
+	}
+}
+
+// withFault replaces the fault an error response declares, leaving its status, headers
+// and body exactly as they are.
+func withFault(action interface{}, fault *policy.FaultDetails) interface{} {
+	switch a := action.(type) {
+	case policy.ImmediateResponse:
+		a.Fault = fault
+		return a
+	case policy.DownstreamResponseModifications:
+		a.Fault = fault
+		return a
+	}
+	return action
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *AWSBedrockGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, output interface{}) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -1480,7 +1535,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 			return policy.UpstreamRequestModifications{}
 		}
 		slog.Debug("AWSBedrockGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil)
+		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil), extractionFault("Error extracting value from JSONPath", err, isResponse))
 	}
 
 	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")
@@ -1501,7 +1556,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 			return policy.UpstreamRequestModifications{}
 		}
 		slog.Debug("AWSBedrockGuardrail: Error loading AWS config", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error loading AWS config", err, isResponse, params.ShowAssessment, nil)
+		return withFault(p.buildErrorResponse("Error loading AWS config", err, isResponse, params.ShowAssessment, nil), checkFailureFault("Error loading AWS config", isResponse))
 	}
 
 	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, extractedValue)
@@ -1514,7 +1569,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 			return policy.UpstreamRequestModifications{}
 		}
 		slog.Debug("AWSBedrockGuardrail: Error calling AWS Bedrock Guardrail", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error calling AWS Bedrock Guardrail", err, isResponse, params.ShowAssessment, nil)
+		return withFault(p.buildErrorResponse("Error calling AWS Bedrock Guardrail", err, isResponse, params.ShowAssessment, nil), checkFailureFault("Error calling AWS Bedrock Guardrail", isResponse))
 	}
 
 	var outputInterface interface{} = output
@@ -1528,7 +1583,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 			return policy.UpstreamRequestModifications{}
 		}
 		slog.Debug("AWSBedrockGuardrail: Error evaluating guardrail response", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error evaluating guardrail response", err, isResponse, params.ShowAssessment, output)
+		return withFault(p.buildErrorResponse("Error evaluating guardrail response", err, isResponse, params.ShowAssessment, output), checkFailureFault("Error evaluating guardrail response", isResponse))
 	}
 
 	if violation {

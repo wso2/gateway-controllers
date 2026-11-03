@@ -243,14 +243,21 @@ for the analytics event and hands it to the API's fault policies (for example `l
 log the failure). The status and body the client receives are the same as in v1.0. A gateway
 without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
 
-Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
 It also names the intervening guardrail (`json-schema-guardrail`) and records that it intervened; the
 assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+A rejection made because the content could not be read is not a verdict and carries no guardrail
+details: it is reported as `960001` (`validation`) for a request body, which is the caller's, and
+`960000` (`mediation`) for a response body.
+A configured `schema` that cannot be loaded is reported as `960000` (`configuration`).
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| Request or response: the value at `jsonPath` cannot be extracted | `422` | `906204` | `guardrail` |
-| Request or response: the schema or the content cannot be loaded for validation | `422` | `906204` | `guardrail` |
+| Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
+| Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
+| Request or response: the configured `schema` cannot be loaded | `422` | `960000` | `configuration` |
+| Request: the content is not valid JSON | `422` | `960001` | `validation` |
+| Response: the content is not valid JSON | `422` | `960000` | `mediation` |
 | Request or response: the content does not satisfy `schema` (or satisfies it, with `invert`) | `422` | `906204` | `guardrail` |
 
 The fault's `Description` carries the internal reason, for example `JSON schema validation failed`.

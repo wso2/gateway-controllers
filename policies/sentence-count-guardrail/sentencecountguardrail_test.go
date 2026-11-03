@@ -3,6 +3,8 @@ package sentencecountguardrail
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -824,5 +826,59 @@ func assertGuardrailError(t *testing.T, err *policy.FaultDetails, wantDirection 
 	}
 	if err.Guardrail.ActionReason == "" {
 		t.Fatalf("expected ActionReason to be set")
+	}
+}
+
+// TestSentenceCountGuardrail_ExtractionFailureDeclaresFault pins the JSONPath extraction failure: no check
+// ran, so it is not a guardrail verdict. An unreadable request body is the caller's; an
+// unreadable response body leaves the policy unable to do its job. The client response is
+// the one the policy returned before the fault was declared.
+func TestSentenceCountGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &SentenceCountGuardrailPolicy{}
+	params := SentenceCountGuardrailPolicyParams{JsonPath: "$.text", Min: 1, Max: 10}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		want := p.buildErrorResponse("Error extracting value from JSONPath", errors.New("unused without showAssessment"), isResponse, false, 1, 10)
+		if isResponse {
+			assertNoVerdictFault(t, got, want, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+		} else {
+			assertNoVerdictFault(t, got, want, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+		}
+	}
+}
+
+// assertNoVerdictFault checks that a rejection made without a guardrail verdict declares
+// the given fault, carries no guardrail details, and leaves the client response unchanged.
+func assertNoVerdictFault(t *testing.T, got, want interface{}, wantCode, wantType, wantDirection string) {
+	t.Helper()
+	var fault *policy.FaultDetails
+	var isFault bool
+	switch g := got.(type) {
+	case policy.ImmediateResponse:
+		w := want.(policy.ImmediateResponse)
+		if g.StatusCode != w.StatusCode || string(g.Body) != string(w.Body) || !reflect.DeepEqual(g.Headers, w.Headers) {
+			t.Fatalf("client response changed: got %d %s, want %d %s", g.StatusCode, g.Body, w.StatusCode, w.Body)
+		}
+		fault, isFault = g.Fault, g.IsFault
+	case policy.DownstreamResponseModifications:
+		w := want.(policy.DownstreamResponseModifications)
+		if g.StatusCode == nil || *g.StatusCode != *w.StatusCode || string(g.Body) != string(w.Body) || !reflect.DeepEqual(g.HeadersToSet, w.HeadersToSet) {
+			t.Fatalf("client response changed: got %v %s, want %d %s", g.StatusCode, g.Body, *w.StatusCode, w.Body)
+		}
+		fault, isFault = g.Fault, g.IsFault
+	default:
+		t.Fatalf("expected an error response, got %T", got)
+	}
+	if !isFault || fault == nil {
+		t.Fatalf("expected the rejection to declare a fault")
+	}
+	if fault.Code != wantCode || fault.Type != wantType || fault.Direction != wantDirection {
+		t.Fatalf("expected fault %s/%s/%s, got %s/%s/%s", wantCode, wantType, wantDirection, fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Guardrail != nil {
+		t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", fault.Guardrail)
+	}
+	if fault.Message == "" || fault.Description == "" {
+		t.Fatalf("expected Message and Description to be set, got %+v", fault)
 	}
 }

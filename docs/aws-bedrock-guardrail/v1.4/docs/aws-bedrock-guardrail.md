@@ -505,13 +505,16 @@ for the analytics event and hands it to the API's fault policies (for example `l
 log the failure). The status and body the client receives are the same as in v1.3. A gateway
 without fault policy support ignores the fault, and the policy behaves exactly as v1.3.
 
-Every fault has type `guardrail` and the code below from the guardrail block (`906000`–`906399`).
+A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
 It also names the intervening guardrail (`aws-bedrock-guardrail`) and records that it intervened; the
 assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+A rejection made because the policy could not run its check is not a verdict and carries no
+guardrail details: a request body that cannot be read is reported as `960001` (`validation`),
+because it is the caller's, and every other such failure as `960000` (`mediation`).
 
 The response phase only rejects responses that it validates: when `applicableStatusCodes` is set,
 a response whose upstream status is not listed passes through without a fault. With
-`passthroughOnError` enabled, the errors in the last row pass the request or response through
+`passthroughOnError` enabled, the errors in the last three rows pass the request or response through
 instead of rejecting it, and no fault is reported. An intervention that includes a PII finding is
 masked or redacted rather than rejected, so it produces no fault.
 
@@ -526,7 +529,9 @@ masked or redacted rather than rejected, so it produces no fault.
 | Request or response: Bedrock intervenes because of a word filter (custom words or a managed word list) | `422` | `906007` | `guardrail` |
 | Request or response: Bedrock intervenes because of a denied topic | `422` | `906301` | `guardrail` |
 | Request or response: Bedrock intervenes for any other reason | `422` | `906099` | `guardrail` |
-| Request or response: the value at `jsonPath` cannot be extracted, the AWS configuration cannot be loaded, the Bedrock call fails, or Bedrock returns an invalid or unexpected response | `422` | `906099` | `guardrail` |
+| Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
+| Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
+| Request or response: the AWS configuration cannot be loaded, the Bedrock call fails, or Bedrock returns an invalid or unexpected response | `422` | `960000` | `mediation` |
 
 When Bedrock reports more than one finding, a content filter decides the code ahead of a word
 filter, and a word filter ahead of a denied topic.

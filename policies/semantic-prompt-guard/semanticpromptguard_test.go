@@ -735,3 +735,51 @@ func TestSemanticPromptGuard_AssessmentsGatedByShowAssessment(t *testing.T) {
 		})
 	}
 }
+
+// TestSemanticPromptGuard_NoVerdictDeclaresFault pins the rejections made without a
+// semantic verdict: a prompt that cannot be read is the caller's, and an embedding the
+// policy cannot generate is its own failure. The client response is the one the policy
+// returned before the fault was declared.
+func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
+	params := SemanticPromptGuardPolicyParams{JsonPath: "$.prompt", DeniedPhrases: []PhraseEmbedding{{Phrase: "x", Embedding: []float32{1, 0}}}, DenySimilarityThreshold: 0.9}
+
+	for _, tc := range []struct {
+		name     string
+		provider *mockEmbeddingProvider
+		payload  string
+		reason   string
+		wantCode string
+		wantType string
+	}{
+		{"unreadable prompt", &mockEmbeddingProvider{}, `not-json`, "Error extracting value from JSONPath", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"empty prompt", &mockEmbeddingProvider{}, `{"prompt":""}`, "Empty prompt extracted", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"embedding failure", &mockEmbeddingProvider{getEmbeddingFn: func(string) ([]float32, error) {
+			return nil, errors.New("provider unavailable")
+		}}, `{"prompt":"hello"}`, "Failed to generate embedding for prompt", policy.FaultCodeMediationFailed, policy.FaultTypeMediation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &SemanticPromptGuardPolicy{embeddingProvider: tc.provider}
+			got, ok := p.validatePayload([]byte(tc.payload), params).(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse")
+			}
+			var validationErr error
+			if tc.reason != "Empty prompt extracted" {
+				validationErr = errors.New("unused without showAssessment")
+			}
+			want := p.buildErrorResponse(tc.reason, validationErr, false).(policy.ImmediateResponse)
+			if got.StatusCode != want.StatusCode || string(got.Body) != string(want.Body) || !reflect.DeepEqual(got.Headers, want.Headers) {
+				t.Fatalf("client response changed: got %d %s, want %d %s", got.StatusCode, got.Body, want.StatusCode, want.Body)
+			}
+			if !got.IsFault || got.Fault == nil {
+				t.Fatalf("expected the rejection to declare a fault")
+			}
+			if got.Fault.Code != tc.wantCode || got.Fault.Type != tc.wantType || got.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("expected fault %s/%s/%s, got %+v", tc.wantCode, tc.wantType, policy.DirectionRequest, got.Fault)
+			}
+			if got.Fault.Guardrail != nil {
+				t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", got.Fault.Guardrail)
+			}
+		})
+	}
+}

@@ -920,9 +920,26 @@ func TestPIIMaskingRegex_MediationFailureDeclaresFault(t *testing.T) {
 // TestPIIMaskingRegex_SuccessfulMaskingIsNotAFault covers the ordinary path: this policy
 // rewrites the body on every masked response. That is a transformation, not a failure.
 func TestPIIMaskingRegex_SuccessfulMaskingIsNotAFault(t *testing.T) {
-	action := policy.DownstreamResponseModifications{Body: []byte("masked")}
-	if action.IsFault {
-		t.Fatalf("a masking transformation must not be a fault")
+	p := &PIIMaskingRegexPolicy{}
+	respCtx := &policy.ResponseContext{
+		SharedContext: &policy.SharedContext{
+			RequestID: "req-id",
+			Metadata: map[string]interface{}{
+				MetadataKeyPIIEntities: map[string]string{"a.user@example.com": "[EMAIL_0000]"},
+			},
+		},
+		ResponseBody: &policy.Body{Content: []byte(`{"answer":"Found [EMAIL_0000]"}`), Present: true},
+	}
+	action := p.OnResponseBody(context.Background(), respCtx, nil)
+	mods, ok := action.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+	}
+	if !strings.Contains(string(mods.Body), "a.user@example.com") {
+		t.Fatalf("expected the placeholder to be restored, got %s", mods.Body)
+	}
+	if mods.IsFault || mods.Fault != nil {
+		t.Fatalf("a restored response must not be a fault")
 	}
 }
 
