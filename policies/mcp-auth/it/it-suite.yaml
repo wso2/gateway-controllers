@@ -61,7 +61,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
         overlay: overlays/mcp-auth-gateway-host.toml
       - name: testbench
     runners:
