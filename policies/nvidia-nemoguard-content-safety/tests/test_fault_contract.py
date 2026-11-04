@@ -7,8 +7,13 @@ import sys
 import types
 import unittest
 
-from . import test_policy as base
-from .fault_stubs import FaultImmediateResponse, with_fault_contract
+try:
+    from . import test_policy as base
+    from .fault_stubs import FaultImmediateResponse, with_fault_contract
+except ImportError:
+    # unittest discover -s tests imports each test module at the top level, not as a package.
+    import test_policy as base
+    from fault_stubs import FaultImmediateResponse, with_fault_contract
 
 
 def load_with_fault_contract():
