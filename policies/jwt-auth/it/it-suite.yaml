@@ -50,3 +50,7 @@ blocks:
         tags: "gateway-version>=1.2.0"
         features:
           - features/jwt_auth_scope_claim_rules.feature
+      - name: jwt-auth-application-subscriptions
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/jwt_auth_application_subscriptions.feature
