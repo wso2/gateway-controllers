@@ -42,6 +42,15 @@ description: |
 
   Failover is never attempted after response headers or streamed content have reached the client.
 
+  Works whether or not the deployment routes upstream failures through the fault flow. With
+  policy_engine.fault_policies.handle_upstream_faults enabled the gateway skips every response
+  policy for a response of 400 or above — which for this policy is exactly the set of responses
+  it grades — so it also runs as a fault policy, and the control plane attaches it to the fault
+  chain automatically for any operation that resolved a failover configuration. A publisher
+  configures failover once; nothing has to be listed twice. On that path it runs FIRST, so the
+  exhaustion error is a default an operator's own fault entries can still reshape, and the
+  client receives the same status and body either way.
+
   When the chain runs out the caller receives one fixed error — HTTP 503 with code 960100,
   `failover_exhausted` — and never the final provider's own response. A provider error body
   routinely names the account it was billed to, the region that rejected it or the key that was

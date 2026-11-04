@@ -79,6 +79,29 @@ func exhaustionResponse(record attemptRecord) policy.ImmediateResponse {
 	}
 }
 
+// exhaustionFaultOverlay describes the exhaustion ON TOP OF whatever the engine already
+// decided, rather than in place of it.
+//
+// The engine applies a returned Fault with `faultCtx.Fault = &redescribed` — a WHOLESALE
+// replacement, keeping only Policy. So returning a freshly-built FaultDetails carrying just
+// this policy's code would delete the engine's own classification, and on this path that
+// classification is both present and correct: the flow is running precisely because the
+// response was an upstream failure, which is a class only the engine may set
+// (FaultTypeUpstream is documented "Set by the engine, not by a policy").
+//
+// Copying first and overlaying second keeps Type, Direction and any other field the engine
+// resolved, and adds the two things it could not know: which condition this was, and a
+// message safe to show the caller.
+func exhaustionFaultOverlay(existing *policy.FaultDetails) *policy.FaultDetails {
+	described := policy.FaultDetails{}
+	if existing != nil {
+		described = *existing
+	}
+	described.Code = exhaustionCode
+	described.Message = exhaustionMessage
+	return &described
+}
+
 // chainCouldFailOver reports whether this request had anywhere to fail over TO.
 //
 // This is what separates an exhausted chain from a single-target operation, and the two must

@@ -59,6 +59,10 @@ const (
 	metadataKeyRankingSource  = "model_failover.ranking_source"
 	metadataKeyRequestedModel = "model_failover.requested_model"
 
+	// metadataKeyGraded records that this request's outcome has already been charged to a
+	// target's health, so the fault hook does not charge it a second time. See OnFault.
+	metadataKeyGraded = "model_failover.graded"
+
 	// attemptCountHeader is populated by Envoy on the downstream response when the virtual
 	// host sets include_attempt_count_in_response.
 	attemptCountHeader = "x-envoy-attempt-count"
@@ -95,10 +99,23 @@ func GetPolicy(
 	metadata policy.PolicyMetadata,
 	params map[string]interface{},
 ) (policy.Policy, error) {
-	return NewPolicy(params), nil
+	parsed := parseParams(params)
+	return &Policy{
+		params: parsed,
+		// Shared with the other chain this operation attaches us to — see shared_health.go.
+		// The factory runs once per CHAIN entry, so the response chain and the fault chain
+		// each get their own *Policy; a private store here would mean the fault chain graded
+		// into a store nothing reads.
+		health: healthStoreFor(metadata, parsed.Suspension),
+		now:    time.Now,
+	}, nil
 }
 
-// NewPolicy builds a policy from its parameters.
+// NewPolicy builds a policy from its parameters, with a PRIVATE health store.
+//
+// Deliberately not the factory path: an attachment's store is shared, and tests that shared a
+// process-global store would leak health between cases and pass or fail on execution order.
+// Production construction goes through GetPolicy.
 func NewPolicy(params map[string]interface{}) *Policy {
 	parsed := parseParams(params)
 	return &Policy{
@@ -333,6 +350,12 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 		SkippedTargets: targetsFromMetadata(respCtx.Metadata, metadataKeySkipped),
 	}
 	record.log()
+
+	// Claim the grading for this request before returning, so a fault chain opened by a
+	// LATER response policy does not record the same outcome again.
+	if respCtx.Metadata != nil {
+		respCtx.Metadata[metadataKeyGraded] = true
+	}
 
 	// The chain ran out. Replace the final upstream's own error with this gateway's, so the
 	// caller never receives a body this gateway did not write (FR-014).
