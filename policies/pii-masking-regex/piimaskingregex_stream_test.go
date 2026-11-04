@@ -876,3 +876,116 @@ func TestSSE_DoneInAssistantTextIsNotTerminal(t *testing.T) {
 		t.Errorf("assembled content = %q, want %q", assembled, want)
 	}
 }
+
+// TestPIIMaskingRegex_MediationFailureDeclaresFault covers the one rejection this policy
+// makes. Masking failed, so unmasked content would otherwise have been forwarded — exactly
+// the failure an operator wants a fault policy to see.
+func TestPIIMaskingRegex_MediationFailureDeclaresFault(t *testing.T) {
+	p := &PIIMaskingRegexPolicy{}
+
+	action := p.buildErrorResponse("error extracting value from JSONPath: no match")
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true when masking fails")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Code == "900967" {
+		t.Fatalf("900967 is a control-plane code and must not be used here")
+	}
+	if resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	// This policy already returns the reason to the caller in the body, so it is
+	// client-safe and belongs in Message. Description must stay empty rather than restate
+	// an already-published string as though a renderer would withhold it.
+	if !strings.Contains(resp.Fault.Message, "no match") {
+		t.Fatalf("expected Error.Message to carry the reason, got %q", resp.Fault.Message)
+	}
+	if resp.Fault.Description != "" {
+		t.Fatalf("expected Error.Description to stay empty, got %q", resp.Fault.Description)
+	}
+}
+
+// TestPIIMaskingRegex_SuccessfulMaskingIsNotAFault covers the ordinary path: this policy
+// rewrites the body on every masked response. That is a transformation, not a failure.
+func TestPIIMaskingRegex_SuccessfulMaskingIsNotAFault(t *testing.T) {
+	p := &PIIMaskingRegexPolicy{}
+	respCtx := &policy.ResponseContext{
+		SharedContext: &policy.SharedContext{
+			RequestID: "req-id",
+			Metadata: map[string]interface{}{
+				MetadataKeyPIIEntities: map[string]string{"a.user@example.com": "[EMAIL_0000]"},
+			},
+		},
+		ResponseBody: &policy.Body{Content: []byte(`{"answer":"Found [EMAIL_0000]"}`), Present: true},
+	}
+	action := p.OnResponseBody(context.Background(), respCtx, nil)
+	mods, ok := action.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+	}
+	if !strings.Contains(string(mods.Body), "a.user@example.com") {
+		t.Fatalf("expected the placeholder to be restored, got %s", mods.Body)
+	}
+	if mods.IsFault || mods.Fault != nil {
+		t.Fatalf("a restored response must not be a fault")
+	}
+}
+
+// TestPIIMaskingRegex_ClientBodyIsUnchanged pins the OTHER half of the code decision above,
+// and it is the half a reader is most likely to assume rather than check.
+//
+// This policy now carries TWO codes for one failure: 900967 in the body the client parses,
+// and 960700 in the FaultDetails the fault flow and analytics read. That is deliberate —
+func TestPIIMaskingRegex_ClientBodyIsUnchanged(t *testing.T) {
+	p := &PIIMaskingRegexPolicy{}
+
+	action := p.buildErrorResponse("error extracting value from JSONPath: no match")
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+
+	if resp.StatusCode != APIMInternalErrorCode {
+		t.Errorf("status = %d, want %d — unchanged from before the fault flow",
+			resp.StatusCode, APIMInternalErrorCode)
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("body is not JSON: %v (%s)", err, resp.Body)
+	}
+
+	// A number, not a string: json.Unmarshal gives float64 for a JSON number, and would
+	// give string if someone switched the body onto the string-typed fault code.
+	code, isNumber := body["code"].(float64)
+	if !isNumber {
+		t.Fatalf("body code is %T (%v), want a JSON number — a client comparing "+
+			"code === 900967 breaks if this becomes a string", body["code"], body["code"])
+	}
+	if int(code) != APIMInternalExceptionCode {
+		t.Errorf("body code = %d, want %d — the client-visible code must not move to the "+
+			"fault code (%s); the two are deliberately different",
+			int(code), APIMInternalExceptionCode, policy.FaultCodeMediationFailed)
+	}
+
+	wantMsg := "Error occurred during pii-masking-regex mediation: error extracting value from JSONPath: no match"
+	if body["message"] != wantMsg {
+		t.Errorf("body message = %q, want %q", body["message"], wantMsg)
+	}
+	if _, hasType := body["type"]; hasType {
+		t.Errorf(`the success path's body has no "type" key (only the marshal-failure `+
+			`fallback does), got %v`, body)
+	}
+}

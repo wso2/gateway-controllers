@@ -675,3 +675,106 @@ func decodeSemanticPromptGuardMessage(t *testing.T, body []byte) map[string]inte
 	}
 	return message
 }
+
+// TestSemanticPromptGuard_InterventionDeclaresFault covers the funnel every rejection this
+// policy makes passes through. It runs on the request phase only, so Direction is always
+func TestSemanticPromptGuard_InterventionDeclaresFault(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+
+	action := p.buildErrorResponse("blocked prompt detail", nil, false)
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a guardrail intervention")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != codeGuardrailIntervened {
+		t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeGuardrail {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to carry the blocked detail")
+	}
+	if resp.Fault.Guardrail == nil || resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+		t.Fatalf("expected the guardrail envelope to name %q, got %+v", guardrailName, resp.Fault.Guardrail)
+	}
+}
+
+// TestSemanticPromptGuard_AssessmentsGatedByShowAssessment covers the field that must not
+// leak: Assessments holds the prompt the guardrail existed to stop.
+func TestSemanticPromptGuard_AssessmentsGatedByShowAssessment(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			action := p.buildErrorResponse("blocked prompt detail", nil, show)
+			resp := action.(policy.ImmediateResponse)
+			if resp.Fault == nil || resp.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := resp.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}
+
+// TestSemanticPromptGuard_NoVerdictDeclaresFault pins the rejections made without a
+// semantic verdict: a prompt that cannot be read is the caller's, and an embedding the
+// policy cannot generate is its own failure. The client response is the one the policy
+// returned before the fault was declared.
+func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
+	params := SemanticPromptGuardPolicyParams{JsonPath: "$.prompt", DeniedPhrases: []PhraseEmbedding{{Phrase: "x", Embedding: []float32{1, 0}}}, DenySimilarityThreshold: 0.9}
+
+	for _, tc := range []struct {
+		name     string
+		provider *mockEmbeddingProvider
+		payload  string
+		wantBody string
+		wantCode string
+		wantType string
+	}{
+		{"unreadable prompt", &mockEmbeddingProvider{}, `not-json`, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"SemanticPromptGuard"},"type":"SEMANTIC_PROMPT_GUARD"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"empty prompt", &mockEmbeddingProvider{}, `{"prompt":""}`, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Violation of applied semantic prompt guard constraints detected.","direction":"REQUEST","interveningGuardrail":"SemanticPromptGuard"},"type":"SEMANTIC_PROMPT_GUARD"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation},
+		{"embedding failure", &mockEmbeddingProvider{getEmbeddingFn: func(string) ([]float32, error) {
+			return nil, errors.New("provider unavailable")
+		}}, `{"prompt":"hello"}`, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Failed to generate embedding for prompt","direction":"REQUEST","interveningGuardrail":"SemanticPromptGuard"},"type":"SEMANTIC_PROMPT_GUARD"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &SemanticPromptGuardPolicy{embeddingProvider: tc.provider}
+			got, ok := p.validatePayload([]byte(tc.payload), params).(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse")
+			}
+			if got.StatusCode != 422 || string(got.Body) != tc.wantBody || len(got.Headers) != 1 || got.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("client response changed: got %d %v %s, want 422 %s", got.StatusCode, got.Headers, got.Body, tc.wantBody)
+			}
+			if !got.IsFault || got.Fault == nil {
+				t.Fatalf("expected the rejection to declare a fault")
+			}
+			if got.Fault.Code != tc.wantCode || got.Fault.Type != tc.wantType || got.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("expected fault %s/%s/%s, got %+v", tc.wantCode, tc.wantType, policy.DirectionRequest, got.Fault)
+			}
+			if got.Fault.Guardrail != nil {
+				t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", got.Fault.Guardrail)
+			}
+		})
+	}
+}

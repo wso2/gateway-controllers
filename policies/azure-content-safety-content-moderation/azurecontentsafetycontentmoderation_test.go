@@ -448,3 +448,153 @@ func decodeAzureJSON(t *testing.T, raw []byte) map[string]interface{} {
 	}
 	return m
 }
+
+// TestAzureContentSafety_InterventionDeclaresFault covers the funnel every intervention
+func TestAzureContentSafety_InterventionDeclaresFault(t *testing.T) {
+	p := &AzureContentSafetyContentModerationPolicy{}
+	analysis := []map[string]interface{}{{"category": "Hate", "severity": 6}}
+
+	t.Run("request phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, false, false, analysis, "inspected", "Hate")
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		if resp.Fault == nil || resp.Fault.Code != policy.GuardrailCodeHate {
+			t.Fatalf("expected Error.Code=%q, got %+v", policy.GuardrailCodeHate, resp.Fault)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Guardrail == nil || resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+			t.Fatalf("expected the guardrail envelope to name %q, got %+v", guardrailName, resp.Fault.Guardrail)
+		}
+	})
+
+	t.Run("response phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, true, false, analysis, "inspected", "Hate")
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side intervention")
+		}
+		if mods.Fault == nil || mods.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %+v", policy.DirectionResponse, mods.Fault)
+		}
+	})
+}
+
+// TestAzureContentSafety_AssessmentsGatedByShowAssessment covers the field that must not
+// leak: for a response-side hit the assessment holds the content the guardrail existed to
+// stop from leaving, so it is populated only where the operator opted in.
+func TestAzureContentSafety_AssessmentsGatedByShowAssessment(t *testing.T) {
+	p := &AzureContentSafetyContentModerationPolicy{}
+	analysis := []map[string]interface{}{{"category": "Hate", "severity": 6}}
+
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			action := p.buildErrorResponse("blocked detail", nil, true, show, analysis, "inspected", "Hate")
+			mods := action.(policy.DownstreamResponseModifications)
+			if mods.Fault == nil || mods.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := mods.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}
+
+// TestAzureContentSafety_ExtractionFailureDeclaresFault pins the JSONPath extraction failure: no check
+// ran, so it is not a guardrail verdict. An unreadable request body is the caller's; an
+// unreadable response body leaves the policy unable to do its job. The client response is
+// the one the policy returned before the fault was declared.
+func TestAzureContentSafety_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &AzureContentSafetyContentModerationPolicy{}
+	params := AzureContentSafetyPolicyParams{JsonPath: "$.text", HateSeverityThreshold: 2}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		if isResponse {
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+		} else {
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+		}
+	}
+}
+
+// assertNoVerdictFault checks that a rejection made without a guardrail verdict declares
+// the given fault, carries no guardrail details, and leaves the client response unchanged:
+// status 422, a JSON Content-Type, and wantBody.
+func assertNoVerdictFault(t *testing.T, got interface{}, wantBody, wantCode, wantType, wantDirection string) {
+	t.Helper()
+	var fault *policy.FaultDetails
+	var isFault bool
+	var status int
+	var headers map[string]string
+	var body []byte
+	switch g := got.(type) {
+	case policy.ImmediateResponse:
+		status, headers, body = g.StatusCode, g.Headers, g.Body
+		fault, isFault = g.Fault, g.IsFault
+	case policy.DownstreamResponseModifications:
+		if g.StatusCode == nil {
+			t.Fatalf("expected a status code on the error response")
+		}
+		status, headers, body = *g.StatusCode, g.HeadersToSet, g.Body
+		fault, isFault = g.Fault, g.IsFault
+	default:
+		t.Fatalf("expected an error response, got %T", got)
+	}
+	if status != 422 || len(headers) != 1 || headers["Content-Type"] != "application/json" || string(body) != wantBody {
+		t.Fatalf("client response changed: got %d %v %s, want 422 map[Content-Type:application/json] %s", status, headers, body, wantBody)
+	}
+	if !isFault || fault == nil {
+		t.Fatalf("expected the rejection to declare a fault")
+	}
+	if fault.Code != wantCode || fault.Type != wantType || fault.Direction != wantDirection {
+		t.Fatalf("expected fault %s/%s/%s, got %s/%s/%s", wantCode, wantType, wantDirection, fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Guardrail != nil {
+		t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", fault.Guardrail)
+	}
+	if fault.Message == "" || fault.Description == "" {
+		t.Fatalf("expected Message and Description to be set, got %+v", fault)
+	}
+}
+
+// TestAzureContentSafety_APIFailureDeclaresFault pins the Azure call that fails: the
+// policy could not do its job, which is not a moderation verdict.
+func TestAzureContentSafety_APIFailureDeclaresFault(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	p := &AzureContentSafetyContentModerationPolicy{endpoint: server.URL, apiKey: "key", client: server.Client()}
+	params := AzureContentSafetyPolicyParams{JsonPath: "$.text", HateSeverityThreshold: 2}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`{"text":"hello"}`), params, isResponse)
+		wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Azure Content Safety API","direction":"REQUEST","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`
+		if isResponse {
+			wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Azure Content Safety API","direction":"RESPONSE","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`
+		}
+		wantDirection := policy.DirectionRequest
+		if isResponse {
+			wantDirection = policy.DirectionResponse
+		}
+		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, wantDirection)
+	}
+}
