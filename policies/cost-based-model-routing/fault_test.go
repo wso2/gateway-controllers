@@ -37,6 +37,8 @@ func TestRejectionsDeclareFault(t *testing.T) {
 	}{
 		{"bad request", badRequest("request body must be a JSON object"), 400, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation,
 			`{"error":"request body must be a JSON object"}`},
+		{"bad request URI", badRequestURI("model path expression 'm' did not match the request"), 400, policy.FaultCodeInvalidRequestURI, policy.FaultTypeValidation,
+			`{"error":"model path expression 'm' did not match the request"}`},
 		{"budget state unavailable", serviceUnavailable("budget state is unavailable"), 503, policy.FaultCodeMediationFailed, policy.FaultTypeMediation,
 			`{"error":"budget state is unavailable"}`},
 		{"budget exhausted", budgetExhaustedResponse(), 429, policy.FaultCodeThrottledCustomPolicy, policy.FaultTypeThrottling,

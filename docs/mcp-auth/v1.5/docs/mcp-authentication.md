@@ -523,7 +523,7 @@ token is passed through unchanged, with its code and type.
 | The policy is misconfigured: `onFailureStatusCode` or `errorMessageFormat` is invalid, or a `keyManagers` entry cannot be read when protected resource metadata is requested | `500` | `960000` | `configuration` |
 | `jwt-auth` cannot be loaded | `500` | `900900` | `authentication` |
 | The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
-| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one (`-32020`) | `400` | `960001` | `validation` |
+| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one, or sends an `Mcp-Name` that cannot be decoded (`-32020`) | `400` | `960004` | `validation` |
 
 The protected resource metadata document is a successful response and is not a fault. A
 malformed request's fault also carries its JSON-RPC error code.

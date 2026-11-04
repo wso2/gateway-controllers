@@ -438,7 +438,7 @@ response and fault are returned as they are.
 |------|--------|------|------|
 | A quota is exceeded | the quota's status (default `429`) | the delegate's code, passed through (`900800` at the API level, `900802` at an operation) | `throttling` |
 | The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
-| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one (`-32020`) | `400` | `960001` | `validation` |
+| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one, or sends an `Mcp-Name` that cannot be decoded (`-32020`) | `400` | `960004` | `validation` |
 
 A malformed request's fault also carries its JSON-RPC error code and the request id. The fault's
 `Description` is the delegate's, for example `quota exceeded: <quota name>`; a malformed request

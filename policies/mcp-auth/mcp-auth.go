@@ -764,18 +764,20 @@ func (p *McpAuthPolicy) handleUnusableBody(reason string) policy.ImmediateRespon
 		data = "Ambiguous MCP request: body names a member more than once"
 	}
 
-	return jsonRPCBadRequest(code, message, data)
+	return jsonRPCBadRequest(code, message, data, policy.FaultCodeInvalidRequestBody)
 }
 
-// handleMissingMirroredHeader rejects a modern request that left out a required mirrored header.
+// handleMissingMirroredHeader rejects a modern request that left out a required mirrored header,
+// or sent one that could not be decoded.
 func (p *McpAuthPolicy) handleMissingMirroredHeader(detail string) policy.ImmediateResponse {
-	return jsonRPCBadRequest(JSONRPCHeaderMismatch, "Invalid Request", detail)
+	return jsonRPCBadRequest(JSONRPCHeaderMismatch, "Invalid Request", detail, policy.FaultCodeInvalidRequestHeader)
 }
 
 // jsonRPCBadRequest renders a JSON-RPC error as a 400, with a null id. Both callers reject a
-// malformed request — a body that cannot be read, or a required mirrored header left out — so
-// it is declared as handleBadRequest declares a local parse failure.
-func jsonRPCBadRequest(code int, message, data string) policy.ImmediateResponse {
+// malformed request, so it is declared as handleBadRequest declares a local parse failure; the
+// caller names the part at fault: FaultCodeInvalidRequestBody for a body that cannot be read,
+// FaultCodeInvalidRequestHeader for a required mirrored header left out.
+func jsonRPCBadRequest(code int, message, data, faultCode string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": JSONRPCVersion,
 		"id":      nil,
@@ -791,7 +793,7 @@ func jsonRPCBadRequest(code int, message, data string) policy.ImmediateResponse 
 		Body:       body,
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeInvalidRequestBody,
+			Code:      faultCode,
 			Type:      policy.FaultTypeValidation,
 			Direction: policy.DirectionRequest,
 			Message:   message,

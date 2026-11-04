@@ -3,6 +3,7 @@ package jsonxmlmediation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -256,6 +257,16 @@ func TestOnRequest_ContentTypeAndPayloadErrors(t *testing.T) {
 	if !ok || immediate.StatusCode != 500 {
 		t.Fatalf("expected 500 ImmediateResponse for wrong content type, got %T %#v", res, res)
 	}
+	// The caller's Content-Type is at fault, not the conversion; the client's 500 is unchanged.
+	if f := immediate.Fault; !immediate.IsFault || f == nil || f.Code != policy.FaultCodeInvalidRequestHeader ||
+		f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Fatalf("expected an invalid-header validation fault for wrong content type, got %+v", immediate.Fault)
+	}
+	wantBody := `{"error":"Internal Server Error","message":"Content-Type must be application/json for downstream payload format json"}`
+	if string(immediate.Body) != wantBody || immediate.Headers["content-type"] != "application/json" ||
+		immediate.Headers["content-length"] != fmt.Sprintf("%d", len(wantBody)) {
+		t.Fatalf("client response changed for wrong content type: %v %s", immediate.Headers, immediate.Body)
+	}
 
 	invalidJSONCtx := &policy.RequestContext{
 		Body:    &policy.Body{Content: []byte(`{"name":`), Present: true},
@@ -265,6 +276,9 @@ func TestOnRequest_ContentTypeAndPayloadErrors(t *testing.T) {
 	immediate, ok = res.(policy.ImmediateResponse)
 	if !ok || immediate.StatusCode != 500 {
 		t.Fatalf("expected 500 ImmediateResponse for invalid JSON, got %T %#v", res, res)
+	}
+	if immediate.Fault == nil || immediate.Fault.Code != policy.FaultCodeMediationFailed || immediate.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected a mediation fault for invalid JSON, got %+v", immediate.Fault)
 	}
 
 	invalidXMLCtx := &policy.RequestContext{

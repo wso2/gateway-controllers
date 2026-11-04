@@ -1,9 +1,9 @@
 module github.com/wso2/gateway-controllers/policies/mcp-ratelimit
 
-go 1.26.2
+go 1.26.10
 
 require (
-	github.com/wso2/api-platform/sdk/core v0.4.2
+	github.com/wso2/api-platform/sdk/core v0.5.1
 	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0
 )
 

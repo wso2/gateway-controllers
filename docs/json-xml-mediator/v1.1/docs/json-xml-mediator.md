@@ -290,7 +290,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| Request phase: the request's `Content-Type` does not match `downstreamPayloadFormat` | `500` | `960000` | `mediation` |
+| Request phase: the request's `Content-Type` does not match `downstreamPayloadFormat` | `500` | `960004` | `validation` |
 | Request phase: the request body cannot be converted (malformed, or beyond the conversion limits) | `500` | `960000` | `mediation` |
 | Response phase: the upstream response's `Content-Type` does not match `upstreamPayloadFormat` | `500` | `960000` | `mediation` |
 | Response phase: the upstream response body cannot be converted (malformed, or beyond the conversion limits) | `500` | `960000` | `mediation` |

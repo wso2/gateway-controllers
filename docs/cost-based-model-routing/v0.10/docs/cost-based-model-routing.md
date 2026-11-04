@@ -248,7 +248,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | When | Status | Code | Type |
 |------|--------|------|------|
 | The model is read from the payload, and the body is empty, not valid JSON or not a JSON object, or the model location in it is missing or invalid | `400` | `960001` | `validation` |
-| The model is carried in a query or path parameter that cannot be rewritten for the selected model | `400` | `960001` | `validation` |
+| The model is carried in a query or path parameter that cannot be rewritten for the selected model | `400` | `960005` | `validation` |
 | The requested model has no available budget, and there is no fallback or its budget is missing or exhausted | `429` | `900806` | `throttling` |
 | Budget storage is unavailable and its failure mode is closed | `503` | `960000` | `mediation` |
 | The routed request body could not be serialised | `500` | `960000` | `mediation` |

@@ -161,14 +161,14 @@ func (p *CostBasedModelRoutingPolicy) OnRequestHeaders(
 	case "queryParam":
 		path, ok := rewriteQueryParameter(reqCtx.Path, identifier, selection.target.Model)
 		if !ok {
-			return badRequest(fmt.Sprintf("request path could not be rewritten for model query parameter '%s'", identifier))
+			return badRequestURI(fmt.Sprintf("request path could not be rewritten for model query parameter '%s'", identifier))
 		}
 		mods.Path = &path
 	case "pathParam":
 		path, ok := rewritePathParameter(reqCtx.Path, p.config.RequestModel.PathExpression,
 			p.config.RequestModel.PathModelGroup, selection.target.Model)
 		if !ok {
-			return badRequest(fmt.Sprintf("model path expression '%s' did not match the request", identifier))
+			return badRequestURI(fmt.Sprintf("model path expression '%s' did not match the request", identifier))
 		}
 		mods.Path = &path
 	}
@@ -512,6 +512,16 @@ func (p *CostBasedModelRoutingPolicy) chargeOnce(ctx context.Context, metadata m
 }
 
 func badRequest(message string) policy.ImmediateResponse {
+	return badRequestFault(message, policy.FaultCodeInvalidRequestBody)
+}
+
+// badRequestURI rejects a request path or query string the model could not be read from or
+// written to. The client receives the same 400 as badRequest; only the fault code differs.
+func badRequestURI(message string) policy.ImmediateResponse {
+	return badRequestFault(message, policy.FaultCodeInvalidRequestURI)
+}
+
+func badRequestFault(message, code string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{"error": message})
 	return policy.ImmediateResponse{
 		StatusCode: 400,
@@ -519,7 +529,7 @@ func badRequest(message string) policy.ImmediateResponse {
 		Body:       body,
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeInvalidRequestBody,
+			Code:      code,
 			Type:      policy.FaultTypeValidation,
 			Direction: policy.DirectionRequest,
 			Message:   message,

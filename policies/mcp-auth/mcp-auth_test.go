@@ -1793,12 +1793,13 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 			if !ok {
 				t.Fatalf("%s: expected an immediate rejection", reason)
 			}
-			assertMalformedRequestFault(t, resp, wantCode)
+			assertMalformedRequestFault(t, resp, policy.FaultCodeInvalidRequestBody, wantCode)
 			assertFallbackBodyAgrees(t, resp)
 		}
 	})
 
-	// A modern request that left out a required mirrored header is malformed too.
+	// A modern request that left out a required mirrored header is malformed too, in a header
+	// rather than the body.
 	t.Run("missing mirrored header", func(t *testing.T) {
 		headers := map[string][]string{headerProtocolVersion: {"2026-07-28"}}
 		attrs := map[string]string{attrBodyMethod: "tools/call", attrBodyCapabilityName: "x"}
@@ -1807,25 +1808,42 @@ func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
 		if !ok {
 			t.Fatalf("expected an immediate rejection")
 		}
-		assertMalformedRequestFault(t, resp, JSONRPCHeaderMismatch)
+		assertMalformedRequestFault(t, resp, policy.FaultCodeInvalidRequestHeader, JSONRPCHeaderMismatch)
 		assertFallbackBodyAgrees(t, resp)
 		// Declaring the fault leaves the body the client receives as it was.
 		want := `{"error":{"code":-32020,"data":"` + headerMcpMethod + ` header is required","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}`
-		if string(resp.Body) != want {
-			t.Fatalf("body = %s, want %s", resp.Body, want)
+		if string(resp.Body) != want || resp.Headers["content-type"] != "application/json" {
+			t.Fatalf("client response changed: %v %s, want body %s", resp.Headers, resp.Body, want)
+		}
+	})
+
+	// The same for a capability method that mirrored no Mcp-Name.
+	t.Run("missing mirrored name", func(t *testing.T) {
+		headers := map[string][]string{headerProtocolVersion: {"2026-07-28"}, headerMcpMethod: {"tools/call"}}
+		attrs := map[string]string{attrBodyMethod: "tools/call", attrBodyCapabilityName: "x"}
+		resp, ok := exemptPolicy("ping").OnRequestHeaders(context.Background(),
+			resolvedHeaderPost(headers, attrs), map[string]any{}).(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected an immediate rejection")
+		}
+		assertMalformedRequestFault(t, resp, policy.FaultCodeInvalidRequestHeader, JSONRPCHeaderMismatch)
+		assertFallbackBodyAgrees(t, resp)
+		want := `{"error":{"code":-32020,"data":"` + headerMcpName + ` header is required for tools/call","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}`
+		if string(resp.Body) != want || resp.Headers["content-type"] != "application/json" {
+			t.Fatalf("client response changed: %v %s, want body %s", resp.Headers, resp.Body, want)
 		}
 	})
 }
 
-// assertMalformedRequestFault checks a 400 for a malformed request declares an invalid-body
-// validation fault carrying its JSON-RPC code.
-func assertMalformedRequestFault(t *testing.T, resp policy.ImmediateResponse, wantCode int) {
+// assertMalformedRequestFault checks a 400 for a malformed request declares a validation fault
+// with the given code, carrying its JSON-RPC code.
+func assertMalformedRequestFault(t *testing.T, resp policy.ImmediateResponse, wantFaultCode string, wantCode int) {
 	t.Helper()
 	if resp.StatusCode != 400 || !resp.IsFault || resp.Fault == nil {
 		t.Fatalf("status %d IsFault %v Fault %+v", resp.StatusCode, resp.IsFault, resp.Fault)
 	}
 	f := resp.Fault
-	if f.Code != policy.FaultCodeInvalidRequestBody || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+	if f.Code != wantFaultCode || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
 		t.Fatalf("fault = %s/%s/%s", f.Code, f.Type, f.Direction)
 	}
 	if f.Description == "" {

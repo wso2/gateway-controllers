@@ -498,7 +498,7 @@ func (p *JSONXMLMediationPolicy) OnRequestBody(ctx context.Context, reqCtx *poli
 	// rewrote alongside the body during the header phase.
 	contentType := getFirstHeader(reqCtx.Headers, "content-type")
 	if !matchesContentType(contentType, p.downstreamPayloadFormat) {
-		return p.handleInternalServerError(fmt.Sprintf(
+		return p.handleContentTypeMismatch(fmt.Sprintf(
 			"Content-Type must be %s for downstream payload format %s",
 			expectedContentTypeMessage(p.downstreamPayloadFormat),
 			p.downstreamPayloadFormat,
@@ -584,6 +584,17 @@ func isSSEResponse(s string) bool {
 }
 
 func (p *JSONXMLMediationPolicy) handleInternalServerError(message string) policy.RequestAction {
+	return p.requestFailure(message, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+}
+
+// handleContentTypeMismatch rejects a request whose Content-Type is not the downstream payload
+// format. The client receives the same 500 as handleInternalServerError; only the fault differs,
+// naming the caller's header rather than the conversion.
+func (p *JSONXMLMediationPolicy) handleContentTypeMismatch(message string) policy.RequestAction {
+	return p.requestFailure(message, policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
+}
+
+func (p *JSONXMLMediationPolicy) requestFailure(message, faultCode, faultType string) policy.RequestAction {
 	errorResponse := map[string]interface{}{
 		"error":   "Internal Server Error",
 		"message": message,
@@ -599,8 +610,8 @@ func (p *JSONXMLMediationPolicy) handleInternalServerError(message string) polic
 		Body:    bodyBytes,
 		IsFault: true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeMediationFailed,
-			Type:      policy.FaultTypeMediation,
+			Code:      faultCode,
+			Type:      faultType,
 			Direction: policy.DirectionRequest,
 			Message:   "Payload conversion failed",
 			// message can quote the caller's own payload. The body above has always

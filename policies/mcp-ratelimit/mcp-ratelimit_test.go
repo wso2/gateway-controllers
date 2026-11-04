@@ -1198,6 +1198,24 @@ func TestOnRequestHeaders_ModernWithoutMcpMethodIsRejected(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &env); err != nil || env.Error.Code != jsonRpcErrCodeHeaderMismatch {
 		t.Fatalf("error code = %d (%v), want %d; body %s", env.Error.Code, err, jsonRpcErrCodeHeaderMismatch, resp.Body)
 	}
+	assertMirroredHeaderFault(t, resp,
+		`{"error":{"code":-32020,"message":"Mcp-Method header is required"},"id":null,"jsonrpc":"2.0"}`)
+}
+
+// assertMirroredHeaderFault checks a missing or undecodable mirrored header is declared as an
+// invalid-header validation fault, and that declaring it leaves the client's 400 as it was.
+func assertMirroredHeaderFault(t *testing.T, resp policy.ImmediateResponse, wantBody string) {
+	t.Helper()
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected a fault, got IsFault %v Fault %+v", resp.IsFault, resp.Fault)
+	}
+	if f := resp.Fault; f.Code != policy.FaultCodeInvalidRequestHeader || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Fatalf("fault = %s/%s/%s, want %s/%s/%s", f.Code, f.Type, f.Direction,
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation, policy.DirectionRequest)
+	}
+	if resp.StatusCode != 400 || string(resp.Body) != wantBody || resp.Headers["content-type"] != "application/json" {
+		t.Fatalf("client response changed: %d %v %s", resp.StatusCode, resp.Headers, resp.Body)
+	}
 }
 
 func newWildcardMethodResolverPolicy(t *testing.T, limit int) *McpRateLimitPolicy {
@@ -1264,6 +1282,8 @@ func TestOnRequestHeaders_ModernWithoutRequiredMcpNameIsRejected(t *testing.T) {
 			if err := json.Unmarshal(resp.Body, &env); err != nil || env.Error.Code != jsonRpcErrCodeHeaderMismatch {
 				t.Fatalf("error code = %d (%v), want %d; body %s", env.Error.Code, err, jsonRpcErrCodeHeaderMismatch, resp.Body)
 			}
+			assertMirroredHeaderFault(t, resp,
+				`{"error":{"code":-32020,"message":"Mcp-Name header is required for tools/call"},"id":null,"jsonrpc":"2.0"}`)
 		})
 	}
 }

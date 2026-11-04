@@ -212,7 +212,7 @@ func (p *McpRateLimitPolicy) limitFromMirroredHeaders(ctx context.Context, reqCt
 	if !facts.HasMethod() {
 		slog.Debug("MCP RateLimit Policy: rejecting a modern request that mirrored no method")
 		return p.buildJsonRpcError(reqCtx.DownstreamHeaders(), 400, jsonRpcErrCodeHeaderMismatch,
-			headerMcpMethod+" header is required", nil)
+			headerMcpMethod+" header is required", nil, policy.FaultCodeInvalidRequestHeader)
 	}
 	// Mcp-Name is required on the three capability methods; an undecodable one counts as missing.
 	// Left in, the empty name would match no capability rule, "*" included.
@@ -220,7 +220,7 @@ func (p *McpRateLimitPolicy) limitFromMirroredHeaders(ctx context.Context, reqCt
 		slog.Debug("MCP RateLimit Policy: rejecting a modern request that mirrored no capability name",
 			"method", facts.Method)
 		return p.buildJsonRpcError(reqCtx.DownstreamHeaders(), 400, jsonRpcErrCodeHeaderMismatch,
-			headerMcpName+" header is required for "+facts.Method, nil)
+			headerMcpName+" header is required for "+facts.Method, nil, policy.FaultCodeInvalidRequestHeader)
 	}
 	return p.applyLimits(ctx, reqCtx, params, facts)
 }
@@ -321,7 +321,7 @@ func (p *McpRateLimitPolicy) handleUnusableBody(reqHeaders *policy.Headers, reas
 		// differently than the gateway did.
 		message = "Ambiguous MCP request: body names a member more than once"
 	}
-	return p.buildJsonRpcError(reqHeaders, 400, code, message, nil)
+	return p.buildJsonRpcError(reqHeaders, 400, code, message, nil, policy.FaultCodeInvalidRequestBody)
 }
 
 // enforce publishes the capability metadata other MCP policies read, finds every rule matching
@@ -689,8 +689,10 @@ func (p *McpRateLimitPolicy) hasUserDefinedBody() bool {
 }
 
 // buildJsonRpcError constructs a JSON-RPC formatted error for malformed
-// request envelopes (analogous to mcp-acl-list.buildRequestErrorResponse).
-func (p *McpRateLimitPolicy) buildJsonRpcError(reqHeaders *policy.Headers, statusCode, jsonRpcCode int, message string, requestID json.RawMessage) policy.ImmediateResponse {
+// request envelopes (analogous to mcp-acl-list.buildRequestErrorResponse). faultCode names the
+// part at fault: FaultCodeInvalidRequestBody for the body, FaultCodeInvalidRequestHeader for a
+// mirrored header.
+func (p *McpRateLimitPolicy) buildJsonRpcError(reqHeaders *policy.Headers, statusCode, jsonRpcCode int, message string, requestID json.RawMessage, faultCode string) policy.ImmediateResponse {
 	body, contentType := buildJsonRpcErrorBody(requestID, jsonRpcCode, message, isEventStream(reqHeaders))
 	headers := map[string]string{"content-type": contentType}
 	if sid := getSessionID(reqHeaders); sid != "" {
@@ -704,7 +706,7 @@ func (p *McpRateLimitPolicy) buildJsonRpcError(reqHeaders *policy.Headers, statu
 		Body:       body,
 		IsFault:    true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeInvalidRequestBody,
+			Code:      faultCode,
 			Type:      policy.FaultTypeValidation,
 			Direction: policy.DirectionRequest,
 			// message becomes the JSON-RPC error message.
