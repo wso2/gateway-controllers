@@ -1,5 +1,5 @@
 name: opaque-token-auth
-version: v1.0.1
+version: v1.1.0
 description: |
   Validates opaque OAuth 2.0 access tokens by calling an authorization server's
   RFC 7662 token introspection endpoint. The gateway forwards the bearer token to

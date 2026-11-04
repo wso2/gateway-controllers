@@ -1,5 +1,5 @@
 name: aws-authentication
-version: v0.10.0
+version: v0.11.0
 description: |
   Signs outbound requests to AWS-hosted backends using AWS Signature Version 4
   (SigV4) before they are forwarded upstream. Supports four credential-acquisition

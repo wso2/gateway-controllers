@@ -1,5 +1,5 @@
 name: websub-hmac-auth
-version: v1.0.1
+version: v1.1.0
 description: |
   Validates HMAC signatures on incoming WebSub hub event notification requests.
   The policy reads the X-Hub-Signature-256 (or X-Hub-Signature) header sent by

@@ -16,10 +16,8 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the analytics-header-filter policy. The gateway under test is built from
-# this policy and the policies the gateway controller requires, staged as the policy tree that
-# addPoliciesFrom names, with remove-headers and basic-ratelimit, which the scenarios chain with it.
-# Feature and overlay paths are relative to this directory.
+# The integration suite of the analytics-header-filter policy. The scenarios chain remove-headers
+# and basic-ratelimit with it. Feature and overlay paths are relative to this directory.
 
 suite: analytics-header-filter
 
@@ -47,7 +45,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
       - name: testbench
     runners:
       - name: analytics-header-filter-validation
@@ -102,7 +99,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
         overlay: overlays/analytics-disabled.toml
       - name: testbench
     runners:

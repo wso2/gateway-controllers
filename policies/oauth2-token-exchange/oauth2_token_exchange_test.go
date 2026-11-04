@@ -105,6 +105,26 @@ func baseParams(tokenEndpoint string) map[string]interface{} {
 	}
 }
 
+// assertFault asserts resp is declared as a fault with wantCode and wantType.
+func assertFault(t *testing.T, resp policy.ImmediateResponse, wantCode, wantType string) {
+	t.Helper()
+	if !resp.IsFault {
+		t.Error("IsFault = false, want true")
+	}
+	if resp.Fault == nil {
+		t.Fatal("Fault = nil, want a fault description")
+	}
+	if resp.Fault.Code != wantCode {
+		t.Errorf("Fault.Code = %q, want %q", resp.Fault.Code, wantCode)
+	}
+	if resp.Fault.Type != wantType {
+		t.Errorf("Fault.Type = %q, want %q", resp.Fault.Type, wantType)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Errorf("Fault.Direction = %q, want %q", resp.Fault.Direction, policy.DirectionRequest)
+	}
+}
+
 // ─── OnRequestBody: success paths ────────────────────────────────────────
 
 func TestOnRequestBody_TokenExchange_Success(t *testing.T) {
@@ -503,6 +523,27 @@ func TestOnRequestBody_MissingSubjectToken_ReturnsUnauthorized(t *testing.T) {
 	if string(resp.Body) != `{"error":"unauthorized","message":"Invalid or expired credentials."}` {
 		t.Errorf("unexpected body leaking detail: %s", resp.Body)
 	}
+	assertFault(t, resp, policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
+}
+
+// A subject header under another scheme is a credential that was presented and
+// rejected, not a missing one. The client still receives the same 401 body.
+func TestOnRequestBody_SubjectTokenWrongScheme_ReturnsUnauthorized(t *testing.T) {
+	p := newTestPolicy()
+	reqCtx := newRequestContext(map[string][]string{"Authorization": {"Basic dXNlcjpwYXNz"}}, "/pets")
+	result := p.OnRequestBody(context.Background(), reqCtx, baseParams("https://example.com/token"))
+
+	resp, ok := result.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", result)
+	}
+	if resp.StatusCode != 401 {
+		t.Errorf("status = %d, want 401", resp.StatusCode)
+	}
+	if string(resp.Body) != `{"error":"unauthorized","message":"Invalid or expired credentials."}` {
+		t.Errorf("unexpected body leaking detail: %s", resp.Body)
+	}
+	assertFault(t, resp, policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 }
 
 func TestOnRequestBody_TokenEndpointNon2xx_ReturnsBadGatewayNoLeak(t *testing.T) {
@@ -526,6 +567,20 @@ func TestOnRequestBody_TokenEndpointNon2xx_ReturnsBadGatewayNoLeak(t *testing.T)
 	}
 	if got := string(resp.Body); strings.Contains(got, "secret") || strings.Contains(got, "DB dsn") || strings.Contains(got, "stack") {
 		t.Errorf("response body leaked upstream detail: %s", got)
+	}
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	var body struct {
+		Message    string `json:"message"`
+		TrackingID string `json:"tracking_id"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if resp.Fault.Message != body.Message {
+		t.Errorf("Fault.Message = %q, want the body's message %q", resp.Fault.Message, body.Message)
+	}
+	if want := "token exchange failed, tracking_id " + body.TrackingID; resp.Fault.Description != want {
+		t.Errorf("Fault.Description = %q, want %q", resp.Fault.Description, want)
 	}
 }
 
@@ -728,6 +783,7 @@ func TestOnRequestHeaders_ExchangeFails_RejectsImmediately(t *testing.T) {
 	if resp.StatusCode != 502 {
 		t.Errorf("status = %d, want 502", resp.StatusCode)
 	}
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 	if headerPhaseSucceeded(shared) {
 		t.Error("expected headerPhaseSucceeded to be false when the exchange call fails")
 	}
@@ -751,6 +807,7 @@ func TestOnRequestHeaders_InvalidConfig_RejectsImmediately(t *testing.T) {
 	if resp.StatusCode != 500 {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
 	}
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
 	if headerPhaseSucceeded(shared) {
 		t.Error("expected headerPhaseSucceeded to be false on invalid config")
 	}
@@ -1307,6 +1364,13 @@ func TestOnRequestBody_InvalidConfig_ReturnsInternalError(t *testing.T) {
 	}
 	if resp.StatusCode != 500 {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
+	}
+	if string(resp.Body) != `{"error":"Internal Server Error"}` {
+		t.Errorf("body = %s, want the unchanged internal error body", resp.Body)
+	}
+	assertFault(t, resp, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
+	if !strings.HasPrefix(resp.Fault.Description, "invalid policy configuration: ") {
+		t.Errorf("Fault.Description = %q, want the configuration error", resp.Fault.Description)
 	}
 }
 

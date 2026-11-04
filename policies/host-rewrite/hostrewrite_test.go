@@ -348,3 +348,35 @@ func TestHostRewritePolicy_OnRequestHeaders_HostTrimmedWhitespace(t *testing.T) 
 		t.Errorf("Expected Host to be 'backend.example.com' (trimmed), got %v", mods.Host)
 	}
 }
+
+// TestConfigErrorDeclaresFault covers the one rejection this policy makes. A misconfigured
+// policy refuses every request and only the deployment can fix it, so it must reach the
+// fault policies.
+func TestConfigErrorDeclaresFault(t *testing.T) {
+	p := &HostRewritePolicy{}
+	// An empty params map has no "host", which is the configuration error.
+	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+		Headers:       policy.NewHeaders(map[string][]string{}),
+	}, map[string]interface{}{})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a configuration error")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeConfiguration {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeConfiguration, resp.Fault.Type)
+	}
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to name the configuration problem")
+	}
+}
