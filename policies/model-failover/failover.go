@@ -308,8 +308,14 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	default:
 		// Any non-failover-worthy status counts as a success for health purposes: the target
 		// answered. A 400 is the client's problem, not the provider's.
-		if event := p.health.RecordSuccess(target, latency, now); event != nil {
-			p.logRecovery(event)
+		recovered, suspended := p.health.RecordSuccess(target, latency, now)
+		if recovered != nil {
+			p.logRecovery(recovered)
+		}
+		if suspended != nil {
+			// A success that suspended the target: the latency rule reading a window of
+			// responses that all arrived, all too slowly (FR-018e).
+			p.logSuspension(suspended)
 		}
 		if attempts > 1 {
 			outcome = outcomeRescued

@@ -134,19 +134,25 @@ func TestHealth_LatencyPercentileSuspends(t *testing.T) {
 	store := NewHealthStore(s)
 	now := time.Now()
 
-	// Every request succeeds, all of them slow. Nothing times out; nothing errors.
+	// Every request succeeds, all of them slow. Nothing times out; nothing errors — so the
+	// success that carries the window past minimumRequests is what trips the rule. A
+	// trailing failure is deliberately NOT used to trigger it: needing one would mean the
+	// rule could never fire for a target that is slow and working, which is the only
+	// target it exists for.
 	var suspended *SuspensionEvent
-	for i := 0; i < 25; i++ {
-		store.RecordSuccess(targetA, 2*time.Second, now)
+	for i := 0; i < 25 && suspended == nil; i++ {
+		_, suspended = store.RecordSuccess(targetA, 2*time.Second, now)
 	}
-	// A failure is what triggers evaluation; the latency rule then fires on the window.
-	suspended = store.RecordFailure(targetA, 2*time.Second, now)
 
 	if suspended == nil {
 		t.Fatal("a sustained p95 above the threshold must suspend the target")
 	}
 	if suspended.Reason != ReasonLatency {
 		t.Errorf("expected reason %q, got %q", ReasonLatency, suspended.Reason)
+	}
+	if suspended.SampleSize < s.MinimumRequests {
+		t.Errorf("suspended on %d samples, below the configured minimum of %d",
+			suspended.SampleSize, s.MinimumRequests)
 	}
 }
 
@@ -479,7 +485,7 @@ func TestHealth_RecoveryIsReportedOnceWhenTheProbeRunCompletes(t *testing.T) {
 		if !store.Healthy(target, later) {
 			t.Fatalf("probe %d was not admitted", i+1)
 		}
-		if event := store.RecordSuccess(target, 0, later); event != nil {
+		if event, _ := store.RecordSuccess(target, 0, later); event != nil {
 			events++
 			last = event
 		}
@@ -506,7 +512,82 @@ func TestHealth_RecoveryIsReportedOnceWhenTheProbeRunCompletes(t *testing.T) {
 // A plain success on a healthy target is not a recovery, or every request would report one.
 func TestHealth_NoRecoveryEventWithoutASuspension(t *testing.T) {
 	store := NewHealthStore(testSuspension())
-	if event := store.RecordSuccess(Target{Model: "gpt-4o"}, 0, time.Now()); event != nil {
+	if event, _ := store.RecordSuccess(Target{Model: "gpt-4o"}, 0, time.Now()); event != nil {
 		t.Fatalf("got a recovery event for a target that was never suspended: %+v", event)
+	}
+}
+
+// FR-018e and SC-011b: "a target whose p95 triples while EVERY REQUEST STILL COMPLETES under
+// perAttemptTimeoutMs is suspended — the case a timeout-only rule never sees."
+//
+// Distinct from TestHealth_LatencyPercentileSuspends above, which reaches the rule through a
+// failure. That one proves the threshold arithmetic; this one proves the rule is reachable at
+// all for the condition it was written for. A target that is merely slow never fails, so if
+// only a failure can trigger evaluation the rule is unreachable in production and the
+// requirement is not met by the arithmetic alone.
+func TestHealth_SustainedSlownessSuspendsWithNoFailureAtAll(t *testing.T) {
+	s := testSuspension()
+	s.ConsecutiveFailures = 0
+	s.ErrorRatePercent = 0
+	s.P95LatencyMs = 1000
+	s.MinimumRequests = 20
+	store := NewHealthStore(s)
+	now := time.Now()
+
+	// Every request succeeds, every one of them slow. No timeouts, no errors — exactly the
+	// degradation a timeout-only rule cannot see.
+	for i := 0; i < 25; i++ {
+		store.RecordSuccess(targetA, 2*time.Second, now)
+	}
+
+	if store.Healthy(targetA, now) {
+		t.Fatal("a target whose p95 is twice the configured threshold is still taking traffic; " +
+			"the latency rule is unreachable without a failure, so FR-018e never fires for the case it exists for")
+	}
+}
+
+// The other half of SC-011b: "a single outlier-slow request against an otherwise fast target
+// suspends nothing." Now that a success can suspend, this is the regression that matters —
+// the rule has to stay an aggregate judgement and must not become one-slow-request-condemns.
+func TestHealth_OneSlowRequestAmongFastOnesSuspendsNothing(t *testing.T) {
+	s := testSuspension()
+	s.ConsecutiveFailures = 0
+	s.ErrorRatePercent = 0
+	s.P95LatencyMs = 1000
+	s.MinimumRequests = 20
+	store := NewHealthStore(s)
+	now := time.Now()
+
+	store.RecordSuccess(targetA, 9*time.Second, now) // the outlier
+	for i := 0; i < 39; i++ {
+		if _, suspended := store.RecordSuccess(targetA, 10*time.Millisecond, now); suspended != nil {
+			t.Fatalf("a fast target was suspended after one slow request: p95 read as %v over %d samples",
+				suspended.Observed, suspended.SampleSize)
+		}
+	}
+	if !store.Healthy(targetA, now) {
+		t.Fatal("a target whose requests are fast apart from one outlier must keep taking traffic")
+	}
+}
+
+// The asymmetry is deliberate and worth pinning: a success feeds the error-rate window but
+// never evaluates it, because a success can only push a rate DOWN. If that ever changes, the
+// change should be a decision rather than a side effect of touching this file.
+func TestHealth_SuccessDoesNotEvaluateTheErrorRateRule(t *testing.T) {
+	s := testSuspension()
+	s.ConsecutiveFailures = 0
+	s.ErrorRatePercent = 50
+	s.P95LatencyMs = 0
+	s.MinimumRequests = 10
+	store := NewHealthStore(s)
+	now := time.Now()
+
+	// Nine failures, then a success takes the window to the minimum sample size with the
+	// rate still at 90%. The success must not be what suspends it.
+	for i := 0; i < 9; i++ {
+		store.RecordFailure(targetA, 0, now)
+	}
+	if _, suspended := store.RecordSuccess(targetA, 0, now); suspended != nil {
+		t.Fatalf("a success evaluated the error-rate rule and suspended the target: %+v", suspended)
 	}
 }

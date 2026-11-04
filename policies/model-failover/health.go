@@ -118,10 +118,19 @@ const probeLeaseSeconds = 30
 type HealthStore interface {
 	// Healthy reports whether the target may receive traffic now.
 	Healthy(target Target, now time.Time) bool
-	// RecordSuccess clears the consecutive-failure count and feeds the window. It returns a
-	// non-nil event when this success completed a probe run and returned the target to
-	// rotation.
-	RecordSuccess(target Target, latency time.Duration, now time.Time) *RecoveryEvent
+	// RecordSuccess clears the consecutive-failure count and feeds the window.
+	//
+	// It returns AT MOST ONE of two events, never both: a recovery when this success
+	// completed a probe run and returned the target to rotation, or a suspension when the
+	// success carried the latency window over its threshold.
+	//
+	// A success suspending a target reads oddly until you look at what the latency rule
+	// measures. A target that is merely slow never fails, so its samples are all successes —
+	// if only a failure could trigger evaluation, FR-018e would be unreachable for exactly
+	// the degradation it was written to catch ("every request still completes under
+	// perAttemptTimeoutMs"). The error-rate rule is NOT evaluated here: a success can only
+	// push a rate down, so there is nothing for it to discover.
+	RecordSuccess(target Target, latency time.Duration, now time.Time) (*RecoveryEvent, *SuspensionEvent)
 	// RecordFailure feeds every suspension criterion and returns a non-nil event if this
 	// outcome suspended the target.
 	RecordFailure(target Target, latency time.Duration, now time.Time) *SuspensionEvent
@@ -237,7 +246,7 @@ func (m *memoryHealthStore) reportableLocked(target Target, now time.Time) bool 
 	return h.suspendedUntil.IsZero() && !h.halfOpen
 }
 
-func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, now time.Time) *RecoveryEvent {
+func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, now time.Time) (*RecoveryEvent, *SuspensionEvent) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -260,9 +269,9 @@ func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, 
 				ProbesRequired:      m.suspension.RecoverAfterSuccesses,
 				SuspendedForSeconds: h.currentDurationSeconds,
 				EscalationStep:      h.escalationStep,
-			}
+			}, nil
 		}
-		return nil
+		return nil, nil
 	}
 
 	// A target that has stayed healthy long enough earns its escalation back to the base
@@ -274,6 +283,34 @@ func (m *memoryHealthStore) RecordSuccess(target Target, latency time.Duration, 
 		h.escalationStep = 0
 	}
 
+	return nil, m.evaluateLatencyLocked(h, target, now)
+}
+
+// evaluateLatencyLocked applies the latency rule to the window as it now stands.
+//
+// Split out because it is the one criterion a SUCCESS can carry over its threshold, so it has
+// to be reachable from both record paths; the consecutive and error-rate rules are about
+// failures and stay where failures are counted.
+func (m *memoryHealthStore) evaluateLatencyLocked(h *targetHealth, target Target,
+	now time.Time) *SuspensionEvent {
+
+	if m.suspension.suspensionDisabled() || m.suspension.P95LatencyMs <= 0 {
+		return nil
+	}
+	// Already suspended, or waiting on a probe: not a second verdict on the same outage,
+	// and never a verdict on the probe that is trying to clear it.
+	if h.halfOpen || (!h.suspendedUntil.IsZero() && now.Before(h.suspendedUntil)) {
+		return nil
+	}
+	total, _ := h.window.counts(now)
+	if total < m.suspension.MinimumRequests {
+		// The same sample-size guard as the error-rate rule (FR-018b): a percentile over
+		// three requests describes nothing.
+		return nil
+	}
+	if p95 := int(h.window.percentile(now, 0.95) / time.Millisecond); p95 >= m.suspension.P95LatencyMs {
+		return m.suspendLocked(h, target, ReasonLatency, p95, total, now)
+	}
 	return nil
 }
 
@@ -322,15 +359,9 @@ func (m *memoryHealthStore) RecordFailure(target Target, latency time.Duration, 
 				return m.suspendLocked(h, target, ReasonErrorRate, rate, total, now)
 			}
 		}
-		if m.suspension.P95LatencyMs > 0 {
-			p95 := int(h.window.percentile(now, 0.95) / time.Millisecond)
-			if p95 >= m.suspension.P95LatencyMs {
-				return m.suspendLocked(h, target, ReasonLatency, p95, total, now)
-			}
-		}
 	}
 
-	return nil
+	return m.evaluateLatencyLocked(h, target, now)
 }
 
 // suspendLocked applies the escalating backoff and returns the event describing it.
