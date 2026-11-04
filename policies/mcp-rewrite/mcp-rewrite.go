@@ -507,7 +507,7 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 		slog.Debug("MCP Rewrite Policy: Refusing a request whose mirrored method cannot be trusted",
 			"bodyMethod", method, "requestID", requestID, "reason", mismatch)
 		return p.buildRequestErrorResponse(ds, 400, -32020, mismatch, requestID,
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
 	}
 
 	capabilityType, action, ok := parseMcpMethod(method)
@@ -546,7 +546,7 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 		slog.Debug("MCP Rewrite Policy: Refusing a request whose mirrored name cannot be trusted",
 			"capabilityType", capabilityType, "capabilityName", capabilityName, "requestID", requestID, "reason", mismatch)
 		return p.buildRequestErrorResponse(ds, 400, -32020, mismatch, requestID,
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
 	}
 
 	if strings.TrimSpace(capabilityName) == "" {

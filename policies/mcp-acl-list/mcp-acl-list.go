@@ -420,7 +420,7 @@ func (p *McpAclListPolicy) governFromMirroredHeaders(
 		slog.Debug("MCP ACL List Policy: Rejecting a modern request that mirrored no method")
 		return p.buildRequestErrorResponse(reqCtx.Headers, 400, jsonRpcErrCodeHeaderMismatch,
 			headerMcpMethod+" header is required", nil,
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
 	}
 	// Mcp-Name is required on the three capability methods; an undecodable one counts as missing.
 	// Left in, the empty name would match no capability rule, "*" included.
@@ -429,7 +429,7 @@ func (p *McpAclListPolicy) governFromMirroredHeaders(
 			"method", facts.Method)
 		return p.buildRequestErrorResponse(reqCtx.Headers, 400, jsonRpcErrCodeHeaderMismatch,
 			headerMcpName+" header is required for "+facts.Method, nil,
-			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
 	}
 	return p.applyAcl(reqCtx, facts)
 }

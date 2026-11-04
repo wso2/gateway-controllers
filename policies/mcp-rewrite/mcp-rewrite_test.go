@@ -1206,15 +1206,23 @@ func TestRejectionsDeclareFault(t *testing.T) {
 		wantRPC  int
 		wantCode string
 		wantType string
+		// wantBody, when set, pins the status, headers and body the client receives.
+		wantBody string
 	}{
 		{name: "broken JSON", body: []byte(`{"jsonrpc":"2.0","method":`), wantRPC: -32700,
 			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
 		{name: "body the resolver could not read", unusable: "not-an-object", wantRPC: -32600,
 			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "mirrored method disagrees with the body",
+			headers:  map[string][]string{"mcp-protocol-version": {"2026-07-28"}, "mcp-method": {"tools/list"}},
+			wantRPC:  -32020,
+			wantCode: policy.FaultCodeInvalidRequestHeader, wantType: policy.FaultTypeValidation,
+			wantBody: `{"error":{"code":-32020,"message":"Mcp-Method does not match the method in the request body"},"id":"1","jsonrpc":"2.0"}`},
 		{name: "mirrored name disagrees with the body",
 			headers:  map[string][]string{"mcp-protocol-version": {"2026-07-28"}, "mcp-method": {"tools/call"}, "mcp-name": {"other"}},
 			wantRPC:  -32020,
-			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+			wantCode: policy.FaultCodeInvalidRequestHeader, wantType: policy.FaultTypeValidation,
+			wantBody: `{"error":{"code":-32020,"message":"Mcp-Name does not match the capability in the request body"},"id":"1","jsonrpc":"2.0"}`},
 		{name: "params is not an object",
 			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":"toolA"}`),
 			wantRPC:  -32602,
@@ -1242,8 +1250,18 @@ func TestRejectionsDeclareFault(t *testing.T) {
 					"mcp.body.unusable": tc.unusable,
 				})
 			}
-			assertFault(t, p.(*McpRewritePolicy).OnRequestBody(context.Background(), ctx, params),
-				tc.wantRPC, tc.wantCode, tc.wantType)
+			action := p.(*McpRewritePolicy).OnRequestBody(context.Background(), ctx, params)
+			assertFault(t, action, tc.wantRPC, tc.wantCode, tc.wantType)
+			if tc.wantBody == "" {
+				return
+			}
+			resp := action.(policy.ImmediateResponse)
+			if resp.StatusCode != 400 || len(resp.Headers) != 1 || resp.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("status/headers = %d %v, want 400 with only Content-Type: application/json", resp.StatusCode, resp.Headers)
+			}
+			if string(resp.Body) != tc.wantBody {
+				t.Fatalf("body = %s, want %s", resp.Body, tc.wantBody)
+			}
 		})
 	}
 

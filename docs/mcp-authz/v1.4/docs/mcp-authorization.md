@@ -550,7 +550,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one | `400` | `960001` | `validation` |
+| A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one | `400` | `960004` | `validation` |
 | The request body could not be read, or names a member more than once | `400` | `960001` | `validation` |
 | A capability a rule governs is invoked without an authenticated identity | `401` | `900902` | `authentication` |
 | The caller's scopes or claims do not satisfy the matching rules | `403` | `900910` | `authorization` |

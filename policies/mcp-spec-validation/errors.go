@@ -47,13 +47,15 @@ const (
 
 // errorResponse renders a JSON-RPC error as the immediate response to a rejected request. The
 // envelope matches the other MCP policies' own copies, so the gateway answers in one shape. data
-// is attached only when non-nil; no current error carries any.
+// is attached only when non-nil; no current error carries any. faultCode names what could not be
+// used — the body or a header — and reaches only the fault, never the client.
 func errorResponse(
 	headers *policy.Headers,
 	jsonRPCCode int,
 	message string,
 	requestID string,
 	data map[string]any,
+	faultCode string,
 ) policy.ImmediateResponse {
 	errObj := map[string]any{
 		"code":    jsonRPCCode,
@@ -93,7 +95,7 @@ func errorResponse(
 		AnalyticsMetadata: map[string]any{"mcpErrorCode": jsonRPCCode},
 		IsFault:           true,
 		Fault: &policy.FaultDetails{
-			Code:      policy.FaultCodeInvalidRequestBody,
+			Code:      faultCode,
 			Type:      policy.FaultTypeValidation,
 			Direction: policy.DirectionRequest,
 			Message:   message,

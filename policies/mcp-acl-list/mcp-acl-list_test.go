@@ -1013,6 +1013,29 @@ func TestOnRequestHeaders_ModernWithoutMcpMethodIsRejected(t *testing.T) {
 	if code := parsed["error"].(map[string]any)["code"]; code != float64(jsonRpcErrCodeHeaderMismatch) {
 		t.Fatalf("error code = %v, want %d", code, jsonRpcErrCodeHeaderMismatch)
 	}
+	assertHeaderFault(t, resp, `{"error":{"code":-32020,"message":"Mcp-Method header is required"},"id":null,"jsonrpc":"2.0"}`)
+}
+
+// assertHeaderFault checks that a header rejection reports FaultCodeInvalidRequestHeader, and pins
+// the status, headers and body the client receives, which the fault code does not change.
+func assertHeaderFault(t *testing.T, resp policy.ImmediateResponse, wantBody string) {
+	t.Helper()
+	if resp.Fault == nil || resp.Fault.Code != policy.FaultCodeInvalidRequestHeader ||
+		resp.Fault.Type != policy.FaultTypeValidation {
+		t.Fatalf("fault = %+v, want %s/%s", resp.Fault, policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
+	}
+	if resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil || *resp.Fault.JSONRPC.Code != jsonRpcErrCodeHeaderMismatch {
+		t.Fatalf("JSON-RPC detail = %+v, want code %d", resp.Fault.JSONRPC, jsonRpcErrCodeHeaderMismatch)
+	}
+	if resp.StatusCode != 400 {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	if len(resp.Headers) != 1 || resp.Headers["Content-Type"] != "application/json" {
+		t.Fatalf("headers = %v, want only Content-Type: application/json", resp.Headers)
+	}
+	if string(resp.Body) != wantBody {
+		t.Fatalf("body = %s, want %s", resp.Body, wantBody)
+	}
 }
 
 // Likewise a missing or undecodable Mcp-Name; a legacy body naming no tool is left to the server.
@@ -1039,6 +1062,7 @@ func TestOnRequestHeaders_ModernWithoutRequiredMcpNameIsRejected(t *testing.T) {
 			if code := parsed["error"].(map[string]any)["code"]; code != float64(jsonRpcErrCodeHeaderMismatch) {
 				t.Fatalf("error code = %v, want %d", code, jsonRpcErrCodeHeaderMismatch)
 			}
+			assertHeaderFault(t, resp, `{"error":{"code":-32020,"message":"Mcp-Name header is required for tools/call"},"id":null,"jsonrpc":"2.0"}`)
 		})
 	}
 
