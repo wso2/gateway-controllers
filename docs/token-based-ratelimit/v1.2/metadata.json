@@ -1,7 +1,7 @@
 {
   "name": "token-based-ratelimit",
   "displayName": "Token Based Ratelimit",
-  "version": "1.0",
+  "version": "1.2",
   "provider": "WSO2",
   "categories": [
     "AI"

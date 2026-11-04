@@ -3,8 +3,8 @@ module github.com/wso2/gateway-controllers/policies/llm-cost-based-ratelimit
 go 1.26.2
 
 require (
-	github.com/wso2/api-platform/sdk/core v0.3.4
-	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.1.2
+	github.com/wso2/api-platform/sdk/core v0.4.2
+	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0
 )
 
 require (

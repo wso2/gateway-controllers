@@ -50,7 +50,7 @@ All available policies, sorted alphabetically.
 | [JSON/XML Mediator](./json-xml-mediator/v1.1/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
 | [JWT Auth](./jwt-auth/v1.4/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
 | [LLM Cost](./llm-cost/v1.2/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. |
-| [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.0/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
+| [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.2/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
 | [LLM Header Router](./llm-header-router/v0.9/docs/llm-header-router.md) | AI | Selects an LLM provider for OpenAI Chat Completions requests using a configurable request header. |
 | [Log Message](./log-message/v1.1/docs/log-message.md) | Logging, Analytics & Monitoring, MCP, WebSub, WebBroker | This policy provides the capability to log the payload and headers of a request/response. |
 | [MCP Access Control](./mcp-acl-list/v1.1/docs/mcp-acl-list.md) | MCP | MCP ACL List policy controls access to tools, resources, and prompts using mode and exceptions. |
@@ -91,7 +91,7 @@ All available policies, sorted alphabetically.
 | [Set Headers](./set-headers/v1.2/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
 | [Subscription Validation](./subscription-validation/v1.0/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
 | [Time-Based Model Routing](./time-based-model-routing/v0.9/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
-| [Token Based Ratelimit](./token-based-ratelimit/v1.0/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
+| [Token Based Ratelimit](./token-based-ratelimit/v1.2/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
 | [TypeSafe Jev Content Safety](./typesafe-jev-content-safety/v0.8/docs/typesafe-jev-content-safety.md) | Guardrails, AI | Screens request or response body content using TypeSafe AI's Jev System One model. |
 | [TypeSafe Jev MCP Tool Intent Verification](./typesafe-jev-mcp-tool-intent-verification/v0.8/docs/typesafe-jev-mcp-tool-intent-verification.md) | MCP, Security | Screens MCP tools/call requests using TypeSafe AI's Jev System One model. |
 | [TypeSafe Jev MCP Tool Result Screening](./typesafe-jev-mcp-tool-result-screening/v0.8/docs/typesafe-jev-mcp-tool-result-screening.md) | MCP, Security | Screens the results of MCP tools/call requests using TypeSafe AI's Jev System One model, before the agent reads them. |

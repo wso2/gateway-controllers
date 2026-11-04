@@ -413,3 +413,21 @@ When rate limiting is applied, the following headers may be included in response
 | Header | Description |
 |--------|-------------|
 | `Retry-After` | Seconds to wait before retrying (only on 429 responses) |
+
+## Fault reporting
+
+From v1.2, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.0. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.0.
+
+The limits are enforced by an `advanced-ratelimit` delegate, and the fault that delegate reports
+is passed through unchanged, with its code and type.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| A limit is exceeded | `429` | the delegate's code, passed through (`900800` at the API level, `900802` at an operation) | `throttling` |
+
+The fault's `Description` is the delegate's, for example `quota exceeded: <quota name>`. It is
+passed to fault policies and analytics only, never to the client.
