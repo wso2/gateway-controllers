@@ -282,7 +282,8 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 |------|--------|------|------|
 | The request body is not valid JSON (JSON-RPC `-32700`) | `400` | `960001` | `validation` |
 | The request body is a batch or a bare scalar, has a member of the wrong type, or names a member twice (`-32600`) | `400` | `960001` | `validation` |
-| On a `2026-07-28` or later request, a required `Mcp-Method` or `Mcp-Name` is missing, a header value has characters not permitted in an HTTP field value or is a malformed sentinel, `MCP-Protocol-Version` is not a dated revision, or a header disagrees with the body (`-32020`) | `400` | `960004` | `validation` |
+| On a request of any protocol version, `MCP-Protocol-Version` has characters not permitted in an HTTP field value or is not a dated revision (`-32020`) | `400` | `960004` | `validation` |
+| On a `2026-07-28` or later request, a required `Mcp-Method` or `Mcp-Name` is missing, a header value has characters not permitted in an HTTP field value or is a malformed sentinel, or a header disagrees with the body (`-32020`) | `400` | `960004` | `validation` |
 
 A JSON-RPC rejection's fault also carries the JSON-RPC error code shown above and the request id,
 so a fault policy can answer in the same JSON-RPC shape. The fault's `Message` is the JSON-RPC
