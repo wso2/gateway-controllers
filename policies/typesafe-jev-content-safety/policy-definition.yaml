@@ -1,5 +1,5 @@
 name: typesafe-jev-content-safety
-version: v0.8.0
+version: v0.9.0
 description: |
   Screens request and/or response content using TypeSafe AI's Jev "System One"
   model. Sends a configurable battery of typed questions (calibrated yes/no,

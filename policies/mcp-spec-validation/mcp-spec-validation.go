@@ -136,7 +136,14 @@ func (p *McpSpecValidationPolicy) OnRequestHeaders(
 
 	reject := func(code int, message string) policy.RequestHeaderAction {
 		slog.Debug("MCP Spec Validation Policy: rejecting request", "code", code, "reason", message)
-		return errorResponse(reqCtx.Headers, code, message, p.requestID(reqCtx), nil)
+		return errorResponse(reqCtx.Headers, code, message, p.requestID(reqCtx), nil,
+			policy.FaultCodeInvalidRequestBody)
+	}
+	// Every header failure answers with codeHeaderMismatch; its fault names the header.
+	rejectHeader := func(message string) policy.RequestHeaderAction {
+		slog.Debug("MCP Spec Validation Policy: rejecting request", "code", codeHeaderMismatch, "reason", message)
+		return errorResponse(reqCtx.Headers, codeHeaderMismatch, message, p.requestID(reqCtx), nil,
+			policy.FaultCodeInvalidRequestHeader)
 	}
 
 	// ─── 1. Format of the version header, on the raw value ──────────────────
@@ -145,16 +152,14 @@ func (p *McpSpecValidationPolicy) OnRequestHeaders(
 	// picks the branch at step 3 and is compared against the body at step 7.
 	rawVersion := firstHeader(reqCtx.Headers, headerProtocolVersion)
 	if rawVersion != "" && !isValidFieldValue(rawVersion) {
-		return reject(codeHeaderMismatch,
-			headerProtocolVersion+" contains characters not permitted in an HTTP field value")
+		return rejectHeader(headerProtocolVersion + " contains characters not permitted in an HTTP field value")
 	}
 
 	// A revision is a date. Step 3 compares this value as a string, where "draft" sorts above
 	// 2026-07-28 and would be read as modern. Any well-formed date passes: which revisions a
 	// proxy accepts is a separate policy's concern.
 	if rawVersion != "" && !isSpecVersion(rawVersion) {
-		return reject(codeHeaderMismatch,
-			headerProtocolVersion+" is not a valid protocol version, expected YYYY-MM-DD")
+		return rejectHeader(headerProtocolVersion + " is not a valid protocol version, expected YYYY-MM-DD")
 	}
 
 	// ─── 2. Could the body be read? ─────────────────────────────────────────
@@ -180,8 +185,7 @@ func (p *McpSpecValidationPolicy) OnRequestHeaders(
 	// scopes the missing-header failure to required headers, the charset one to all of them.
 	for _, name := range []string{headerMcpMethod, headerMcpName} {
 		if raw := firstHeader(reqCtx.Headers, name); raw != "" && !isValidFieldValue(raw) {
-			return reject(codeHeaderMismatch,
-				name+" contains characters not permitted in an HTTP field value")
+			return rejectHeader(name + " contains characters not permitted in an HTTP field value")
 		}
 	}
 
@@ -191,17 +195,17 @@ func (p *McpSpecValidationPolicy) OnRequestHeaders(
 	// optional on most methods, but any value present is still compared.
 	method := firstHeader(reqCtx.Headers, headerMcpMethod)
 	if method == "" {
-		return reject(codeHeaderMismatch, headerMcpMethod+" header is required")
+		return rejectHeader(headerMcpMethod + " header is required")
 	}
 	name := firstHeader(reqCtx.Headers, headerMcpName)
 	if methodsRequiringName[method] && name == "" {
-		return reject(codeHeaderMismatch, headerMcpName+" header is required for "+method)
+		return rejectHeader(headerMcpName + " header is required for " + method)
 	}
 
 	// ─── 6. Decode the sentinel ─────────────────────────────────────────────
 	decodedName, err := decodeSentinel(name)
 	if err != nil {
-		return reject(codeHeaderMismatch, headerMcpName+" is not a valid base64 sentinel value")
+		return rejectHeader(headerMcpName + " is not a valid base64 sentinel value")
 	}
 
 	// ─── 7. Is the body what the headers claim? ─────────────────────────────
@@ -210,12 +214,11 @@ func (p *McpSpecValidationPolicy) OnRequestHeaders(
 	// the message separates them. Version first, so a header claiming modern over a body that
 	// does not is reported as that.
 	if bodyVersion := reqCtx.ResolutionAttributes.Get(attrBodyProtocolVersion); bodyVersion != rawVersion {
-		return reject(codeHeaderMismatch,
-			mirrorFailure(headerProtocolVersion, "protocol version", bodyVersion))
+		return rejectHeader(mirrorFailure(headerProtocolVersion, "protocol version", bodyVersion))
 	}
 
 	if bodyMethod := reqCtx.ResolutionAttributes.Get(attrBodyMethod); bodyMethod != method {
-		return reject(codeHeaderMismatch, mirrorFailure(headerMcpMethod, "method", bodyMethod))
+		return rejectHeader(mirrorFailure(headerMcpMethod, "method", bodyMethod))
 	}
 
 	// On the raw header: a degenerate "=?base64??=" decodes to "" and would skip the
@@ -235,7 +238,7 @@ func (p *McpSpecValidationPolicy) OnRequestHeaders(
 			return nil
 		}
 		if bodyValue != decodedName {
-			return reject(codeHeaderMismatch, mirrorFailure(headerMcpName, subject, bodyValue))
+			return rejectHeader(mirrorFailure(headerMcpName, subject, bodyValue))
 		}
 	}
 
@@ -265,7 +268,7 @@ func (p *McpSpecValidationPolicy) OnRequestBody(
 	code, message := unusableBodyError(reason)
 	slog.Debug("MCP Spec Validation Policy: rejecting request", "code", code, "reason", message)
 	// No id, matching the resolver, which publishes none for an unreadable body.
-	return errorResponse(reqCtx.Headers, code, message, "", nil)
+	return errorResponse(reqCtx.Headers, code, message, "", nil, policy.FaultCodeInvalidRequestBody)
 }
 
 // shouldParseBody reports whether this policy has to read the request body itself. It does

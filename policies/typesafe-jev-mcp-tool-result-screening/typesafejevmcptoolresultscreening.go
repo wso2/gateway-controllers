@@ -288,21 +288,21 @@ func (p *TypesafeJevMcpToolResultScreeningPolicy) OnResponseBody(ctx context.Con
 				}
 				continue
 			}
-			replacement, analytics := p.screen(ctx, respCtx.SharedContext, rule, call, message)
+			replacement, analytics, fault := p.screen(ctx, respCtx.SharedContext, rule, call, message)
 			if replacement == nil {
 				return policy.DownstreamResponseModifications{AnalyticsMetadata: analytics}
 			}
 			events[i].data = string(replacement)
-			return policy.DownstreamResponseModifications{Body: buildEventStream(events), AnalyticsMetadata: analytics}
+			return policy.DownstreamResponseModifications{Body: buildEventStream(events), AnalyticsMetadata: analytics, IsFault: true, Fault: fault}
 		}
 		// No event answers the call. If the stream holds no data, or part of it
 		// couldn't be read, the result may be in it, unscreened.
 		if !sawData || sawUnreadable {
-			replacement := p.failure(respCtx.SharedContext, rule, call, unreadableReason, fmt.Errorf("event stream has no readable JSON-RPC message"))
+			replacement, _, fault := p.failure(respCtx.SharedContext, rule, call, unreadableReason, fmt.Errorf("event stream has no readable JSON-RPC message"))
 			if replacement == nil {
 				return policy.DownstreamResponseModifications{}
 			}
-			return policy.DownstreamResponseModifications{Body: buildEventStream([]sseEvent{{fields: []string{"event: message"}, data: string(replacement)}})}
+			return policy.DownstreamResponseModifications{Body: buildEventStream([]sseEvent{{fields: []string{"event: message"}, data: string(replacement)}}), IsFault: true, Fault: fault}
 		}
 		return policy.DownstreamResponseModifications{}
 	}
@@ -315,17 +315,17 @@ func (p *TypesafeJevMcpToolResultScreeningPolicy) OnResponseBody(ctx context.Con
 		if isJSONObject(body) && json.Valid(body) {
 			return policy.DownstreamResponseModifications{}
 		}
-		replacement := p.failure(respCtx.SharedContext, rule, call, unreadableReason, fmt.Errorf("response body is not a JSON-RPC message"))
+		replacement, _, fault := p.failure(respCtx.SharedContext, rule, call, unreadableReason, fmt.Errorf("response body is not a JSON-RPC message"))
 		if replacement == nil {
 			return policy.DownstreamResponseModifications{}
 		}
-		return policy.DownstreamResponseModifications{Body: replacement}
+		return policy.DownstreamResponseModifications{Body: replacement, IsFault: true, Fault: fault}
 	}
-	replacement, analytics := p.screen(ctx, respCtx.SharedContext, rule, call, message)
+	replacement, analytics, fault := p.screen(ctx, respCtx.SharedContext, rule, call, message)
 	if replacement == nil {
 		return policy.DownstreamResponseModifications{AnalyticsMetadata: analytics}
 	}
-	return policy.DownstreamResponseModifications{Body: replacement, AnalyticsMetadata: analytics}
+	return policy.DownstreamResponseModifications{Body: replacement, AnalyticsMetadata: analytics, IsFault: true, Fault: fault}
 }
 
 // ruleFor returns the rule for a tool: its own rule, else the "*" rule, else nil.
@@ -432,25 +432,25 @@ func sameID(a, b json.RawMessage) bool {
 }
 
 // screen asks Jev the rule's questions about one tool result. It returns the
-// JSON-RPC message to send in its place, or nil to pass the result through, and
-// the analytics metadata to record.
-func (p *TypesafeJevMcpToolResultScreeningPolicy) screen(ctx context.Context, shared *policy.SharedContext, rule *toolRule, call *toolCallRequest, message map[string]json.RawMessage) ([]byte, map[string]interface{}) {
+// JSON-RPC message to send in its place, or nil to pass the result through, the
+// analytics metadata to record, and the fault a withheld result reports.
+func (p *TypesafeJevMcpToolResultScreeningPolicy) screen(ctx context.Context, shared *policy.SharedContext, rule *toolRule, call *toolCallRequest, message map[string]json.RawMessage) ([]byte, map[string]interface{}, *policy.FaultDetails) {
 	text, err := resultText(message["result"])
 	if err != nil {
-		return p.failure(shared, rule, call, "result is not a valid tool result", err), nil
+		return p.failure(shared, rule, call, "result is not a valid tool result", err)
 	}
 	if text == "" {
 		// Nothing the model reads as text (for example an image only).
-		return nil, nil
+		return nil, nil, nil
 	}
 	if len(text) > p.maxResultBytes {
-		return p.failure(shared, rule, call, "result too large to screen", fmt.Errorf("result text is %d bytes, more than maxResultBytes (%d)", len(text), p.maxResultBytes)), nil
+		return p.failure(shared, rule, call, "result too large to screen", fmt.Errorf("result text is %d bytes, more than maxResultBytes (%d)", len(text), p.maxResultBytes))
 	}
 
 	state := resultState{Tool: resultStateTool{Name: call.Name, Arguments: call.Arguments}, Result: text}
 	answers, usage, err := p.callJev(ctx, state, rule.questions, p.timeout)
 	if err != nil {
-		return p.failure(shared, rule, call, "Error calling Jev API", err), nil
+		return p.failure(shared, rule, call, reasonJevCall, err)
 	}
 	if usage != nil {
 		setMetadata(shared, metaKeyUsage, map[string]interface{}{
@@ -463,11 +463,11 @@ func (p *TypesafeJevMcpToolResultScreeningPolicy) screen(ctx context.Context, sh
 		raw, ok := answers[q.Key]
 		if !ok {
 			// A partial Jev response is a failure of the check, not a pass.
-			return p.failure(shared, rule, call, "Error processing Jev response", fmt.Errorf("Jev response missing answer for question %q", q.Key)), nil
+			return p.failure(shared, rule, call, reasonJevResponse, fmt.Errorf("Jev response missing answer for question %q", q.Key))
 		}
 		assessment, blocks, err := evaluateAnswer(q, raw)
 		if err != nil {
-			return p.failure(shared, rule, call, "Error processing Jev response", fmt.Errorf("question %q: %w", q.Key, err)), nil
+			return p.failure(shared, rule, call, reasonJevResponse, fmt.Errorf("question %q: %w", q.Key, err))
 		}
 		switch {
 		case blocks:
@@ -483,14 +483,14 @@ func (p *TypesafeJevMcpToolResultScreeningPolicy) screen(ctx context.Context, sh
 			"questions", lowConfidence, "tool", call.Name)
 	}
 	if len(failed) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	setMetadata(shared, metaKeyAssessments, failed)
 	if rule.mode == modeMonitor {
 		slog.Info("TypesafeJevMcpToolResultScreening: violation detected (monitor mode, not withholding)",
 			"failedQuestions", failed, "tool", call.Name)
-		return nil, guardrailHitAnalytics()
+		return nil, guardrailHitAnalytics(), nil
 	}
 
 	slog.Debug("TypesafeJevMcpToolResultScreening: violation detected, withholding result", "failedQuestions", failed, "tool", call.Name)
@@ -498,26 +498,86 @@ func (p *TypesafeJevMcpToolResultScreeningPolicy) screen(ctx context.Context, sh
 	if p.showAssessment {
 		assessments = failed
 	}
-	return buildWithheldResult(call.ID, withheldText, assessments), guardrailHitAnalytics()
+	return buildWithheldResult(call.ID, withheldText, assessments), guardrailHitAnalytics(), withheldFault(call, failed, assessments)
+}
+
+// withheldFault describes a withheld result. The client still gets a 200 with a
+// tool result marked isError, so IsFault is what says the result was refused.
+// The questions are operator-configurable and need not be about prompt
+// injection, so the verdict is reported with the generic guardrail code. The
+// assessments are carried only where showAssessment put them in the body.
+func withheldFault(call *toolCallRequest, failed, assessments []map[string]interface{}) *policy.FaultDetails {
+	questions := make([]string, 0, len(failed))
+	for _, f := range failed {
+		if key, ok := f["question"].(string); ok {
+			questions = append(questions, key)
+		}
+	}
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         withheldText,
+	}
+	if assessments != nil {
+		guardrail.Assessments = map[string]any{"assessments": assessments}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.GuardrailCodeIntervened,
+		Type:        policy.FaultTypeGuardrail,
+		Direction:   policy.DirectionResponse,
+		Message:     withheldText,
+		Description: "tool " + call.Name + " failed questions: " + strings.Join(questions, ", "),
+		Guardrail:   guardrail,
+		JSONRPC:     &policy.JSONRPCError{ID: jsonRPCID(call.ID)},
+	}
+}
+
+// jsonRPCID is the request id for a fault's JSON-RPC detail; nil when absent.
+func jsonRPCID(id json.RawMessage) any {
+	if len(id) == 0 {
+		return nil
+	}
+	return id
 }
 
 // unreadableReason is recorded when a matched call's response can't be read.
 const unreadableReason = "response is not a readable JSON-RPC message"
 
+// The reasons recorded when Jev could not be reached or answered malformed.
+const (
+	reasonJevCall     = "Error calling Jev API"
+	reasonJevResponse = "Error processing Jev response"
+)
+
 // failure handles a check that could not run (not a violation). The result passes
 // through when the rule fails open, which is the default, or in monitor mode;
 // otherwise it is withheld. Either way the reason is recorded, so results that
 // reached the agent unscreened can be found.
-func (p *TypesafeJevMcpToolResultScreeningPolicy) failure(shared *policy.SharedContext, rule *toolRule, call *toolCallRequest, reason string, err error) []byte {
+//
+// A withheld result reports the gateway's own failure, not a verdict: Jev
+// unreachable or answering malformed is an upstream failure, and a result this
+// policy cannot read is a mediation failure. It returns no analytics metadata.
+func (p *TypesafeJevMcpToolResultScreeningPolicy) failure(shared *policy.SharedContext, rule *toolRule, call *toolCallRequest, reason string, err error) ([]byte, map[string]interface{}, *policy.FaultDetails) {
 	setMetadata(shared, metaKeyUnscreened, reason)
 	if rule.mode == modeMonitor || rule.passthroughOnError {
 		slog.Debug("TypesafeJevMcpToolResultScreening: check failed, passing result through",
 			"reason", reason, "error", err, "mode", rule.mode, "tool", call.Name)
-		return nil
+		return nil, nil, nil
 	}
 	slog.Debug("TypesafeJevMcpToolResultScreening: check failed, withholding result",
 		"reason", reason, "error", err, "tool", call.Name)
-	return buildWithheldResult(call.ID, uncheckedText, nil)
+	faultType := policy.FaultTypeMediation
+	if reason == reasonJevCall || reason == reasonJevResponse {
+		faultType = policy.FaultTypeMediation
+	}
+	return buildWithheldResult(call.ID, uncheckedText, nil), nil, &policy.FaultDetails{
+		Code:        policy.FaultCodeMediationFailed,
+		Type:        faultType,
+		Direction:   policy.DirectionResponse,
+		Message:     uncheckedText,
+		Description: reason + ": " + err.Error(),
+		JSONRPC:     &policy.JSONRPCError{ID: jsonRPCID(call.ID)},
+	}
 }
 
 // toolResultContent is one entry of a tools/call result's content array. Only the

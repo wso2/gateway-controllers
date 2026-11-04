@@ -1,5 +1,5 @@
 name: oauth2-token-exchange
-version: v0.9.0
+version: v0.10.0
 description: |
   Exchanges the caller's inbound credential for a backend-specific token at an
   external OAuth2 authorization server, then attaches it to the upstream

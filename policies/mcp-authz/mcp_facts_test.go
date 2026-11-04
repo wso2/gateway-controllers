@@ -20,6 +20,7 @@ package mcpauthz
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -319,7 +320,27 @@ func TestAcceptedSkips(t *testing.T) {
 func TestModernRequestWithoutMcpMethodIsRejected(t *testing.T) {
 	ctx := resolvedRequest(map[string][]string{headerProtocolVersion: {"2026-07-28"}},
 		nil, scopedAuth("scope:other"))
-	assertGoverned(t, runResolved(toolAOnlyPolicy(), ctx), 400, "modern request with no Mcp-Method")
+	action := runResolved(toolAOnlyPolicy(), ctx)
+	assertGoverned(t, action, 400, "modern request with no Mcp-Method")
+	assertHeaderFault(t, ctx, action, "Mcp-Method header is required")
+}
+
+// assertHeaderFault checks that a missing-header rejection reports FaultCodeInvalidRequestHeader
+// while the client still receives exactly the invalid_request response handleAuthFailure builds.
+func assertHeaderFault(t *testing.T, ctx *policy.RequestHeaderContext, action policy.RequestHeaderAction, message string) {
+	t.Helper()
+	resp := action.(policy.ImmediateResponse)
+	if resp.Fault == nil || resp.Fault.Code != policy.FaultCodeInvalidRequestHeader ||
+		resp.Fault.Type != policy.FaultTypeValidation || resp.Fault.Message != message {
+		t.Fatalf("fault = %+v, want %s/%s %q", resp.Fault, policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation, message)
+	}
+	want := toolAOnlyPolicy().handleAuthFailure(ctx, 400, ErrorInvalidRequest, message, nil)
+	if resp.StatusCode != want.StatusCode || !reflect.DeepEqual(resp.Headers, want.Headers) {
+		t.Fatalf("status/headers = %d %v, want %d %v", resp.StatusCode, resp.Headers, want.StatusCode, want.Headers)
+	}
+	if wantBody := `{"error":"Bad Request","message":"` + message + `"}`; string(resp.Body) != wantBody {
+		t.Fatalf("body = %s, want %s", resp.Body, wantBody)
+	}
 }
 
 // Likewise a missing or undecodable Mcp-Name on a method that must mirror one.
@@ -337,7 +358,9 @@ func TestModernRequestWithoutRequiredMcpNameIsRejected(t *testing.T) {
 				headers[headerMcpName] = headerName
 			}
 			ctx := resolvedRequest(headers, nil, scopedAuth("scope:other"))
-			assertGoverned(t, runResolved(toolAOnlyPolicy(), ctx), 400, "Mcp-Name "+name)
+			action := runResolved(toolAOnlyPolicy(), ctx)
+			assertGoverned(t, action, 400, "Mcp-Name "+name)
+			assertHeaderFault(t, ctx, action, "Mcp-Name header is required for tools/call")
 		})
 	}
 

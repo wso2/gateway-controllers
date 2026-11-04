@@ -616,3 +616,70 @@ func TestTransformToRatelimitParams_ConsumerBased_True(t *testing.T) {
 		t.Errorf("Expected second entry fallback 'default', got %v", second["fallback"])
 	}
 }
+
+// stubThrottlingCostDelegate is a delegate stub whose request-header phase rejects with a
+// fixed action, standing in for an advanced-ratelimit delegate whose budget is exhausted.
+type stubThrottlingCostDelegate struct {
+	stubCostChunkPolicer
+	onRequestHeadersAction policy.RequestHeaderAction
+}
+
+func (s *stubThrottlingCostDelegate) OnRequestHeaders(context.Context, *policy.RequestHeaderContext, map[string]interface{}) policy.RequestHeaderAction {
+	return s.onRequestHeadersAction
+}
+
+// TestDelegateFaultDeclarationIsPassedThrough covers what this policy contributes to the
+// fault contract: nothing, deliberately. It returns the advanced-ratelimit delegate's
+// action unchanged, so the delegate's IsFault and Fault reach the gateway untouched.
+//
+// The test exists because the alternative — rebuilding the response field-by-field to add
+// or reshape something — is the mistake that silently drops both fields, and it is not
+// visible from reading this policy alone.
+func TestDelegateFaultDeclarationIsPassedThrough(t *testing.T) {
+	params := map[string]interface{}{
+		"budgetLimits": []interface{}{
+			map[string]interface{}{"amount": float64(10), "duration": "1h"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "memory",
+	}
+	p := &LLMCostRateLimitPolicy{metadata: policy.PolicyMetadata{RouteName: "fault-route"}}
+
+	// Build the real delegate once so the cached entry carries the cache key the request
+	// path computes, then swap in a stub that rejects.
+	if _, err := p.resolveDelegate("openai", params); err != nil {
+		t.Fatalf("resolveDelegate: %v", err)
+	}
+	entry, ok := p.delegates.Load("openai")
+	if !ok {
+		t.Fatalf("expected a cached delegate for the provider")
+	}
+	throttled := policy.ImmediateResponse{
+		StatusCode: 429,
+		Body:       []byte("Message throttled out"),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      "900802", // RESOURCE_THROTTLE_OUT_ERROR_CODE
+			Type:      "throttling",
+			Direction: policy.DirectionRequest,
+			Message:   "Message throttled out",
+		},
+	}
+	p.delegates.Store("openai", &delegateEntry{
+		cacheKey: entry.(*delegateEntry).cacheKey,
+		delegate: &stubThrottlingCostDelegate{onRequestHeadersAction: throttled},
+	})
+
+	action := p.OnRequestHeaders(context.Background(), createTestRequestHeaderContext("openai"), params)
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("the delegate's IsFault must reach the gateway unchanged")
+	}
+	if resp.Fault == nil || resp.Fault.Code != "900802" {
+		t.Fatalf("the delegate's Fault must reach the gateway unchanged, got %+v", resp.Fault)
+	}
+}
