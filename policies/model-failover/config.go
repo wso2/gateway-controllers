@@ -116,9 +116,21 @@ type Params struct {
 	// controller. The cluster depends on the provider alone, never the model, so this is
 	// enough to build a group for ANY model at request time — including one no configuration
 	// enumerated (FR-058).
-	ProviderClusters    map[string]string
-	FailureConditions   FailureConditions
-	Suspension          Suspension
+	ProviderClusters  map[string]string
+	FailureConditions FailureConditions
+	Suspension        Suspension
+
+	// PerAttemptTimeoutMs is parsed and DELIBERATELY NEVER READ by this policy.
+	//
+	// It bounds one attempt, and the controller alone acts on it: the same perTryTimeout
+	// parameter is generated into Envoy's retry policy, which is where a hung attempt is
+	// actually cut off. Nothing here consults it, and nothing here should.
+	//
+	// That is FR-018f, not an oversight. A timeout is a per-request bound; suspension is an
+	// aggregate judgement over a window. Feeding the timeout into a health decision would
+	// let ONE slow request condemn a target, which is the behaviour the windowed rules in
+	// health.go exist to replace. Kept on Params because the parameter is this policy's to
+	// document and validate, not because anything reads it.
 	PerAttemptTimeoutMs int
 }
 
