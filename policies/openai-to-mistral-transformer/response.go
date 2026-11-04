@@ -112,7 +112,8 @@ func translateErrorResponse(respBody []byte, status int) policy.ResponseAction {
 
 	newBody, err := json.Marshal(openaiErr)
 	if err != nil {
-		return errResponse(500, "failed to translate Mistral error: "+err.Error())
+		return errResponse(500, "failed to translate Mistral error: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 
 	return policy.DownstreamResponseModifications{

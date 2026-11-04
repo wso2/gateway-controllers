@@ -1,0 +1,11 @@
+{
+  "name": "openai-to-bedrock-transformer",
+  "displayName": "OpenAI to Bedrock Transformer",
+  "version": "0.10",
+  "provider": "WSO2",
+  "categories": [
+    "AI",
+    "LLM Transformation"
+  ],
+  "description": "Translates OpenAI Chat Completions requests into AWS Bedrock Converse format and rewrites non-streaming and streaming Bedrock responses back into OpenAI-compatible JSON or Server-Sent Events."
+}

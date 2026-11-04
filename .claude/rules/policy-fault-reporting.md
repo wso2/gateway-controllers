@@ -21,9 +21,15 @@ The gateway only knows *why* a request failed if the policy says so. Without a d
 3. **Use an SDK constant for the code, never a literal.** Codes come from `github.com/wso2/api-platform/sdk/core/policy/v1alpha2` (`policy.FaultCode*`, `policy.GuardrailCode*`). Write `policy.FaultCodeAuthMissingCredentials`, not `"900902"`. If the constant you need does not exist, add it to the SDK; do not invent a number in the policy. The number decides the analytics category by its range, so pick by meaning:
    - authentication / authorization: `FaultCodeAuth*`, `FaultCodeInvalidScope`, `FaultCodeSubscriptionInactive` (900900–900999)
    - throttling: `FaultCodeThrottled*` (900800–900899)
-   - upstream: `FaultCodeUpstream*`
    - guardrail: `GuardrailCode*` (906000–906399)
-   - the policy could not do its job: `FaultCodeMediationFailed`; the caller's payload could not be read: `FaultCodeInvalidRequestBody`. Do not allocate a per-policy code for either — `Policy` already says which policy failed.
+   - the shared policy codes (960000–960005) — do not allocate a per-policy code for any of these; `Policy` already says which policy failed:
+     - `FaultCodeMediationFailed` (960000) — the policy could not do its job; `FaultTypeMediation`.
+     - `FaultCodeInvalidRequestBody` (960001) — the caller's request body could not be read or does not fit; `FaultTypeValidation`.
+     - `FaultCodeProviderStreamFailed` (960002) — a provider ended a streamed response with an error event or exception frame; `FaultTypeMediation`, `DirectionResponse`.
+     - `FaultCodeNoModelAvailable` (960003) — a model-routing policy has no model left to route to; `FaultTypeMediation`, `DirectionRequest`.
+     - `FaultCodeInvalidRequestHeader` (960004) — a request header the policy needed is missing, malformed, or contradicts the body; `FaultTypeValidation`, `DirectionRequest`.
+     - `FaultCodeInvalidRequestURI` (960005) — the request path or query string could not be used; `FaultTypeValidation`, `DirectionRequest`.
+   - Do not use `FaultCodeUpstream*` (101500–101599, 303001): those are the gateway's own codes for the router failing to proxy a request, not for a policy.
 
 4. **Keep the client response unchanged when migrating a policy.** Adding `IsFault` and `Fault` must not change `StatusCode`, `Headers` or `Body`. Clients already parse those bytes; the fault description is additive.
 
@@ -41,7 +47,7 @@ The gateway only knows *why* a request failed if the policy says so. Without a d
 
 8. **Python policies feature-detect the fault types.** The Python SDK is the one the gateway runtime ships, so a gateway older than the fault contract does not have it. Import the fault names in a `try`/`except ImportError` block, and add `is_fault=True, fault=FaultDetails(...)` only when the import succeeded, so the policy still loads and behaves as before on an older gateway.
 
-9. **Require an SDK that has the contract, and test the declaration.** A Go policy that uses `IsFault`, `FaultDetails` or the code constants requires `sdk/core` v0.4.2 or later in its `go.mod`. Add a unit test that asserts each rejection's `IsFault`, `Code` and `Type`, and that the body is unchanged.
+9. **Require an SDK that has the contract, and test the declaration.** A Go policy that uses `IsFault`, `FaultDetails` or the code constants requires `sdk/core` v0.4.2 or later in its `go.mod` (v0.5.1 or later for codes 960002–960005). Add a unit test that asserts each rejection's `IsFault`, `Code` and `Type`, and that the body is unchanged.
 
 10. **No deferring behind a comment.** Do not ship a rejection without its fault declaration and a `// TODO: declare fault` next to it. Declare it, or raise the gap in the PR.
 

@@ -1022,3 +1022,75 @@ func TestStream_NilSharedContextForwardsUnchanged(t *testing.T) {
 		t.Errorf("passthrough must not synthesise [DONE], got %d", n)
 	}
 }
+
+// TestStreamFailureFaults pins the fault a terminated stream declares, on both the streaming
+// and the buffered path. A provider error event is FaultCodeProviderStreamFailed; a frame the
+// translator cannot parse is its own failure, FaultCodeMediationFailed. The buffered path sends
+// the same bytes as the streaming one, and a stream that ends cleanly declares no fault.
+func TestStreamFailureFaults(t *testing.T) {
+	cases := []struct {
+		name     string
+		stream   string
+		wantCode string
+	}{
+		{"provider error event", sseFrame(`{"error":{"code":503,"message":"Overloaded","status":"UNAVAILABLE"}}`), policy.FaultCodeProviderStreamFailed},
+		{"malformed frame", sseFrame(`{"candidates":`), policy.FaultCodeMediationFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := sseFrame(`{"candidates":[{"content":{"role":"model","parts":[{"text":"Hi"}]},"index":0}],"modelVersion":"gemini-2.5-pro","responseId":"resp-f"}`) + tc.stream
+			action := testPolicy().OnResponseBodyChunk(context.Background(), &policy.ResponseStreamContext{
+				SharedContext:   &policy.SharedContext{RequestID: "req-fault", Metadata: map[string]interface{}{}},
+				ResponseHeaders: sseHeaders(),
+				ResponseStatus:  200,
+			}, &policy.StreamBody{Chunk: []byte(stream), EndOfStream: true}, nil)
+			terminate, ok := action.(policy.TerminateResponseChunk)
+			if !ok {
+				t.Fatalf("expected TerminateResponseChunk, got %T", action)
+			}
+			assertStreamFault(t, terminate.IsFault, terminate.Fault, tc.wantCode)
+
+			buffered := testPolicy().OnResponseBody(context.Background(), &policy.ResponseContext{
+				SharedContext:   &policy.SharedContext{RequestID: "req-fault", Metadata: map[string]interface{}{}},
+				ResponseHeaders: sseHeaders(),
+				ResponseBody:    &policy.Body{Content: []byte(stream), Present: true},
+				ResponseStatus:  200,
+			}, nil)
+			mods, ok := buffered.(policy.DownstreamResponseModifications)
+			if !ok {
+				t.Fatalf("expected DownstreamResponseModifications, got %T", buffered)
+			}
+			assertStreamFault(t, mods.IsFault, mods.Fault, tc.wantCode)
+			if normalizeCreated(string(mods.Body)) != normalizeCreated(string(terminate.Body)) {
+				t.Errorf("buffered body differs from the streamed one:\n%s\nvs\n%s", mods.Body, terminate.Body)
+			}
+			if mods.StatusCode != nil {
+				t.Errorf("the buffered path must not change the status, got %d", *mods.StatusCode)
+			}
+		})
+	}
+
+	t.Run("clean stream", func(t *testing.T) {
+		buffered := testPolicy().OnResponseBody(context.Background(), &policy.ResponseContext{
+			SharedContext:   &policy.SharedContext{RequestID: "req-clean", Metadata: map[string]interface{}{}},
+			ResponseHeaders: sseHeaders(),
+			ResponseBody:    &policy.Body{Content: []byte(geminiTextStream()), Present: true},
+			ResponseStatus:  200,
+		}, nil)
+		mods := buffered.(policy.DownstreamResponseModifications)
+		if mods.IsFault || mods.Fault != nil {
+			t.Errorf("a clean stream must not declare a fault, got %+v", mods.Fault)
+		}
+	})
+}
+
+func assertStreamFault(t *testing.T, isFault bool, fault *policy.FaultDetails, wantCode string) {
+	t.Helper()
+	if !isFault || fault == nil {
+		t.Fatalf("expected a fault, got IsFault=%v Fault=%v", isFault, fault)
+	}
+	if fault.Code != wantCode || fault.Type != policy.FaultTypeMediation || fault.Direction != policy.DirectionResponse {
+		t.Errorf("fault = %s/%s/%s, want %s/%s/%s", fault.Code, fault.Type, fault.Direction,
+			wantCode, policy.FaultTypeMediation, policy.DirectionResponse)
+	}
+}

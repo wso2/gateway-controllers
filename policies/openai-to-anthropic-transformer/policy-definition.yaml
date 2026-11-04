@@ -1,5 +1,5 @@
 name: openai-to-anthropic-transformer
-version: v0.9.2
+version: v0.10.0
 description: |
   Translates OpenAI Chat Completions requests to Anthropic Messages format and
   rewrites Anthropic responses back to the OpenAI response shape.
