@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -49,6 +50,9 @@ type extractedPayload struct {
 //     covers every MCP tool argument).
 //   - A Server-Sent Events body (e.g. an MCP Streamable HTTP response) is split
 //     into events, and jsonPath is resolved against the JSON in each event's data.
+//   - A single JSON-RPC message the path does not apply to (e.g. an MCP
+//     initialize, tools/list or notification, which carry no tool arguments or
+//     tool result) has nothing to check, so it yields no segments.
 func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) {
 	if jsonPath == "" {
 		segment := &textSegment{value: string(payload)}
@@ -68,6 +72,9 @@ func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) 
 	if jsonErr == nil {
 		root := &doc
 		segments, err := resolveTextSegments(root, tokens, nil)
+		if errors.Is(err, errNoValue) && isJSONRPCMessage(doc) {
+			return unchangedPayload(payload), nil
+		}
 		if err != nil {
 			return nil, fmt.Errorf("%w (jsonPath %q)", err, jsonPath)
 		}
@@ -84,6 +91,26 @@ func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) 
 	return nil, fmt.Errorf("payload is neither JSON nor a Server-Sent Events stream: %w", jsonErr)
 }
 
+// errNoValue is returned when jsonPath matches nothing in a document.
+var errNoValue = errors.New("no value found at jsonPath")
+
+// isJSONRPCMessage reports whether doc is one JSON-RPC 2.0 message. A batch
+// (a JSON array) is not one, so a batch the path does not match is still an
+// error rather than passing unchecked.
+func isJSONRPCMessage(doc interface{}) bool {
+	m, ok := doc.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	version, ok := m["jsonrpc"].(string)
+	return ok && version == "2.0"
+}
+
+// unchangedPayload is a payload with nothing to check.
+func unchangedPayload(payload []byte) *extractedPayload {
+	return &extractedPayload{rebuild: func() ([]byte, error) { return payload, nil }}
+}
+
 func decodeJSON(data []byte) (interface{}, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -91,8 +118,10 @@ func decodeJSON(data []byte) (interface{}, error) {
 	if err := decoder.Decode(&doc); err != nil {
 		return nil, err
 	}
-	// Reject trailing content such as a second JSON value.
-	if decoder.More() {
+	// Reject trailing content, such as a second JSON value or a stray '}'.
+	// (Decoder.More would accept a trailing '}' or ']'.)
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return nil, errors.New("unexpected content after JSON value")
 	}
 	return doc, nil
@@ -118,8 +147,7 @@ type sseEvent struct {
 // looksLikeEventStream reports whether the first non-empty line of the body is
 // a Server-Sent Events field or comment.
 func looksLikeEventStream(payload []byte) bool {
-	for _, line := range strings.Split(string(payload), "\n") {
-		line = strings.TrimRight(line, "\r")
+	for _, line := range strings.Split(normalizeLineEndings(payload), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -133,8 +161,14 @@ func looksLikeEventStream(payload []byte) bool {
 	return false
 }
 
+// normalizeLineEndings turns the CRLF and CR line endings that Server-Sent
+// Events allow into LF.
+func normalizeLineEndings(payload []byte) string {
+	return strings.ReplaceAll(strings.ReplaceAll(string(payload), "\r\n", "\n"), "\r", "\n")
+}
+
 func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*extractedPayload, error) {
-	normalized := strings.ReplaceAll(string(payload), "\r\n", "\n")
+	normalized := normalizeLineEndings(payload)
 
 	var events []*sseEvent
 	current := &sseEvent{}
@@ -154,6 +188,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 
 	var segments []*textSegment
 	matched := false
+	allJSONRPC := true
 	for _, event := range events {
 		data, ok := eventData(event.lines)
 		if !ok {
@@ -164,6 +199,9 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 			// Not JSON (e.g. a "[DONE]" marker); nothing to check in this event.
 			continue
 		}
+		if !isJSONRPCMessage(doc) {
+			allJSONRPC = false
+		}
 		event.doc = doc
 		ev := event
 		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
@@ -173,6 +211,11 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		}
 		matched = true
 		segments = append(segments, eventSegments...)
+	}
+	if !matched && allJSONRPC {
+		// Only JSON-RPC messages the path does not apply to, e.g. a stream of
+		// MCP progress notifications or an initialize result.
+		return unchangedPayload(payload), nil
 	}
 	if !matched {
 		return nil, fmt.Errorf("no event in the Server-Sent Events stream has a value at jsonPath %q", jsonPath)
@@ -383,7 +426,7 @@ func resolveTextSegments(root *interface{}, tokens []pathToken, onChange func())
 		}
 		slots = next
 		if len(slots) == 0 {
-			return nil, errors.New("no value found at jsonPath")
+			return nil, errNoValue
 		}
 	}
 

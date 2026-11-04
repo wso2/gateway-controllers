@@ -942,6 +942,9 @@ type guardrailFindings struct {
 	blocked bool
 	// anonymized is true when any PII entity or regex has the action ANONYMIZED.
 	anonymized bool
+	// unmaskable is true when an ANONYMIZED PII entity or regex carries no
+	// matched text, so the policy cannot mask it.
+	unmaskable bool
 }
 
 func collectGuardrailFindings(output *bedrockruntime.ApplyGuardrailOutput) guardrailFindings {
@@ -980,6 +983,9 @@ func collectGuardrailFindings(output *bedrockruntime.ApplyGuardrailOutput) guard
 					findings.blocked = true
 				case types.GuardrailSensitiveInformationPolicyActionAnonymized:
 					findings.anonymized = true
+					if aws.ToString(entity.Match) == "" {
+						findings.unmaskable = true
+					}
 				}
 			}
 			for _, regex := range sip.Regexes {
@@ -988,6 +994,9 @@ func collectGuardrailFindings(output *bedrockruntime.ApplyGuardrailOutput) guard
 					findings.blocked = true
 				case types.GuardrailSensitiveInformationPolicyActionAnonymized:
 					findings.anonymized = true
+					if aws.ToString(regex.Match) == "" {
+						findings.unmaskable = true
+					}
 				}
 			}
 		}
@@ -1014,7 +1023,8 @@ type piiReplacement struct {
 //
 // The content is blocked when any finding has the action BLOCKED, even if PII
 // was also found. It is masked only when every finding that acted is ANONYMIZED.
-// An intervention with no finding the policy can identify is blocked (fail closed).
+// An intervention with no finding the policy can identify, or with an
+// ANONYMIZED finding that has no matched text to mask, is blocked (fail closed).
 func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}, redactPII bool, isRequest bool, metadata map[string]interface{}) (bool, []piiReplacement, error) {
 	if output == nil {
 		return true, nil, fmt.Errorf("AWS Bedrock Guardrails API returned an invalid response")
@@ -1034,7 +1044,7 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 	}
 
 	findings := collectGuardrailFindings(outputTyped)
-	if findings.blocked || !findings.anonymized {
+	if findings.blocked || findings.unmaskable || !findings.anonymized {
 		return true, nil, nil
 	}
 

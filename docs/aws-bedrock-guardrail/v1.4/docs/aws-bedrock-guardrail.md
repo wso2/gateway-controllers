@@ -182,7 +182,7 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 When the selected value is an object or an array, every string inside it is sent to the guardrail. A path that matches nothing, or that selects only `true`, `false`, or `null`, is an extraction error, handled according to `passthroughOnError`. Numbers are validated only when selected directly.
 
-If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
+If `jsonPath` is set to an empty string (`""`), the entire payload is treated as a string and validated. If `jsonPath` is omitted, the default path for that phase is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses).
 
 #### MCP routes
 
@@ -193,7 +193,9 @@ The default paths target OpenAI-style chat completions. An MCP `tools/call` has 
 | Request | `$.params.arguments` | Every string argument of the tool call, whatever the argument names |
 | Response | `$.result.content[*].text` | The text of every content item in the tool result |
 
-MCP servers using Streamable HTTP may reply with a Server-Sent Events body (`Content-Type: text/event-stream`). The policy reads each event's `data:` JSON and applies the response `jsonPath` to it. Events the path does not match, such as progress notifications, are left unchanged. If no event matches, the response is treated as an extraction error.
+MCP servers using Streamable HTTP may reply with a Server-Sent Events body (`Content-Type: text/event-stream`). The policy reads each event's `data:` JSON and applies the response `jsonPath` to it. Events the path does not match, such as progress notifications, are left unchanged.
+
+The policy runs on every message of the MCP proxy, not only `tools/call`. A JSON-RPC message the path does not match, such as `initialize`, `tools/list` or a tool result without text content, has nothing to validate and passes unchanged. The same applies to an event stream whose events are all JSON-RPC messages. A body that is not JSON-RPC, a JSON-RPC batch, or an event stream with other JSON that the path does not match is still treated as an extraction error.
 
 **Note:**
 
@@ -488,6 +490,8 @@ spec:
 
 A tool call or tool result that triggers a blocking guardrail policy returns HTTP `422`. PII that the guardrail anonymizes in a tool result is replaced with its type in braces, such as `{EMAIL}`.
 
+The policy applies to every message on the route, not only `tools/call`. Messages such as `initialize`, `tools/list` and notifications have no `params.arguments` or tool result text, so they have nothing to validate and pass unchanged, without a Bedrock call. See [MCP routes](#mcp-routes).
+
 ### Example 9: Validating only successful responses
 
 An error response from the LLM provider, such as an expired credential or an invalid model, carries the provider's error rather than generated content. Setting `applicableStatusCodes` limits response validation to the listed upstream status codes, so the provider's error reaches the client unchanged:
@@ -528,7 +532,7 @@ With this configuration, an upstream `403` is returned to the client as is, whil
 
 #### Credential resolution
 
-The credentials provider is built **once**, when the policy attachment is created, and reused across requests. Role assumption therefore happens on first use and on refresh near expiry, not on every request. A failure to build it — an unassumable role, a missing IRSA environment — rejects the attachment at deploy time rather than failing at request time.
+The credentials provider is built **once**, when the policy attachment is created, and reused across requests. Role assumption therefore happens on first use and on refresh near expiry, not on every request. A configuration that cannot be used at all, such as a missing role ARN or a missing IRSA environment, rejects the attachment at deploy time. A role that cannot be assumed is only found on the first `ApplyGuardrail` call, because the role is assumed then: that request fails as a guardrail error and follows `passthroughOnError`.
 
 #### PII Handling Modes
 
