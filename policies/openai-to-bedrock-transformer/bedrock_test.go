@@ -1048,7 +1048,7 @@ func assertExceptionFault(t *testing.T, isFault bool, fault *policy.FaultDetails
 	if !isFault || fault == nil {
 		t.Fatalf("expected a fault, got IsFault=%v Fault=%v", isFault, fault)
 	}
-	if fault.Code != policy.FaultCodeUpstreamGeneric || fault.Type != policy.FaultTypeMediation ||
+	if fault.Code != policy.FaultCodeProviderStreamFailed || fault.Type != policy.FaultTypeMediation ||
 		fault.Direction != policy.DirectionResponse {
 		t.Errorf("fault = %s/%s/%s", fault.Code, fault.Type, fault.Direction)
 	}

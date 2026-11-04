@@ -987,7 +987,7 @@ func TestStream_NilSharedContextForwardsUnchanged(t *testing.T) {
 }
 
 // TestStreamFailureFaults pins the fault a terminated stream declares, on both the streaming
-// and the buffered path. A provider error event is FaultCodeUpstreamGeneric; a frame the
+// and the buffered path. A provider error event is FaultCodeProviderStreamFailed; a frame the
 // translator cannot parse is its own failure, FaultCodeMediationFailed. The buffered path sends
 // the same bytes as the streaming one, and a stream that ends cleanly declares no fault.
 func TestStreamFailureFaults(t *testing.T) {
@@ -996,7 +996,7 @@ func TestStreamFailureFaults(t *testing.T) {
 		stream   string
 		wantCode string
 	}{
-		{"provider error event", sseFrame("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), policy.FaultCodeUpstreamGeneric},
+		{"provider error event", sseFrame("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), policy.FaultCodeProviderStreamFailed},
 		{"malformed frame", sseFrame("content_block_delta", `{"type":"content_block_delta"`), policy.FaultCodeMediationFailed},
 	}
 	for _, tc := range cases {

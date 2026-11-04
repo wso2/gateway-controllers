@@ -277,7 +277,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| Every configured model is suspended, so none is available to route to | `503` | `303001` | `routing` |
+| Every configured model is suspended, so none is available to route to | `503` | `960003` | `mediation` |
 | `requestModel.location` is `payload` and the request body is empty or is not valid JSON | `400` | `960001` | `validation` |
 | The selected model cannot be written at `requestModel.identifier` in the request body | `400` | `960001` | `validation` |
 | The updated request body cannot be serialized | `500` | `960000` | `mediation` |

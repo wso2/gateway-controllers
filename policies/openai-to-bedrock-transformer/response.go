@@ -208,12 +208,12 @@ func streamException(data []byte) (string, bool) {
 }
 
 // streamExceptionFault describes a Converse stream the provider ended with an exception:
-// the provider breaking mid-response, FaultCodeUpstreamGeneric as docs/error-codes.md directs.
+// the provider breaking mid-response, FaultCodeProviderStreamFailed as docs/error-codes.md directs.
 // The translated error event already carries the provider's message to the client; the
 // fault adds only the exception type.
 func streamExceptionFault(exceptionType string) *policy.FaultDetails {
 	return &policy.FaultDetails{
-		Code:        policy.FaultCodeUpstreamGeneric,
+		Code:        policy.FaultCodeProviderStreamFailed,
 		Type:        policy.FaultTypeMediation,
 		Direction:   policy.DirectionResponse,
 		Message:     "The upstream stream ended with an error.",

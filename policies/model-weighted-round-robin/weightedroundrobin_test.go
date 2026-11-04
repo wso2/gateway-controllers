@@ -594,6 +594,6 @@ func TestModelWeightedRoundRobin_RejectionsDeclareFault(t *testing.T) {
 			Headers:       policy.NewHeaders(map[string][]string{"x-model": {"orig"}}),
 		}
 		assertFault(t, p.OnRequestHeaders(context.Background(), ctx, nil), 503,
-			`{"error": "All models are currently unavailable"}`, policy.FaultCodeUpstreamUnavailable, policy.FaultTypeRouting)
+			`{"error": "All models are currently unavailable"}`, policy.FaultCodeNoModelAvailable, policy.FaultTypeMediation)
 	})
 }

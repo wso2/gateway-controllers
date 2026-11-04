@@ -167,8 +167,8 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 |------|--------|------|------|
 | `requestModel.location` is `payload` and the request body is empty, is not valid JSON, or is not a JSON object | `400` | `960001` | `validation` |
 | The selected model cannot be written at `requestModel.identifier` in the request body | `400` | `960001` | `validation` |
-| `requestModel.location` is `queryParam` and the request path cannot be rewritten with the model | `400` | `960001` | `validation` |
-| `requestModel.location` is `pathParam` and `pathExpression` does not match the request path | `400` | `960001` | `validation` |
+| `requestModel.location` is `queryParam` and the request path cannot be rewritten with the model | `400` | `960005` | `validation` |
+| `requestModel.location` is `pathParam` and `pathExpression` does not match the request path | `400` | `960005` | `validation` |
 | The updated request body cannot be serialized | `500` | `960000` | `mediation` |
 
 The fault's `Description` carries the internal reason where there is one beyond the body's error

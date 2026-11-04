@@ -377,8 +377,8 @@ func (p *ModelWeightedRoundRobinPolicy) OnRequestHeaders(ctx context.Context, re
 			Body:       []byte(`{"error": "All models are currently unavailable"}`),
 			IsFault:    true,
 			Fault: &policy.FaultDetails{
-				Code:      policy.FaultCodeUpstreamUnavailable,
-				Type:      policy.FaultTypeRouting,
+				Code:      policy.FaultCodeNoModelAvailable,
+				Type:      policy.FaultTypeMediation,
 				Direction: policy.DirectionRequest,
 				Message:   "All models are currently unavailable",
 			},

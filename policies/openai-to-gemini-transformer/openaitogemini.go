@@ -259,7 +259,7 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 }
 
 // streamFault describes a terminated stream by why it terminated. A provider error event
-// is the provider breaking mid-response, FaultCodeUpstreamGeneric as docs/error-codes.md
+// is the provider breaking mid-response, FaultCodeProviderStreamFailed as docs/error-codes.md
 // directs; a frame the translator could not parse is its own failure, FaultCodeMediationFailed.
 // The final SSE event already carries the detail to the client; nothing is withheld here.
 func streamFault(failure streamFailure) *policy.FaultDetails {
@@ -273,7 +273,7 @@ func streamFault(failure streamFailure) *policy.FaultDetails {
 		}
 	}
 	return &policy.FaultDetails{
-		Code:      policy.FaultCodeUpstreamGeneric,
+		Code:      policy.FaultCodeProviderStreamFailed,
 		Type:      policy.FaultTypeMediation,
 		Direction: policy.DirectionResponse,
 		Message:   "The upstream stream ended with an error.",

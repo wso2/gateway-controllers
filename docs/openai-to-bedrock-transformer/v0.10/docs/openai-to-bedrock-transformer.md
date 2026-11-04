@@ -156,7 +156,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | A `file` content part cannot be sent to Bedrock: it has no `file` object, uses `file_id`, has no `file_data`, its `file_data` is not a base64 data URI (or is empty, contains whitespace, or is not valid base64), or its file type is not a supported document type | `400` | `960001` | `validation` |
 | A user message carries a file without a non-empty text part | `400` | `960001` | `validation` |
 | Response phase: the Bedrock Converse response or error body cannot be translated back to the OpenAI shape | `500` | `960000` | `mediation` |
-| Response phase, buffered event stream: Bedrock ends the Converse stream with an exception | the stream's status | `101599` | `mediation` |
+| Response phase, buffered event stream: Bedrock ends the Converse stream with an exception | the stream's status | `960002` | `mediation` |
 
 When the event stream is translated in one piece, the client receives the translated error
 event followed by `data: [DONE]` with the stream's status, and the fault records the failure.

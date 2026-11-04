@@ -109,7 +109,7 @@ without fault policy support ignores the fault, and the policy behaves exactly a
 | No model can be resolved: the request's `model` is not a string or is blank, and none is configured | `400` | `960001` | `validation` |
 | The translated Gemini request body cannot be serialized | `500` | `960000` | `mediation` |
 | Response phase: the Gemini response or error body cannot be translated back to the OpenAI shape | `500` | `960000` | `mediation` |
-| Response phase, event stream: Gemini sends an `error` object mid-stream | the stream's status, already sent | `101599` | `mediation` |
+| Response phase, event stream: Gemini sends an `error` object mid-stream | the stream's status, already sent | `960002` | `mediation` |
 | Response phase, event stream: Gemini sends an event that cannot be parsed | the stream's status, already sent | `960000` | `mediation` |
 
 An event-stream rejection happens in the response phase after the response headers have been

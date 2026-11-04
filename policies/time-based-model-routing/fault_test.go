@@ -20,6 +20,7 @@ package timebasedmodelrouting
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -72,6 +73,55 @@ func TestRejectionsDeclareFault(t *testing.T) {
 			}
 			if resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Message != c.message {
 				t.Errorf("direction %q, message %q, want %q", resp.Fault.Direction, resp.Fault.Message, c.message)
+			}
+		})
+	}
+}
+
+// A path or query string the policy could not rewrite is the request URI's fault, not the
+// body's: 960005, with the 400 the client receives unchanged.
+func TestURIRewriteFailuresDeclareInvalidRequestURI(t *testing.T) {
+	fixedNow(t, "2026-08-30T01:00:00Z")
+
+	cases := []struct {
+		name       string
+		location   string
+		identifier string
+		path       string
+		message    string
+	}{
+		{"query parameter", "queryParam", "model", "/invoke?model=%zz",
+			"request path could not be rewritten for model query parameter 'model'"},
+		{"path parameter", "pathParam", `model/([A-Za-z0-9.:-]+)/`, "/v1/chat/completions",
+			"model path expression 'model/([A-Za-z0-9.:-]+)/' did not match the request"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			params := testParams()
+			params["requestModel"] = map[string]interface{}{"location": c.location, "identifier": c.identifier}
+			raw, err := GetPolicy(policy.PolicyMetadata{}, params)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := requestContext(`{"model":"client-model"}`)
+			ctx.Path = c.path
+			action := raw.(*TimeBasedModelRoutingPolicy).OnRequestBody(context.Background(), ctx, nil)
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
+			}
+			wantBody, _ := json.Marshal(map[string]string{"error": c.message})
+			if resp.StatusCode != 400 || string(resp.Body) != string(wantBody) ||
+				len(resp.Headers) != 1 || resp.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("client response changed: status %d, headers %v, body %s", resp.StatusCode, resp.Headers, resp.Body)
+			}
+			if !resp.IsFault || resp.Fault == nil {
+				t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", resp.IsFault, resp.Fault)
+			}
+			if resp.Fault.Code != policy.FaultCodeInvalidRequestURI || resp.Fault.Type != policy.FaultTypeValidation ||
+				resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Message != c.message {
+				t.Errorf("fault = %+v, want %s/%s request %q", resp.Fault, policy.FaultCodeInvalidRequestURI,
+					policy.FaultTypeValidation, c.message)
 			}
 		})
 	}
