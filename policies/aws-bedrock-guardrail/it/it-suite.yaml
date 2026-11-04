@@ -50,6 +50,9 @@ blocks:
       - name: aws-bedrock-guardrail
         features:
           - features/aws_bedrock_guardrail_error_compatibility.feature
+      - name: aws-bedrock-guardrail-mcp
+        features:
+          - features/aws_bedrock_guardrail_mcp.feature
   - name: aws-bedrock-guardrail-default
     parallel: 1
     components:
