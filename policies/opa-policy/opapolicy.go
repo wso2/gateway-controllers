@@ -150,24 +150,24 @@ func (p *OPAPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Request
 	payload, err := p.buildInput(reqCtx)
 	if err != nil {
 		slog.Error("OPA: failed to build request payload", "policy", p.policyName, "error", err)
-		return internalError()
+		return internalError(fmt.Sprintf("failed to build the OPA input: %v", err))
 	}
 
 	respBody, err := p.callOPA(ctx, payload)
 	if err != nil {
 		slog.Error("OPA: validation request failed", "policy", p.policyName, "rule", p.rule, "error", err)
-		return internalError()
+		return internalError(fmt.Sprintf("OPA validation request failed: %v", err))
 	}
 
 	allowed, err := p.handleResponse(respBody)
 	if err != nil {
 		slog.Error("OPA: invalid validation response", "policy", p.policyName, "rule", p.rule, "error", err)
-		return internalError()
+		return internalError(fmt.Sprintf("invalid OPA validation response: %v", err))
 	}
 
 	if !allowed {
 		slog.Debug("OPA: request denied", "policy", p.policyName, "rule", p.rule, "requestId", requestID(reqCtx))
-		return forbidden()
+		return forbidden(fmt.Sprintf("OPA policy %q rule %q denied the request", p.policyName, p.rule))
 	}
 	return policy.UpstreamRequestHeaderModifications{}
 }
@@ -334,7 +334,11 @@ func requestID(reqCtx *policy.RequestHeaderContext) string {
 	return reqCtx.SharedContext.RequestID
 }
 
-func forbidden() policy.ImmediateResponse {
+// forbidden rejects a request OPA denied: the caller is identified but not
+// permitted, an authorization failure. reason names the policy and rule and
+// goes in Description, which reaches fault policies and analytics, never the
+// client.
+func forbidden(reason string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{
 		"error":   "Forbidden",
 		"message": "The request was rejected by the OPA policy validation",
@@ -343,10 +347,23 @@ func forbidden() policy.ImmediateResponse {
 		StatusCode: http.StatusForbidden,
 		Headers:    map[string]string{"content-type": contentTypeJSON},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeAuthForbidden,
+			Type:        policy.FaultTypeAuthorization,
+			Direction:   policy.DirectionRequest,
+			Message:     "The request was rejected by the OPA policy validation",
+			Description: reason,
+		},
 	}
 }
 
-func internalError() policy.ImmediateResponse {
+// internalError refuses the request when no decision could be obtained from
+// OPA. That is the policy failing to do its job, not a decision about the
+// caller, so the fault is policy.FaultCodeMediationFailed. reason carries the
+// underlying error, which can name the OPA server, so it goes in Description
+// and never reaches the client.
+func internalError(reason string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{
 		"error":   "Internal Server Error",
 		"message": "Unable to validate the request with the OPA policy engine",
@@ -355,6 +372,14 @@ func internalError() policy.ImmediateResponse {
 		StatusCode: http.StatusInternalServerError,
 		Headers:    map[string]string{"content-type": contentTypeJSON},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionRequest,
+			Message:     "Unable to validate the request with the OPA policy engine",
+			Description: reason,
+		},
 	}
 }
 

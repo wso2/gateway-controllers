@@ -178,41 +178,42 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 	providers, err := p.getProviders(params)
 	if err != nil {
 		slog.Debug("Opaque Token Auth Policy: Failed to parse introspection providers", "error", err)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("invalid introspection configuration: %v", err))
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("invalid introspection configuration: %v", err), policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
 	}
 	if len(providers) == 0 {
 		slog.Debug("Opaque Token Auth Policy: No introspection providers configured")
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "introspection providers not configured")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "introspection providers not configured", policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
 	}
 
 	selected := selectProviders(providers, userIssuers)
 	if len(selected) == 0 {
 		slog.Debug("Opaque Token Auth Policy: No provider matches configured issuers", "issuers", userIssuers)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no introspection provider matches configured issuers")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no introspection provider matches configured issuers", policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
 	}
 
 	authHeaders := reqCtx.DownstreamHeaders().Get(strings.ToLower(headerName))
 	if len(authHeaders) == 0 {
 		slog.Debug("Opaque Token Auth Policy: Missing authorization header", "headerName", headerName)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "missing authorization header")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "missing authorization header", policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication)
 	}
 	authHeader := authHeaders[0]
 
 	token := extractToken(authHeader, authHeaderScheme)
 	if token == "" {
 		slog.Debug("Opaque Token Auth Policy: Failed to extract token from authorization header", "authHeaderScheme", authHeaderScheme)
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid authorization header format")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "invalid authorization header format", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	selected = filterProvidersByToken(selected, token)
 	if len(selected) == 0 {
 		slog.Debug("Opaque Token Auth Policy: No provider tokenPattern matches token")
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no introspection provider matches token pattern")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no introspection provider matches token pattern", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	// Introspect against each selected provider until one reports the token active.
 	var result *IntrospectionResult
 	var lastErr error
+	var answered bool
 	for _, provider := range selected {
 		res, err := p.introspect(ctx, token, provider, cacheTtl, negativeCacheTtl, timeout, retryCount, retryInterval)
 		if err != nil {
@@ -220,6 +221,7 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 			lastErr = err
 			continue
 		}
+		answered = true
 		if res.Active {
 			slog.Debug("Opaque Token Auth Policy: Token reported active", "provider", provider.Name)
 			result = res
@@ -230,20 +232,24 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 
 	if result == nil {
 		reason := "token inactive or unrecognized"
-		if lastErr != nil {
+		code, faultType := policy.FaultCodeAuthTokenInactive, policy.FaultTypeAuthentication
+		if !answered {
+			// No authorization server could answer, so nothing was decided about the token
+			// itself: the policy could not do its job, which is not the caller's failure.
 			reason = fmt.Sprintf("introspection failed: %v", lastErr)
+			code, faultType = policy.FaultCodeMediationFailed, policy.FaultTypeMediation
 		}
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, reason)
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, reason, code, faultType)
 	}
 
 	// Defense-in-depth: re-check nbf/exp locally with leeway. The authorization
 	// server is authoritative, but cached entries are bounded only by exp.
 	now := time.Now()
 	if result.Exp > 0 && now.After(time.Unix(result.Exp, 0).Add(leeway)) {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "token expired")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "token expired", policy.FaultCodeAuthTokenExpired, policy.FaultTypeAuthentication)
 	}
 	if result.Nbf > 0 && now.Before(time.Unix(result.Nbf, 0).Add(-leeway)) {
-		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "token not yet valid")
+		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "token not yet valid", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 	}
 
 	// Audience assertion.
@@ -251,7 +257,7 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 		aud := parseAudience(result.raw["aud"])
 		if !anyMatch(userAudiences, aud) {
 			slog.Debug("Opaque Token Auth Policy: No valid audience found", "tokenAudiences", aud)
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no valid audience found in token")
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no valid audience found in token", policy.FaultCodeAuthInvalidCredentials, policy.FaultTypeAuthentication)
 		}
 	}
 
@@ -260,7 +266,7 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 		scopes := parseScopes(result.raw["scope"], result.raw["scp"])
 		if !anyMatch(userRequiredScopes, scopes) {
 			slog.Debug("Opaque Token Auth Policy: No required scope found in token", "requiredScopes", userRequiredScopes)
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "token does not contain any required scope")
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "token does not contain any required scope", policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization)
 		}
 	}
 
@@ -268,7 +274,7 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 	for claimName, expectedValue := range userRequiredClaims {
 		if claimValueToString(result.raw[claimName]) != expectedValue {
 			slog.Debug("Opaque Token Auth Policy: Required claim validation failed", "claimName", claimName)
-			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("claim '%s' validation failed", claimName))
+			return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, fmt.Sprintf("claim '%s' validation failed", claimName), policy.FaultCodeAuthForbidden, policy.FaultTypeAuthorization)
 		}
 	}
 
@@ -453,7 +459,7 @@ func (p *OpaqueTokenAuthPolicy) handleAuthSuccessHeaders(shared *policy.SharedCo
 
 // handleAuthFailureHeaders sets an unauthenticated AuthContext and returns an
 // immediate error response.
-func (p *OpaqueTokenAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason string) policy.RequestHeaderAction {
+func (p *OpaqueTokenAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason, code, errorType string) policy.RequestHeaderAction {
 	slog.Debug("Opaque Token Auth Policy: Authentication failed", "statusCode", statusCode, "reason", reason)
 
 	shared.AuthContext = &policy.AuthContext{
@@ -487,6 +493,16 @@ func (p *OpaqueTokenAuthPolicy) handleAuthFailureHeaders(shared *policy.SharedCo
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       []byte(body),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: policy.DirectionRequest,
+			Message:   errorMessage,
+			// reason is the internal diagnostic; the renderer withholds Description from
+			// the client body and passes it to fault policies only.
+			Description: reason,
+		},
 	}
 }
 
