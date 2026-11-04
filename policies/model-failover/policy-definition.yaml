@@ -42,6 +42,21 @@ description: |
 
   Failover is never attempted after response headers or streamed content have reached the client.
 
+  When the chain runs out the caller receives one fixed error — HTTP 503 with code 960100,
+  `failover_exhausted` — and never the final provider's own response. A provider error body
+  routinely names the account it was billed to, the region that rejected it or the key that was
+  refused, none of which the caller was ever shown; which member failed and why is answered in the
+  telemetry record and the log line instead. The status is always 503, including when the last
+  member answered 429: a spent chain is a gateway with nowhere left to send the request, not a
+  rate-limited caller. A chain with a single member is exempt and returns its own response
+  unchanged, exactly as it would with no failover policy attached.
+
+  The same error is returned immediately, with nothing dispatched, when every member of a chain is
+  suspended — rather than attempting a member health has already withdrawn. Telemetry separates
+  the two: a chain that was tried and failed is `exhausted`, a chain that was never attempted is
+  `unavailable`, and the second usually points at the suspension settings rather than at the
+  providers.
+
   Every attempt carries the request-body mutations applied by preceding policies — masking,
   redaction, guardrail rewrites, prompt decoration — so a fallback target never receives content
   the first target was not allowed to receive. What an attempt does NOT carry is the previous

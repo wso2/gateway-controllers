@@ -186,6 +186,15 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 
 	resolved, skipped := resolveChain(published, first, fallbacks, p.health, now)
 
+	// Every candidate is suspended. Answer now rather than letting the request fall through
+	// to its configured upstream, which is one of the suspended targets: sending traffic to a
+	// target health has taken out of rotation is the one thing suspension exists to prevent,
+	// and the request would pay a full per-attempt timeout to learn what is already known
+	// (FR-014, "Every target suspended" edge case).
+	if len(resolved) == 0 && len(skipped) > 0 {
+		return p.rejectAllSuspended(requestedModel, published, skipped)
+	}
+
 	metadata := buildFailoverMetadata(resolved, p.params.ProviderClusters)
 	if metadata == nil {
 		// Nothing to fail over between. The policy is inert: no metadata, no telemetry, no
@@ -206,11 +215,7 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		reqCtx.Metadata[metadataKeySelectedModel] = leading.Model
 		reqCtx.Metadata[metadataKeySelectedProvider] = leading.Provider
 		reqCtx.Metadata[metadataKeyRequestedModel] = requestedModel
-		rankingSource := rankingSourceConfigured
-		if len(published) > 0 {
-			rankingSource = rankingSourceRoutingPolicy
-		}
-		reqCtx.Metadata[metadataKeyRankingSource] = rankingSource
+		reqCtx.Metadata[metadataKeyRankingSource] = rankingSourceOf(published)
 		if len(skipped) > 0 {
 			reqCtx.Metadata[metadataKeySkipped] = skipped
 		}
@@ -323,9 +328,44 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	}
 	record.log()
 
+	// The chain ran out. Replace the final upstream's own error with this gateway's, so the
+	// caller never receives a body this gateway did not write (FR-014).
+	//
+	// Guarded by chainCouldFailOver: a single-target operation returns its target's response
+	// as-is, exactly as it would with no failover policy attached.
+	if outcome == outcomeExhausted && chainCouldFailOver(chain, record.SkippedTargets) {
+		return exhaustionResponse(record)
+	}
+
 	return policy.DownstreamResponseHeaderModifications{
 		AnalyticsMetadata: record.analytics(),
 	}
+}
+
+// rejectAllSuspended answers a request whose every candidate target is suspended, without
+// attempting any of them.
+//
+// The record carries Attempts and ChainLength of zero, which is the literal truth: nothing was
+// tried and no chain was published. The skipped list is what makes the record readable — it
+// names every target health withheld, which is the whole of what happened here.
+func (p *Policy) rejectAllSuspended(requestedModel string, published, skipped []Target) policy.RequestAction {
+	record := attemptRecord{
+		RequestedModel: requestedModel,
+		Outcome:        outcomeUnavailable,
+		RankingSource:  rankingSourceOf(published),
+		SkippedTargets: skipped,
+	}
+	record.log()
+	return exhaustionResponse(record)
+}
+
+// rankingSourceOf reports where this request's order came from: a routing policy that
+// published one, or the publisher's configured chain.
+func rankingSourceOf(published []Target) string {
+	if len(published) > 0 {
+		return rankingSourceRoutingPolicy
+	}
+	return rankingSourceConfigured
 }
 
 func stringFromMetadata(metadata map[string]interface{}, key string) string {

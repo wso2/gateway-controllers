@@ -62,11 +62,26 @@ func telemetryFor(t *testing.T, p *Policy, requestedModel string, status int,
 	}
 	action := p.OnResponseHeaders(context.Background(), respCtx, nil)
 
-	mods, ok := action.(policy.DownstreamResponseHeaderModifications)
-	if !ok {
-		t.Fatalf("response action is %T, want DownstreamResponseHeaderModifications", action)
+	return analyticsOf(t, action)
+}
+
+// analyticsOf pulls the record off whichever action the response phase returned.
+//
+// Both carry one: an exhausted chain short-circuits with ImmediateResponse and takes its
+// analytics with it, everything else forwards the upstream response and attaches them. These
+// tests are about the CONTENT of the record, so the carrier is not their subject — which
+// action each outcome produces is asserted in exhaustion_test.go.
+func analyticsOf(t *testing.T, action policy.ResponseHeaderAction) map[string]interface{} {
+	t.Helper()
+	switch a := action.(type) {
+	case policy.DownstreamResponseHeaderModifications:
+		return a.AnalyticsMetadata
+	case policy.ImmediateResponse:
+		return a.AnalyticsMetadata
+	default:
+		t.Fatalf("response action is %T, want a modification or an immediate response", action)
+		return nil
 	}
-	return mods.AnalyticsMetadata
 }
 
 func field(t *testing.T, got map[string]interface{}, key string) interface{} {

@@ -46,6 +46,16 @@ const (
 	outcomeRescued = "rescued"
 	// outcomeExhausted: every target in the chain failed and the client got the error.
 	outcomeExhausted = "exhausted"
+	// outcomeUnavailable: every candidate target was suspended, so none was attempted and
+	// the client got the same error without waiting.
+	//
+	// Separate from exhausted rather than folded into it, even though the client cannot tell
+	// them apart. They are different incidents with different fixes: exhausted means the
+	// providers are failing right now, unavailable means this policy's own health tracking
+	// has taken the whole chain out of rotation — possibly over a suspension window that is
+	// too long or a threshold that is too tight. Counting them as one hides the second
+	// behind the first, which is the failure mode an operator is least likely to guess at.
+	outcomeUnavailable = "unavailable"
 )
 
 // Ranking sources, so an operator reading a record can tell WHY the chain was ordered the way
@@ -157,6 +167,8 @@ func (r attemptRecord) log() {
 	switch r.Outcome {
 	case outcomeExhausted:
 		slog.Warn("ModelFailover: every target in the chain failed", attrs...)
+	case outcomeUnavailable:
+		slog.Warn("ModelFailover: every target is suspended; nothing was attempted", attrs...)
 	case outcomeRescued:
 		slog.Info("ModelFailover: request rescued by a later target", attrs...)
 	default:
