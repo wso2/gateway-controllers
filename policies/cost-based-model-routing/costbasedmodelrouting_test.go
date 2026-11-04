@@ -858,6 +858,8 @@ func TestPathParameterRewriteNonMatchingExpression(t *testing.T) {
 	if !strings.Contains(string(response.Body), "did not match") {
 		t.Errorf("body = %s, want a non-matching-expression message", response.Body)
 	}
+	assertInvalidRequestURIFault(t, response,
+		`{"error":"model path expression 'model/([^/]+)/invoke' did not match the request"}`)
 }
 
 func TestQueryParameterRewriteInvalidPath(t *testing.T) {
@@ -868,6 +870,24 @@ func TestQueryParameterRewriteInvalidPath(t *testing.T) {
 	response := immediate(t, mustAction(requestHeaders(p, "not a valid uri", nil)))
 	if response.StatusCode != 400 {
 		t.Errorf("status = %d, want 400", response.StatusCode)
+	}
+	assertInvalidRequestURIFault(t, response,
+		`{"error":"request path could not be rewritten for model query parameter 'model'"}`)
+}
+
+// assertInvalidRequestURIFault checks a path or query string the model could not be read from or
+// written to is declared as an invalid-URI validation fault, and the client's 400 is unchanged.
+func assertInvalidRequestURIFault(t *testing.T, response policy.ImmediateResponse, wantBody string) {
+	t.Helper()
+	if !response.IsFault || response.Fault == nil {
+		t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", response.IsFault, response.Fault)
+	}
+	if f := response.Fault; f.Code != policy.FaultCodeInvalidRequestURI || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Errorf("fault = %s/%s/%s, want %s/%s/%s", f.Code, f.Type, f.Direction,
+			policy.FaultCodeInvalidRequestURI, policy.FaultTypeValidation, policy.DirectionRequest)
+	}
+	if string(response.Body) != wantBody || response.Headers["Content-Type"] != "application/json" {
+		t.Errorf("client response changed: %v %s, want body %s", response.Headers, response.Body, wantBody)
 	}
 }
 

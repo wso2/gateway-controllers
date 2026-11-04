@@ -3,6 +3,7 @@ package jsonxmlmediation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -256,6 +257,16 @@ func TestOnRequest_ContentTypeAndPayloadErrors(t *testing.T) {
 	if !ok || immediate.StatusCode != 500 {
 		t.Fatalf("expected 500 ImmediateResponse for wrong content type, got %T %#v", res, res)
 	}
+	// The caller's Content-Type is at fault, not the conversion; the client's 500 is unchanged.
+	if f := immediate.Fault; !immediate.IsFault || f == nil || f.Code != policy.FaultCodeInvalidRequestHeader ||
+		f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Fatalf("expected an invalid-header validation fault for wrong content type, got %+v", immediate.Fault)
+	}
+	wantBody := `{"error":"Internal Server Error","message":"Content-Type must be application/json for downstream payload format json"}`
+	if string(immediate.Body) != wantBody || immediate.Headers["content-type"] != "application/json" ||
+		immediate.Headers["content-length"] != fmt.Sprintf("%d", len(wantBody)) {
+		t.Fatalf("client response changed for wrong content type: %v %s", immediate.Headers, immediate.Body)
+	}
 
 	invalidJSONCtx := &policy.RequestContext{
 		Body:    &policy.Body{Content: []byte(`{"name":`), Present: true},
@@ -265,6 +276,9 @@ func TestOnRequest_ContentTypeAndPayloadErrors(t *testing.T) {
 	immediate, ok = res.(policy.ImmediateResponse)
 	if !ok || immediate.StatusCode != 500 {
 		t.Fatalf("expected 500 ImmediateResponse for invalid JSON, got %T %#v", res, res)
+	}
+	if immediate.Fault == nil || immediate.Fault.Code != policy.FaultCodeMediationFailed || immediate.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected a mediation fault for invalid JSON, got %+v", immediate.Fault)
 	}
 
 	invalidXMLCtx := &policy.RequestContext{
@@ -457,5 +471,74 @@ func TestConvertXMLToJSON_RejectsAmplificationPayload(t *testing.T) {
 	}
 	if _, err := p.convertXMLToJSON([]byte(`<root><name>John</name></root>`)); err != nil {
 		t.Fatalf("an ordinary XML document must still convert: %v", err)
+	}
+}
+
+// TestMediationFailureDeclaresFault covers the one rejection this policy makes: it could
+// not apply its own transformation, so the request is refused rather than forwarded
+// half-transformed.
+func TestMediationFailureDeclaresFault(t *testing.T) {
+	p := &JSONXMLMediationPolicy{}
+	action := p.handleInternalServerError("conversion failed: malformed XML")
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a mediation failure")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionRequest {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+	}
+	// The detail can quote the caller's own payload, so it stays out of the client body.
+	if resp.Fault.Description == "" {
+		t.Fatalf("expected Error.Description to carry the failure detail")
+	}
+}
+
+// TestResponseMediationFailureDeclaresFault covers the response-phase twin: the upstream's
+// response could not be converted, so the client receives a 500 instead, reported as a
+// response-direction fault with the same body as before.
+func TestResponseMediationFailureDeclaresFault(t *testing.T) {
+	p := &JSONXMLMediationPolicy{}
+	action := p.handleInternalServerErrorResponse("conversion failed: malformed XML")
+
+	resp, ok := action.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+	}
+	if resp.StatusCode == nil || *resp.StatusCode != 500 {
+		t.Fatalf("expected status 500, got %v", resp.StatusCode)
+	}
+	if string(resp.Body) != `{"error":"Internal Server Error","message":"conversion failed: malformed XML"}` {
+		t.Fatalf("unexpected body: %s", resp.Body)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a response mediation failure")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Fault to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Fault.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Fault.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+	}
+	if resp.Fault.Direction != policy.DirectionResponse {
+		t.Fatalf("expected Fault.Direction=%q, got %q", policy.DirectionResponse, resp.Fault.Direction)
+	}
+	if resp.Fault.Description != "conversion failed: malformed XML" {
+		t.Fatalf("expected Fault.Description to carry the failure detail, got %q", resp.Fault.Description)
 	}
 }

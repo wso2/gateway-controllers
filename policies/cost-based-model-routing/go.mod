@@ -1,11 +1,11 @@
 module github.com/wso2/gateway-controllers/policies/cost-based-model-routing
 
-go 1.26.2
+go 1.26.10
 
 require (
 	github.com/redis/go-redis/v9 v9.17.3
-	github.com/wso2/api-platform/sdk/core v0.3.4
-	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.1.2
+	github.com/wso2/api-platform/sdk/core v0.5.1
+	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0
 )
 
 require (

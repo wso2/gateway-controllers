@@ -53,7 +53,8 @@ func (p *McpToolSchemaValidatorPolicy) OnRequestBody(
 		// rather than forward a possibly governed call unvalidated.
 		if exceedsDepth(body, decoderMaxDepth) {
 			slog.Debug("MCP Tool Schema Validator: rejecting request nested beyond the decoder limit")
-			return requestError(headers, "", codeInvalidRequest, messageTooDeep, nil, nil)
+			return requestError(headers, "", codeInvalidRequest, messageTooDeep, nil, nil,
+				"request body is nested beyond the decoder limit")
 		}
 		return nil
 	case parseOther:
@@ -61,7 +62,8 @@ func (p *McpToolSchemaValidatorPolicy) OnRequestBody(
 	case parseAmbiguous:
 		slog.Debug("MCP Tool Schema Validator: rejecting ambiguous tools/call")
 		// No id: an ambiguous body has no single id to echo.
-		return requestError(headers, "", codeInvalidRequest, messageAmbiguous, nil, nil)
+		return requestError(headers, "", codeInvalidRequest, messageAmbiguous, nil, nil,
+			"tools/call names a member more than once")
 	}
 
 	rule := p.tools[call.name]
@@ -76,7 +78,8 @@ func (p *McpToolSchemaValidatorPolicy) OnRequestBody(
 	if call.argumentsAmbiguous {
 		slog.Debug("MCP Tool Schema Validator: rejecting tools/call with ambiguous arguments", "tool", rule.Name)
 		return requestError(headers, call.id, codeInvalidRequest, messageAmbiguous, nil,
-			analytics(rule.Name, directionRequest, resultFail, reasonAmbiguousPayload, 1))
+			analytics(rule.Name, directionRequest, resultFail, reasonAmbiguousPayload, 1),
+			"arguments of tool "+rule.Name+" name a member more than once")
 	}
 
 	fail := func(reason string, errs []assessmentError) policy.RequestAction {
@@ -90,7 +93,8 @@ func (p *McpToolSchemaValidatorPolicy) OnRequestBody(
 			data.Errors = capErrors(errs)
 		}
 		return requestError(headers, call.id, codeInvalidParams, messageArgumentsInvalid, data,
-			analytics(rule.Name, directionRequest, resultFail, reason, len(errs)))
+			analytics(rule.Name, directionRequest, resultFail, reason, len(errs)),
+			faultDescription(rule.Name, "arguments", reason, len(errs)))
 	}
 
 	if len(body) > maxBodyBytes {

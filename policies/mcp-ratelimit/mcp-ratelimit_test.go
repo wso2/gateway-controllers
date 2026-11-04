@@ -19,6 +19,7 @@
 package mcpratelimit
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"slices"
@@ -1197,6 +1198,24 @@ func TestOnRequestHeaders_ModernWithoutMcpMethodIsRejected(t *testing.T) {
 	if err := json.Unmarshal(resp.Body, &env); err != nil || env.Error.Code != jsonRpcErrCodeHeaderMismatch {
 		t.Fatalf("error code = %d (%v), want %d; body %s", env.Error.Code, err, jsonRpcErrCodeHeaderMismatch, resp.Body)
 	}
+	assertMirroredHeaderFault(t, resp,
+		`{"error":{"code":-32020,"message":"Mcp-Method header is required"},"id":null,"jsonrpc":"2.0"}`)
+}
+
+// assertMirroredHeaderFault checks a missing or undecodable mirrored header is declared as an
+// invalid-header validation fault, and that declaring it leaves the client's 400 as it was.
+func assertMirroredHeaderFault(t *testing.T, resp policy.ImmediateResponse, wantBody string) {
+	t.Helper()
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected a fault, got IsFault %v Fault %+v", resp.IsFault, resp.Fault)
+	}
+	if f := resp.Fault; f.Code != policy.FaultCodeInvalidRequestHeader || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Fatalf("fault = %s/%s/%s, want %s/%s/%s", f.Code, f.Type, f.Direction,
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation, policy.DirectionRequest)
+	}
+	if resp.StatusCode != 400 || string(resp.Body) != wantBody || resp.Headers["content-type"] != "application/json" {
+		t.Fatalf("client response changed: %d %v %s", resp.StatusCode, resp.Headers, resp.Body)
+	}
 }
 
 func newWildcardMethodResolverPolicy(t *testing.T, limit int) *McpRateLimitPolicy {
@@ -1263,6 +1282,8 @@ func TestOnRequestHeaders_ModernWithoutRequiredMcpNameIsRejected(t *testing.T) {
 			if err := json.Unmarshal(resp.Body, &env); err != nil || env.Error.Code != jsonRpcErrCodeHeaderMismatch {
 				t.Fatalf("error code = %d (%v), want %d; body %s", env.Error.Code, err, jsonRpcErrCodeHeaderMismatch, resp.Body)
 			}
+			assertMirroredHeaderFault(t, resp,
+				`{"error":{"code":-32020,"message":"Mcp-Name header is required for tools/call"},"id":null,"jsonrpc":"2.0"}`)
 		})
 	}
 }
@@ -1617,4 +1638,187 @@ func TestOnRequestHeaders_ModernUnusableBodyStillLimitsOnTheHeaders(t *testing.T
 			}
 		})
 	}
+}
+
+func TestDecodeRequestID(t *testing.T) {
+	// The id is whatever the client sent, and the gateway re-emits it verbatim. A string must
+	// stay a string and a number a number: a client matching on the value it sent would not
+	// recognise the other spelling.
+	if got := decodeRequestID(json.RawMessage(`"req-1"`)); got != "req-1" {
+		t.Fatalf("expected string id req-1, got %#v", got)
+	}
+	if got := decodeRequestID(json.RawMessage(`1`)); got != json.Number("1") {
+		t.Fatalf("expected numeric id 1, got %#v", got)
+	}
+	// An integer beyond float64 precision must not be rounded.
+	if got := decodeRequestID(json.RawMessage(`9007199254740993`)); got != json.Number("9007199254740993") {
+		t.Fatalf("expected numeric id 9007199254740993, got %#v", got)
+	}
+	// Absent, explicit null, and unparseable all collapse to nil, which the gateway renders
+	// as the null JSON-RPC requires for an id it could not determine.
+	for _, raw := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`{bad`)} {
+		if got := decodeRequestID(raw); got != nil {
+			t.Fatalf("expected nil id for %q, got %#v", raw, got)
+		}
+	}
+}
+
+// assertDescribedJSONRPC checks the described error and the fallback body beside it.
+//
+// The description is what the gateway's renderer reads, and supplies what a status alone
+// cannot: the specific code and the id. The body is the same failure in the shape this
+// policy has always written, for a gateway with no renderer — assertFallbackBodyAgrees
+// checks the two cannot drift apart.
+func assertDescribedJSONRPC(t *testing.T, resp policy.ImmediateResponse, wantCode int, wantID any) {
+	t.Helper()
+	if resp.Fault == nil || resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil {
+		t.Fatalf("expected a described JSON-RPC code, got %+v", resp.Fault)
+	}
+	if *resp.Fault.JSONRPC.Code != wantCode {
+		t.Fatalf("expected code %d, got %d", wantCode, *resp.Fault.JSONRPC.Code)
+	}
+	if resp.Fault.JSONRPC.ID != wantID {
+		t.Fatalf("expected id %v, got %v", wantID, resp.Fault.JSONRPC.ID)
+	}
+	assertFallbackBodyAgrees(t, resp)
+}
+
+// TestRateLimitedResponsePropagatesDelegateFault covers the rewrite this policy performs on
+// the delegate's throttle response. Only the body and headers are replaced with a JSON-RPC
+// envelope, so the delegate's own fault declaration must survive — a field-by-field copy
+// would silently drop it, and the throttle would never reach the fault policies.
+func TestRateLimitedResponsePropagatesDelegateFault(t *testing.T) {
+	p := newToolPolicy(t, "toolA", 1)
+	makeBody := func() []byte {
+		b, _ := json.Marshal(map[string]any{"id": "1", "method": "tools/call", "params": map[string]any{"name": "toolA"}})
+		return b
+	}
+
+	p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, makeBody()), nil)
+	second := p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, makeBody()), nil)
+
+	resp, ok := second.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse on limit breach, got %T", second)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected the delegate's IsFault to survive the JSON-RPC rewrite")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected the delegate's Fault to survive the JSON-RPC rewrite")
+	}
+	if resp.Fault.Type != "throttling" {
+		t.Fatalf("expected Error.Type=%q, got %q", "throttling", resp.Fault.Type)
+	}
+	if resp.Fault.Code != policy.FaultCodeThrottledAPI {
+		t.Fatalf("expected Error.Code %q, got %q", policy.FaultCodeThrottledAPI, resp.Fault.Code)
+	}
+	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeRateLimited, "1")
+}
+
+// A large numeric id reaches the description exactly as the client sent it.
+func TestRateLimitedResponseKeepsLargeNumericID(t *testing.T) {
+	p := newToolPolicy(t, "toolA", 1)
+	body := []byte(`{"jsonrpc":"2.0","id":9007199254740993,"method":"tools/call","params":{"name":"toolA"}}`)
+
+	p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, body), nil)
+	resp, ok := p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, body), nil).(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse on limit breach")
+	}
+	if !strings.Contains(string(resp.Body), `"id":9007199254740993`) {
+		t.Fatalf("expected the raw id in the body, got %s", resp.Body)
+	}
+	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeRateLimited, json.Number("9007199254740993"))
+}
+
+// TestMalformedRequestDeclaresFault covers this policy's own rejection: a body it cannot
+// parse as MCP. Nothing was throttled, so the code must come from the reserved user block
+func TestMalformedRequestDeclaresFault(t *testing.T) {
+	p := newToolPolicy(t, "toolA", 10)
+
+	action := p.OnRequestBody(context.Background(), newRequestCtx(t, "POST", nil, []byte("{not json")), nil)
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a malformed request")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if resp.Fault.Code != policy.FaultCodeInvalidRequestBody {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeInvalidRequestBody, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeValidation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeValidation, resp.Fault.Type)
+	}
+	assertDescribedJSONRPC(t, resp, jsonRpcErrCodeParseError, nil)
+}
+
+// assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels alongside the
+// description.
+//
+// Both are always sent. The description is what a gateway with an error renderer uses; the
+// body is what a gateway without one sends, so a policy upgraded on its own still answers a
+// rejection the way it always has. Asserting they AGREE — rather than restating the literals
+// a second time — is what catches the failure that matters: one of the two drifting, so the
+// answer a caller gets depends on which gateway happens to be running.
+func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if len(resp.Body) == 0 {
+		t.Fatal("Expected a fallback body alongside the description, got none")
+	}
+
+	raw := resp.Body
+	wantType := "application/json"
+	if after, found := strings.CutPrefix(string(raw), "data: "); found {
+		// SSE framing: the envelope is the event's data member.
+		raw = []byte(strings.TrimSuffix(after, "\n\n"))
+		wantType = "text/event-stream"
+	}
+	if got := resp.Headers["Content-Type"] + resp.Headers["content-type"]; got != wantType {
+		t.Fatalf("Expected Content-Type %q for the fallback body, got %q", wantType, got)
+	}
+
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&envelope); err != nil {
+		t.Fatalf("Fallback body is not a JSON-RPC envelope: %v (%q)", err, raw)
+	}
+	if envelope.JSONRPC != "2.0" {
+		t.Fatalf("Expected jsonrpc 2.0 in the fallback body, got %q", envelope.JSONRPC)
+	}
+	if resp.Fault == nil || resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil {
+		t.Fatalf("Expected a described JSON-RPC error to compare against, got %+v", resp.Fault)
+	}
+	if envelope.Error.Code != *resp.Fault.JSONRPC.Code {
+		t.Fatalf("Fallback body code %d disagrees with the described code %d",
+			envelope.Error.Code, *resp.Fault.JSONRPC.Code)
+	}
+	if envelope.Error.Message != resp.Fault.Message {
+		t.Fatalf("Fallback body message %q disagrees with the described message %q",
+			envelope.Error.Message, resp.Fault.Message)
+	}
+	if !sameJSONRPCID(envelope.ID, resp.Fault.JSONRPC.ID) {
+		t.Fatalf("Fallback body id %v disagrees with the described id %v",
+			envelope.ID, resp.Fault.JSONRPC.ID)
+	}
+}
+
+// sameJSONRPCID compares two decoded JSON-RPC ids through their JSON encoding rather than
+// with ==, so the comparison does not depend on how each side decoded a number.
+func sameJSONRPCID(fromBody, described any) bool {
+	a, errA := json.Marshal(fromBody)
+	b, errB := json.Marshal(described)
+	return errA == nil && errB == nil && string(a) == string(b)
 }
