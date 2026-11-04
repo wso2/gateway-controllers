@@ -40,23 +40,23 @@ All available policies, sorted alphabetically.
 | [Basic Auth](./basic-auth/v1.1/docs/basic-auth.md) | Security, AI, WebSub, WebBroker | Implements HTTP Basic Authentication to protect APIs with username and password credentials. |
 | [Content Length Guardrail](./content-length-guardrail/v1.0/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
-| [Cost-Based Model Routing](./cost-based-model-routing/v0.9/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
+| [Cost-Based Model Routing](./cost-based-model-routing/v0.10/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
 | [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
 | [Granite Guardian Prompt Injection](./granite-guardian-prompt-injection/v0.9/docs/granite-guardian-prompt-injection.md) | Guardrails, AI | Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B. |
-| [Host Rewrite](./host-rewrite/v1.0/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
+| [Host Rewrite](./host-rewrite/v1.1/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
 | [Intelligent Model Routing](./intelligent-model-routing/v0.9/docs/intelligent-model-routing.md) | AI | Routes AI/LLM requests to different models using LLM-powered classification. |
-| [Interceptor Service](./interceptor-service/v1.0/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
+| [Interceptor Service](./interceptor-service/v1.1/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.0/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
-| [JSON/XML Mediator](./json-xml-mediator/v1.0/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
+| [JSON/XML Mediator](./json-xml-mediator/v1.1/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
 | [JWT Auth](./jwt-auth/v1.4/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
 | [LLM Cost](./llm-cost/v1.2/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. |
-| [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.0/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
+| [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.2/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
 | [LLM Header Router](./llm-header-router/v0.9/docs/llm-header-router.md) | AI | Selects an LLM provider for OpenAI Chat Completions requests using a configurable request header. |
 | [Log Message](./log-message/v1.1/docs/log-message.md) | Logging, Analytics & Monitoring, MCP, WebSub, WebBroker | This policy provides the capability to log the payload and headers of a request/response. |
 | [MCP Access Control](./mcp-acl-list/v1.1/docs/mcp-acl-list.md) | MCP | MCP ACL List policy controls access to tools, resources, and prompts using mode and exceptions. |
-| [MCP Authentication](./mcp-auth/v1.4/docs/mcp-authentication.md) | MCP, Security | This policy is used to secure traffic to Model Context Protocol server as defined in the specification (https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization). |
+| [MCP Authentication](./mcp-auth/v1.5/docs/mcp-authentication.md) | MCP, Security | This policy is used to secure traffic to Model Context Protocol server as defined in the specification (https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization). |
 | [MCP Authorization](./mcp-authz/v1.3/docs/mcp-authorization.md) | MCP, Security | MCP Authorization policy validates access to MCP resources (tools, resources, prompts) and methods based on JWT claims or OAuth scopes provided by the mcp-auth policy. |
-| [MCP Rate Limit](./mcp-ratelimit/v1.2/docs/mcp-ratelimit.md) | MCP, Security | Applies rate limits to MCP traffic per tool, resource, prompt, or JSON-RPC method. |
+| [MCP Rate Limit](./mcp-ratelimit/v1.3/docs/mcp-ratelimit.md) | MCP, Security | Applies rate limits to MCP traffic per tool, resource, prompt, or JSON-RPC method. |
 | [MCP Rewrite](./mcp-rewrite/v1.1/docs/mcp-rewrite.md) | MCP | MCP Rewrite policy defines user-facing tools, resources, and prompts and maps them to backend capability names using optional "target" fields. |
 | [MCP Spec Validation](./mcp-spec-validation/v0.9/docs/mcp-spec-validation.md) | MCP, Security | Validates incoming MCP requests for conformance with the MCP specification applicable to the declared protocol version. |
 | [MCP Tool Schema Validator](./mcp-tool-schema-validator/v0.9/docs/mcp-tool-schema-validator.md) | MCP, Security | Validates MCP tools/call arguments and structured results against JSON Schemas configured per tool. |
@@ -77,12 +77,12 @@ All available policies, sorted alphabetically.
 | [Prompt Decorator](./prompt-decorator/v1.0/docs/prompt-decorator.md) | AI | Dynamically modifies the prompt by applying custom decorations using a configured strategy. |
 | [Prompt Template](./prompt-template/v1.0/docs/prompt-template.md) | AI | Dynamically modifies the prompt by applying custom templates using a configured strategy. |
 | [Rate Limit - Advanced](./advanced-ratelimit/v1.4/docs/advanced-ratelimit.md) | Security, AI | Rate limiting policy supporting multiple algorithms, multi-dimensional quotas, weighted rate limiting, flexible key extraction (including JWT/auth-context properties) with optional match conditions, and in-memory, Redis, and Redis-local-async backends. |
-| [Rate Limit - Basic](./basic-ratelimit/v1.0/docs/basic-ratelimit.md) | Security, AI | Simple request rate limiting policy that limits the number of requests per time window. |
+| [Rate Limit - Basic](./basic-ratelimit/v1.2/docs/basic-ratelimit.md) | Security, AI | Simple request rate limiting policy that limits the number of requests per time window. |
 | [Redirect](./redirect/v0.9/docs/redirect.md) | Transformation | Issues an HTTP redirect to the client without forwarding the request to the upstream backend (Gateway-API RequestRedirect semantics). |
 | [Regex Guardrail](./regex-guardrail/v1.0/docs/regex.md) | Guardrails, AI | Validates request or response body content against a regular expression pattern. |
 | [Remove Headers](./remove-headers/v1.0/docs/remove-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to remove headers from either the request or the response. |
-| [Request Rewrite](./request-rewrite/v1.0/docs/request-rewrite.md) | Transformation | Rewrites incoming requests by updating path, query parameters, and/or HTTP method before forwarding to upstream services. |
-| [Respond](./respond/v1.0/docs/respond.md) | AI | Returns an immediate response to the client without forwarding the request to the upstream backend. |
+| [Request Rewrite](./request-rewrite/v1.1/docs/request-rewrite.md) | Transformation | Rewrites incoming requests by updating path, query parameters, and/or HTTP method before forwarding to upstream services. |
+| [Respond](./respond/v1.1/docs/respond.md) | AI | Returns an immediate response to the client without forwarding the request to the upstream backend. |
 | [Semantic Cache](./semantic-cache/v1.2/docs/semantic-caching.md) | AI | Implements semantic caching for LLM responses using vector similarity search. |
 | [Semantic Model Routing](./semantic-model-routing/v0.9/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
 | [Semantic Prompt Guard](./semantic-prompt-guard/v1.0/docs/semantic-prompt-guard.md) | Guardrails, AI | Blocks or allows prompts based on semantic similarity to configured allow/deny phrase embeddings. |
@@ -91,7 +91,7 @@ All available policies, sorted alphabetically.
 | [Set Headers](./set-headers/v1.2/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
 | [Subscription Validation](./subscription-validation/v1.1/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
 | [Time-Based Model Routing](./time-based-model-routing/v0.9/docs/time-based-model-routing.md) | AI | Routes LLM requests to configured models and optional providers according to time windows evaluated in a configured timezone. |
-| [Token Based Ratelimit](./token-based-ratelimit/v1.0/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
+| [Token Based Ratelimit](./token-based-ratelimit/v1.2/docs/token-based-ratelimit.md) | AI | A specialized rate limiting policy for LLM APIs that enforces usage quotas based on token counts. |
 | [TypeSafe Jev Content Safety](./typesafe-jev-content-safety/v0.8/docs/typesafe-jev-content-safety.md) | Guardrails, AI | Screens request or response body content using TypeSafe AI's Jev System One model. |
 | [TypeSafe Jev MCP Tool Intent Verification](./typesafe-jev-mcp-tool-intent-verification/v0.8/docs/typesafe-jev-mcp-tool-intent-verification.md) | MCP, Security | Screens MCP tools/call requests using TypeSafe AI's Jev System One model. |
 | [TypeSafe Jev MCP Tool Result Screening](./typesafe-jev-mcp-tool-result-screening/v0.8/docs/typesafe-jev-mcp-tool-result-screening.md) | MCP, Security | Screens the results of MCP tools/call requests using TypeSafe AI's Jev System One model, before the agent reads them. |
