@@ -79,8 +79,9 @@ func errorEnvelope(rawID string, code int, message string, data *errorData) []by
 }
 
 // requestError is the immediate response to a refused request. Framed as an SSE event only when
-// the caller cannot read JSON, as mcp-spec-validation frames its own errors.
-func requestError(headers *policy.Headers, rawID string, code int, message string, data *errorData, meta map[string]any) policy.ImmediateResponse {
+// the caller cannot read JSON, as mcp-spec-validation frames its own errors. description is the
+// internal reason, carried on the fault and never sent to the client.
+func requestError(headers *policy.Headers, rawID string, code int, message string, data *errorData, meta map[string]any, description string) policy.ImmediateResponse {
 	body := errorEnvelope(rawID, code, message, data)
 	contentType := "application/json"
 	if acceptsOnlyEventStream(headers) {
@@ -97,7 +98,22 @@ func requestError(headers *policy.Headers, rawID string, code int, message strin
 		Headers:           map[string]string{"Content-Type": contentType},
 		Body:              body,
 		AnalyticsMetadata: meta,
+		IsFault:           true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeInvalidRequestBody,
+			Type:        policy.FaultTypeValidation,
+			Direction:   policy.DirectionRequest,
+			Message:     message,
+			Description: description,
+			JSONRPC:     &policy.JSONRPCError{Code: &code, ID: jsonRPCID(rawID)},
+		},
 	}
+}
+
+// faultDescription is the internal reason a fault carries: the tool, what failed, why, and how
+// many failures validation found. It names no payload values.
+func faultDescription(tool, what, reason string, errorCount int) string {
+	return fmt.Sprintf("tool %s %s failed validation: %s (%d errors)", tool, what, reason, errorCount)
 }
 
 // sseFrame wraps one JSON-RPC message as a single SSE event.

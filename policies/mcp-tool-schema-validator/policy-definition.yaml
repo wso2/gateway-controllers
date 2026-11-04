@@ -1,5 +1,5 @@
 name: mcp-tool-schema-validator
-version: v0.9.0
+version: v0.10.0
 description: |
   Validates MCP tools/call traffic against JSON Schemas configured per tool.
 
