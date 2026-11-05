@@ -152,3 +152,26 @@ func TestControllerPoliciesAreTheOnesTheControllerRequires(t *testing.T) {
 	require.ElementsMatch(t,
 		[]string{"api-key-auth", "host-rewrite", "oauth2-generator", "respond", "set-headers"}, ControllerPolicies)
 }
+
+func TestStagePlatformAPIStagesTheSharedFilesOnlyForASuiteThatRunsPlatformAPI(t *testing.T) {
+	gatewayOnly := filepath.Join(t.TempDir(), "it-suite.yaml")
+	writeFile(t, gatewayOnly, "blocks:\n  - name: sample\n    components:\n      - name: platform-gateway\n")
+	withControlPlane := filepath.Join(t.TempDir(), "it-suite.yaml")
+	writeFile(t, withControlPlane, "blocks:\n  - name: sample\n    components:\n      - name: platform-api\n")
+
+	skipped := t.TempDir()
+	require.NoError(t, stagePlatformAPI(gatewayOnly, skipped))
+	entries, err := os.ReadDir(skipped)
+	require.NoError(t, err)
+	require.Empty(t, entries)
+
+	staged := t.TempDir()
+	require.NoError(t, stagePlatformAPI(withControlPlane, staged))
+	require.FileExists(t, filepath.Join(staged, "platform-api", "config", "config.toml"))
+	require.FileExists(t, filepath.Join(staged, "platform-api", "resources", "role-to-scope-mapping.yaml"))
+	require.FileExists(t, filepath.Join(staged, "tests", "framework", "core", "catalog", "platformapi", "docker-compose.yaml"))
+}
+
+func TestStagePlatformAPIReportsASuiteFileItCannotRead(t *testing.T) {
+	require.Error(t, stagePlatformAPI(filepath.Join(t.TempDir(), "missing.yaml"), t.TempDir()))
+}

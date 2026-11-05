@@ -16,14 +16,10 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the api-key-auth policy. Feature paths are relative to this directory. Give a
-# runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release newer
-# than the oldest one tested.
-
 suite: api-key-auth
 
 defaults:
-  parallel: 1
+  parallel: 4
   components:
     platform-gateway:
       db: sqlite
@@ -43,5 +39,40 @@ blocks:
       - name: testbench
     runners:
       - name: api-key-auth
+        tags: "gateway-version>=1.1.0"
+        features:
+          - features/api_key_auth.feature
+      - name: api-key-auth-error-compatibility
         features:
           - features/api_key_auth_error_compatibility.feature
+
+  - name: api-key-auth-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/policy-engine-message-timeout.toml
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: api-key-auth-restart
+        tags: "gateway-version>=1.1.0"
+        features:
+          - features/api_key_auth_restart.feature
+
+  - name: api-key-auth-multigateway
+    parallel: 1
+    components:
+      - name: platform-api
+        version: latest
+        db: sqlite
+      - name: platform-gateway
+        dependsOn: [platform-api]
+        replicas: 2
+        db: sqlite
+      - name: testbench
+    runners:
+      - name: api-key-auth-multigateway
+        tags: "gateway-version>=1.1.0"
+        features:
+          - features/api_key_auth_multigateway.feature

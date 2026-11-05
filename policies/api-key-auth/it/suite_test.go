@@ -27,7 +27,10 @@ import (
 	"github.com/wso2/gateway-controllers/policies/api-key-auth/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+var config = suite.Config{
+	Companions:       []string{"basic-ratelimit", "cors"},
+	RegisterWithBase: steps.Register,
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
