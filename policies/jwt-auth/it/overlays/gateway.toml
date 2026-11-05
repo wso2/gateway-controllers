@@ -29,13 +29,3 @@ issuer = "http://expected-issuer.com"
 
 [policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
 uri = "http://testbench:3001/jwks"
-
-# Same issuer and keys as mock-jwks, but reads the application identity from client_id, so
-# APIs that name it (issuers: ["mock-jwks-appid"]) exercise application-based subscriptions.
-[[policy_configurations.jwtauth_v1.keymanagers]]
-name = "mock-jwks-appid"
-issuer = "http://testbench:3001/token"
-applicationIdClaim = "client_id"
-
-[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
-uri = "http://testbench:3001/jwks"

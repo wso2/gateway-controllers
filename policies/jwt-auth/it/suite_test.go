@@ -27,7 +27,17 @@ import (
 	"github.com/wso2/gateway-controllers/policies/jwt-auth/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// The application-identity scenarios attach these policies beside jwt-auth. make it builds every
+// policy into the gateway; a direct go test run builds only jwt-auth and these companions.
+var config = suite.Config{Register: steps.Register, Companions: []string{
+	"subscription-validation",
+	"semantic-cache",
+	"token-based-ratelimit",
+	"llm-cost-based-ratelimit",
+	"llm-cost",
+	"advanced-ratelimit",
+	"basic-auth",
+}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
