@@ -804,3 +804,64 @@ func TestNormalizeErrorResponsePinsRateLimitHeaders(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEqual(t, got, without, "a dropped Retry-After must change the expected error response")
 }
+
+func TestAlternatingValuesAndRequests(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	values, err := alternatingValues(ctx, headerTable(t, []string{"Basic good", "200"}, []string{"Basic bad", "401"}))
+	require.NoError(t, err)
+	require.Equal(t, []alternatingValue{{"Basic good", 200}, {"Basic bad", 401}}, values)
+
+	shared := map[string]string{"Authorization": "Basic admin", "X-Keep": "k"}
+	requests, wants := alternatingRequests(5, "GET", "http://gw/p", "host.local", shared, "Authorization", values)
+	require.Equal(t, []int{200, 401, 200, 401, 200}, wants)
+	for i, req := range requests {
+		require.Equal(t, values[i%2].value, req.Headers["Authorization"], "request %d", i+1)
+		require.Equal(t, "k", req.Headers["X-Keep"])
+		require.Equal(t, "host.local", req.Host)
+	}
+	require.Equal(t, "Basic admin", shared["Authorization"], "shared headers must not be modified")
+
+	_, err = alternatingValues(ctx, nil)
+	require.ErrorContains(t, err, "is required")
+	_, err = alternatingValues(ctx, headerTable(t, []string{"v"}))
+	require.ErrorContains(t, err, "exactly two cells")
+	for _, status := range []string{"ok", "99", "600"} {
+		_, err = alternatingValues(ctx, headerTable(t, []string{"v", status}))
+		require.ErrorContains(t, err, "invalid status", status)
+	}
+}
+
+func TestSendAllConcurrentlyExpectingChecksEachStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "good" {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer server.Close()
+	client := httpx.NewClient(httpx.Options{})
+	values := []alternatingValue{{"good", 200}, {"bad", 401}}
+	requests, wants := alternatingRequests(10, "GET", server.URL, "", nil, "Authorization", values)
+	require.NoError(t, sendAllConcurrentlyExpecting(context.Background(), client, requests, wants, 4))
+
+	// A value whose status does not match fails, naming the request.
+	wrong := []alternatingValue{{"good", 200}, {"bad", 200}}
+	requests, wants = alternatingRequests(4, "GET", server.URL, "", nil, "Authorization", wrong)
+	err := sendAllConcurrentlyExpecting(context.Background(), client, requests, wants, 4)
+	require.ErrorContains(t, err, "request 2 of 4")
+	require.ErrorContains(t, err, "want status 200")
+	require.NotContains(t, err.Error(), "request 1 of 4")
+
+	require.ErrorContains(t,
+		sendAllConcurrentlyExpecting(context.Background(), client, requests, []int{200}, 4), "expected statuses")
+}
+
+func TestSendConcurrentAlternatingRejectsInvalidInput(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	table := headerTable(t, []string{"v", "200"})
+	for _, n := range []int{0, maxConcurrentSendRequests + 1} {
+		require.ErrorContains(t, (&Base{}).sendConcurrentAlternating(ctx, n, "GET", "/p", "Authorization", table),
+			"must be between")
+	}
+	require.ErrorContains(t, (&Base{}).sendConcurrentAlternating(ctx, 2, "GET", "/p", " ", table),
+		"header name is required")
+}

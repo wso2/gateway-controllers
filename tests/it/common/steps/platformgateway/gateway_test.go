@@ -19,6 +19,7 @@
 package platformgateway
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -3860,4 +3861,138 @@ func TestManagementEndpointDeleteRetriesConflictsOnlyForCertificates(t *testing.
 		require.Equal(t, wantCalls, calls.Load(), "collection %s", collection)
 		require.Equal(t, collection != certificatesCollection, err != nil, "collection %s: %v", collection, err)
 	}
+}
+
+func TestRawHeaderLines(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, tcontext.Set(ctx, "cred", "YQ=="))
+	lines, err := rawHeaderLines(ctx, analyticsTable(t,
+		[]string{"authorization", "Basic ${CTX:cred}"},
+		[]string{"X-Ctl", `a\rb\nc\td\\e\x00f\xC3\xA9`},
+		[]string{"X-Empty", ""}))
+	require.NoError(t, err)
+	require.Equal(t, []string{"authorization: Basic YQ==", "X-Ctl: a\rb\nc\td\\e\x00f\u00e9", "X-Empty: "}, lines)
+
+	_, err = rawHeaderLines(ctx, nil)
+	require.ErrorContains(t, err, "is required")
+	_, err = rawHeaderLines(ctx, analyticsTable(t, []string{"A"}))
+	require.ErrorContains(t, err, "exactly two cells")
+	_, err = rawHeaderLines(ctx, analyticsTable(t, []string{" ", "v"}))
+	require.ErrorContains(t, err, "empty header name")
+	for value, want := range map[string]string{
+		`\`:    "lone backslash",
+		`\q`:   `unknown escape \q`,
+		`\x4`:  "two hex digits",
+		`\xZZ`: "two hex digits",
+	} {
+		_, err := rawHeaderLines(ctx, analyticsTable(t, []string{"A", value}))
+		require.ErrorContains(t, err, want, value)
+	}
+}
+
+func TestRawHTTPRequestWritesLinesVerbatim(t *testing.T) {
+	request := rawHTTPRequest("GET", "/ctx/v1/p", "gw.local",
+		[]string{"authorization: Basic YQ==", "Authorization: Basic Yg=="})
+	require.Equal(t,
+		"GET /ctx/v1/p HTTP/1.1\r\nHost: gw.local\r\nauthorization: Basic YQ==\r\nAuthorization: Basic Yg==\r\n"+
+			"Connection: close\r\n\r\n",
+		string(request))
+}
+
+func TestRawHTTPExchangeSendsTheBytesAndParsesTheResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	received := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		var head strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			head.WriteString(line)
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		received <- head.String()
+		_, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\nWww-Authenticate: Basic realm=\"R\"\r\n" +
+			"Content-Length: 5\r\n\r\nnope!"))
+	}()
+
+	request := rawHTTPRequest("GET", "/p", "gw", []string{"AUTHORIZATION: Basic YQ==", "Authorization: x"})
+	response, err := rawHTTPExchange(context.Background(), listener.Addr().String(), "GET", request)
+	require.NoError(t, err)
+	require.Equal(t, string(request), <-received)
+	require.Equal(t, 401, response.StatusCode)
+	require.Equal(t, `Basic realm="R"`, response.Headers.Get("WWW-Authenticate"))
+	require.Equal(t, "nope!", string(response.Body))
+	require.Equal(t, "GET", response.Method)
+}
+
+func TestRawHTTPExchangeReportsAConnectionClosedWithoutAResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_ = conn.Close()
+		}
+	}()
+	_, err = rawHTTPExchange(context.Background(), listener.Addr().String(), "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+	require.ErrorIs(t, err, errClosedWithoutResponse)
+
+	// A connection that cannot be made is not a refusal: the gateway is not there.
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	_, err = rawHTTPExchange(context.Background(), address, "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, errClosedWithoutResponse)
+}
+
+func TestRawRequestRefused(t *testing.T) {
+	ctx := agentTestContext()
+	funnel := httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: time.Second}), 0, 0)
+	const closing = "by closing the connection"
+	withStatus := func(n string) (string, string) { return "with status " + n, n }
+
+	require.ErrorContains(t, rawRequestRefused(ctx, closing, ""), "no raw request was sent")
+	how, n := withStatus("401")
+	require.ErrorContains(t, rawRequestRefused(ctx, how, n), "no raw request was sent")
+
+	// The gateway closed the connection.
+	require.NoError(t, tcontext.Set(ctx, keyRawClosedWithoutResponse, true))
+	require.NoError(t, rawRequestRefused(ctx, closing, ""))
+	require.ErrorContains(t, rawRequestRefused(ctx, how, n), "closed the connection without a response")
+
+	// The gateway answered 401.
+	require.NoError(t, tcontext.Set(ctx, keyRawClosedWithoutResponse, false))
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 401, Method: "GET", URL: "http://gw/p"}))
+	require.NoError(t, rawRequestRefused(ctx, how, n))
+	require.ErrorContains(t, rawRequestRefused(ctx, closing, ""), "expected the gateway to close the connection")
+	how400, n400 := withStatus("400")
+	require.ErrorContains(t, rawRequestRefused(ctx, how400, n400), "expected the gateway to refuse the request with status 400")
+
+	// A routing 404 is not the refusal a scenario names.
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 404, Method: "GET", URL: "http://gw/p"}))
+	require.Error(t, rawRequestRefused(ctx, how, n))
+
+	for _, bad := range []string{"200", "302", "500", "x"} {
+		how, n := withStatus(bad)
+		require.ErrorContains(t, rawRequestRefused(ctx, how, n), "must be a 4xx status", bad)
+	}
+}
+
+func TestClosedByPeer(t *testing.T) {
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET, syscall.EPIPE,
+		fmt.Errorf("read: %w", syscall.ECONNRESET)} {
+		require.True(t, closedByPeer(err), err.Error())
+	}
+	require.False(t, closedByPeer(errors.New("timeout")))
 }
