@@ -28,8 +28,8 @@ Feature: Basic auth policy configuration validation
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
-  # The configured username and password must each have at least one character, so an empty one
-  # is rejected and no request can authenticate with it.
+  # The configuration must have a username and a password, each of at least one character, so an
+  # empty or missing one is rejected and no request can authenticate with it.
   Scenario Outline: Send an empty username or empty password (<case>)
     Given I generate a unique value from "ba-invalid-<key>" and store it as "apiName"
     And I generate a unique API version from "ba-invalid-<key>" and store it as "apiVersion"
@@ -49,9 +49,11 @@ Feature: Basic auth policy configuration validation
     And the response body should contain "<field>"
 
     Examples:
-      | case                                | key  | field    | params                                   |
-      | empty username in the configuration | user | username | {"username":"","password":"ba-secret?1"} |
-      | empty password in the configuration | pass | password | {"username":"ba-user","password":""}     |
+      | case                                    | key     | field    | params                                   |
+      | empty username in the configuration     | user    | username | {"username":"","password":"ba-secret?1"} |
+      | empty password in the configuration     | pass    | password | {"username":"ba-user","password":""}     |
+      | username missing from the configuration | no-user | username | {"password":"ba-secret?1"}               |
+      | password missing from the configuration | no-pass | password | {"username":"ba-user"}                   |
 
 
   # Username, password and realm each take 1 to 256 characters.

@@ -936,8 +936,9 @@ Feature: Basic auth policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 404
 
-  # The policy itself does not limit attempts: every wrong password is rejected, none reaches the
-  # backend, and the gateway keeps serving. The next scenario adds a rate limit in front of it.
+  # The policy itself does not limit attempts: each of the 50 wrong passwords is rejected with 401,
+  # none reaches the backend, and the gateway keeps serving. The next scenario adds a rate limit in
+  # front of it.
   Scenario: Attempt brute-force authentication using repeated incorrect passwords (repeated wrong passwords)
     Given I generate a unique value from "ba-brute" and store it as "apiName"
     And I generate a unique API version from "ba-brute" and store it as "apiVersion"
@@ -955,9 +956,8 @@ Feature: Basic auth policy
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 401
 
     When I clear all headers
-    And I set header "Authorization" to "Basic YmEtdXNlcjp3cm9uZy1zZWNyZXQ="
-    And I send 50 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    And I send 50 concurrent "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/protected" alternating the "Authorization" header:
+      | Basic YmEtdXNlcjp3cm9uZy1zZWNyZXQ= | 401 |
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/protected"
     Then the response status code should be 204
     When I check the health of all gateway services
@@ -991,7 +991,9 @@ Feature: Basic auth policy
     When I clear all headers
     And I set header "Authorization" to "Basic YmEtdXNlcjp3cm9uZy1zZWNyZXQ="
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 401
-    And I send 2 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/protected"
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
+    Then the response status code should be 401
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
     Then the response status code should be 401
     When I clear all headers
     And I set header "Authorization" to "Basic YmEtdXNlcjpiYS1zZWNyZXQ/MQ=="

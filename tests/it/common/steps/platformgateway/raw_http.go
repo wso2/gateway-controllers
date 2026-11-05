@@ -231,8 +231,9 @@ func rawHTTPRequest(method, path, host string, headerLines []string) []byte {
 }
 
 // rawHTTPExchange sends the request bytes to address and reads one response. When the gateway
-// accepts the connection but closes or resets it before answering, it returns
-// errClosedWithoutResponse; a connection that cannot be made at all is an ordinary error.
+// accepts the connection but closes or resets it before sending any of a response, it returns
+// errClosedWithoutResponse. A connection that cannot be made, or a response cut off part way,
+// is an ordinary error. Cancelling ctx ends the exchange.
 func rawHTTPExchange(ctx context.Context, address, method string, request []byte) (*httpx.Response, error) {
 	started := time.Now()
 	dialer := net.Dialer{}
@@ -242,17 +243,30 @@ func rawHTTPExchange(ctx context.Context, address, method string, request []byte
 	}
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(rawRequestTimeout))
+	// Registered after the deadline above, so a cancelled ctx is never overwritten by it: the
+	// callback moves the deadline to now, which ends a blocked write or read at once.
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
+	defer stop()
 	if _, err := conn.Write(request); err != nil {
 		if closedByPeer(err) {
 			return nil, errClosedWithoutResponse
 		}
 		return nil, fmt.Errorf("send raw request: %w", err)
 	}
-	resp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: method})
-	if err != nil {
+	// Only a connection closed before the first byte of a response is a refusal. A response cut
+	// off part way is an ordinary error, so it can never pass for a closed connection.
+	reader := bufio.NewReader(conn)
+	if _, err := reader.Peek(1); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("read raw-request response: %w", ctxErr)
+		}
 		if closedByPeer(err) {
 			return nil, errClosedWithoutResponse
 		}
+		return nil, fmt.Errorf("read raw-request response: %w", err)
+	}
+	resp, err := http.ReadResponse(reader, &http.Request{Method: method})
+	if err != nil {
 		return nil, fmt.Errorf("read raw-request response: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()

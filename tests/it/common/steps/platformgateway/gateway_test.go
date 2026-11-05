@@ -3956,6 +3956,47 @@ func TestRawHTTPExchangeReportsAConnectionClosedWithoutAResponse(t *testing.T) {
 	require.NotErrorIs(t, err, errClosedWithoutResponse)
 }
 
+func TestRawHTTPExchangeTreatsAPartialResponseAsAnError(t *testing.T) {
+	for _, partial := range []string{"HTTP/1.1 401 Unauthorized\r\n", "HTTP/1.1 401 Unauthorized\r\nWww-Authenticate: Basic"} {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_, _ = conn.Write([]byte(partial))
+			_ = conn.Close()
+		}()
+		_, err = rawHTTPExchange(context.Background(), listener.Addr().String(), "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+		require.Error(t, err, partial)
+		require.NotErrorIs(t, err, errClosedWithoutResponse, "a response cut off part way is not a refusal: %q", partial)
+		_ = listener.Close()
+	}
+}
+
+func TestRawHTTPExchangeStopsWhenTheContextIsCancelled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		time.Sleep(5 * time.Second) // accept the request, then never answer within the test
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = rawHTTPExchange(ctx, listener.Addr().String(), "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, errClosedWithoutResponse)
+	require.Less(t, time.Since(started), 3*time.Second, "cancelling ctx must not wait for the 30 s socket deadline")
+}
+
 func TestRawRequestRefused(t *testing.T) {
 	ctx := agentTestContext()
 	funnel := httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: time.Second}), 0, 0)
