@@ -18,6 +18,12 @@
 
 package modelfailover
 
+import (
+	"strings"
+
+	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+)
+
 // isFailoverWorthy reports whether a response status should count as a failure for health
 // tracking.
 //
@@ -63,3 +69,38 @@ func (p *Policy) isFailoverWorthy(status int) bool {
 // outlier detection: ejection is cosmetic under the default panic threshold, and disabling
 // panic mode makes the ejected cluster return a non-retryable "no healthy upstream" that breaks
 // failover outright.
+
+// isProvisionalStatus reports whether the response status cannot be taken as the final
+// outcome of the attempt.
+//
+// True when the upstream declared a streamed response — chunked framing or
+// text/event-stream — and the body had still to come. Envoy commits the status line
+// downstream before the stream completes, so an upstream that resets mid-body reaches this
+// phase indistinguishable from one that answered in full; Envoy reports the difference
+// afterwards, as "upstream_reset_after_response_started", on a channel this phase cannot see
+// (FR-030n).
+//
+// Measured 2026-11-05: a reset BEFORE the response is committed arrives here as a clean 5xx
+// instead, because nothing had reached the client yet. So this is narrowly about responses
+// already in flight, not about streaming in general.
+//
+// The rule mirrors the engine's own streaming detection. It is restated here rather than
+// shared because the engine's helper is internal to a different repository; the two must be
+// kept in step, and a disagreement shows up as a target graded on a status the engine knew
+// was provisional.
+func isProvisionalStatus(respCtx *policy.ResponseHeaderContext) bool {
+	if respCtx == nil || respCtx.ResponseHeaders == nil {
+		return false
+	}
+	for _, te := range respCtx.ResponseHeaders.Get("transfer-encoding") {
+		if strings.Contains(strings.ToLower(te), "chunked") {
+			return true
+		}
+	}
+	for _, ct := range respCtx.ResponseHeaders.Get("content-type") {
+		if strings.Contains(strings.ToLower(ct), "text/event-stream") {
+			return true
+		}
+	}
+	return false
+}

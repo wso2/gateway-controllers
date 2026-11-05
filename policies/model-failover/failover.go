@@ -322,6 +322,22 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 		// one outcome the client actually sees as an error.
 		outcome = outcomeExhausted
 		failed = append(failed, target)
+	case isProvisionalStatus(respCtx):
+		// The status says success, but it was committed to the client before the body
+		// existed, so it is not evidence the target SERVED the request: an upstream that
+		// dies mid-stream arrives here as the 200 it started as (FR-030n).
+		//
+		// Recorded as nothing rather than as a success. Banking it would reset the
+		// consecutive-failure count and add a healthy sample to the window, which is how a
+		// provider that truncates everything immunises itself against the suspension its
+		// real failures would otherwise trigger. Probe accounting still advances, or a
+		// target whose responses are all streamed could never recover (FR-030p).
+		if recovered := p.health.RecordUnverified(target, now); recovered != nil {
+			p.logRecovery(recovered)
+		}
+		if attempts > 1 {
+			outcome = outcomeRescued
+		}
 	default:
 		// Any non-failover-worthy status counts as a success for health purposes: the target
 		// answered. A 400 is the client's problem, not the provider's.

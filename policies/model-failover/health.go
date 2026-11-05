@@ -131,6 +131,21 @@ type HealthStore interface {
 	// perAttemptTimeoutMs"). The error-rate rule is NOT evaluated here: a success can only
 	// push a rate down, so there is nothing for it to discover.
 	RecordSuccess(target Target, latency time.Duration, now time.Time) (*RecoveryEvent, *SuspensionEvent)
+	// RecordUnverified records that the target answered without judging whether the
+	// answer COMPLETED. Used when the status line is provisional -- a streamed response
+	// commits its 200 before the body exists, so a stream cut mid-body still reaches the
+	// response phase as the success it started as (FR-030n, FR-030p).
+	//
+	// It deliberately does NOT clear the consecutive-failure count and does NOT add a
+	// sample to the window. Recording a provisional success as a real one is what lets a
+	// provider that truncates everything immunise itself: the reset wipes the counter its
+	// real failures were accumulating, and the sample dilutes the error rate below the
+	// threshold. Recording nothing leaves both to be decided by outcomes we can see.
+	//
+	// Probe accounting is the one exception, and it is deliberate: a half-open probe that
+	// answers still counts toward recovery, because withholding that too would leave a
+	// target whose responses are all streamed suspended forever (FR-030p).
+	RecordUnverified(target Target, now time.Time) *RecoveryEvent
 	// RecordFailure feeds every suspension criterion and returns a non-nil event if this
 	// outcome suspended the target.
 	RecordFailure(target Target, latency time.Duration, now time.Time) *SuspensionEvent
@@ -312,6 +327,34 @@ func (m *memoryHealthStore) evaluateLatencyLocked(h *targetHealth, target Target
 		return m.suspendLocked(h, target, ReasonLatency, p95, total, now)
 	}
 	return nil
+}
+
+func (m *memoryHealthStore) RecordUnverified(target Target, now time.Time) *RecoveryEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+
+	// No window sample and no counter reset: see the interface comment. The only state this
+	// advances is the probe run, because a suspended target has to be able to come back.
+	if !h.halfOpen {
+		return nil
+	}
+	h.probeInFlight = false
+	h.probeSuccesses++
+	if h.probeSuccesses < m.suspension.RecoverAfterSuccesses {
+		return nil
+	}
+	h.halfOpen = false
+	h.probeSuccesses = 0
+	h.healthySince = now
+	return &RecoveryEvent{
+		Target:              target,
+		ProbesRequired:      m.suspension.RecoverAfterSuccesses,
+		SuspendedForSeconds: h.currentDurationSeconds,
+		EscalationStep:      h.escalationStep,
+	}
 }
 
 func (m *memoryHealthStore) RecordFailure(target Target, latency time.Duration, now time.Time) *SuspensionEvent {
