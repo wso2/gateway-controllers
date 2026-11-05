@@ -307,10 +307,21 @@ func (p *TranslatorPolicy) translateBufferedFlush(
 		// body, so a nil here would deliver the truncated document to the client
 		// instead of suppressing it.
 		//
-		// The policy SDK pinned here (sdk/core v0.2.14) has no IsFault on this
-		// action, so the close cannot be declared a failure to the fault flow;
-		// the warning above is the record of it.
-		return policy.TerminateResponseChunk{Body: []byte{}}
+		// The close is a failure rather than a clean end of stream, so it is
+		// declared to the fault flow. The status went out with the headers long
+		// before this chunk and is almost always 200, which leaves IsFault as the
+		// only signal that this response did not succeed.
+		return policy.TerminateResponseChunk{
+			Body:    []byte{},
+			IsFault: true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeMediation,
+				Direction:   policy.DirectionResponse,
+				Message:     "The upstream response could not be translated.",
+				Description: "response exceeded the stream accumulator limit before the upstream closed",
+			},
+		}
 	}
 	if len(chunk.Chunk) == 0 {
 		return policy.ForwardResponseChunk{}
@@ -335,7 +346,9 @@ func bufferedActionToChunk(action policy.ResponseAction) policy.StreamingRespons
 		}
 		return policy.ForwardResponseChunk{Body: a.Body}
 	case policy.ImmediateResponse:
-		return policy.TerminateResponseChunk{Body: a.Body}
+		// The buffered translator already declared this rejection a fault; carry
+		// its declaration across rather than dropping or restating it.
+		return policy.TerminateResponseChunk{Body: a.Body, IsFault: a.IsFault, Fault: a.Fault}
 	}
 	return policy.ForwardResponseChunk{}
 }

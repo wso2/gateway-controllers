@@ -238,6 +238,23 @@ func TestTranslateBufferedFlush_AccumulatorCapReportsError(t *testing.T) {
 	if got.Error.Message == "" {
 		t.Error("expected a human-readable message on the truncation error")
 	}
+	// The status went out with the headers and is almost always 200, so IsFault
+	// is the only thing that tells the fault flow this response failed.
+	if !term.IsFault {
+		t.Error("a truncated body is a failure and must be declared to the fault flow")
+	}
+	if term.Fault == nil {
+		t.Fatal("expected Fault to be populated")
+	}
+	if term.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Errorf("Fault.Code = %q, want %q", term.Fault.Code, policy.FaultCodeMediationFailed)
+	}
+	if term.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("Fault.Type = %q, want %q", term.Fault.Type, policy.FaultTypeMediation)
+	}
+	if term.Fault.Direction != policy.DirectionResponse {
+		t.Errorf("Fault.Direction = %q, want %q", term.Fault.Direction, policy.DirectionResponse)
+	}
 }
 
 // TestOnResponseBodyChunk_UnselectedProviderPassesThrough: on a multi-provider

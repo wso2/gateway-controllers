@@ -96,12 +96,22 @@ func (p *TranslatorPolicy) translateBufferedFlush(
 		slog.Warn(PolicyName+": response exceeded the policy engine's stream accumulator "+
 			"limit before the upstream closed; the body is truncated and cannot be translated",
 			"flush_bytes", len(chunk.Chunk), "status", respCtx.ResponseStatus)
-		return policy.TerminateResponseChunk{Body: openAIErrorBody(
-			"server_error",
-			"The upstream response exceeded the gateway's response buffer before it "+
-				"completed, so it could not be translated.",
-			"response_too_large",
-		)}
+		return policy.TerminateResponseChunk{
+			Body: openAIErrorBody(
+				"server_error",
+				"The upstream response exceeded the gateway's response buffer before it "+
+					"completed, so it could not be translated.",
+				"response_too_large",
+			),
+			IsFault: true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeMediation,
+				Direction:   policy.DirectionResponse,
+				Message:     "The upstream response could not be translated.",
+				Description: "response exceeded the stream accumulator limit before the upstream closed",
+			},
+		}
 	}
 	if len(chunk.Chunk) == 0 {
 		return policy.ForwardResponseChunk{}
@@ -130,11 +140,17 @@ func bufferedActionToChunk(action policy.ResponseAction) policy.StreamingRespons
 		// client does not recognise as an error. The status it carries cannot be
 		// applied here either, so re-render the message as the nested envelope
 		// the client does understand before closing the stream.
-		return policy.TerminateResponseChunk{Body: openAIErrorBody(
-			mapStatusToOpenAIErrorType(a.StatusCode),
-			messageFromErrResponse(a.Body),
-			"response_translation_failed",
-		)}
+		return policy.TerminateResponseChunk{
+			Body: openAIErrorBody(
+				mapStatusToOpenAIErrorType(a.StatusCode),
+				messageFromErrResponse(a.Body),
+				"response_translation_failed",
+			),
+			// The body is re-rendered, but the fault the buffered translator
+			// declared describes the same failure — carry it across unchanged.
+			IsFault: a.IsFault,
+			Fault:   a.Fault,
+		}
 	}
 	return policy.ForwardResponseChunk{}
 }
