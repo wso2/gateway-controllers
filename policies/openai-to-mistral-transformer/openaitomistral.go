@@ -35,6 +35,10 @@ const (
 	MistralChatCompletionsPath  = "/v1/chat/completions"
 	MetadataKeySelectedProvider = "selected_provider"
 	MetadataKeyEffectiveModel   = "openai_to_mistral_effective_model"
+	// MetadataKeyResponseIsEventStream caches the one-time verdict on whether
+	// the upstream response is an event stream, so every chunk after the first
+	// is routed the same way as the first. See responseIsEventStream.
+	MetadataKeyResponseIsEventStream = "openai_to_mistral_response_is_event_stream"
 )
 
 // unsupportedRequestFields lists OpenAI fields Mistral's API rejects. Keep in
@@ -73,12 +77,30 @@ func GetPolicy(_ policy.PolicyMetadata, rawParams map[string]interface{}) (polic
 	return &TranslatorPolicy{params: parsed}, nil
 }
 
+// Mode declares the response body as STREAM rather than BUFFER even though
+// Mistral speaks OpenAI already and needs no event translation.
+//
+// The declaration is not about this policy's own needs. The kernel computes one
+// streaming capability for the whole chain: a single policy declaring
+// BodyModeBuffer sets SupportsResponseStreaming=false for every policy on the
+// route (BuildPolicyChain in the engine's body_mode.go), which makes the engine
+// ask Envoy for a BUFFERED response body. On a multi-provider proxy that pairs
+// Mistral with a translator that does stream — Anthropic, Gemini, Bedrock — a
+// BUFFER declaration here therefore switched off incremental delivery for all
+// of them, and the client saw nothing until the upstream closed. That flag is
+// computed once at chain-build time from Mode() alone, so the per-provider
+// "selected_provider" condition cannot undo it: a Mistral translator that never
+// runs still silenced the stream.
+//
+// Declaring STREAM keeps the route streaming and moves the choice to where it
+// can be made per response: OnResponseBodyChunk forwards event streams
+// untouched and reassembles anything else for the buffered translator.
 func (p *TranslatorPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
 		RequestBodyMode:    policy.BodyModeBuffer,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   policy.BodyModeStream,
 	}
 }
 
