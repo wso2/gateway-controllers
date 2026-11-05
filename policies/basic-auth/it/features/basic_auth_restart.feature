@@ -30,11 +30,12 @@ Feature: Basic auth policy across gateway restarts
     And I authenticate using basic auth as "admin"
 
   # Gateway replicas in the test environment are independent gateways that share no state, so
-  # scaling is not covered here; each restart below shows the configuration is reloaded intact.
-  Scenario Outline: Restart or scale gateway replicas with Basic Auth configured (restart <service>)
-    Given I generate a unique value from "ba-restart-<key>" and store it as "apiName"
-    And I generate a unique API version from "ba-restart-<key>" and store it as "apiVersion"
-    And I generate a unique API context from "/ba-restart-<key>" and store it as "apiContext"
+  # scaling is not covered here. After a restart, the runtime loads the configuration again from
+  # the controller, so the policy still rejects requests without valid credentials.
+  Scenario: Restart or scale gateway replicas with Basic Auth configured (restart gateway-runtime)
+    Given I generate a unique value from "ba-restart-runtime" and store it as "apiName"
+    And I generate a unique API version from "ba-restart-runtime" and store it as "apiVersion"
+    And I generate a unique API context from "/ba-restart-runtime" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -47,7 +48,7 @@ Feature: Basic auth policy across gateway restarts
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 401
 
-    When I restart the "<service>" service
+    When I restart the "gateway-runtime" service
     And I clear all headers
     And I authenticate using basic auth as "admin"
     And I wait for the gateway controller health endpoint
@@ -69,7 +70,59 @@ Feature: Basic auth policy across gateway restarts
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 404
 
-    Examples:
-      | service            | key        |
-      | gateway-runtime    | runtime    |
-      | gateway-controller | controller |
+  # The runtime keeps its configuration while the controller restarts. Restarting the runtime
+  # afterwards makes it load the configuration from the restarted controller, which shows the
+  # controller kept the policy and its credentials.
+  Scenario: Restart or scale gateway replicas with Basic Auth configured (restart gateway-controller, then gateway-runtime)
+    Given I generate a unique value from "ba-restart-controller" and store it as "apiName"
+    And I generate a unique API version from "ba-restart-controller" and store it as "apiVersion"
+    And I generate a unique API context from "/ba-restart-controller" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3000 |
+      | spec.operations        | [{"method":"GET","path":"/protected","policies":[{"name":"basic-auth","version":"v1","params":{"username":"ba-user","password":"ba-secret?1"}}]}] |
+    Then the resource creation response should indicate successful deployment
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 401
+
+    When I restart the "gateway-controller" service
+    And I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I wait for the gateway controller health endpoint
+    And I clear all headers
+    And I set header "Authorization" to "Basic YmEtdXNlcjpiYS1zZWNyZXQ/MQ=="
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 200
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
+    Then the response status code should be 401
+    And the response should match the expected error response "basic-auth-unauthorized"
+    When I clear all headers
+    And I set header "Authorization" to "Basic YmEtdXNlcjp3cm9uZy1zZWNyZXQ="
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
+    Then the response status code should be 401
+
+    When I restart the "gateway-runtime" service
+    And I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I wait for the gateway controller health endpoint
+    And I clear all headers
+    And I set header "Authorization" to "Basic YmEtdXNlcjpiYS1zZWNyZXQ/MQ=="
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 200
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
+    Then the response status code should be 401
+    And the response should match the expected error response "basic-auth-unauthorized"
+    When I clear all headers
+    And I set header "Authorization" to "Basic YmEtdXNlcjp3cm9uZy1zZWNyZXQ="
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
+    Then the response status code should be 401
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 404
