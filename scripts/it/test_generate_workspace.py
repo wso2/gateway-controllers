@@ -40,6 +40,13 @@ class GenerateWorkspaceTests(unittest.TestCase):
             gw.render(self.root),
         )
 
+    def test_lists_a_major_version_suite_beside_v1(self):
+        repo(self.root, suites=("backend-jwt",))
+        write(self.root, "policies/backend-jwt/v2/it/go.mod", "module x/backend-jwt/v2/it\n\ngo 1.26.5\n")
+
+        self.assertEqual(["backend-jwt", "backend-jwt/v2"], gw.suite_names(self.root))
+        self.assertIn("\t../../policies/backend-jwt/v2/it\n", gw.render(self.root))
+
     def test_takes_the_go_version_from_tests_it(self):
         repo(self.root)
         write(self.root, "tests/it/go.mod", "module x\n\ngo 1.27.1\n")

@@ -235,7 +235,8 @@ func (r *runner) say(format string, args ...any) {
 // displayName names a block in the output: the block's own name when it begins with the policy's,
 // otherwise the policy and the block.
 func displayName(policy, block string) string {
-	if block == policy || strings.HasPrefix(block, policy+"/") || strings.HasPrefix(block, policy+"-") {
+	if flat := strings.ReplaceAll(policy, "/", "-"); block == policy || strings.HasPrefix(block, policy+"/") ||
+		strings.HasPrefix(block, policy+"-") || block == flat || strings.HasPrefix(block, flat+"-") {
 		return block
 	}
 	return policy + "/" + block
