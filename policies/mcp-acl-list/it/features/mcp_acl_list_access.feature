@@ -75,8 +75,12 @@ Feature: mcp-acl-list access decisions
     Then the response should be successful
 
     Examples: tools
-      | case                          | tools                                 | allowed | denied |
+      | case                                                  | tools                                       | allowed | denied  |
       # MAC #1: deny mode with T1 as the only exception; T1 runs, T2 is denied.
-      | deny mode with one exception  | {"mode":"deny","exceptions":["add"]}  | add     | echo   |
+      | deny mode with one exception                          | {"mode":"deny","exceptions":["add"]}        | add     | echo    |
       # MAC #2: allow mode with T1 as the only exception; T2 runs, T1 is denied.
-      | allow mode with one exception | {"mode":"allow","exceptions":["add"]} | echo    | add    |
+      | allow mode with one exception                         | {"mode":"allow","exceptions":["add"]}       | echo    | add     |
+      # MAC #3: deny mode with several exceptions; every listed tool runs, an unlisted tool is denied.
+      # One row per listed tool, so each listed tool is shown to run with the same configuration.
+      | deny mode with several exceptions, first listed tool  | {"mode":"deny","exceptions":["add","echo"]} | add     | headers |
+      | deny mode with several exceptions, second listed tool | {"mode":"deny","exceptions":["add","echo"]} | echo    | headers |
