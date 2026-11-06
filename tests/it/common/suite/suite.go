@@ -182,12 +182,7 @@ func provideGateway(t *testing.T, suiteDir string, cfg Config) error {
 		return fmt.Errorf("%q is not a policy's %s folder", suiteDir, gateway.IntegrationDir)
 	}
 	policyDir := filepath.Dir(suiteDir)
-	policiesDir, policy := filepath.Dir(policyDir), filepath.Base(policyDir)
-	if regexp.MustCompile(`^v\d+$`).MatchString(policy) {
-		// A major version released beside v1: policies/<name>/v<N>.
-		policy = filepath.Base(policiesDir) + "/" + policy
-		policiesDir = filepath.Dir(policiesDir)
-	}
+	policiesDir, policy := gateway.PolicyOf(policyDir)
 	policies := slices.Concat([]string{policy}, ControllerPolicies, cfg.Companions)
 	images, err := gateway.Build(t.Context(), gateway.BuildOptions{
 		PoliciesDir: policiesDir,

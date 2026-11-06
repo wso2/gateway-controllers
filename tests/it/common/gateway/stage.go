@@ -47,6 +47,22 @@ func stagedName(policy string) string {
 	return strings.ReplaceAll(policy, "/", "-")
 }
 
+// policiesFolder is the name of the folder that holds the policy folders of this repository.
+const policiesFolder = "policies"
+
+// PolicyOf returns the folder that holds the policy folders and the policy's name for a policy's
+// folder: policies/<name> gives (policies, <name>). A major version folder, policies/<name>/v<N>,
+// gives (policies, <name>/v<N>); a top-level policy that is itself named v<N> is not mistaken for
+// one, because a version folder sits inside a policy folder and not directly in policies.
+func PolicyOf(policyDir string) (policiesDir, name string) {
+	parent := filepath.Dir(policyDir)
+	base := filepath.Base(policyDir)
+	if versionDir.MatchString(base) && filepath.Base(parent) != policiesFolder {
+		return filepath.Dir(parent), filepath.Base(parent) + "/" + base
+	}
+	return parent, base
+}
+
 // PolicyNames returns the policies of policiesDir, the folders that hold a policy-definition.yaml,
 // in name order. A major version folder, <name>/v<N>, that holds its own policy-definition.yaml is
 // listed as <name>/v<N>.
@@ -65,7 +81,8 @@ func PolicyNames(policiesDir string) ([]string, error) {
 		}
 		versions, err := os.ReadDir(filepath.Join(policiesDir, entry.Name()))
 		if err != nil {
-			return nil, err
+			// A folder that cannot be read holds no listable version folder; discovery goes on.
+			continue
 		}
 		for _, version := range versions {
 			if !version.IsDir() || !versionDir.MatchString(version.Name()) {
@@ -100,7 +117,7 @@ func Stage(policiesDir, workspace string, names ...string) (string, error) {
 		if _, err := os.Stat(filepath.Join(source, policyDefinition)); err != nil {
 			return "", fmt.Errorf("%q is not a policy folder: %w", source, err)
 		}
-		if err := CopyTree(source, filepath.Join(tree, stagedName(name))); err != nil {
+		if err := copyTree(source, filepath.Join(tree, stagedName(name)), true); err != nil {
 			return "", err
 		}
 	}
@@ -109,6 +126,13 @@ func Stage(policiesDir, workspace string, names ...string) (string, error) {
 
 // CopyTree copies source to destination, leaving out a top-level it folder and refusing symlinks.
 func CopyTree(source, destination string) error {
+	return copyTree(source, destination, false)
+}
+
+// copyTree is CopyTree, and with skipVersionPolicies it also leaves out a top-level v<N> folder that
+// holds a policy of its own, which is staged separately by its own name. Only a policy tree has such
+// folders, so overlays and other trees are copied whole.
+func copyTree(source, destination string, skipVersionPolicies bool) error {
 	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -121,7 +145,7 @@ func CopyTree(source, destination string) error {
 			return filepath.SkipDir
 		}
 		// A major version folder holds a policy of its own, staged separately by its own name.
-		if entry.IsDir() && versionDir.MatchString(relative) {
+		if skipVersionPolicies && entry.IsDir() && versionDir.MatchString(relative) {
 			if _, err := os.Stat(filepath.Join(path, policyDefinition)); err == nil {
 				return filepath.SkipDir
 			}
