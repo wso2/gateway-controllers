@@ -253,3 +253,91 @@ func assertJSONError(t *testing.T, body []byte) {
 		t.Error("expected non-empty 'error' field in JSON body")
 	}
 }
+
+// TestBasicAuthPolicy_RejectionErrorCodes pins the fault declaration and the code chosen
+func TestBasicAuthPolicy_RejectionErrorCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		headers  map[string][]string
+		params   map[string]interface{}
+		wantCode string
+	}{
+		{
+			name:     "no authorization header",
+			headers:  nil,
+			params:   defaultParams(),
+			wantCode: policy.FaultCodeAuthMissingCredentials,
+		},
+		{
+			name:     "not the Basic scheme",
+			headers:  map[string][]string{"authorization": {"Bearer abc"}},
+			params:   defaultParams(),
+			wantCode: policy.FaultCodeAuthMissingCredentials,
+		},
+		{
+			name:     "credentials are not base64",
+			headers:  map[string][]string{"authorization": {"Basic !!!not-base64!!!"}},
+			params:   defaultParams(),
+			wantCode: policy.FaultCodeAuthInvalidCredentials,
+		},
+		{
+			name:     "wrong password",
+			headers:  map[string][]string{"authorization": {basicAuthHeader("admin", "wrong")}},
+			params:   defaultParams(),
+			wantCode: policy.FaultCodeAuthInvalidCredentials,
+		},
+		{
+			name:     "policy misconfigured",
+			headers:  map[string][]string{"authorization": {basicAuthHeader("admin", "secret")}},
+			params:   map[string]interface{}{"password": "secret"},
+			wantCode: policy.FaultCodeAuthGeneral,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &BasicAuthPolicy{}
+			ctx := newBasicRequestHeaderContext(tt.headers)
+
+			action := p.OnRequestHeaders(context.Background(), ctx, tt.params)
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
+			}
+			if !resp.IsFault {
+				t.Fatalf("expected IsFault=true on a rejection")
+			}
+			if resp.Fault == nil {
+				t.Fatalf("expected Error to be populated on a rejection")
+			}
+			if resp.Fault.Code != tt.wantCode {
+				t.Fatalf("expected Error.Code=%q, got %q", tt.wantCode, resp.Fault.Code)
+			}
+			if resp.Fault.Type != policy.FaultTypeAuthentication {
+				t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+			}
+			if resp.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+			}
+			if resp.Fault.Description == "" {
+				t.Fatalf("expected Error.Description to carry the internal reason")
+			}
+		})
+	}
+}
+
+// TestBasicAuthPolicy_AllowUnauthenticatedIsNotAFault covers the deliberate non-rejection:
+// with allowUnauthenticated set, a caller with no credentials passes through. There is no
+// ImmediateResponse at all, so nothing can be a fault — asserting it keeps a future change
+// from turning a permitted anonymous request into a paged failure.
+func TestBasicAuthPolicy_AllowUnauthenticatedIsNotAFault(t *testing.T) {
+	p := &BasicAuthPolicy{}
+	ctx := newBasicRequestHeaderContext(nil)
+	params := defaultParams()
+	params["allowUnauthenticated"] = true
+
+	action := p.OnRequestHeaders(context.Background(), ctx, params)
+	if _, ok := action.(policy.ImmediateResponse); ok {
+		t.Fatalf("expected the request to pass through, got an ImmediateResponse")
+	}
+}

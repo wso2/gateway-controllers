@@ -30,6 +30,23 @@ import (
 	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
+// codeGuardrailIntervened is the specific code for what this guardrail checks —
+// how many WORDS the content had — so a caller can tell this rejection from another
+// guardrail's without parsing a message. The name is unchanged so every call site reads the
+// same; only the value moved.
+//
+// The tradeoff, stated because it is real: 906xxx sits OUTSIDE carbon's guardrail range
+// [900514, 900515), which is exactly one code wide. Carbon-compatible analytics assigns a
+// fault category by range membership, so this classifies as "other" rather than
+// "guardrail" there. Accepted deliberately: the code identifies the rejection, and the
+// class is already carried by FaultDetails.Type ("guardrail") and by
+// GuardrailDetails.InterveningGuardrail. See policy.GuardrailCodeIntervened for the full
+// reasoning, and use that generic code for a guardrail with nothing specific to say.
+const codeGuardrailIntervened = policy.GuardrailCodeWordCount
+
+// guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
+const guardrailName = "word-count-guardrail"
+
 const (
 	GuardrailErrorCode           = 422
 	TextCleanRegex               = "^\"|\"$"
@@ -338,6 +355,85 @@ func normalizeExtractedValue(value interface{}) (string, error) {
 	}
 }
 
+// buildGuardrailErrorResponse describes the intervention for the gateway: the code and
+// class that decide its analytics category, which side was refused, and the guardrail
+// envelope this policy already publishes in its response body.
+//
+// Direction is per phase, not per policy: a request-side hit and a response-side hit are
+// operationally different events that share a status code, and only this policy knows
+// which it made.
+func (p *WordCountGuardrailPolicy) buildGuardrailErrorResponse(reason string, validationError error, isResponse, showAssessment bool, min, max int) *policy.FaultDetails {
+	assessment := p.buildAssessmentObject(reason, validationError, isResponse, showAssessment, min, max)
+
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+
+	actionReason, _ := assessment["actionReason"].(string)
+
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// Assessments carries the content the guardrail existed to stop, so it is populated
+	// only where the operator already opted in through showAssessment — the same gate the
+	// published response envelope uses.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+
+	return &policy.FaultDetails{
+		Code:      codeGuardrailIntervened,
+		Type:      policy.FaultTypeGuardrail,
+		Direction: direction,
+		Message:   "Violation of applied word count constraints detected",
+		// reason is the detail of what was blocked. Description is withheld from the
+		// response body by every renderer and reaches fault policies only, which is why
+		// the detail belongs here rather than in Message.
+		Description: reason,
+		Guardrail:   guardrail,
+	}
+}
+
+// extractionFault describes a rejection made because the value at jsonPath could not be
+// read, so no check ran and there is no guardrail verdict to report. On a request the
+// payload is the caller's, so it is an invalid request body; on a response it is the
+// upstream's, and the policy could not do its job.
+func extractionFault(reason string, err error, isResponse bool) *policy.FaultDetails {
+	if isResponse {
+		return &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionResponse,
+			Message:     "The response body could not be read for the guardrail check",
+			Description: reason + ": " + err.Error(),
+		}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeInvalidRequestBody,
+		Type:        policy.FaultTypeValidation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The request body could not be read for the guardrail check",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// withFault replaces the fault an error response declares, leaving its status, headers
+// and body exactly as they are.
+func withFault(action interface{}, fault *policy.FaultDetails) interface{} {
+	switch a := action.(type) {
+	case policy.ImmediateResponse:
+		a.Fault = fault
+		return a
+	case policy.DownstreamResponseModifications:
+		a.Fault = fault
+		return a
+	}
+	return action
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *WordCountGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, min, max int) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -502,6 +598,8 @@ func (p *WordCountGuardrailPolicy) buildErrorResponse(reason string, validationE
 		bodyBytes = []byte(`{"type":"WORD_COUNT_GUARDRAIL","message":"Internal error"}`)
 	}
 
+	errorResponse := p.buildGuardrailErrorResponse(reason, validationError, isResponse, showAssessment, min, max)
+
 	if isResponse {
 		statusCode := GuardrailErrorCode
 		return policy.DownstreamResponseModifications{
@@ -511,6 +609,8 @@ func (p *WordCountGuardrailPolicy) buildErrorResponse(reason string, validationE
 			HeadersToSet: map[string]string{
 				"Content-Type": "application/json",
 			},
+			IsFault: true,
+			Fault:   errorResponse,
 		}
 	}
 
@@ -520,7 +620,9 @@ func (p *WordCountGuardrailPolicy) buildErrorResponse(reason string, validationE
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault:   errorResponse,
 	}
 }
 
@@ -563,7 +665,7 @@ func (p *WordCountGuardrailPolicy) validatePayload(payload []byte, params WordCo
 	extractedValue, err := extractStringFromJSONPath(payload, params.JsonPath)
 	if err != nil {
 		slog.Debug("WordCountGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, params.Min, params.Max)
+		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, params.Min, params.Max), extractionFault("Error extracting value from JSONPath", err, isResponse))
 	}
 
 	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")
@@ -706,17 +808,37 @@ func (p *WordCountGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, resp
 			if !rp.Invert {
 				if count < rp.Min {
 					reason := fmt.Sprintf("word count %d is below minimum of %d words", count, rp.Min)
-					return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+					return policy.TerminateResponseChunk{
+						Body: p.buildSSEErrorEvent(reason, rp),
+						// Ending the stream here is a failure, not a clean close. Nothing else can
+						// tell the two apart: the status was committed with the headers long before
+						// this chunk arrived.
+						IsFault: true,
+						Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+					}
 				}
 			} else if count >= rp.Min && count <= rp.Max {
 				reason := fmt.Sprintf("word count %d is within the excluded range %d-%d words", count, rp.Min, rp.Max)
-				return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+				return policy.TerminateResponseChunk{
+					Body: p.buildSSEErrorEvent(reason, rp),
+					// Ending the stream here is a failure, not a clean close. Nothing else can
+					// tell the two apart: the status was committed with the headers long before
+					// this chunk arrived.
+					IsFault: true,
+					Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+				}
 			}
 			return policy.ForwardResponseChunk{}
 		}
 		result := p.validatePayload([]byte(full), p.responseParams, true)
-		if mod, ok := result.(policy.DownstreamResponseModifications); ok && mod.StatusCode != nil {
-			return policy.TerminateResponseChunk{Body: mod.Body}
+		// Test the modification's own account of itself rather than inferring a rejection
+		// from a changed status; the status is not what says "this failed".
+		if mod, ok := result.(policy.DownstreamResponseModifications); ok && mod.IsFault {
+			return policy.TerminateResponseChunk{
+				Body:    mod.Body,
+				IsFault: true,
+				Fault:   mod.Fault,
+			}
 		}
 		return policy.ForwardResponseChunk{}
 	}
@@ -743,13 +865,27 @@ func (p *WordCountGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, resp
 			slog.Debug("WordCountGuardrail: max exceeded",
 				"count", count, "max", rp.Max, "chunkIndex", chunk.Index)
 			reason := fmt.Sprintf("word count %d exceeded maximum of %d words", count, rp.Max)
-			return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent(reason, rp),
+				// Ending the stream here is a failure, not a clean close. Nothing else can
+				// tell the two apart: the status was committed with the headers long before
+				// this chunk arrived.
+				IsFault: true,
+				Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+			}
 		}
 		if isDone && count < rp.Min {
 			slog.Debug("WordCountGuardrail: below min at stream end",
 				"count", count, "min", rp.Min, "chunkIndex", chunk.Index)
 			reason := fmt.Sprintf("word count %d is below minimum of %d words", count, rp.Min)
-			return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent(reason, rp),
+				// Ending the stream here is a failure, not a clean close. Nothing else can
+				// tell the two apart: the status was committed with the headers long before
+				// this chunk arrived.
+				IsFault: true,
+				Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+			}
 		}
 		return policy.ForwardResponseChunk{}
 	}
@@ -760,7 +896,14 @@ func (p *WordCountGuardrailPolicy) OnResponseBodyChunk(ctx context.Context, resp
 			slog.Debug("WordCountGuardrail: invert violation at stream end",
 				"count", count, "min", rp.Min, "max", rp.Max, "chunkIndex", chunk.Index)
 			reason := fmt.Sprintf("word count %d is within the excluded range %d-%d words", count, rp.Min, rp.Max)
-			return policy.TerminateResponseChunk{Body: p.buildSSEErrorEvent(reason, rp)}
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent(reason, rp),
+				// Ending the stream here is a failure, not a clean close. Nothing else can
+				// tell the two apart: the status was committed with the headers long before
+				// this chunk arrived.
+				IsFault: true,
+				Fault:   p.buildGuardrailErrorResponse(reason, nil, true, rp.ShowAssessment, rp.Min, rp.Max),
+			}
 		}
 	}
 	return policy.ForwardResponseChunk{}

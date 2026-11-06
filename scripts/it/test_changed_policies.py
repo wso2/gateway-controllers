@@ -36,7 +36,7 @@ def go_mod(name, *requires):
 class PureFunctionTests(unittest.TestCase):
     def test_parse_dependencies_ignores_the_module_line(self):
         text = go_mod("jwt-auth", "advanced-ratelimit") + f"\t{MODULE}foo/v2 v2.0.1\n"
-        self.assertEqual({"advanced-ratelimit", "foo"}, cp.parse_dependencies(text, "jwt-auth"))
+        self.assertEqual({"advanced-ratelimit", "foo/v2"}, cp.parse_dependencies(text, "jwt-auth"))
         self.assertEqual(set(), cp.parse_dependencies(go_mod("cors"), "cors"))
 
     def test_dependents_closure_is_transitive(self):
@@ -47,6 +47,12 @@ class PureFunctionTests(unittest.TestCase):
     def test_changed_policies_uses_first_directory_under_policies(self):
         files = ["policies/a/x.go", "policies/a/it/it-suite.yaml", "docs/b/v1.0/x.md", "policies/gone/x.go", "README.md"]
         self.assertEqual({"a"}, cp.changed_policies(files, {"a", "b"}))
+
+    def test_changed_policies_keeps_a_major_version_apart_from_v1(self):
+        existing = {"a", "a/v2", "b"}
+        self.assertEqual({"a/v2"}, cp.changed_policies(["policies/a/v2/it/it-suite.yaml"], existing))
+        self.assertEqual({"a"}, cp.changed_policies(["policies/a/it/it-suite.yaml", "policies/a/x.go"], existing))
+        self.assertEqual({"a", "a/v2"}, cp.changed_policies(["policies/a/x.go", "policies/a/v2/x.go"], existing))
 
     def test_only_infra_changed(self):
         self.assertTrue(cp.only_infra_changed([".github/workflows/it.yml", "scripts/it/changed-policies.py"]))
@@ -68,6 +74,9 @@ class SelectionTests(unittest.TestCase):
         write(self.root, "policies/dependent/go.mod", go_mod("dependent", "tests-a"))
         write(self.root, "policies/dependent/it/it-suite.yaml")
         write(self.root, "policies/notests/go.mod", go_mod("notests"))
+        write(self.root, "policies/tests-a/v2/go.mod", go_mod("tests-a/v2"))
+        write(self.root, "policies/tests-a/v2/policy-definition.yaml")
+        write(self.root, "policies/tests-a/v2/it/it-suite.yaml")
         write(self.root, "policies/time-based-model-routing/go.mod", go_mod("time-based-model-routing"))
         write(self.root, "policies/time-based-model-routing/it/it-suite.yaml")
         git(self.root, "add", "-A")
@@ -88,6 +97,25 @@ class SelectionTests(unittest.TestCase):
         selected, skipped, _ = cp.select(self.root, "base")
         self.assertEqual(["dependent", "tests-a"], selected)
         self.assertEqual([], skipped)
+
+    def test_a_v2_change_selects_only_the_v2_suite(self):
+        self.change("policies/tests-a/v2/a.go")
+        selected, _, _ = cp.select(self.root, "base")
+        self.assertEqual(["tests-a/v2"], selected)
+
+    def test_a_v_folder_without_a_policy_definition_belongs_to_the_policy_around_it(self):
+        write(self.root, "policies/tests-a/v3/notes.md")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "notes")
+        git(self.root, "tag", "-f", "base")
+        self.change("policies/tests-a/v3/notes.md")
+        selected, _, _ = cp.select(self.root, "base")
+        self.assertEqual(["dependent", "tests-a"], selected)
+        self.assertNotIn("tests-a/v3", cp.policy_names(self.root))
+
+    def test_requesting_a_v2_suite_by_id(self):
+        selected, _, _ = cp.select(self.root, None, ["tests-a/v2"])
+        self.assertEqual(["tests-a/v2"], selected)
 
     def test_policy_without_a_descriptor_is_reported_not_selected(self):
         self.change("policies/notests/a.go")
@@ -135,7 +163,7 @@ class SelectionTests(unittest.TestCase):
         self.change("docs/a.md")
         self.assertEqual(["tests-a"], cp.select(self.root, None, ["tests-a"])[0])
         self.assertEqual(
-            ["dependent", "tests-a", "time-based-model-routing"], cp.select(self.root, None, ["all"])[0]
+            ["dependent", "tests-a", "tests-a/v2", "time-based-model-routing"], cp.select(self.root, None, ["all"])[0]
         )
         with self.assertRaises(SystemExit):
             cp.select(self.root, None, ["missing"])

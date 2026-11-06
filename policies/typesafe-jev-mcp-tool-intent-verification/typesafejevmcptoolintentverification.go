@@ -267,7 +267,8 @@ type toolCallStateTool struct {
 // run, so a body the server might read differently is refused rather than passed.
 func parseToolCall(body []byte, headers *policy.Headers) (*toolCallRequest, *policy.ImmediateResponse) {
 	reject := func(code int, message string, id json.RawMessage) (*toolCallRequest, *policy.ImmediateResponse) {
-		resp := buildRequestErrorResponse(headers, statusBlocked, code, message, id, nil)
+		resp := buildRequestErrorResponse(headers, statusBlocked, code, message, id, nil,
+			&policy.FaultDetails{Code: policy.FaultCodeInvalidRequestBody, Type: policy.FaultTypeValidation})
 		return nil, &resp
 	}
 
@@ -366,8 +367,14 @@ func (p *TypesafeJevMcpToolIntentVerificationPolicy) screen(ctx context.Context,
 		}
 		slog.Debug("TypesafeJevMcpToolIntentVerification: check failed, failing closed",
 			"reason", reason, "error", err, "tool", call.Name)
+		// Not a verdict: the gateway could not reach Jev, or Jev answered malformed.
 		return buildRequestErrorResponse(headers, statusCheckUnavailable, jsonRpcErrCodeInternal,
-			"MCP tool call could not be checked by guardrail", call.ID, nil)
+			"MCP tool call could not be checked by guardrail", call.ID, nil,
+			&policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeMediation,
+				Description: reason + ": " + err.Error(),
+			})
 	}
 
 	state := toolCallState{
@@ -431,11 +438,37 @@ func (p *TypesafeJevMcpToolIntentVerificationPolicy) screen(ctx context.Context,
 		}
 	}
 	resp := buildRequestErrorResponse(headers, statusBlocked, jsonRpcErrCodeBlocked,
-		"MCP tool call blocked by guardrail", call.ID, data)
+		"MCP tool call blocked by guardrail", call.ID, data, guardrailFault(call.Name, failed, data))
 	for k, v := range guardrailHitAnalytics() {
 		resp.AnalyticsMetadata[k] = v
 	}
 	return resp
+}
+
+// guardrailFault describes a blocked call. The questions are operator-defined,
+// so the verdict has no more specific code than the generic guardrail one.
+// The assessments are carried only where showAssessment put them in the body.
+func guardrailFault(tool string, failed []map[string]interface{}, data map[string]interface{}) *policy.FaultDetails {
+	questions := make([]string, 0, len(failed))
+	for _, f := range failed {
+		if key, ok := f["question"].(string); ok {
+			questions = append(questions, key)
+		}
+	}
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         "MCP tool call blocked by guardrail",
+	}
+	if data != nil {
+		guardrail.Assessments = map[string]any{"assessments": data["assessments"]}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.GuardrailCodeIntervened,
+		Type:        policy.FaultTypeGuardrail,
+		Description: "tool " + tool + " failed questions: " + strings.Join(questions, ", "),
+		Guardrail:   guardrail,
+	}
 }
 
 func guardrailHitAnalytics() map[string]interface{} {
@@ -595,8 +628,10 @@ func eventStreamData(body []byte) (data []byte, events int) {
 }
 
 // buildRequestErrorResponse builds a JSON-RPC error response, framed as SSE when
-// the request was, and echoing the request id and MCP session id.
-func buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcCode int, message string, requestID json.RawMessage, data map[string]interface{}) policy.ImmediateResponse {
+// the request was, and echoing the request id and MCP session id. fault gives the
+// code, type and any detail of the rejection; the request direction, the client
+// message and the JSON-RPC code and id are filled in here from what the body says.
+func buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcCode int, message string, requestID json.RawMessage, data map[string]interface{}, fault *policy.FaultDetails) policy.ImmediateResponse {
 	errObj := map[string]interface{}{
 		"code":    jsonRpcCode,
 		"message": message,
@@ -627,11 +662,21 @@ func buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcC
 		respHeaders[mcpSessionHeader] = sessionID
 	}
 
+	fault.Direction = policy.DirectionRequest
+	fault.Message = message
+	var faultID any
+	if len(requestID) > 0 {
+		faultID = requestID
+	}
+	fault.JSONRPC = &policy.JSONRPCError{Code: &jsonRpcCode, ID: faultID}
+
 	return policy.ImmediateResponse{
 		StatusCode:        statusCode,
 		Headers:           respHeaders,
 		Body:              body,
 		AnalyticsMetadata: map[string]interface{}{"mcpErrorCode": jsonRpcCode},
+		IsFault:           true,
+		Fault:             fault,
 	}
 }
 

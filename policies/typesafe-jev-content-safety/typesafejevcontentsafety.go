@@ -95,6 +95,10 @@ const (
 	metaKeyAssessmentsPrefix   = "typesafe-jev-content-safety:assessments:"
 	metaKeyUsagePrefix         = "typesafe-jev-content-safety:usage:"
 	metaKeyLowConfidencePrefix = "typesafe-jev-content-safety:low-confidence:"
+
+	// reasonExtractionFailed is the actionReason when the text to screen could
+	// not be read from the body at the configured path.
+	reasonExtractionFailed = "Error extracting value from JSONPath"
 )
 
 // guardrailQuestion is one entry in a configured question battery. Criteria
@@ -298,7 +302,7 @@ func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *pol
 		}
 		slog.Debug("TypesafeJevContentSafety: check failed, failing closed",
 			"reason", reason, "error", err, "phase", phase)
-		return p.buildErrorResponse(reason, nil, isResponse, params.ShowAssessment)
+		return p.buildErrorResponse(reason, nil, isResponse, params.ShowAssessment, err)
 	}
 
 	if len(params.Questions) == 0 {
@@ -312,7 +316,7 @@ func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *pol
 
 	extractedValue, err := extractText(payload, params, isResponse)
 	if err != nil {
-		return failure("Error extracting value from JSONPath", err)
+		return failure(reasonExtractionFailed, err)
 	}
 	extractedValue = strings.TrimSpace(extractedValue)
 	if extractedValue == "" {
@@ -375,7 +379,7 @@ func (p *TypesafeJevContentSafetyPolicy) screen(ctx context.Context, shared *pol
 	}
 
 	slog.Debug("TypesafeJevContentSafety: violation detected", "failedQuestions", failed, "phase", phase)
-	return p.buildErrorResponse("Request failed one or more Jev content safety checks", failed, isResponse, params.ShowAssessment)
+	return p.buildErrorResponse("Request failed one or more Jev content safety checks", failed, isResponse, params.ShowAssessment, nil)
 }
 
 // evaluateAnswer decodes one question's answer and returns its assessment
@@ -439,7 +443,9 @@ func evaluateAnswer(q guardrailQuestion, raw json.RawMessage) (assessment map[st
 	return assessment, true, nil
 }
 
-func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, failed []map[string]interface{}, isResponse bool, showAssessment bool) interface{} {
+// buildErrorResponse builds the rejection for a violation (failed set) or for a
+// check that could not run and failed closed (failed nil, checkErr the cause).
+func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, failed []map[string]interface{}, isResponse bool, showAssessment bool, checkErr error) interface{} {
 	assessment := map[string]interface{}{
 		"action":               "GUARDRAIL_INTERVENED",
 		"interveningGuardrail": guardrailName,
@@ -474,6 +480,7 @@ func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, faile
 		bodyBytes = []byte(`{"type":"TYPESAFE_JEV_CONTENT_SAFETY","message":"Internal error"}`)
 	}
 
+	fault := buildFault(reason, failed, isResponse, assessment, checkErr)
 	if isResponse {
 		statusCode := GuardrailErrorCode
 		return policy.DownstreamResponseModifications{
@@ -481,6 +488,8 @@ func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, faile
 			Body:              bodyBytes,
 			AnalyticsMetadata: analyticsMetadata,
 			HeadersToSet:      map[string]string{"Content-Type": "application/json"},
+			IsFault:           true,
+			Fault:             fault,
 		}
 	}
 	return policy.ImmediateResponse{
@@ -488,6 +497,67 @@ func (p *TypesafeJevContentSafetyPolicy) buildErrorResponse(reason string, faile
 		Body:              bodyBytes,
 		AnalyticsMetadata: analyticsMetadata,
 		Headers:           map[string]string{"Content-Type": "application/json"},
+		IsFault:           true,
+		Fault:             fault,
+	}
+}
+
+// buildFault describes a rejection for the gateway. A violation is a guardrail
+// fault. A check that could not run is the gateway's own failure, not a
+// verdict: Jev unreachable or answering malformed is an upstream failure, and
+// a body the configured path cannot be read from is the caller's invalid
+// request (or, on the response, a mediation failure).
+func buildFault(reason string, failed []map[string]interface{}, isResponse bool, assessment map[string]interface{}, checkErr error) *policy.FaultDetails {
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+	actionReason, _ := assessment["actionReason"].(string)
+
+	if failed == nil {
+		fault := &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: direction,
+			// reason already reaches the client as actionReason, so it is client-safe.
+			Message: reason,
+		}
+		if checkErr != nil {
+			fault.Description = checkErr.Error()
+		}
+		if reason == reasonExtractionFailed {
+			fault.Type = policy.FaultTypeMediation
+			if !isResponse {
+				fault.Code = policy.FaultCodeInvalidRequestBody
+				fault.Type = policy.FaultTypeValidation
+			}
+		}
+		return fault
+	}
+
+	questions := make([]string, 0, len(failed))
+	for _, f := range failed {
+		if key, ok := f["question"].(string); ok {
+			questions = append(questions, key)
+		}
+	}
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// The assessments can describe the blocked content, so they are carried only
+	// where the operator opted in through showAssessment, as in the body.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.GuardrailCodeUnsafeContent,
+		Type:        policy.FaultTypeGuardrail,
+		Direction:   direction,
+		Message:     actionReason,
+		Description: "failed questions: " + strings.Join(questions, ", "),
+		Guardrail:   guardrail,
 	}
 }
 

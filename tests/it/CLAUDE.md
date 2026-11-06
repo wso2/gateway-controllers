@@ -9,31 +9,41 @@ tests needs only that policy's folder and the shared code in `tests/it/common`.
 
 | What | Where |
 | --- | --- |
-| A policy's suite: the gateway it boots, its databases, its runners | `policies/<name>/it/it-suite.yaml` |
+| A policy's suite: its databases and its runners | `policies/<name>/it/it-suite.yaml` |
 | A policy's scenarios | `policies/<name>/it/features/*.feature` |
 | Steps only that policy needs | `policies/<name>/it/steps/` |
 | The policy suite's Go module and test entry | `policies/<name>/it/go.mod`, `policies/<name>/it/suite_test.go` |
+| The framework version every suite runs on | `tests/it/go.mod` |
+| The Go workspace that applies it to every suite, generated and not committed | `tests/it/it.work`, from `scripts/it/generate-workspace.py` |
 | Templates only that policy needs | `policies/<name>/it/resources/templates/` |
 | Steps every policy shares | `tests/it/common/steps/` |
 | Canonical resource templates every policy shares | `tests/it/common/resources/templates/` |
 | The code that runs a policy's suite on the shared steps | `tests/it/common/suite/` |
+| The code that builds the gateway the suites boot | `tests/it/common/gateway/`, `tests/it/cmd/build-gateway/` |
+| The code that runs the blocks of the selected suites, several at a time | `tests/it/common/runsuites/`, `tests/it/cmd/run-suites/` |
 | Selecting the policies a pull request runs | `scripts/it/changed-policies.py` |
+| The run summary of the time each suite took | `scripts/it/render-timeline.py` |
 | The pull request workflow | `.github/workflows/it.yml` |
 
-A suite has one block, named for the policy. The gateway is built from the policy under test and
-the policies the gateway controller itself requires to create LLM providers and proxies
-(`api-key-auth`, `host-rewrite`, `oauth2-generator`, `respond` and `set-headers`), not from the
-whole catalog: the suite file's `addPoliciesFrom: policies` names a temporary workspace that
-`tests/it/common/suite` fills with copies of those policy folders (without their `it/`). A policy
-whose scenarios use further policies lists them in its `suite_test.go`:
+A suite has one block, named for the policy. It names no policy tree: the gateway it boots is not
+built by the suite. `make it` builds the gateway once per gateway version
+(`tests/it/cmd/build-gateway`), from every policy of the repository on the base images of that
+version, and every selected suite boots that build. It hands the build to the suites through the
+framework's `IT_IMAGE_GATEWAY_CONTROLLER` and `IT_IMAGE_GATEWAY_RUNTIME`, as images tagged with the
+version (`local/apip-it-gateway-controller:<version>`). A suite run directly with `go test`, without
+those variables, builds a gateway of its own from the policy under test and the policies the gateway
+controller itself requires to create LLM providers and proxies (`api-key-auth`, `host-rewrite`,
+`oauth2-generator`, `respond` and `set-headers`). A policy whose scenarios use further policies
+lists them in its `suite_test.go` for that run:
 `suite.Config{Register: steps.Register, Companions: []string{"<other policy>"}}`. A policy's `it/`
 folder is a Go module of its own, `github.com/wso2/gateway-controllers/policies/<name>/it`, so its
 test dependencies never reach the policy's own `go.mod`, and the gateway build and the policy's
 release both leave `it/` out.
 
 The engine that boots the containers (topology, components, the runner, the testbench) is the test
-framework, a Go module published by api-platform and pinned in each suite's `go.mod`
-(`github.com/wso2/api-platform/tests/framework`). The step definitions and the canonical templates
+framework, a Go module published by api-platform (`github.com/wso2/api-platform/tests/framework`).
+One version of it serves every suite, and `tests/it/go.mod` is the only place that names it. The
+step definitions and the canonical templates
 are not imported from it. `tests/it/common` holds copies of the framework's Platform Gateway
 steps, trimmed to what a gateway policy needs (no Platform API, API portal or AI workspace steps),
 so a policy developer never reads or changes api-platform. They are owned here and changed here.
@@ -52,20 +62,36 @@ export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0
 ```
 
-`make it` runs the suite of each named policy in turn and fails if any of them fails. To run one
-suite directly, from its folder:
+`make it` builds the gateway once, then runs every block of the named policies' suites against it,
+`BLOCK_PARALLEL` blocks at a time across all the suites, and fails if any block fails. Each block
+runs in a process of its own and its output streams with the block's name in front of every line.
+To run one suite directly, from its folder (it builds its own gateway), generate the Go workspace
+and select it first. The suite's `go.mod` does not name the framework, and the workspace is what
+resolves it:
 
 ```bash
+make it-workspace
+export GOWORK=$(git rev-parse --show-toplevel)/tests/it/it.work
 cd policies/time-based-model-routing/it
 go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args -gateway-version=1.2.0
 ```
+
+Without `GOWORK`, Go reports `updates to go.mod needed`. The make targets (`it`, `it-unit`,
+`it-standards`) generate the workspace and set `GOWORK` for you, and so does the workflow. The
+workspace file lists `tests/it` and every `policies/*/it` that has a `go.mod`, so a new suite needs
+no edit to it; it is generated and not committed (nor is its checksum file `it.work.sum`). It is not
+named `go.work` on purpose: a `go.work` at the root would make `go test` fail in every policy's own
+module, which the workspace does not list. Run `make it-workspace` again after adding a suite.
 
 | Variable | Meaning |
 | --- | --- |
 | `POLICIES` | Comma-separated policies. Defaults to every policy that has an `it/it-suite.yaml`. |
 | `GATEWAY_VERSION` | `1.2.0`, `1.1.0` or `latest`. Default `1.2.0`. |
 | `GATEWAY_HOST` | Image repository prefix for the gateway controller, runtime and builder images when they are not under `ghcr.io/wso2/api-platform`. The 1.1.0 images are patched, because the stock 1.1.0 builder cannot build policies that need a newer Go, so 1.1.0 runs use `docker.io/isurangaws`, which publishes all three. |
+| `GATEWAY_POLICIES` | Comma-separated policies to build into the shared gateway. Defaults to every policy of the repository. |
 | `DB` | Limit the run to `sqlite`, `postgres` or `sqlserver`. All three run by default. |
+| `BLOCK_PARALLEL` | How many blocks run at the same time across all selected suites; a block starts as soon as another ends. Each block boots its own gateway, testbench and database, so size it to the machine. Default `12`, at least `1`. `make it` ignores the `parallel` of the suite files; a suite run directly with `go test` still uses it. |
+| `IT_TIMELINE` | A file path. When set, the run writes how long each block took, when it started, which lane ran it, and the machine's CPU and RAM during the run, to that file as JSON. The workflow sets it and renders it into the run summary. |
 
 - `latest` is the gateway built from api-platform `main`; it can change between two runs, and its
   `main-<sha>` tag identifies what a run used. It is pulled again on every run.
@@ -74,6 +100,24 @@ go test . -count=1 -timeout=40m -v -run TestIntegrationSuite -args -gateway-vers
 - Other targets: `make it-standards` checks the shared steps and each policy's steps, features and
   suite file against the framework standards; `make it-unit` runs the unit tests of the shared
   steps and of each policy's own steps. Both take `POLICIES` too.
+
+## How long the suites took
+
+`BLOCK_PARALLEL` is a number of lanes. Each lane runs one block at a time and takes the next waiting
+block when it ends the last one. Every workflow leg, one per gateway version, adds an "Integration
+suites on gateway <version>: execution map" section to its run summary. It draws every lane with the
+blocks the lane ran, in order, each with its name (and so its policy), its time, its start and end
+counted from the start of the run, and the machine's CPU and RAM while it ran. A lane ends with its
+completion time, its busy time and its CPU and RAM, and the diagram ends with the completion time of
+the whole run and its CPU and RAM. CPU and RAM are those of the whole machine, sampled every 5 seconds
+on Linux; the lanes share the machine, so each cannot be measured alone, and a local run on another
+system shows no CPU or RAM. Below the diagram are a table of the machine's load, a table of the lanes
+and, collapsed, a table of every policy's suite: wall time from its first block's start to its last
+block's end, the added-up time of its blocks, its slowest block and the time to compile it. The same
+data is the `it-timeline-<version>.json` file in the leg's test output artifact, next to
+`resource-usage-<version>.log`, which samples the runner's memory and load.
+To get the summary for a local run, `make it ... IT_TIMELINE=/tmp/timeline.json`, then
+`python3 scripts/it/render-timeline.py --input /tmp/timeline.json`.
 
 ## Add tests to a policy that has none
 
@@ -85,13 +129,14 @@ A policy without `it/it-suite.yaml` has no integration tests, and the pull reque
    make it-scaffold POLICY=<name>
    ```
 
-   It creates the whole suite in `policies/<name>/it/` and runs `go mod tidy` there, and it
+   It creates the whole suite in `policies/<name>/it/`, runs `go mod tidy` there and leaves the
+   framework out of the suite's `go.mod`. The Go workspace picks the new suite up by itself. It
    refuses to overwrite anything:
 
    | File | Purpose |
    | --- | --- |
    | `it-suite.yaml` | the suite: gateway built from this policy, database matrix, one runner |
-   | `go.mod`, `go.sum` | the suite's Go module |
+   | `go.mod`, `go.sum` | the suite's Go module, without the framework (`tests/it/go.mod` pins it) |
    | `suite_test.go` | the test entry; it hands the suite to `tests/it/common/suite` |
    | `steps/register.go` | binds the policy's own steps |
    | `steps/<name>_steps.go` | the policy's own step definitions, with one example to replace |
@@ -106,8 +151,8 @@ A policy without `it/it-suite.yaml` has no integration tests, and the pull reque
    send the requests that show the policy's effect, and assert them.
 4. Run `make it POLICIES=<name> GATEWAY_VERSION=1.2.0`, then the same for `1.1.0` and `latest`, then
    `make it-standards POLICIES=<name>`.
-5. Commit the `it/` folder with the policy change. A pull request that changes any file in the
-   policy's folder now runs these tests on all three gateway versions.
+5. Commit the `it/` folder with the policy change. The pull request then runs these tests, with
+   every other suite, on all three gateway versions.
 
 ## Write the scenarios
 
@@ -159,26 +204,51 @@ steps does not reach it by itself, so port it when a policy needs it.
 
 ## What a pull request runs
 
-`scripts/it/changed-policies.py` selects every policy whose folder has a changed file, plus the
-policies that depend on one of them through a `go.mod` require, limited to policies that have an
-`it/it-suite.yaml`. A change to the workflow, these scripts, `tests/it` or the Makefile runs the
-smoke policy instead. One workflow run executes the suite of every selected policy on gateway
-1.2.0, 1.1.0 and latest, each on all three databases (SQL Server only from 1.2.0). The standards
-check runs on the shared steps and on the selected policies' steps, features and suite files. A
-manual run takes `policies` (comma-separated, or `all`).
+A pull request to `main` that touches `policies/`, `tests/it`, `scripts/it`, the Makefile or the
+workflow runs the suite of every policy that has an `it/it-suite.yaml`, whichever files it changes.
+A policy can import another one through its `go.mod`, use another one beside it in its scenarios,
+or rely on the policies the gateway controller requires. A change to any of them can break its
+tests, so they all run.
+
+One workflow run builds the gateway once for each of gateway 1.2.0, 1.1.0 and latest and executes
+every suite on it, each on all three databases (SQL Server only from 1.2.0). The standards check
+runs on the shared steps and on every policy's steps, features and suite file.
+
+The workflow selects them with `scripts/it/changed-policies.py --policies all`. A manual run takes
+`policies` (comma-separated, or `all`) and passes it to the same script. The script rejects an
+unknown policy and skips a policy that has no `it/it-suite.yaml`.
 
 ## The framework dependency
 
-- Every suite's `go.mod` pins the framework version, and `tests/it/go.mod` pins it for the shared
-  steps. Update them together: `go get github.com/wso2/api-platform/tests/framework@vX.Y.Z` and
-  `go mod tidy` in `tests/it` and in each `policies/<name>/it`, then run the suites. The testbench
-  image, `ghcr.io/wso2/api-platform/testbench:<version>`, follows the version the suite's `go.mod`
-  pins: `tests/it/common/suite` sets it, and it is pulled on the first run. When the image cannot
-  be pulled, build it from the pinned module's source, as the workflow's "Provide the testbench
-  image" step does:
+- The framework version is written once, in `tests/it/go.mod`, and every suite runs on it. The
+  suites' own `go.mod` files do not name the framework: the Go workspace `tests/it/it.work`, which
+  `make it-workspace` generates, joins `tests/it` and every `policies/<name>/it` module, so Go
+  resolves the framework for a suite from `tests/it/go.mod`. To move every suite to another release, run
+  `go get github.com/wso2/api-platform/tests/framework@vX.Y.Z` and `go mod tidy` in `tests/it`
+  (nowhere else), then run the suites. The testbench image,
+  `ghcr.io/wso2/api-platform/testbench:<version>`, follows that version: `tests/it/common/suite`
+  asks Go for the version the workspace resolves and sets it, and the image is pulled on the first
+  run. When the image cannot be pulled, build it from the pinned module's source, as the workflow's
+  "Provide the testbench image" step does:
   `dir=$(cd tests/it && go list -m -f '{{.Dir}}' github.com/wso2/api-platform/tests/framework)`
   then `docker build -f "$dir/testbench/Dockerfile" -t ghcr.io/wso2/api-platform/testbench:<version> "$dir"`.
   Set `APIP_IT_IMAGE_TESTBENCH` to use any other image.
+- A change to the testbench does not need a new framework release. api-platform's "Tests Framework
+  Release" workflow has a `rebuild-testbench` mode that rebuilds the image of the latest release with
+  the current testbench code and pushes it under the same version tag, without a new git tag, so the
+  `go.mod` keeps resolving the same version and needs no change. A new framework release is rare
+  and is the only reason to move the pinned version.
+- Only the latest release is rebuilt, so keep the suites on the latest framework release: on an
+  older version the suites keep that version's image as it was.
+- A rebuild moves the tag. An image already on your machine is not replaced by itself, so
+  `docker pull ghcr.io/wso2/api-platform/testbench:<version>` to pick up a rebuild. The image built
+  from the module source, as above, has the testbench of the release, not of a later rebuild.
+- Keep the framework out of the suites' `go.mod` files. `go mod tidy` run inside a policy's `it`
+  folder, outside the workspace, puts the line back, and it can then disagree with
+  `tests/it/go.mod`; `make it-standards` runs `scripts/it/check-framework-pin.py`, which fails on
+  it. Do not add a `replace` of the framework to a committed `go.mod`; to try a local checkout,
+  copy `tests/it/it.work`, add the `replace` to the copy, point `GOWORK` at the copy and run `go test`
+  yourself (the make targets always use the generated file).
 
 ## Troubleshooting
 
@@ -186,6 +256,13 @@ manual run takes `policies` (comma-separated, or `all`).
   the testbench image could not be pulled, so no block booted. Build it as described under "The
   framework dependency", and check the tag in the message against the framework version in
   `go.mod`.
+- A scenario that needs a recent testbench behaviour fails on your machine but passes in CI: your
+  local testbench image is older than the rebuilt one. `docker pull` it again, as described under
+  "The framework dependency".
+- `updates to go.mod needed` or `no required module provides package ...tests/framework/...` in a
+  suite's folder: Go ran outside the workspace, or the workspace file is missing or stale.
+  `make it-workspace` and `export GOWORK=<repo>/tests/it/it.work`, as in "Run the tests", or use
+  `make it`.
 - `failed to connect to the docker API` or `rootless Docker not found`: Docker is not running, or
   `DOCKER_HOST` and `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` are not set for Rancher Desktop or
   Colima.

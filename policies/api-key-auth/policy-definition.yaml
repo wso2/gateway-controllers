@@ -1,5 +1,5 @@
 name: api-key-auth
-version: v1.2.1
+version: v1.3.0
 description: |
   Secures APIs by validating API keys in incoming requests. API keys are
   provided through a configured HTTP header.

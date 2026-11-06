@@ -337,6 +337,14 @@ func (p *RequestRewritePolicy) OnRequestHeaders(ctx context.Context, reqCtx *pol
 			StatusCode: 500,
 			Headers:    map[string]string{"content-type": "application/json"},
 			Body:       body,
+			IsFault:    true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeConfiguration,
+				Direction:   policy.DirectionRequest,
+				Message:     "Configuration Error",
+				Description: err.Error(),
+			},
 		}
 	}
 	return policy.UpstreamRequestHeaderModifications{

@@ -97,7 +97,8 @@ func translateSuccessResponse(respBody []byte, requestModel string) policy.Respo
 	openAIResp := buildOpenAIChatCompletion(&msg, responseModel)
 	newBody, err := json.Marshal(openAIResp)
 	if err != nil {
-		return errResponse(500, "failed to translate Anthropic response: "+err.Error())
+		return errResponse(500, "failed to translate Anthropic response: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 
 	return policy.DownstreamResponseModifications{
@@ -129,7 +130,8 @@ func translateErrorResponse(respBody []byte, status int) policy.ResponseAction {
 
 	newBody, err := json.Marshal(openaiErr)
 	if err != nil {
-		return errResponse(500, "failed to translate Anthropic error: "+err.Error())
+		return errResponse(500, "failed to translate Anthropic error: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 
 	return policy.DownstreamResponseModifications{

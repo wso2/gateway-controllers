@@ -205,10 +205,23 @@ func (p *McpToolSchemaValidatorPolicy) resultError(
 	status := http.StatusOK
 	meta := analytics(rule.Name, directionResponse, resultFail, reason, len(errs))
 	meta["mcpErrorCode"] = codeInvalidToolResult
+	code := codeInvalidToolResult
 	return policy.DownstreamResponseModifications{
 		Body:              frame(errorEnvelope(requestID, codeInvalidToolResult, messageResultInvalid, data)),
 		StatusCode:        &status,
 		AnalyticsMetadata: meta,
+		// A failure despite the 200: the client receives an error instead of the tool's result.
+		// The upstream returned the bad result, so this is the policy unable to deliver one,
+		// not a caller error.
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeValidation,
+			Direction:   policy.DirectionResponse,
+			Message:     messageResultInvalid,
+			Description: faultDescription(rule.Name, "result", reason, len(errs)),
+			JSONRPC:     &policy.JSONRPCError{Code: &code, ID: jsonRPCID(requestID)},
+		},
 	}
 }
 

@@ -495,7 +495,8 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 	requestPayload, requestEvents, requestEventIndex, err := parseRequestPayload(reqCtx.Body.Content, isEventStream(ds))
 	if err != nil {
 		slog.Debug("MCP Rewrite Policy: Failed to parse MCP request", "error", err, "path", dsReq.Path)
-		return p.buildRequestErrorResponse(ds, 400, -32700, "Invalid JSON", nil)
+		return p.buildRequestErrorResponse(ds, 400, -32700, "Invalid JSON", nil,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	}
 
 	requestID := requestPayload["id"]
@@ -505,7 +506,8 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 	if mismatch := mirroredMethodMismatch(ds, method); mismatch != "" {
 		slog.Debug("MCP Rewrite Policy: Refusing a request whose mirrored method cannot be trusted",
 			"bodyMethod", method, "requestID", requestID, "reason", mismatch)
-		return p.buildRequestErrorResponse(ds, 400, -32020, mismatch, requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32020, mismatch, requestID,
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
 	}
 
 	capabilityType, action, ok := parseMcpMethod(method)
@@ -531,7 +533,8 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 	paramsRaw, ok := requestPayload["params"].(map[string]any)
 	if !ok {
 		slog.Debug("MCP Rewrite Policy: Invalid request params", "capabilityType", capabilityType, "requestID", requestID, "error", "params not a map")
-		return p.buildRequestErrorResponse(ds, 400, -32602, "Invalid MCP request params", requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32602, "Invalid MCP request params", requestID,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	}
 
 	paramKey := getParamKey(capabilityType)
@@ -542,12 +545,14 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 	if mismatch := mirroredNameMismatch(ds, capabilityName); mismatch != "" {
 		slog.Debug("MCP Rewrite Policy: Refusing a request whose mirrored name cannot be trusted",
 			"capabilityType", capabilityType, "capabilityName", capabilityName, "requestID", requestID, "reason", mismatch)
-		return p.buildRequestErrorResponse(ds, 400, -32020, mismatch, requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32020, mismatch, requestID,
+			policy.FaultCodeInvalidRequestHeader, policy.FaultTypeValidation)
 	}
 
 	if strings.TrimSpace(capabilityName) == "" {
 		slog.Debug("MCP Rewrite Policy: Missing capability name", "capabilityType", capabilityType, "requestID", requestID, "paramKey", paramKey)
-		return p.buildRequestErrorResponse(ds, 400, -32602, fmt.Sprintf("Missing MCP %s name", capabilityType), requestID)
+		return p.buildRequestErrorResponse(ds, 400, -32602, fmt.Sprintf("Missing MCP %s name", capabilityType), requestID,
+			policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 	}
 
 	entry, exists := config.Lookup[capabilityName]
@@ -559,6 +564,8 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 			-32602,
 			fmt.Sprintf("MCP %s '%s' is not allowed", capabilityType, capabilityName),
 			requestID,
+			policy.FaultCodeAuthForbidden,
+			policy.FaultTypeAuthorization,
 		)
 	}
 
@@ -569,7 +576,8 @@ func (p *McpRewritePolicy) processRequestBody(reqCtx *policy.RequestContext) pol
 		updatedPayload, err := json.Marshal(requestPayload)
 		if err != nil {
 			slog.Debug("MCP Rewrite Policy: Failed to marshal updated request", "capabilityType", capabilityType, "capabilityName", capabilityName, "requestID", requestID, "error", err)
-			return p.buildRequestErrorResponse(ds, 500, -32603, "Failed to update MCP request", requestID)
+			return p.buildRequestErrorResponse(ds, 500, -32603, "Failed to update MCP request", requestID,
+				policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 		}
 
 		if len(requestEvents) > 0 && requestEventIndex >= 0 {
@@ -616,7 +624,8 @@ func (p *McpRewritePolicy) handleUnusableBody(headers *policy.Headers, reason st
 		// The one this policy cannot detect itself — its map[string]any is case-sensitive.
 		message = "Ambiguous MCP request: body names a member more than once"
 	}
-	return p.buildRequestErrorResponse(headers, 400, code, message, nil)
+	return p.buildRequestErrorResponse(headers, 400, code, message, nil,
+		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
 }
 
 // isModernRequest reports whether the request declares a revision that mirrors the operation into
@@ -677,6 +686,39 @@ func mirroredNameMismatch(headers *policy.Headers, capabilityName string) string
 	return ""
 }
 
+// buildJsonRpcErrorBody renders the JSON-RPC error envelope this policy has always sent,
+// SSE-framed when the caller posted an event stream. The content type is returned alongside
+// it so the two cannot drift apart.
+//
+// This is the fallback body, not the gateway's rendering — see buildRequestErrorResponse.
+// It stays byte-for-byte what the policy sent before the fault contract existed, so
+// upgrading the policy on its own changes nothing a client receives.
+func buildJsonRpcErrorBody(jsonRpcCode int, reason string, requestID any, sse bool) ([]byte, string) {
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      requestID,
+		"error": map[string]any{
+			"code":    jsonRpcCode,
+			"message": reason,
+		},
+	})
+	if err != nil {
+		// requestID reached here from the caller's own payload, so a value that will not
+		// marshal is possible; null is the JSON-RPC answer for an unrecoverable id.
+		slog.Debug("MCP Rewrite Policy: Failed to marshal error response", "error", err)
+		idBytes, idErr := json.Marshal(requestID)
+		if idErr != nil {
+			idBytes = []byte("null")
+		}
+		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Unexpected error"}}`, string(idBytes))
+	}
+
+	if sse {
+		return buildEventStream([]sseEvent{{data: string(body)}}), "text/event-stream"
+	}
+	return body, "application/json"
+}
+
 // isEventStream reports whether v1alpha2 headers indicate an SSE payload.
 func isEventStream(headers *policy.Headers) bool {
 	if headers == nil {
@@ -710,52 +752,30 @@ func getSessionID(headers *policy.Headers) string {
 }
 
 // buildRequestErrorResponse builds a v1alpha2 error response for a request.
-func (p *McpRewritePolicy) buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcCode int, reason string, requestID any) policy.RequestAction {
-	sessionID := getSessionID(headers)
-	if isEventStream(headers) {
-		return p.buildEventStreamErrorResponse(statusCode, jsonRpcCode, reason, requestID, sessionID)
-	}
-	return p.buildErrorResponse(statusCode, jsonRpcCode, reason, requestID, sessionID)
-}
+func (p *McpRewritePolicy) buildRequestErrorResponse(headers *policy.Headers, statusCode int, jsonRpcCode int, reason string, requestID any, code, errorType string) policy.RequestAction {
+	body, contentType := buildJsonRpcErrorBody(jsonRpcCode, reason, requestID, isEventStream(headers))
 
-// buildEventStreamErrorResponse builds a v1alpha2 SSE error response.
-func (p *McpRewritePolicy) buildEventStreamErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.RequestAction {
-	responseBody := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      requestID,
-		"error": map[string]any{
-			"code":    jsonRpcCode,
-			"message": reason,
-		},
-	}
-	analyticsMetadata := map[string]any{
-		"mcpErrorCode": jsonRpcCode,
-	}
-	body, err := json.Marshal(responseBody)
-	if err != nil {
-		slog.Debug("MCP Rewrite Policy: Failed to marshal event-stream error response", "error", err)
-		idBytes, idErr := json.Marshal(requestID)
-		if idErr != nil {
-			idBytes = []byte("null")
-		}
-		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Unexpected error"}}`, string(idBytes))
-	}
-
-	event := sseEvent{data: string(body)}
-	streamBody := buildEventStream([]sseEvent{event})
-
-	headers := map[string]string{
-		"Content-Type": "text/event-stream",
-	}
-	if sessionID != "" {
-		headers[mcpSessionHeader] = sessionID
+	responseHeaders := map[string]string{"Content-Type": contentType}
+	if sessionID := getSessionID(headers); sessionID != "" {
+		responseHeaders[mcpSessionHeader] = sessionID
 	}
 
 	return policy.ImmediateResponse{
-		StatusCode:        statusCode,
-		Headers:           headers,
-		Body:              streamBody,
-		AnalyticsMetadata: analyticsMetadata,
+		StatusCode: statusCode,
+		Headers:    responseHeaders,
+		Body:       body,
+		AnalyticsMetadata: map[string]any{
+			"mcpErrorCode": jsonRpcCode,
+		},
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: policy.DirectionRequest,
+			// reason becomes the JSON-RPC error message.
+			Message: reason,
+			JSONRPC: &policy.JSONRPCError{Code: &jsonRpcCode, ID: requestID},
+		},
 	}
 }
 
@@ -884,43 +904,5 @@ func (p *McpRewritePolicy) OnResponseBody(ctx context.Context, respCtx *policy.R
 
 	return policy.DownstreamResponseModifications{
 		Body: updatedPayload,
-	}
-}
-
-// buildErrorResponse builds a v1alpha2 JSON error response.
-func (p *McpRewritePolicy) buildErrorResponse(statusCode int, jsonRpcCode int, reason string, requestID any, sessionID string) policy.RequestAction {
-	responseBody := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      requestID,
-		"error": map[string]any{
-			"code":    jsonRpcCode,
-			"message": reason,
-		},
-	}
-	analyticsMetadata := map[string]any{
-		"mcpErrorCode": jsonRpcCode,
-	}
-	body, err := json.Marshal(responseBody)
-	if err != nil {
-		slog.Debug("MCP Rewrite Policy: Failed to marshal error response", "error", err)
-		idBytes, idErr := json.Marshal(requestID)
-		if idErr != nil {
-			idBytes = []byte("null")
-		}
-		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":%s,"error":{"code":-32603,"message":"Unexpected error"}}`, string(idBytes))
-	}
-
-	headers := map[string]string{
-		"Content-Type": "application/json",
-	}
-	if sessionID != "" {
-		headers[mcpSessionHeader] = sessionID
-	}
-
-	return policy.ImmediateResponse{
-		StatusCode:        statusCode,
-		Headers:           headers,
-		Body:              body,
-		AnalyticsMetadata: analyticsMetadata,
 	}
 }

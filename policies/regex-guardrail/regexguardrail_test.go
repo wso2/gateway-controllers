@@ -756,3 +756,185 @@ type errSentinel string
 func (e errSentinel) Error() string {
 	return string(e)
 }
+
+// TestRegexGuardrail_InterventionDeclaresFault covers both phases. The code is the point:
+func TestRegexGuardrail_InterventionDeclaresFault(t *testing.T) {
+	t.Run("request phase", func(t *testing.T) {
+		p := mustGetRegexPolicy(t, map[string]interface{}{
+			"request": map[string]interface{}{
+				"regex":    "abc",
+				"jsonPath": "$.messages",
+			},
+		})
+
+		action := p.OnRequestBody(context.Background(), newRequestContextWithBody(`{"messages":"does not match"}`), nil)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != codeGuardrailIntervened {
+			t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeGuardrail {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Guardrail == nil {
+			t.Fatalf("expected Guardrail detail to be populated")
+		}
+		if resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+			t.Fatalf("expected InterveningGuardrail=%q, got %q", guardrailName, resp.Fault.Guardrail.InterveningGuardrail)
+		}
+		if resp.Fault.Guardrail.Action != policy.GuardrailActionIntervened {
+			t.Fatalf("expected Action=%q, got %q", policy.GuardrailActionIntervened, resp.Fault.Guardrail.Action)
+		}
+	})
+
+	t.Run("response phase carries DirectionResponse", func(t *testing.T) {
+		p := mustGetRegexPolicy(t, map[string]interface{}{
+			"response": map[string]interface{}{
+				"enabled":  true,
+				"regex":    "abc",
+				"jsonPath": "$.messages",
+			},
+		})
+
+		action := p.OnResponseBody(context.Background(), newResponseContextWithBody(`{"messages":"does not match"}`), nil)
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side guardrail intervention")
+		}
+		if mods.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if mods.Fault.Code != codeGuardrailIntervened {
+			t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, mods.Fault.Code)
+		}
+		// The direction is what separates a request-side hit from a response-side one;
+		// they share a status code and only the policy knows which it made.
+		if mods.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, mods.Fault.Direction)
+		}
+	})
+}
+
+// TestRegexGuardrail_AssessmentsGatedByShowAssessment covers the one field that must not
+// leak: Assessments frequently holds the very content the guardrail existed to stop, so it
+// is populated only where the operator opted in through showAssessment.
+func TestRegexGuardrail_AssessmentsGatedByShowAssessment(t *testing.T) {
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			p := mustGetRegexPolicy(t, map[string]interface{}{
+				"request": map[string]interface{}{
+					"regex":          "abc",
+					"jsonPath":       "$.messages",
+					"showAssessment": show,
+				},
+			})
+
+			action := p.OnRequestBody(context.Background(), newRequestContextWithBody(`{"messages":"does not match"}`), nil)
+			resp := action.(policy.ImmediateResponse)
+			if resp.Fault == nil || resp.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := resp.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}
+
+// TestRegexGuardrail_ExtractionFailureDeclaresFault pins the JSONPath extraction failure: no check
+// ran, so it is not a guardrail verdict. An unreadable request body is the caller's; an
+// unreadable response body leaves the policy unable to do its job. The client response is
+// the one the policy returned before the fault was declared.
+func TestRegexGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &RegexGuardrailPolicy{}
+	params := RegexGuardrailPolicyParams{JsonPath: "$.text", Regex: "a"}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		if isResponse {
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"regex-guardrail"},"type":"REGEX_GUARDRAIL"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+		} else {
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"regex-guardrail"},"type":"REGEX_GUARDRAIL"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+		}
+	}
+}
+
+// assertNoVerdictFault checks that a rejection made without a guardrail verdict declares
+// the given fault, carries no guardrail details, and leaves the client response unchanged:
+// status 422, a JSON Content-Type, and wantBody.
+func assertNoVerdictFault(t *testing.T, got interface{}, wantBody, wantCode, wantType, wantDirection string) {
+	t.Helper()
+	var fault *policy.FaultDetails
+	var isFault bool
+	var status int
+	var headers map[string]string
+	var body []byte
+	switch g := got.(type) {
+	case policy.ImmediateResponse:
+		status, headers, body = g.StatusCode, g.Headers, g.Body
+		fault, isFault = g.Fault, g.IsFault
+	case policy.DownstreamResponseModifications:
+		if g.StatusCode == nil {
+			t.Fatalf("expected a status code on the error response")
+		}
+		status, headers, body = *g.StatusCode, g.HeadersToSet, g.Body
+		fault, isFault = g.Fault, g.IsFault
+	default:
+		t.Fatalf("expected an error response, got %T", got)
+	}
+	if status != 422 || len(headers) != 1 || headers["Content-Type"] != "application/json" || string(body) != wantBody {
+		t.Fatalf("client response changed: got %d %v %s, want 422 map[Content-Type:application/json] %s", status, headers, body, wantBody)
+	}
+	if !isFault || fault == nil {
+		t.Fatalf("expected the rejection to declare a fault")
+	}
+	if fault.Code != wantCode || fault.Type != wantType || fault.Direction != wantDirection {
+		t.Fatalf("expected fault %s/%s/%s, got %s/%s/%s", wantCode, wantType, wantDirection, fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Guardrail != nil {
+		t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", fault.Guardrail)
+	}
+	if fault.Message == "" || fault.Description == "" {
+		t.Fatalf("expected Message and Description to be set, got %+v", fault)
+	}
+}
+
+// TestRegexGuardrail_InvalidPatternDeclaresFault pins the pattern that cannot be compiled:
+// the operator's parameters are unusable, which is not a guardrail verdict.
+func TestRegexGuardrail_InvalidPatternDeclaresFault(t *testing.T) {
+	p := &RegexGuardrailPolicy{}
+	params := RegexGuardrailPolicyParams{JsonPath: "$", Regex: "("}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`hello`), params, isResponse)
+		wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Invalid regex pattern","direction":"REQUEST","interveningGuardrail":"regex-guardrail"},"type":"REGEX_GUARDRAIL"}`
+		if isResponse {
+			wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Invalid regex pattern","direction":"RESPONSE","interveningGuardrail":"regex-guardrail"},"type":"REGEX_GUARDRAIL"}`
+		}
+		wantDirection := policy.DirectionRequest
+		if isResponse {
+			wantDirection = policy.DirectionResponse
+		}
+		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, wantDirection)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -64,11 +65,15 @@ func (p *APIKeyPolicy) Mode() policy.ProcessingMode {
 
 // resolveValidatedAPIKey validates the provided API key against external store/service and returns the resolved key
 // returns nil if the key is invalid, or an error if there was an issue during validation
+//
+// The store error is wrapped rather than replaced so the caller can still tell
+// store.ErrNotFound — a rejected key — from a store that could not answer. Those pick
+// different error codes, and hence different analytics fault categories.
 func (p *APIKeyPolicy) resolveValidatedAPIKey(apiId, apiOperation, operationMethod, apiKey, issuer string) (*store.APIKey, error) {
 	apiKeyStore := store.GetAPIkeyStoreInstance()
 	resolvedKey, err := apiKeyStore.ResolveValidatedAPIKey(apiId, apiOperation, operationMethod, apiKey, issuer)
 	if err != nil {
-		return nil, fmt.Errorf("failed to resolve API key via the policy engine")
+		return nil, fmt.Errorf("failed to resolve API key via the policy engine: %w", err)
 	}
 	return resolvedKey, nil
 }
@@ -153,14 +158,14 @@ func (p *APIKeyPolicy) authenticate(
 	if !ok || keyName == "" {
 		slog.Debug("API Key Auth Policy: Missing or invalid 'key' configuration")
 		return p.failAuth(shared, 401, "json", "Valid API key required",
-			"missing or invalid 'key' configuration")
+			"missing or invalid 'key' configuration", policy.FaultCodeAuthGeneral)
 	}
 
 	location, ok := params["in"].(string)
 	if !ok || location == "" {
 		slog.Debug("API Key Auth Policy: Missing or invalid 'in' configuration")
 		return p.failAuth(shared, 401, "json", "Valid API key required",
-			"missing or invalid 'in' configuration")
+			"missing or invalid 'in' configuration", policy.FaultCodeAuthGeneral)
 	}
 
 	var valuePrefix string
@@ -192,7 +197,7 @@ func (p *APIKeyPolicy) authenticate(
 	default:
 		slog.Debug("API Key Auth Policy: Unsupported location", "location", location)
 		return p.failAuth(shared, 401, "json", "Valid API key required",
-			"missing or invalid 'in' configuration")
+			"missing or invalid 'in' configuration", policy.FaultCodeAuthGeneral)
 	}
 
 	if valuePrefix != "" {
@@ -207,7 +212,7 @@ func (p *APIKeyPolicy) authenticate(
 
 	if providedKey == "" {
 		slog.Debug("API Key Auth Policy: No API key found or API key is malformed", "location", location, "keyName", keyName)
-		return p.failAuth(shared, 401, "json", "Valid API key required", "missing or malformed API key")
+		return p.failAuth(shared, 401, "json", "Valid API key required", "missing or malformed API key", policy.FaultCodeAuthMissingCredentials)
 	}
 
 	apiId := shared.APIId
@@ -221,7 +226,7 @@ func (p *APIKeyPolicy) authenticate(
 			"apiId", apiId, "apiName", apiName, "apiVersion", apiVersion,
 			"apiOperation", apiOperation, "operationMethod", operationMethod)
 		return p.failAuth(shared, 401, "json", "Valid API key required",
-			"missing API details for validation")
+			"missing API details for validation", policy.FaultCodeAuthGeneral)
 	}
 
 	slog.Debug("API Key Auth Policy: Starting validation",
@@ -232,12 +237,17 @@ func (p *APIKeyPolicy) authenticate(
 	resolvedKey, err := p.resolveValidatedAPIKey(apiId, apiOperation, operationMethod, providedKey, issuer)
 	if err != nil {
 		slog.Debug("API Key Auth Policy: Validation error", "error", err)
+		// A key the store does not hold is a rejected credential, not a store failure.
+		if errors.Is(err, store.ErrNotFound) {
+			return p.failAuth(shared, 401, "json", "Valid API key required",
+				"API key not recognised", policy.FaultCodeAuthInvalidCredentials)
+		}
 		return p.failAuth(shared, 401, "json", "Valid API key required",
-			"error validating API key")
+			"error validating API key", policy.FaultCodeAuthGeneral)
 	}
 	if resolvedKey == nil {
 		slog.Debug("API Key Auth Policy: Invalid API key")
-		return p.failAuth(shared, 401, "json", "Valid API key required", "invalid API key")
+		return p.failAuth(shared, 401, "json", "Valid API key required", "invalid API key", policy.FaultCodeAuthInvalidCredentials)
 	}
 
 	slog.Debug("API Key Auth Policy: Authentication successful")
@@ -259,7 +269,7 @@ func (p *APIKeyPolicy) authenticate(
 }
 
 // failAuth sets the auth context to unauthenticated and returns a policy.ImmediateResponse.
-func (p *APIKeyPolicy) failAuth(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason string) *policy.ImmediateResponse {
+func (p *APIKeyPolicy) failAuth(shared *policy.SharedContext, statusCode int, errorFormat, errorMessage, reason, code string) *policy.ImmediateResponse {
 	shared.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
@@ -270,6 +280,16 @@ func (p *APIKeyPolicy) failAuth(shared *policy.SharedContext, statusCode int, er
 		StatusCode: v1resp.StatusCode,
 		Headers:    v1resp.Headers,
 		Body:       v1resp.Body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      policy.FaultTypeAuthentication,
+			Direction: policy.DirectionRequest,
+			Message:   errorMessage,
+			// reason is the internal diagnostic; the renderer withholds Description
+			// from the client body and passes it to fault policies only.
+			Description: reason,
+		},
 	}
 }
 

@@ -20,15 +20,19 @@
 // A policy keeps its suite file, features and own steps in policies/<name>/it, a Go module of its
 // own, and its test entry point hands them to this package.
 //
-// The gateway a suite boots is built from the policy under test and the policies the gateway
-// controller itself needs, not from the whole catalog.
+// The suites of a run boot one gateway image set, built once by tests/it/cmd/build-gateway and
+// named through the environment (see package gateway). A suite run alone, without that
+// environment, builds the set itself from the policy under test and the policies the gateway
+// controller itself needs.
 package suite
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -43,13 +47,11 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/suiterun"
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 
+	"github.com/wso2/gateway-controllers/tests/it/common/gateway"
+	"github.com/wso2/gateway-controllers/tests/it/common/resources"
 	"github.com/wso2/gateway-controllers/tests/it/common/steps"
 	"github.com/wso2/gateway-controllers/tests/it/common/steps/platformgateway"
 )
-
-// policyIntegrationDir is the folder inside a policy that holds its integration tests. The
-// framework leaves it out of the policy it builds into the gateway, and so does staging.
-const policyIntegrationDir = "it"
 
 // overlaysDir is the folder inside a policy's it folder that holds the gateway configuration
 // overlays its suite file names. Staging copies it to the workspace root, so a component's
@@ -58,19 +60,23 @@ const overlaysDir = "overlays"
 
 // ControllerPolicies are the policies the gateway controller requires to create LLM providers, LLM
 // proxies and their authentication: it attaches them to the resources it generates and rejects a
-// resource when one is missing from the gateway. Every suite's gateway is built with them.
+// resource when one is missing from the gateway. A gateway built for one suite carries them.
 var ControllerPolicies = []string{"api-key-auth", "host-rewrite", "oauth2-generator", "respond", "set-headers"}
 
 // Config describes one policy's suite.
 type Config struct {
-	// Companions names further policies of this repository to build into the gateway because the
-	// policy's scenarios use them beside it, for example a policy that composes with another. It
-	// is optional.
+	// Companions names further policies of this repository to build into the gateway of a suite
+	// run alone, because the policy's scenarios use them beside it, for example a policy that
+	// composes with another. It is optional.
 	Companions []string
 
 	// Register binds the steps only this policy needs, after the shared steps are bound. It is
 	// optional. A step defined here must not repeat a shared one.
 	Register func(sc *godog.ScenarioContext, topo *frameworkruntime.Topology)
+
+	// RegisterWithBase is Register for steps that build on the shared request steps. It also
+	// receives the shared steps' base, and runs after Register. It is optional.
+	RegisterWithBase func(sc *godog.ScenarioContext, base *steps.Base, topo *frameworkruntime.Topology)
 }
 
 // Main parses the suite flags and runs the tests. Call it from TestMain.
@@ -81,51 +87,61 @@ func Main(m *testing.M, cfg Config) {
 
 const (
 	testbenchRepository = "ghcr.io/wso2/api-platform/testbench"
-	frameworkModule     = `github\.com/wso2/api-platform/tests/framework`
+	frameworkModule     = "github.com/wso2/api-platform/tests/framework"
 )
 
-var (
-	frameworkRequire = regexp.MustCompile(`(?m)^\s*(?:require\s+)?` + frameworkModule + `\s+v(\d+\.\d+\.\d+)\s*$`)
-	// Matches the framework replaced inside a replace block, or on a replace line, with or
-	// without the version on the left of the arrow.
-	frameworkReplace = regexp.MustCompile(`(?m)^\s*(?:replace\s+)?` + frameworkModule + `(?:\s+v\S+)?\s*=>`)
-)
+// releasedVersion matches a tagged release, not a pre-release or an untagged revision.
+var releasedVersion = regexp.MustCompile(`^v(\d+\.\d+\.\d+)$`)
 
 // pinTestbenchImage points the framework at the testbench image published with the framework
-// release that the suite's go.mod pins, unless the environment already names one. The framework
-// chooses that image from the module versions embedded in the running binary, and a binary built
-// by `go test` embeds none, so left alone it asks for an image that only a local build creates.
+// release the suites run on, unless the environment already names one. The framework chooses that
+// image from the module versions embedded in the running binary, and a binary built by `go test`
+// embeds none, so left alone it asks for an image that only a local build creates. The release is
+// the one the Go workspace resolves (`make it-workspace` generates it): a suite's own go.mod does
+// not name the framework, only tests/it/go.mod does.
 func pinTestbenchImage() {
 	if os.Getenv(testbench.EnvImageTestbench) != "" {
 		return
 	}
-	goMod, err := os.ReadFile("go.mod")
+	listing, err := exec.Command("go", "list", "-m", "-json", frameworkModule).Output()
 	if err != nil {
 		return
 	}
-	if image, ok := pinnedTestbenchImage(goMod); ok {
+	if image, ok := pinnedTestbenchImage(listing); ok {
 		os.Setenv(testbench.EnvImageTestbench, image)
 	}
 }
 
-// pinnedTestbenchImage returns the testbench image of the released framework a go.mod requires.
-// A go.mod that replaces the framework with a local checkout, or requires an untagged revision,
-// has none: the framework then uses the image that checkout builds.
-func pinnedTestbenchImage(goMod []byte) (string, bool) {
-	if frameworkReplace.Match(goMod) {
+// pinnedTestbenchImage returns the testbench image of the released framework that the output of
+// `go list -m -json` describes. A framework replaced with a local checkout or another module, or
+// at an untagged revision or a pre-release, has none: the framework then uses the image that
+// checkout builds.
+func pinnedTestbenchImage(listing []byte) (string, bool) {
+	var module struct {
+		Version string
+		Replace *struct{ Path, Version string }
+	}
+	if err := json.Unmarshal(listing, &module); err != nil {
 		return "", false
 	}
-	match := frameworkRequire.FindSubmatch(goMod)
+	version := module.Version
+	if module.Replace != nil {
+		if module.Replace.Path != frameworkModule {
+			return "", false
+		}
+		version = module.Replace.Version
+	}
+	match := releasedVersion.FindStringSubmatch(version)
 	if match == nil {
 		return "", false
 	}
-	return testbenchRepository + ":" + string(match[1]), true
+	return testbenchRepository + ":" + match[1], true
 }
 
 // Run executes the suite declared in it-suite.yaml in the working directory, which `go test` sets
-// to the policy's it folder. The gateway is built from the policy, ControllerPolicies and
-// cfg.Companions: their folders are staged as the policy tree of a temporary workspace that the
-// suite file's addPoliciesFrom names. The suite's overlays folder is staged beside that tree.
+// to the policy's it folder. The gateway it boots is the prebuilt image set the environment names,
+// or, when none is named, one built from the policy, ControllerPolicies and cfg.Companions. The
+// suite's overlays folder is staged in a temporary workspace.
 func Run(t *testing.T, cfg Config) {
 	t.Helper()
 	dir, err := os.Getwd()
@@ -133,19 +149,54 @@ func Run(t *testing.T, cfg Config) {
 		t.Fatalf("locating the suite directory: %v", err)
 	}
 	workspace := t.TempDir()
-	if err := StagePolicy(dir, workspace, append(slices.Clone(ControllerPolicies), cfg.Companions...)...); err != nil {
-		t.Fatalf("staging the policy: %v", err)
-	}
 	if err := StageOverlays(dir, workspace); err != nil {
 		t.Fatalf("staging the overlays: %v", err)
 	}
+	if err := stagePlatformAPI(filepath.Join(dir, suiterun.DefaultSuiteFile), workspace); err != nil {
+		t.Fatalf("staging the platform-api files: %v", err)
+	}
 	if reason := excludedEverywhere(suiterun.Selection(), filepath.Join(dir, suiterun.DefaultSuiteFile)); reason != nil {
 		t.Skipf("nothing to run: %v", reason)
+	}
+	if err := provideGateway(t, dir, cfg); err != nil {
+		t.Fatalf("providing the gateway: %v", err)
 	}
 	opts := options(cfg)
 	opts.Dir = dir
 	opts.WorkspaceRoot = workspace
 	suiterun.Run(t, opts)
+}
+
+// provideGateway makes the framework boot a gateway that carries the suite's policies: the
+// prebuilt image set when the environment names one, otherwise a set built here for this suite.
+func provideGateway(t *testing.T, suiteDir string, cfg Config) error {
+	selection := suiterun.Selection()
+	version := strings.TrimSpace(selection.GatewayVersion)
+	if version == "" {
+		return errors.New("run the suite with -gateway-version")
+	}
+	if images, ok := gateway.Prebuilt(); ok {
+		return images.CheckVersion(version)
+	}
+	if filepath.Base(suiteDir) != gateway.IntegrationDir {
+		return fmt.Errorf("%q is not a policy's %s folder", suiteDir, gateway.IntegrationDir)
+	}
+	policyDir := filepath.Dir(suiteDir)
+	policiesDir, policy := gateway.PolicyOf(policyDir)
+	policies := slices.Concat([]string{policy}, ControllerPolicies, cfg.Companions)
+	images, err := gateway.Build(t.Context(), gateway.BuildOptions{
+		PoliciesDir: policiesDir,
+		Policies:    policies,
+		Version:     version,
+		Host:        selection.GatewayHost,
+	})
+	if err != nil {
+		return err
+	}
+	for key, value := range images.Environment() {
+		t.Setenv(key, value)
+	}
+	return nil
 }
 
 // excludedEverywhere returns why the selected gateway version leaves the suite nothing to run,
@@ -171,36 +222,9 @@ func excludedEverywhere(selection topology.Selection, suiteFile string) error {
 	return nil
 }
 
-// StagePolicy copies the policy that owns suiteDir, and each named companion policy from the
-// same repository, to <workspace>/policies/<policy>, leaving out their it folders. The framework
-// builds the gateway from every policy in a tree, so the tree holds exactly the policies the
-// gateway should carry.
-func StagePolicy(suiteDir, workspace string, companions ...string) error {
-	suiteDir, err := filepath.Abs(suiteDir)
-	if err != nil {
-		return err
-	}
-	if filepath.Base(suiteDir) != policyIntegrationDir {
-		return fmt.Errorf("%q is not a policy's %s folder", suiteDir, policyIntegrationDir)
-	}
-	source := filepath.Dir(suiteDir)
-	policies := filepath.Dir(source)
-	staged := map[string]bool{}
-	for _, name := range append([]string{filepath.Base(source)}, companions...) {
-		if staged[name] {
-			continue
-		}
-		staged[name] = true
-		if err := stageOne(filepath.Join(policies, name), filepath.Join(workspace, "policies", name)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // StageOverlays copies the overlays folder of suiteDir, when it has one, to
 // <workspace>/overlays. The framework resolves a component's overlay path against the workspace,
-// which holds only the staged policy tree and leaves every it folder out.
+// which holds no it folder.
 func StageOverlays(suiteDir, workspace string) error {
 	source := filepath.Join(suiteDir, overlaysDir)
 	info, err := os.Stat(source)
@@ -213,43 +237,35 @@ func StageOverlays(suiteDir, workspace string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%q is not a folder", source)
 	}
-	return copyTree(source, filepath.Join(workspace, overlaysDir))
+	return gateway.CopyTree(source, filepath.Join(workspace, overlaysDir))
 }
 
-func stageOne(source, destination string) error {
-	if _, err := os.Stat(filepath.Join(source, "policy-definition.yaml")); err != nil {
-		return fmt.Errorf("%q is not a policy folder: %w", source, err)
+var platformAPIComponent = regexp.MustCompile(`(?m)^\s*-\s*name:\s*platform-api\s*$`)
+
+// stagePlatformAPI stages the shared Platform API files at the workspace root when the suite file
+// runs the platform-api component, which the framework module cannot run without them.
+func stagePlatformAPI(suiteFile, workspace string) error {
+	content, err := os.ReadFile(suiteFile)
+	if err != nil {
+		return err
 	}
-	return copyTree(source, destination)
-}
-
-// copyTree copies source to destination, leaving out a top-level it folder and refusing symlinks.
-func copyTree(source, destination string) error {
-	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, err error) error {
+	if !platformAPIComponent.Match(content) {
+		return nil
+	}
+	for name, path := range resources.PlatformAPIFiles {
+		file, err := resources.PlatformAPI.ReadFile("platformapi/" + name)
 		if err != nil {
 			return err
 		}
-		relative, err := filepath.Rel(source, path)
-		if err != nil {
+		target := filepath.Join(workspace, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
 		}
-		if relative == policyIntegrationDir {
-			return filepath.SkipDir
+		if err := os.WriteFile(target, file, 0o644); err != nil {
+			return err
 		}
-		target := filepath.Join(destination, relative)
-		switch {
-		case entry.Type()&fs.ModeSymlink != 0:
-			return fmt.Errorf("symlink %q is not allowed in a policy", path)
-		case entry.IsDir():
-			return os.MkdirAll(target, 0o755)
-		default:
-			content, err := os.ReadFile(path)
-			if err != nil {
-				return err
-			}
-			return os.WriteFile(target, content, 0o644)
-		}
-	})
+	}
+	return nil
 }
 
 func options(cfg Config) suiterun.Options {
@@ -263,6 +279,9 @@ func options(cfg Config) suiterun.Options {
 				shared.Register(sc)
 				if cfg.Register != nil {
 					cfg.Register(sc, topo)
+				}
+				if cfg.RegisterWithBase != nil {
+					cfg.RegisterWithBase(sc, shared.Base, topo)
 				}
 			}, nil
 		},

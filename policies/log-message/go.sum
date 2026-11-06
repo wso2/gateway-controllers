@@ -1,6 +1,2 @@
-github.com/wso2/api-platform/sdk/core v0.2.4 h1:dwwe7QROmf1HIeCqhfiv82/34n6oAe2b0hazYljpPS0=
-github.com/wso2/api-platform/sdk/core v0.2.4/go.mod h1:vgNVzR16g9k5cun3VXZ7wDg8UGbPxsVU2TW8EbRCv0o=
-github.com/wso2/api-platform/sdk/core v0.3.4-alpha h1:VwiyWHh/BdxW00J6w0CM/2JzpuizMcoHPviBiwf/O1w=
-github.com/wso2/api-platform/sdk/core v0.3.4-alpha/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
-github.com/wso2/api-platform/sdk/core v0.3.4 h1:0QkrwZeeFppOiaU79swRa+5kRZ4cBqmF4absQ+rs4Z8=
-github.com/wso2/api-platform/sdk/core v0.3.4/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
+github.com/wso2/api-platform/sdk/core v0.4.2 h1:duoNqWPEaxYt/AeLupuqeI7ksu2biSMdpA1ugTpHQPY=
+github.com/wso2/api-platform/sdk/core v0.4.2/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=

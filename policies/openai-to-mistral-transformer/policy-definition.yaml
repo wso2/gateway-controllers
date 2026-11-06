@@ -1,9 +1,16 @@
 name: openai-to-mistral-transformer
-version: v0.9.1
+version: v0.10.1
 description: |
   Adapts OpenAI Chat Completions requests for Mistral-compatible upstreams by
   resolving the model, stripping unsupported fields, and rewriting the request
   path. Mistral-compatible responses are passed back in OpenAI shape.
+
+  Mistral already answers in OpenAI shape, so streaming responses are forwarded
+  event for event rather than rewritten, which keeps delivery incremental. A
+  response that is not an event stream is reassembled before translation, so a
+  body the upstream framed as chunked — an error envelope, or any JSON reply
+  sent without a content-length — is still translated rather than passed
+  through untouched. Supports routed and unconditional execution modes.
 
 parameters:
   type: object

@@ -1,5 +1,5 @@
 name: backend-jwt
-version: v1.1.0
+version: v1.2.0
 description: |
   Generates a signed JWT and injects it into the upstream request header. Can be used
   standalone or after an authentication policy (e.g. jwt-auth, basic-auth, api-key-auth).

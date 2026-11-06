@@ -1,5 +1,5 @@
 name: opa-policy
-version: v0.1.0
+version: v0.2.0
 description: |
   Validates requests against an Open Policy Agent (OPA) policy engine. The
   gateway extracts a predefined set of request metadata (method, path, headers,

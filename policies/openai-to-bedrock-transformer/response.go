@@ -124,7 +124,8 @@ func translateConverseResponse(body []byte, status int, model, id string) policy
 
 	newBody, err := json.Marshal(openAIResp)
 	if err != nil {
-		return errResponse(500, "failed to translate Bedrock response: "+err.Error())
+		return errResponse(500, "failed to translate Bedrock response: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 	return policy.DownstreamResponseModifications{
 		Body: newBody,
@@ -153,7 +154,8 @@ func translateErrorResponse(body []byte, status int) policy.ResponseAction {
 	}
 	newBody, err := json.Marshal(openaiErr)
 	if err != nil {
-		return errResponse(500, "failed to translate Bedrock error: "+err.Error())
+		return errResponse(500, "failed to translate Bedrock error: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 	return policy.DownstreamResponseModifications{
 		Body: newBody,
@@ -187,6 +189,36 @@ func eventStreamToSSE(data []byte, endOfStream bool, id, model string) []byte {
 		out = append(out, sseDonePayload...)
 	}
 	return out
+}
+
+// streamException returns the exception type of the first exception frame among the
+// complete frames in data, and whether there is one. Bedrock ends a Converse stream after an
+// exception, so one means the provider broke off the response.
+func streamException(data []byte) (string, bool) {
+	frames, _, ok := decodeEventStreamFrames(data)
+	if !ok {
+		return "", false
+	}
+	for i := range frames {
+		if frames[i].MessageType == "exception" || frames[i].ExceptionType != "" {
+			return frames[i].ExceptionType, true
+		}
+	}
+	return "", false
+}
+
+// streamExceptionFault describes a Converse stream the provider ended with an exception:
+// the provider breaking mid-response, FaultCodeProviderStreamFailed as docs/error-codes.md directs.
+// The translated error event already carries the provider's message to the client; the
+// fault adds only the exception type.
+func streamExceptionFault(exceptionType string) *policy.FaultDetails {
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeProviderStreamFailed,
+		Type:        policy.FaultTypeMediation,
+		Direction:   policy.DirectionResponse,
+		Message:     "The upstream stream ended with an error.",
+		Description: "Bedrock stream exception: " + exceptionType,
+	}
 }
 
 // streamFrameToSSE maps a single Converse stream event to zero or more OpenAI
