@@ -63,6 +63,23 @@ func TestStageCopiesEachNamedPolicyExceptItsIntegrationTests(t *testing.T) {
 	require.NoDirExists(t, filepath.Join(tree, "set-headers", "it"))
 }
 
+func TestStageKeepsAMajorVersionBesideV1(t *testing.T) {
+	policies := t.TempDir()
+	writePolicy(t, policies, "backend-jwt")
+	writePolicy(t, policies, "backend-jwt/v2")
+	writeFile(t, filepath.Join(policies, "backend-jwt", "v2", "logic.go"), "package v2\n")
+	workspace := t.TempDir()
+
+	tree, err := Stage(policies, workspace, "backend-jwt", "backend-jwt/v2")
+	require.NoError(t, err)
+
+	require.FileExists(t, filepath.Join(tree, "backend-jwt", "policy-definition.yaml"))
+	require.NoDirExists(t, filepath.Join(tree, "backend-jwt", "v2"), "v1 does not carry the v2 source")
+	require.FileExists(t, filepath.Join(tree, "backend-jwt-v2", "policy-definition.yaml"))
+	require.FileExists(t, filepath.Join(tree, "backend-jwt-v2", "logic.go"))
+	require.NoDirExists(t, filepath.Join(tree, "backend-jwt-v2", "it"))
+}
+
 func TestStageRejectsWhatIsNotAPolicyFolder(t *testing.T) {
 	policies := t.TempDir()
 	writeFile(t, filepath.Join(policies, "not-a-policy", "README.md"), "x\n")
@@ -91,6 +108,18 @@ func TestPolicyNamesListsTheFoldersThatHoldAPolicyDefinition(t *testing.T) {
 	names, err := PolicyNames(policies)
 	require.NoError(t, err)
 	require.Equal(t, []string{"a-policy", "b-policy"}, names)
+}
+
+func TestPolicyNamesListsAMajorVersionFolderBesideV1(t *testing.T) {
+	policies := t.TempDir()
+	writePolicy(t, policies, "backend-jwt")
+	writePolicy(t, policies, "backend-jwt/v2")
+	writeFile(t, filepath.Join(policies, "cors", "v3", "notes.md"), "no definition here\n")
+	writePolicy(t, policies, "cors")
+
+	names, err := PolicyNames(policies)
+	require.NoError(t, err)
+	require.Equal(t, []string{"backend-jwt", "backend-jwt/v2", "cors"}, names)
 }
 
 func TestPrebuiltNeedsBothImages(t *testing.T) {
@@ -167,4 +196,47 @@ func TestBuildRequiresAVersionAndPolicies(t *testing.T) {
 
 	_, err = Build(context.Background(), BuildOptions{PoliciesDir: policies, Version: "1.2.0", Runner: &recordingRunner{}})
 	require.ErrorIs(t, err, errNoPolicies)
+}
+
+func TestPolicyOfTellsAVersionFolderFromATopLevelPolicyNamedLikeOne(t *testing.T) {
+	root := filepath.Join("repo", "policies")
+
+	dir, name := PolicyOf(filepath.Join(root, "backend-jwt"))
+	require.Equal(t, root, dir)
+	require.Equal(t, "backend-jwt", name)
+
+	dir, name = PolicyOf(filepath.Join(root, "backend-jwt", "v2"))
+	require.Equal(t, root, dir)
+	require.Equal(t, "backend-jwt/v2", name)
+
+	// A top-level policy that happens to be named v2 sits directly in policies, so it is a policy.
+	dir, name = PolicyOf(filepath.Join(root, "v2"))
+	require.Equal(t, root, dir)
+	require.Equal(t, "v2", name)
+}
+
+func TestPolicyNamesSkipsAFolderItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not stop root")
+	}
+	policies := t.TempDir()
+	writePolicy(t, policies, "readable")
+	locked := filepath.Join(policies, "locked")
+	require.NoError(t, os.MkdirAll(locked, 0o755))
+	require.NoError(t, os.Chmod(locked, 0o000))
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+	names, err := PolicyNames(policies)
+	require.NoError(t, err)
+	require.Equal(t, []string{"readable"}, names)
+}
+
+func TestCopyTreeKeepsAVersionFolderOutsideAPolicyTree(t *testing.T) {
+	source := t.TempDir()
+	writeFile(t, filepath.Join(source, "v2", "policy-definition.yaml"), "name: x\nversion: v2.0.0\n")
+	destination := t.TempDir()
+
+	require.NoError(t, CopyTree(source, destination))
+
+	require.FileExists(t, filepath.Join(destination, "v2", "policy-definition.yaml"), "an overlay tree is copied whole")
 }
