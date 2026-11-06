@@ -13,7 +13,28 @@ description: |
 
 parameters:
   type: object
+  x-wso2-policy-property-order: [profile, mode, modelPool, tierBalancing, fallback, promptDisclosure, sessionHeader, sessionFromPrompt, responseHeaders]
   properties:
+    profile:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Name of the routing profile on switchyard-server: a route id in the
+        server's configuration, such as "coding-agents". The profile sets how
+        tiers are chosen; this policy sets which models serve each tier.
+      minLength: 1
+    mode:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        enforce routes each request to the decided model. observe_only asks
+        switchyard-server and records the tier and model it would have chosen
+        in analytics, but leaves every request unchanged and never rejects
+        one; use it to check a profile on real traffic before enforcing it.
+      enum:
+        - enforce
+        - observe_only
+      default: enforce
     modelPool:
       type: array
       x-wso2-policy-advanced-param: false
@@ -27,6 +48,7 @@ parameters:
       items:
         type: object
         additionalProperties: false
+        x-wso2-policy-property-order: [provider, model, tier, weight]
         properties:
           provider:
             type: string
@@ -72,18 +94,11 @@ parameters:
         - round_robin
         - session_affinity
       default: first
-    profile:
-      type: string
-      x-wso2-policy-advanced-param: false
-      description: |
-        Name of the routing profile on switchyard-server: a route id in the
-        server's configuration, such as "coding-agents". The profile sets how
-        tiers are chosen; this policy sets which models serve each tier.
-      minLength: 1
     fallback:
       type: object
       x-wso2-policy-advanced-param: false
       additionalProperties: false
+      x-wso2-policy-property-order: [mode, provider, model]
       description: |
         What happens when switchyard-server fails or returns an unusable
         decision. "error" rejects the request. "model" sends it to the named
@@ -101,18 +116,6 @@ parameters:
         model:
           type: string
           description: The fallback model ID.
-    mode:
-      type: string
-      x-wso2-policy-advanced-param: false
-      description: |
-        enforce routes each request to the decided model. observe_only asks
-        switchyard-server and records the tier and model it would have chosen
-        in analytics, but leaves every request unchanged and never rejects
-        one; use it to check a profile on real traffic before enforcing it.
-      enum:
-        - enforce
-        - observe_only
-      default: enforce
     promptDisclosure:
       type: string
       x-wso2-policy-advanced-param: false
