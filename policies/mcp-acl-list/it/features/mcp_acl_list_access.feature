@@ -75,5 +75,6 @@ Feature: mcp-acl-list access decisions
     Then the response should be successful
 
     Examples: tools
-      | case                                  | tools                                | allowed | denied |
-      | deny mode with one exception (MAC #1) | {"mode":"deny","exceptions":["add"]} | add     | echo   |
+      | case                                   | tools                                 | allowed | denied |
+      | deny mode with one exception (MAC #1)  | {"mode":"deny","exceptions":["add"]}  | add     | echo   |
+      | allow mode with one exception (MAC #2) | {"mode":"allow","exceptions":["add"]} | echo    | add    |
