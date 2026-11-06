@@ -99,7 +99,7 @@ func GetPolicy(
 		return nil, err
 	}
 	if downstreamPayloadFormat == upstreamPayloadFormat {
-		return nil, fmt.Errorf("Invalid policy configuration: downsteamPayloadFormat must be different from upstreamPayloadFormat")
+		return nil, fmt.Errorf("Invalid policy configuration: downstreamPayloadFormat must be different from upstreamPayloadFormat")
 	}
 
 	return &JSONXMLMediationPolicy{
@@ -122,9 +122,37 @@ func getUpstreamPayloadFormat(params map[string]interface{}) (string, error) {
 	return upstreamPayloadFormat, err
 }
 
+// getDownstreamPayloadFormat reads "downstreamPayloadFormat", the preferred
+// key, falling back to the deprecated "downsteamPayloadFormat" (missing the
+// "r") kept for backward compatibility. Both may be set only if they agree;
+// otherwise the config is rejected rather than silently preferring one.
 func getDownstreamPayloadFormat(params map[string]interface{}) (string, error) {
-	downstreamPayloadFormat, _, err := getPayloadFormat(params, "downsteamPayloadFormat", true)
-	return downstreamPayloadFormat, err
+	canonical, canonicalPresent, err := getPayloadFormat(params, "downstreamPayloadFormat", false)
+	if err != nil {
+		return "", err
+	}
+
+	deprecated, deprecatedPresent, err := getPayloadFormat(params, "downsteamPayloadFormat", false)
+	if err != nil {
+		return "", err
+	}
+
+	if deprecatedPresent {
+		slog.Warn("json-xml-mediator: 'downsteamPayloadFormat' is deprecated; migrate to 'downstreamPayloadFormat'.")
+		if canonicalPresent && canonical != deprecated {
+			return "", fmt.Errorf(
+				"Invalid policy configuration: downstreamPayloadFormat (%q) and the deprecated downsteamPayloadFormat (%q) must not be set to different values; remove the deprecated downsteamPayloadFormat",
+				canonical, deprecated,
+			)
+		}
+		return deprecated, nil
+	}
+
+	if canonicalPresent {
+		return canonical, nil
+	}
+
+	return "", fmt.Errorf("Invalid policy configuration: downstreamPayloadFormat must be a non-empty string")
 }
 
 func getPayloadFormat(params map[string]interface{}, key string, required bool) (string, bool, error) {
