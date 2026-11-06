@@ -470,9 +470,12 @@ func sanitizeEndpointForLogging(raw string) string {
 	return u.String()
 }
 
-// buildHeaderValue combines valuePrefix and the credential into the header value to inject.
-// An empty prefix yields the raw credential with no scheme prefix.
+// buildHeaderValue combines the prefix and credential with one space separator.
+// Trailing spaces and tabs are removed here so callers do not need to normalize
+// the prefix first. An empty prefix returns the raw credential.
 func buildHeaderValue(prefix, token string) string {
+	prefix = strings.TrimRight(prefix, " \t")
+
 	if prefix == "" {
 		return token
 	}
