@@ -252,6 +252,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I clear all headers$`, b.clearHeaders)
 	sc.Step(`^I reset the request$`, b.resetRequest)
 	sc.Step(`^I set request host to "([^"]*)"$`, b.setRequestHost)
+	sc.Step(`^I generate a value of (\d+) KiB of "([^"]*)" and store it as "([^"]*)"$`,
+		stepscommon.GenerateRepeatedAndStore)
 	sc.Step(`^I generate a unique value from "([^"]*)" and store it as "([^"]*)"$`,
 		b.generateUniqueValue)
 	sc.Step(`^I generate a unique API version from "([^"]*)" and store it as "([^"]*)"$`,
@@ -262,6 +264,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.generateUniqueContext)
 	sc.Step(`^I send a "([^"]*)" request( over HTTPS)? to "([^"]*)"$`, b.sendRequestOnListener)
 	sc.Step(`^I send (\d+) "([^"]*)" requests to "([^"]*)"$`, b.sendRepeated)
+	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" alternating the "([^"]*)" header:$`,
+		b.sendConcurrentAlternating)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" with per-request headers:$`,
 		b.sendConcurrent)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
@@ -497,6 +501,86 @@ func (b *Base) sendConcurrent(ctx context.Context, n int, method, path string, t
 		maxConcurrentSendInFlight)
 }
 
+// alternatingValue is one row of the alternating concurrent send: a header value and the status
+// every request that carries it must return.
+type alternatingValue struct {
+	value  string
+	status int
+}
+
+// sendConcurrentAlternating invokes a data-plane path n times concurrently. Request i (1-based)
+// sends the named header with the value of table row ((i-1) mod rows), replacing any scenario
+// header of that name, and must return that row's status. Like sendConcurrent, it publishes no
+// response.
+func (b *Base) sendConcurrentAlternating(
+	ctx context.Context, n int, method, path, header string, table *godog.Table,
+) error {
+	if n <= 0 || n > maxConcurrentSendRequests {
+		return fmt.Errorf("the concurrent request count must be between 1 and %d, got %d",
+			maxConcurrentSendRequests, n)
+	}
+	name := textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(header))
+	if name == "" {
+		return fmt.Errorf("a header name is required")
+	}
+	values, err := alternatingValues(ctx, table)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	url, err := b.gatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	httpx.ClearPublished(ctx)
+	requests, wants := alternatingRequests(n, strings.ToUpper(method), url, b.requestHost(ctx),
+		b.scenarioHeaders(ctx), name, values)
+	return sendAllConcurrentlyExpecting(ctx, b.funnel.Client(), requests, wants, maxConcurrentSendInFlight)
+}
+
+func alternatingValues(ctx context.Context, table *godog.Table) ([]alternatingValue, error) {
+	if table == nil || len(table.Rows) == 0 {
+		return nil, fmt.Errorf("a table of header values and statuses is required")
+	}
+	values := make([]alternatingValue, 0, len(table.Rows))
+	for i, row := range table.Rows {
+		if row == nil || len(row.Cells) != 2 {
+			return nil, fmt.Errorf("alternating values row %d must contain exactly two cells", i+1)
+		}
+		value, err := stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[0].Value))
+		if err != nil {
+			return nil, err
+		}
+		status, err := strconv.Atoi(strings.TrimSpace(row.Cells[1].Value))
+		if err != nil || status < 100 || status > 599 {
+			return nil, fmt.Errorf("alternating values row %d has an invalid status %q", i+1, row.Cells[1].Value)
+		}
+		values = append(values, alternatingValue{value: value, status: status})
+	}
+	return values, nil
+}
+
+func alternatingRequests(
+	n int, method, url, host string, shared map[string]string, header string, values []alternatingValue,
+) ([]httpx.Request, []int) {
+	requests := make([]httpx.Request, n)
+	wants := make([]int, n)
+	for i := range requests {
+		headers := maps.Clone(shared)
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		row := values[i%len(values)]
+		headers[header] = row.value
+		requests[i] = httpx.Request{Method: method, URL: url, Headers: headers, Host: host}
+		wants[i] = row.status
+	}
+	return requests, wants
+}
+
 func perRequestHeaders(ctx context.Context, table *godog.Table) ([]perRequestHeader, error) {
 	if table == nil || len(table.Rows) == 0 {
 		return nil, fmt.Errorf("a per-request headers table is required")
@@ -545,7 +629,19 @@ func concurrentRequests(
 }
 
 // sendAllConcurrently issues every request, at most inFlight at a time, without retrying.
+// Every response must succeed.
 func sendAllConcurrently(ctx context.Context, client *httpx.Client, requests []httpx.Request, inFlight int) error {
+	return sendAllConcurrentlyExpecting(ctx, client, requests, nil, inFlight)
+}
+
+// sendAllConcurrentlyExpecting issues every request, at most inFlight at a time, without
+// retrying. Request i must return wants[i]; with no wants, every response must succeed.
+func sendAllConcurrentlyExpecting(
+	ctx context.Context, client *httpx.Client, requests []httpx.Request, wants []int, inFlight int,
+) error {
+	if wants != nil && len(wants) != len(requests) {
+		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), len(requests))
+	}
 	if client == nil {
 		return fmt.Errorf("an HTTP client is required")
 	}
@@ -563,8 +659,11 @@ func sendAllConcurrently(ctx context.Context, client *httpx.Client, requests []h
 			switch {
 			case err != nil:
 				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, len(requests), err)
-			case !resp.Succeeded():
+			case wants == nil && !resp.Succeeded():
 				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, len(requests), resp.Describe())
+			case wants != nil && resp.StatusCode != wants[i]:
+				errs[i] = fmt.Errorf("request %d of %d returned %s, want status %d",
+					i+1, len(requests), resp.Describe(), wants[i])
 			}
 		})
 	}

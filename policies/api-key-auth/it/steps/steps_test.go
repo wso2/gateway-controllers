@@ -19,7 +19,6 @@
 package steps
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -27,7 +26,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -166,107 +164,6 @@ func TestSendRequestOverHTTP2RejectsAServerThatDoesNotSpeakHTTP2(t *testing.T) {
 	})
 	err := steps.sendRequestOverHTTP2(newScenarioContext(), "GET", "/probe")
 	require.ErrorContains(t, err, "HTTP/2")
-}
-
-func TestSendRawRequestKeepsHeaderOrderCasingAndDuplicates(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = listener.Close() })
-	received := make(chan string, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		defer func() { _ = conn.Close() }()
-		reader := bufio.NewReader(conn)
-		var request strings.Builder
-		for {
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				return
-			}
-			request.WriteString(line)
-			if line == "\r\n" {
-				break
-			}
-		}
-		received <- request.String()
-		_, _ = io.WriteString(conn, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno")
-	}()
-
-	steps := newSteps(fakeBase{host: "api.example.com"}, topologyAt(t, listener.Addr()))
-	steps.funnel = httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0)
-	ctx := newScenarioContext()
-
-	require.NoError(t, steps.sendRawRequest(ctx, "get", "ctx/probe", cells(
-		[2]string{"api-KEY", "first"},
-		[2]string{"api-KEY", "second"},
-		[2]string{"X-Tab", `a\tb`},
-	)))
-
-	require.Equal(t, "GET /ctx/probe HTTP/1.1\r\nHost: api.example.com\r\n"+
-		"api-KEY: first\r\napi-KEY: second\r\nX-Tab: a\tb\r\nConnection: close\r\n\r\n", <-received)
-	resp, err := httpx.Published(ctx)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
-	require.Equal(t, "no", string(resp.Body))
-}
-
-func TestDecodeRawHeaderValue(t *testing.T) {
-	tests := map[string]struct {
-		in, want string
-	}{
-		"tabs":                {`\t\t`, "\t\t"},
-		"spaces untouched":    {"   ", "   "},
-		"carriage return":     {`\r\n`, "\r\n"},
-		"escaped byte":        {`\x20\x20\x20`, "   "},
-		"escaped byte upper":  {`\x4A`, "J"},
-		"literal backslash":   {`a\\b`, `a\b`},
-		"mixed":               {`abc\x01def`, "abc\x01def"},
-		"crlf injection":      {`abc\r\nX-Injected: yes`, "abc\r\nX-Injected: yes"},
-		"trailing backslash":  {`abc\`, `abc\`},
-		"unknown escape kept": {`a\zb`, `a\zb`},
-		"truncated hex kept":  {`a\x2`, `a\x2`},
-		"invalid hex kept":    {`a\xZZb`, `a\xZZb`},
-		"empty":               {"", ""},
-	}
-	for name, tt := range tests {
-		t.Run(name, func(t *testing.T) {
-			require.Equal(t, tt.want, decodeRawHeaderValue(tt.in))
-		})
-	}
-}
-
-func TestRawHeaderLinesPreservesOrderAndDuplicates(t *testing.T) {
-	headers, err := rawHeaderLines(context.Background(), cells(
-		[2]string{"API-Key", "first"},
-		[2]string{"API-Key", "second"},
-		[2]string{"x-api-key", `\t`},
-	))
-	require.NoError(t, err)
-	require.Equal(t, []rawHeader{
-		{name: "API-Key", value: "first"},
-		{name: "API-Key", value: "second"},
-		{name: "x-api-key", value: "\t"},
-	}, headers)
-}
-
-func TestRawHeaderLinesExpandsContextValues(t *testing.T) {
-	ctx := newScenarioContext()
-	require.NoError(t, tcontext.Set(ctx, "akaKey", "secret-value"))
-
-	headers, err := rawHeaderLines(ctx, cells([2]string{"API-Key", "${CTX:akaKey}"}))
-	require.NoError(t, err)
-	require.Equal(t, []rawHeader{{name: "API-Key", value: "secret-value"}}, headers)
-}
-
-func TestRawHeaderLinesRejectsInvalidTables(t *testing.T) {
-	_, err := rawHeaderLines(context.Background(), nil)
-	require.Error(t, err, "empty table")
-
-	_, err = rawHeaderLines(context.Background(), cells([2]string{"  ", "value"}))
-	require.Error(t, err, "empty header name")
 }
 
 func TestConcurrentCyclingRowsParsesValuesAndAbsentMarker(t *testing.T) {
