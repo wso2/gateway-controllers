@@ -54,7 +54,7 @@ blocks:
   # The application identity jwt-auth sets, and the policies that read it. Redis backs
   # semantic-cache.
   - name: jwt-auth-application-identity
-    parallel: 1
+    parallel: 2
     components:
       - name: platform-gateway
         db:
