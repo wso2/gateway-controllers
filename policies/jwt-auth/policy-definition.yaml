@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.4.0
+version: v1.5.0
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -214,6 +214,21 @@ systemParameters:
               Separator used to split a string-valued `scopeClaim` into individual scopes.
               Defaults to a single space (" ") when omitted. Ignored when `scopeClaim` resolves to
               an array claim. Has no effect unless `scopeClaim` is set.
+          applicationIdClaim:
+            type: string
+            minLength: 1
+            maxLength: 256
+            pattern: '^\S+$'
+            not:
+              enum: [iss, sub, aud, exp, nbf, iat, jti, scope, scp]
+            description: >-
+              Optional token claim that identifies the calling application for tokens verified
+              by this key manager, for example `client_id`, `azp`, `appid` or `cid`. When set, the
+              claim's string value becomes the request's application identity, which
+              subscription-validation uses to find an application-based subscription when no
+              subscription key is sent. When omitted, no application identity is set. An identity
+              already set by an earlier policy is kept. Registered claims (iss, sub, aud, exp,
+              nbf, iat, jti, scope, scp) cannot identify an application and are ignored.
           jwks:
             type: object
             description: JWKS configuration supporting both remote endpoints and local certificates. Either 'remote' or 'local' must be specified, but not both.
