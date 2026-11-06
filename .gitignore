@@ -40,3 +40,8 @@ __pycache__/
 # Policy integration test output
 policies/*/it/logs-out/
 policies/*/it/coverage-out/
+
+# Local Go workspace used to build a policy against an unreleased sdk/core.
+# Contains absolute host paths; never committed.
+go.work
+go.work.sum
