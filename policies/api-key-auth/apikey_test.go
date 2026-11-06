@@ -643,3 +643,48 @@ func sanitizeTestName(v string) string {
 	v = strings.ReplaceAll(v, " ", "-")
 	return strings.ToLower(v)
 }
+
+func TestAPIKeyPolicy_OnRequestHeaders_UsesResolvedOperation(t *testing.T) {
+	resetAPIKeyStore(t)
+	seedExternalAPIKey(t, "endpoint-1", "model-secret", `["*"]`)
+
+	// A body-resolved route (a model endpoint) binds each request to an operation of
+	// its own; the route's operation path is not what a scoped key names. With no
+	// operation path at all the key is still checked, against the resolved operation.
+	p := &APIKeyPolicy{}
+	ctx := newRequestHeaderContext(t, "POST", "/wso2/v1/chat/completions", map[string][]string{
+		http.CanonicalHeaderKey("authorization"): {"Bearer model-secret"},
+	}, "endpoint-1", "Model Endpoint", "v1.0", "")
+	ctx.SharedContext.ResolvedOperation = "claude-haiku"
+
+	action := p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{
+		"key":         "Authorization",
+		"in":          "header",
+		"valuePrefix": "Bearer ",
+	})
+	if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("expected the key to be checked against the resolved operation, got %T", action)
+	}
+	if ctx.SharedContext.AuthContext == nil || !ctx.SharedContext.AuthContext.Authenticated {
+		t.Fatalf("expected AuthContext.Authenticated=true")
+	}
+}
+
+func TestAPIKeyPolicy_OnRequestHeaders_RecordsKeyOperations(t *testing.T) {
+	resetAPIKeyStore(t)
+	seedExternalAPIKey(t, "api-1", "header-secret", `["GET /orders"]`)
+
+	p := &APIKeyPolicy{}
+	ctx := newRequestHeaderContext(t, "GET", "/orders", map[string][]string{
+		http.CanonicalHeaderKey("x-api-key"): {"header-secret"},
+	}, "api-1", "OrdersAPI", "v1", "/orders")
+
+	p.OnRequestHeaders(context.Background(), ctx, map[string]interface{}{"key": "x-api-key", "in": "header"})
+
+	if ctx.SharedContext.AuthContext == nil {
+		t.Fatal("expected an AuthContext")
+	}
+	if got := ctx.SharedContext.AuthContext.Properties[authPropertyAPIKeyOperations]; got != `["GET /orders"]` {
+		t.Fatalf("expected the key's operations to be recorded, got %q", got)
+	}
+}

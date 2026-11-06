@@ -36,6 +36,10 @@ import (
 const (
 	AuthType = "apikey"
 
+	// authPropertyAPIKeyOperations is the auth property the key's operation scope is
+	// recorded under.
+	authPropertyAPIKeyOperations = "APIKeyOperations"
+
 	applicationIDMetadataKey   = "x-wso2-application-id"
 	applicationNameMetadataKey = "x-wso2-application-name"
 )
@@ -218,7 +222,14 @@ func (p *APIKeyPolicy) authenticate(
 	apiId := shared.APIId
 	apiName := shared.APIName
 	apiVersion := shared.APIVersion
+	// On a route that resolves each request to an operation of its own (a model
+	// endpoint dispatching to a Model, an MCP or A2A route), the key is checked
+	// against that operation, which is what a key scoped to some operations names.
+	// Every other route checks its operation path, as before.
 	apiOperation := shared.OperationPath
+	if shared.ResolvedOperation != "" {
+		apiOperation = shared.ResolvedOperation
+	}
 	operationMethod := method
 
 	if apiId == "" || apiName == "" || apiVersion == "" || apiOperation == "" || operationMethod == "" {
@@ -258,6 +269,10 @@ func (p *APIKeyPolicy) authenticate(
 		Properties: map[string]string{
 			"ApplicationName": resolvedKey.ApplicationName,
 			"ApplicationID":   resolvedKey.ApplicationID,
+			// The operations the key reaches ("*", or a JSON array of them), for a
+			// policy that answers per operation itself: a model endpoint's catalog
+			// lists only the Models a scoped key reaches.
+			authPropertyAPIKeyOperations: resolvedKey.Operations,
 		},
 		TokenId: generateTokenID(providedKey),
 	}
