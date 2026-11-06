@@ -93,8 +93,9 @@ Feature: mcp-acl-list access decisions
   # The upstream is the MCP mock (testbench port 3009), which serves three real tools: add,
   # echo and headers. The tools/list answer is checked for its JSON-RPC envelope and for the
   # number of tools left after filtering; "should have N items" fails if result.tools is null
-  # or missing, so a count of 0 proves an empty array. The call uses id 21 so its response
-  # can be held to the recorded mcp-acl-list-tool-denied.json.
+  # or missing, so a count of 0 proves an empty array. The denied tool must be missing from the
+  # list as well as refused when called. The call uses id 21 so its response can be held to the
+  # recorded mcp-acl-list-tool-denied.json.
   Scenario Outline: A tools/list keeps only the tools the tools block permits (<case>)
     Given I generate a unique resource name from "mcp-acl-list" and store it as "mcpName"
     And I generate a unique value from "mcp-acl-list" and store it as "mcpDisplayName"
@@ -118,6 +119,7 @@ Feature: mcp-acl-list access decisions
     And the JSON response field "id" should be 3
     And the JSON response field "error" should not exist
     And the JSON response array field "result.tools" should have <listed> items
+    And the JSON response array "result.tools" should not contain an item with "name" equal to "<denied>"
 
     When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
       """
@@ -144,12 +146,60 @@ Feature: mcp-acl-list access decisions
     And the response body should contain "Reports the value of a header"
 
     Examples: tools
-      | case                                            | tools                           | listed | denied  |
+      | case                                             | tools                                | listed | denied  |
       # MAC #10: deny mode with no exceptions is a full lockdown; the list is an empty array and
       # every call is denied. One row per tool, so each of the mock's three tools is shown denied.
-      | deny mode with no exceptions, add is denied     | {"mode":"deny","exceptions":[]} | 0      | add     |
-      | deny mode with no exceptions, echo is denied    | {"mode":"deny","exceptions":[]} | 0      | echo    |
-      | deny mode with no exceptions, headers is denied | {"mode":"deny","exceptions":[]} | 0      | headers |
+      | deny mode with no exceptions, add is denied      | {"mode":"deny","exceptions":[]}      | 0      | add     |
+      | deny mode with no exceptions, echo is denied     | {"mode":"deny","exceptions":[]}      | 0      | echo    |
+      | deny mode with no exceptions, headers is denied  | {"mode":"deny","exceptions":[]}      | 0      | headers |
+      # MAC #7: deny mode with T1 as the only exception; the list holds exactly T1. One row per
+      # unlisted tool, so with a count of 1 and both other tools missing, the one left is add.
+      # The scenario after this outline checks that add's fields are unchanged.
+      | deny mode with one exception, echo is removed    | {"mode":"deny","exceptions":["add"]} | 1      | echo    |
+      | deny mode with one exception, headers is removed | {"mode":"deny","exceptions":["add"]} | 1      | headers |
+
+  # MAC #7: the entry the policy keeps reaches the client with its fields unchanged. The policy
+  # decodes the list, removes the denied entries and encodes it again, so the keys come back in
+  # a different order; the values are what must not change. Each value below is the 3009 mock's
+  # own definition of add, which the outline above shows the mock serves without the gateway.
+  # cacheScope and ttlMs sit next to the list and must survive the filter too.
+  Scenario: A tools/list keeps the fields of a permitted tool unchanged
+    Given I generate a unique resource name from "mcp-acl-fields" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-fields" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-fields" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-fields" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add"]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.tools" should have 1 item
+    And the JSON response field "result.tools[0].name" should be "add"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "description" equal to "Adds two numbers"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.type" equal to "object"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.properties.a.type" equal to "number"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.properties.a.description" equal to "First number"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.properties.b.type" equal to "number"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.properties.b.description" equal to "Second number"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.required[0]" equal to "a"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.required[1]" equal to "b"
+    And the JSON response array "result.tools" item with "name" equal to "add" should not have field "inputSchema.required[2]"
+    And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.additionalProperties" equal to "false"
+    And the JSON response field "result.cacheScope" should be "public"
+    And the JSON response field "result.ttlMs" should be 0
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
 
   # MAC #11: allow mode with no exceptions; the full discovery and call sequence behaves as if
   # no policy were attached.
