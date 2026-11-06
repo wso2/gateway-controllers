@@ -87,3 +87,66 @@ Feature: mcp-acl-list access decisions
       # MAC #21: exceptions but no mode; the block is accepted and the mode defaults to deny,
       # so the listed tool runs and an unlisted tool is denied (allow would swap the verdicts).
       | no mode, defaults to deny                             | {"exceptions":["add"]}                      | add     | echo    |
+
+  # ---- Tool lists -----------------------------------------------------------------------
+
+  # The upstream is the MCP mock (testbench port 3009), which serves three real tools: add,
+  # echo and headers. The tools/list answer is checked for its JSON-RPC envelope and for the
+  # number of tools left after filtering; "should have N items" fails if result.tools is null
+  # or missing, so a count of 0 proves an empty array. The call uses id 21 so its response
+  # can be held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario Outline: A tools/list keeps only the tools the tools block permits (<case>)
+    Given I generate a unique resource name from "mcp-acl-list" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-list" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-list" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-list" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":<tools>}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "jsonrpc" should be "2.0"
+    And the JSON response field "id" should be 3
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.tools" should have <listed> items
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"<denied>","arguments":{}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    # The same tools/list sent straight to the mock, without the gateway, still lists all
+    # three tools, so a shorter list above was made by the policy. The mock answers in SSE,
+    # which the JSON steps cannot read, so each tool is matched by its description. The
+    # mock rejects a request whose Accept header does not offer both content types.
+    When I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to the "mcp" service at "/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should contain "Adds two numbers"
+    And the response body should contain "Echoes back the input"
+    And the response body should contain "Reports the value of a header"
+
+    Examples: tools
+      | case                                            | tools                           | listed | denied  |
+      # MAC #10: deny mode with no exceptions is a full lockdown; the list is an empty array and
+      # every call is denied. One row per tool, so each of the mock's three tools is shown denied.
+      | deny mode with no exceptions, add is denied     | {"mode":"deny","exceptions":[]} | 0      | add     |
+      | deny mode with no exceptions, echo is denied    | {"mode":"deny","exceptions":[]} | 0      | echo    |
+      | deny mode with no exceptions, headers is denied | {"mode":"deny","exceptions":[]} | 0      | headers |
