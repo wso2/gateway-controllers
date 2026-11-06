@@ -84,3 +84,6 @@ Feature: mcp-acl-list access decisions
       # One row per listed tool, so each listed tool is shown to run with the same configuration.
       | deny mode with several exceptions, first listed tool  | {"mode":"deny","exceptions":["add","echo"]} | add     | headers |
       | deny mode with several exceptions, second listed tool | {"mode":"deny","exceptions":["add","echo"]} | echo    | headers |
+      # MAC #21: exceptions but no mode; the block is accepted and the mode defaults to deny,
+      # so the listed tool runs and an unlisted tool is denied (allow would swap the verdicts).
+      | no mode, defaults to deny                             | {"exceptions":["add"]}                      | add     | echo    |
