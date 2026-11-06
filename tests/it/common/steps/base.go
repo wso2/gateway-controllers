@@ -647,31 +647,43 @@ func sendAllConcurrently(ctx context.Context, client *httpx.Client, requests []h
 func sendAllConcurrentlyExpecting(
 	ctx context.Context, client *httpx.Client, requests []httpx.Request, wants []int, inFlight int,
 ) error {
-	if wants != nil && len(wants) != len(requests) {
-		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), len(requests))
-	}
+	return sendEachConcurrently(ctx, client, len(requests),
+		func(i int) httpx.Request { return requests[i] }, wants, inFlight)
+}
+
+// sendEachConcurrently issues n requests, at most inFlight at a time, without retrying. It builds
+// request i only once that request holds an in-flight slot, so no more than inFlight request
+// bodies exist at a time. Request i must return wants[i]; with no wants, every response must
+// succeed.
+func sendEachConcurrently(
+	ctx context.Context, client *httpx.Client, n int, build func(i int) httpx.Request, wants []int,
+	inFlight int,
+) error {
 	if client == nil {
 		return fmt.Errorf("an HTTP client is required")
 	}
 	if inFlight <= 0 {
 		return fmt.Errorf("the in-flight request limit must be positive, got %d", inFlight)
 	}
+	if wants != nil && len(wants) != n {
+		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), n)
+	}
 	slots := make(chan struct{}, inFlight)
-	errs := make([]error, len(requests))
+	errs := make([]error, n)
 	var wg sync.WaitGroup
-	for i, req := range requests {
+	for i := range n {
 		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			resp, err := client.Do(ctx, req, 0, 0)
+			resp, err := client.Do(ctx, build(i), 0, 0)
 			switch {
 			case err != nil:
-				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, len(requests), err)
+				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, n, err)
 			case wants == nil && !resp.Succeeded():
-				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, len(requests), resp.Describe())
+				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, n, resp.Describe())
 			case wants != nil && resp.StatusCode != wants[i]:
 				errs[i] = fmt.Errorf("request %d of %d returned %s, want status %d",
-					i+1, len(requests), resp.Describe(), wants[i])
+					i+1, n, resp.Describe(), wants[i])
 			}
 		})
 	}
@@ -703,40 +715,43 @@ func (b *Base) sendConcurrentWithBody(ctx context.Context, n int, method, path s
 	if err != nil {
 		return err
 	}
-	requests, err := numberedRequests(n, strings.ToUpper(method), resolved, payload, b.requestHost(ctx), headers, b.gatewayURL)
+	build, err := numberedRequests(n, strings.ToUpper(method), resolved, payload, b.requestHost(ctx), headers, b.gatewayURL)
 	if err != nil {
 		return err
 	}
 	httpx.ClearPublished(ctx)
-	return sendAllConcurrently(ctx, b.funnel.Client(), requests, maxConcurrentSendInFlight)
+	return sendEachConcurrently(ctx, b.funnel.Client(), n, build, nil, maxConcurrentSendInFlight)
 }
 
-// numberedRequests builds n requests, replacing {i} in the path and body of request i
-// (1-based) with i. At least one of them must contain {i}, or every request would be the same.
+// numberedRequests returns a builder of n requests, which replaces {i} in the path and body of
+// request i (0-based index, 1-based number) with its number. At least one of them must contain
+// {i}, or every request would be the same. The URLs are resolved here, so a bad path fails
+// before any request is sent. Each body is built only when its request is built.
 func numberedRequests(
 	n int, method, path string, body []byte, host string, shared map[string]string,
 	gatewayURL func(string) (string, error),
-) ([]httpx.Request, error) {
+) (func(i int) httpx.Request, error) {
 	if !strings.Contains(path, requestNumberPlaceholder) && !bytes.Contains(body, []byte(requestNumberPlaceholder)) {
 		return nil, fmt.Errorf("the path or the body must contain %s to vary between requests", requestNumberPlaceholder)
 	}
-	requests := make([]httpx.Request, n)
-	for i := range requests {
-		number := strconv.Itoa(i + 1)
-		url, err := gatewayURL(strings.ReplaceAll(path, requestNumberPlaceholder, number))
+	urls := make([]string, n)
+	for i := range urls {
+		url, err := gatewayURL(strings.ReplaceAll(path, requestNumberPlaceholder, strconv.Itoa(i+1)))
 		if err != nil {
 			return nil, err
 		}
+		urls[i] = url
+	}
+	return func(i int) httpx.Request {
 		headers := maps.Clone(shared)
 		if headers == nil {
 			headers = map[string]string{}
 		}
-		requests[i] = httpx.Request{
-			Method: method, URL: url, Headers: headers, Host: host,
-			Body: bytes.ReplaceAll(body, []byte(requestNumberPlaceholder), []byte(number)),
+		return httpx.Request{
+			Method: method, URL: urls[i], Headers: headers, Host: host,
+			Body: bytes.ReplaceAll(body, []byte(requestNumberPlaceholder), []byte(strconv.Itoa(i+1))),
 		}
-	}
-	return requests, nil
+	}, nil
 }
 
 // sendUntilStatus invokes a data-plane path until it answers with the wanted status.
@@ -896,7 +911,7 @@ func (b *Base) sendUntilHeader(ctx context.Context, method, path, name, want str
 }
 
 // sendUntilHeaderMatches polls a data-plane path, with a body when one is given, until a
-// response header carries the wanted value or, when negate is set, any other value. See
+// response header carries the wanted value or, when negate is set, any other present value. See
 // sendUntilHeader for why a header (rather than a status) is the right condition for this class
 // of wait. The negated form waits for a value that is not known in advance, such as refreshed
 // credentials, to replace a known one.
@@ -944,15 +959,20 @@ func negatedPhrase(negate bool) string {
 	return ""
 }
 
-// headerCondition reports whether a response's header equals want or, when negate is set,
-// differs from it. An absent header differs from any non-empty want.
+// headerCondition reports whether a response's header equals want or, when negate is set, is
+// present and differs from it. A negated wait keeps polling while the header is absent, so a
+// transient error response without the header does not end a wait for a replacement value.
 func headerCondition(name, want string, negate bool) stepscommon.ResponseCondition {
 	return func(r *httpx.Response) bool {
 		if r == nil {
 			return false
 		}
 		// Get is case-insensitive per RFC 7230, matching responseHeaderEquals.
-		return (r.Headers.Get(name) == want) != negate
+		got := r.Headers.Get(name)
+		if negate {
+			return got != "" && got != want
+		}
+		return got == want
 	}
 }
 

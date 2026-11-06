@@ -557,10 +557,10 @@ func TestSendConcurrentLeavesNoPublishedResponse(t *testing.T) {
 func TestNumberedRequests(t *testing.T) {
 	gatewayURL := func(path string) (string, error) { return "http://gw" + path, nil }
 	shared := map[string]string{"Content-Type": "application/json"}
-	requests, err := numberedRequests(3, "POST", "/items/{i}", []byte(`{"order":{i},"note":"n-{i}"}`),
+	build, err := numberedRequests(3, "POST", "/items/{i}", []byte(`{"order":{i},"note":"n-{i}"}`),
 		"host.local", shared, gatewayURL)
 	require.NoError(t, err)
-	require.Len(t, requests, 3)
+	requests := []httpx.Request{build(0), build(1), build(2)}
 	for i, request := range requests {
 		n := strconv.Itoa(i + 1)
 		require.Equal(t, "POST", request.Method)
@@ -571,24 +571,49 @@ func TestNumberedRequests(t *testing.T) {
 	}
 	requests[0].Headers["X-Changed"] = "1"
 	require.NotContains(t, requests[1].Headers, "X-Changed")
+	require.NotContains(t, build(0).Headers, "X-Changed", "every build returns fresh headers")
 	require.NotContains(t, shared, "X-Changed")
 
 	pathOnly, err := numberedRequests(2, "GET", "/items/{i}", nil, "", nil, gatewayURL)
 	require.NoError(t, err)
-	require.Equal(t, "http://gw/items/2", pathOnly[1].URL)
-	require.Empty(t, pathOnly[1].Body)
-	require.NotNil(t, pathOnly[1].Headers)
+	require.Equal(t, "http://gw/items/2", pathOnly(1).URL)
+	require.Empty(t, pathOnly(1).Body)
+	require.NotNil(t, pathOnly(1).Headers)
 
 	bodyOnly, err := numberedRequests(2, "POST", "/items", []byte(`{"order":{i}}`), "", nil, gatewayURL)
 	require.NoError(t, err)
-	require.Equal(t, "http://gw/items", bodyOnly[1].URL)
-	require.Equal(t, `{"order":2}`, string(bodyOnly[1].Body))
+	require.Equal(t, "http://gw/items", bodyOnly(1).URL)
+	require.Equal(t, `{"order":2}`, string(bodyOnly(1).Body))
 
 	_, err = numberedRequests(2, "POST", "/items", []byte(`{"order":1}`), "", nil, gatewayURL)
 	require.ErrorContains(t, err, "must contain {i}")
 	_, err = numberedRequests(1, "GET", "/items/{i}", nil, "", nil,
 		func(string) (string, error) { return "", errors.New("no gateway") })
 	require.ErrorContains(t, err, "no gateway")
+}
+
+func TestSendEachConcurrentlyBuildsRequestsOnlyWithinTheInFlightLimit(t *testing.T) {
+	var outstanding, peak atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		outstanding.Add(-1)
+	}))
+	defer server.Close()
+	client := httpx.NewClient(httpx.Options{})
+
+	build := func(i int) httpx.Request {
+		current := outstanding.Add(1)
+		for {
+			old := peak.Load()
+			if current <= old || peak.CompareAndSwap(old, current) {
+				break
+			}
+		}
+		return httpx.Request{Method: "GET", URL: server.URL}
+	}
+	require.NoError(t, sendEachConcurrently(context.Background(), client, 12, build, nil, 3))
+	require.LessOrEqual(t, peak.Load(), int32(3), "a request is built only once it holds a slot")
+	require.Greater(t, peak.Load(), int32(1))
 }
 
 func TestSendConcurrentWithBodyRejectsInvalidInput(t *testing.T) {
@@ -713,7 +738,7 @@ func TestHeaderCondition(t *testing.T) {
 	isNot := headerCondition("X-Aws-Access-Key-Id", "ASIA1", true)
 	require.False(t, isNot(response))
 	require.True(t, headerCondition("X-Aws-Access-Key-Id", "ASIA2", true)(response))
-	require.True(t, isNot(absent), "an absent header is not the value")
+	require.False(t, isNot(absent), "an absent header keeps a negated wait polling")
 	require.False(t, isNot(nil), "no response satisfies either condition")
 
 	require.True(t, headerCondition("X-Absent", "", false)(response), "an absent header equals the empty value")
