@@ -19,6 +19,7 @@
 package openaitobedrock
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -372,6 +373,96 @@ func TestNeedsMoreResponseData_Boundaries(t *testing.T) {
 	}
 	if p.NeedsMoreResponseData(nil) {
 		t.Error("empty accumulator should not request more data")
+	}
+	if !p.NeedsMoreResponseData([]byte(`{"output":{"message":{}}}`)) {
+		t.Error("a body that is not event-stream framed must accumulate until the upstream closes")
+	}
+}
+
+// TestStream_ConverseJSONBodyIsTranslated covers the framing the gateway cannot
+// tell apart from a stream: a Converse JSON reply sent without content-length is
+// routed through the chunk path, and must still be translated rather than
+// forwarded as raw Bedrock JSON with a [DONE] appended to it.
+func TestStream_ConverseJSONBodyIsTranslated(t *testing.T) {
+	p := &TranslatorPolicy{params: PolicyParams{Model: "claude"}}
+	converse := `{"output":{"message":{"role":"assistant","content":[{"text":"Hi there"}]}},` +
+		`"stopReason":"end_turn","usage":{"inputTokens":5,"outputTokens":3,"totalTokens":8}}`
+	respCtx := &policy.ResponseStreamContext{
+		SharedContext:   &policy.SharedContext{RequestID: "req-json", Metadata: map[string]interface{}{}},
+		ResponseHeaders: policy.NewHeaders(map[string][]string{"content-type": {"application/json"}}),
+		ResponseStatus:  200,
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx,
+		&policy.StreamBody{Chunk: []byte(converse), EndOfStream: true}, nil)
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if forward.Body == nil {
+		t.Fatal("a Converse JSON body must be translated, not forwarded untouched")
+	}
+	if bytes.Contains(forward.Body, []byte("[DONE]")) {
+		t.Errorf("a JSON reply must not be terminated like an SSE stream: %q", forward.Body)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(forward.Body, &out); err != nil {
+		t.Fatalf("translated body is not JSON: %v", err)
+	}
+	if out["object"] != "chat.completion" {
+		t.Errorf("object = %v, want chat.completion", out["object"])
+	}
+	choices, _ := out["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("choices = %v, want one entry", out["choices"])
+	}
+	msg, _ := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "Hi there" {
+		t.Errorf("content = %v, want \"Hi there\"", msg["content"])
+	}
+}
+
+// TestStream_ConverseJSONTruncatedByAccumulatorCap covers the one case where a
+// non-stream body reaches the chunk path incomplete: the policy engine's stream
+// accumulator cap forces a flush before the upstream closes. The document is cut
+// mid-body, so the stream is closed rather than a fragment emitted.
+func TestStream_ConverseJSONTruncatedByAccumulatorCap(t *testing.T) {
+	p := &TranslatorPolicy{params: PolicyParams{Model: "claude"}}
+	respCtx := &policy.ResponseStreamContext{
+		SharedContext:   &policy.SharedContext{RequestID: "req-trunc", Metadata: map[string]interface{}{}},
+		ResponseHeaders: policy.NewHeaders(map[string][]string{"content-type": {"application/json"}}),
+		ResponseStatus:  200,
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx,
+		&policy.StreamBody{Chunk: []byte(`{"output":{"message":{"role":"ass`), EndOfStream: false}, nil)
+	term, ok := action.(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("expected TerminateResponseChunk for a truncated body, got %T", action)
+	}
+	if term.Body == nil {
+		t.Error("Body must be an empty slice, not nil: a nil body leaves the chain " +
+			"carrying the truncated document and delivers it to the client")
+	}
+	if len(term.Body) != 0 {
+		t.Errorf("a truncated body must not be forwarded, got %q", term.Body)
+	}
+	// The status went out with the headers and is almost always 200, so IsFault
+	// is the only thing that tells the fault flow this response failed.
+	if !term.IsFault {
+		t.Error("a truncated body is a failure and must be declared to the fault flow")
+	}
+	if term.Fault == nil {
+		t.Fatal("expected Fault to be populated")
+	}
+	if term.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Errorf("Fault.Code = %q, want %q", term.Fault.Code, policy.FaultCodeMediationFailed)
+	}
+	if term.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("Fault.Type = %q, want %q", term.Fault.Type, policy.FaultTypeMediation)
+	}
+	if term.Fault.Direction != policy.DirectionResponse {
+		t.Errorf("Fault.Direction = %q, want %q", term.Fault.Direction, policy.DirectionResponse)
 	}
 }
 

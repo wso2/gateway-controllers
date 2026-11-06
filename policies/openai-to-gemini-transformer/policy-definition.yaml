@@ -1,5 +1,5 @@
 name: openai-to-gemini-transformer
-version: v0.10.0
+version: v0.10.1
 description: |
   Translates OpenAI Chat Completions requests to the Gemini generateContent API
   format and rewrites Gemini responses back to the OpenAI shape.

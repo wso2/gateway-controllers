@@ -186,18 +186,28 @@ func (p *TranslatorPolicy) OnResponseBody(
 
 // ─── Streaming response phase ─────────────────────────────────────────────────
 
-// NeedsMoreResponseData keeps the kernel accumulating until its buffer ends on an
-// SSE frame boundary, so OnResponseBodyChunk normally receives whole events. The
-// per-request residual buffer still covers the cases where the kernel flushes
-// early (accumulator cap, end of stream).
+// NeedsMoreResponseData tells the kernel when to keep accumulating instead of
+// delivering what it has.
+//
+// For an event stream it holds until the buffer ends on an SSE frame boundary,
+// so OnResponseBodyChunk normally receives whole events; the per-request
+// residual buffer still covers the cases where the kernel flushes early.
+//
+// For a body that is not an event stream it holds until the upstream closes. The
+// gateway routes a response through this path whenever the upstream framing is
+// chunked, and an ordinary JSON reply is framed that way whenever the provider
+// omits content-length — so a complete, non-streamed document arrives here in
+// pieces. Releasing those pieces would hand OnResponseBodyChunk a fragment of a
+// JSON document it cannot parse; holding them reassembles the document so the
+// buffered translation can run on it.
 func (p *TranslatorPolicy) NeedsMoreResponseData(accumulated []byte) bool {
 	if len(accumulated) == 0 {
 		return false
 	}
 	if !looksLikeSSE(accumulated) {
-		// Not SSE (e.g. a JSON error body streamed through) — don't stall the
-		// stream waiting for a boundary that will never come.
-		return false
+		// Not an event stream — accumulate the whole body and translate it once,
+		// rather than emit fragments of a document that is not a stream.
+		return true
 	}
 	return !endsOnSSEBoundary(accumulated)
 }
@@ -217,9 +227,16 @@ func (p *TranslatorPolicy) OnResponseBodyChunk(
 
 	state := p.streamStateFor(respCtx, chunk)
 	if state == nil {
-		// Not an event stream — the buffered OnResponseBody path owns this
-		// response; forward the bytes untouched.
-		return policy.ForwardResponseChunk{}
+		if respCtx.SharedContext == nil {
+			// Without a per-request store streamStateFor cannot say whether this
+			// is an event stream, so the bytes are forwarded unchanged — the same
+			// degradation it already chooses for a stream it cannot track.
+			return policy.ForwardResponseChunk{}
+		}
+		// Not an event stream. NeedsMoreResponseData holds such a body until the
+		// upstream closes, so this flush carries the complete document and the
+		// buffered translation applies to it unchanged.
+		return p.translateBufferedFlush(respCtx, chunk)
 	}
 
 	sse, terminate := translateSSEChunk(state, chunk.Chunk, chunk.EndOfStream)
@@ -266,6 +283,74 @@ func streamFault(failure streamFailure) *policy.FaultDetails {
 		Direction: policy.DirectionResponse,
 		Message:   "The upstream stream ended with an error.",
 	}
+}
+
+// translateBufferedFlush translates a complete, non-event-stream response body
+// that was delivered on the streaming path. NeedsMoreResponseData keeps the
+// kernel accumulating such a body until the upstream closes, so the flush that
+// reaches here is the whole document. The one exception is the kernel's stream
+// accumulator cap, which forces a flush mid-body and can only hand over a
+// truncated document.
+func (p *TranslatorPolicy) translateBufferedFlush(
+	respCtx *policy.ResponseStreamContext, chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
+	if !chunk.EndOfStream {
+		// The accumulator cap fired. The document is cut mid-body, so there is
+		// nothing correct to emit — close the stream rather than forward a
+		// fragment the client cannot parse. The status and the headers went out
+		// long ago, so this is the only way left to report the failure.
+		slog.Warn(PolicyName+": response exceeded the policy engine's stream accumulator "+
+			"limit before the upstream closed; the body is truncated and cannot be translated",
+			"flush_bytes", len(chunk.Chunk), "status", respCtx.ResponseStatus)
+		// Body is an explicitly empty slice, not nil: the chain executor only
+		// replaces the bytes it is carrying when an action supplies a non-nil
+		// body, so a nil here would deliver the truncated document to the client
+		// instead of suppressing it.
+		//
+		// The close is a failure rather than a clean end of stream, so it is
+		// declared to the fault flow. The status went out with the headers long
+		// before this chunk and is almost always 200, which leaves IsFault as the
+		// only signal that this response did not succeed.
+		return policy.TerminateResponseChunk{
+			Body:    []byte{},
+			IsFault: true,
+			Fault: &policy.FaultDetails{
+				Code:        policy.FaultCodeMediationFailed,
+				Type:        policy.FaultTypeMediation,
+				Direction:   policy.DirectionResponse,
+				Message:     "The upstream response could not be translated.",
+				Description: "response exceeded the stream accumulator limit before the upstream closed",
+			},
+		}
+	}
+	if len(chunk.Chunk) == 0 {
+		return policy.ForwardResponseChunk{}
+	}
+
+	slog.Debug(PolicyName+": translating a buffered response on the streaming path",
+		"status", respCtx.ResponseStatus, "bytes", len(chunk.Chunk))
+	return bufferedActionToChunk(translateResponse(chunk.Chunk, respCtx.ResponseStatus,
+		effectiveModel(respCtx.SharedContext, p.params.Model)))
+}
+
+// bufferedActionToChunk adapts an action from the buffered translator to the
+// streaming path, where the status and the headers are already committed and
+// only the body can still change. A modification contributes its new body, a
+// pass-through (nil body) leaves the provider bytes alone, and an immediate
+// response can only be delivered as a final body before the stream closes.
+func bufferedActionToChunk(action policy.ResponseAction) policy.StreamingResponseAction {
+	switch a := action.(type) {
+	case policy.DownstreamResponseModifications:
+		if a.Body == nil {
+			return policy.ForwardResponseChunk{}
+		}
+		return policy.ForwardResponseChunk{Body: a.Body}
+	case policy.ImmediateResponse:
+		// The buffered translator already declared this rejection a fault; carry
+		// its declaration across rather than dropping or restating it.
+		return policy.TerminateResponseChunk{Body: a.Body, IsFault: a.IsFault, Fault: a.Fault}
+	}
+	return policy.ForwardResponseChunk{}
 }
 
 // ─── Routing / selection ──────────────────────────────────────────────────────
