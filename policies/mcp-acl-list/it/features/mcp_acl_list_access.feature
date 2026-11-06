@@ -150,3 +150,94 @@ Feature: mcp-acl-list access decisions
       | deny mode with no exceptions, add is denied     | {"mode":"deny","exceptions":[]} | 0      | add     |
       | deny mode with no exceptions, echo is denied    | {"mode":"deny","exceptions":[]} | 0      | echo    |
       | deny mode with no exceptions, headers is denied | {"mode":"deny","exceptions":[]} | 0      | headers |
+
+  # MAC #11: allow mode with no exceptions; the full discovery and call sequence behaves as if
+  # no policy were attached.
+  # Two proxies point at the same MCP mock (testbench port 3009): one without any policy, which
+  # gives the baseline, and one with the policy. Each answer from the baseline is stored and the
+  # same request through the policy must return exactly the same bytes. The baseline answers are
+  # first checked for real content (three tools, real tool results), so the comparison cannot
+  # pass by matching two errors. Only well-formed requests are compared: the policy still
+  # rejects a malformed request itself, which the malformed-request scenarios cover.
+  Scenario: Allow mode with no exceptions behaves as if no policy were attached
+    Given I generate a unique resource name from "mcp-acl-baseline" and store it as "baselineName"
+    And I generate a unique value from "mcp-acl-baseline" and store it as "baselineDisplayName"
+    And I generate a unique API version from "mcp-acl-baseline" and store it as "baselineVersion"
+    And I generate a unique API context from "/mcp-acl-baseline" and store it as "baselineContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:baselineName} |
+      | displayName       | ${CTX:baselineDisplayName} |
+      | version           | ${CTX:baselineVersion} |
+      | context           | ${CTX:baselineContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:baselineContext}/mcp" until successful
+
+    Given I generate a unique resource name from "mcp-acl-allow-all" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-allow-all" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-allow-all" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-allow-all" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"allow","exceptions":[]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # Discovery: the full list of three tools, unchanged.
+    When I use the MCP Client to send a tools/list request to "${CTX:baselineContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 3 items
+    And I store the response body as "baselineList"
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the response body should be:
+      """
+      ${CTX:baselineList}
+      """
+
+    # Calls: every tool in the list runs and returns the same result as without the policy.
+    When I use the MCP Client to send "add" tools/call request to "${CTX:baselineContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    And I store the response body as "baselineAdd"
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the response body should be:
+      """
+      ${CTX:baselineAdd}
+      """
+
+    When I use the MCP Client to send "echo" tools/call request to "${CTX:baselineContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "Echo: Hello, World!"
+    And I store the response body as "baselineEcho"
+    When I use the MCP Client to send "echo" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the response body should be:
+      """
+      ${CTX:baselineEcho}
+      """
+
+    When I use the MCP Client to send "headers" tools/call request to "${CTX:baselineContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should contain "Authorization:"
+    And I store the response body as "baselineHeaders"
+    When I use the MCP Client to send "headers" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the response body should be:
+      """
+      ${CTX:baselineHeaders}
+      """
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+    When I delete the MCP proxy "${CTX:baselineName}"
+    Then the response should be successful
