@@ -200,7 +200,7 @@ Feature: Basic rate limiting policy
       | spec.version           | ${CTX:apiVersion}                |
       | spec.context           | ${CTX:apiContext}/$version       |
       | spec.upstream.main.url | http://testbench:3000            |
-      | spec.policies          | [{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":5,"duration":"1h"}]}}] |
+      | spec.policies          | [{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":6,"duration":"1h"}]}}] |
       | spec.operations        | [{"method":"GET","path":"/health","policies":[{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":100,"duration":"1h"}]}}]},{"method":"GET","path":"/resource-a"},{"method":"GET","path":"/resource-b","policies":[{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":3,"duration":"1h"}]}}]},{"method":"GET","path":"/resource-c"}] |
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
@@ -211,9 +211,14 @@ Feature: Basic rate limiting policy
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource-b"
     Then the response status code should be 429
 
-    # The API-level bucket (5) is already exhausted by the readiness poll plus resource-b's
-    # traffic (every request against an operation under this API counts toward the API-level
-    # bucket, whether or not that operation also has its own route-level policy).
+    # The readiness poll and resource-b's four requests, including the rejected one, have used
+    # 5 of the API-level bucket's 6. Every request to an operation under this API counts toward
+    # it, whether or not that operation also has its own route-level policy.
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource-a"
+    Then the response status code should be 200
+    And the response header "X-RateLimit-Limit" should be "6"
+    And the response header "X-RateLimit-Remaining" should be "0"
+
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource-a"
     Then the response status code should be 429
 
