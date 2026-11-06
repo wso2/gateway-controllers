@@ -146,17 +146,21 @@ Feature: mcp-acl-list access decisions
     And the response body should contain "Reports the value of a header"
 
     Examples: tools
-      | case                                             | tools                                | listed | denied  |
+      | case                                             | tools                                 | listed | denied  |
       # MAC #10: deny mode with no exceptions is a full lockdown; the list is an empty array and
       # every call is denied. One row per tool, so each of the mock's three tools is shown denied.
-      | deny mode with no exceptions, add is denied      | {"mode":"deny","exceptions":[]}      | 0      | add     |
-      | deny mode with no exceptions, echo is denied     | {"mode":"deny","exceptions":[]}      | 0      | echo    |
-      | deny mode with no exceptions, headers is denied  | {"mode":"deny","exceptions":[]}      | 0      | headers |
+      | deny mode with no exceptions, add is denied      | {"mode":"deny","exceptions":[]}       | 0      | add     |
+      | deny mode with no exceptions, echo is denied     | {"mode":"deny","exceptions":[]}       | 0      | echo    |
+      | deny mode with no exceptions, headers is denied  | {"mode":"deny","exceptions":[]}       | 0      | headers |
       # MAC #7: deny mode with T1 as the only exception; the list holds exactly T1. One row per
       # unlisted tool, so with a count of 1 and both other tools missing, the one left is add.
       # The scenario after this outline checks that add's fields are unchanged.
-      | deny mode with one exception, echo is removed    | {"mode":"deny","exceptions":["add"]} | 1      | echo    |
-      | deny mode with one exception, headers is removed | {"mode":"deny","exceptions":["add"]} | 1      | headers |
+      | deny mode with one exception, echo is removed    | {"mode":"deny","exceptions":["add"]}  | 1      | echo    |
+      | deny mode with one exception, headers is removed | {"mode":"deny","exceptions":["add"]}  | 1      | headers |
+      # MAC #8: allow mode with T1 as the only exception; the list holds every tool except T1.
+      # The mock serves three tools, so with a count of 2 and add missing, the two left are echo
+      # and headers.
+      | allow mode with one exception, add is removed    | {"mode":"allow","exceptions":["add"]} | 2      | add     |
 
   # MAC #7: the entry the policy keeps reaches the client with its fields unchanged. The policy
   # decodes the list, removes the denied entries and encodes it again, so the keys come back in
