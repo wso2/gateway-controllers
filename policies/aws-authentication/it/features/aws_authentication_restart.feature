@@ -34,7 +34,7 @@ Feature: AWS Authentication policy across gateway restarts
   # One API signs with a permanent access key and the other with credentials from STS
   # AssumeRole. The restarted gateway runtime builds the policies again, so the second API also
   # shows the runtime obtains new temporary credentials after a restart.
-  Scenario: Restart controller/runtime, scale gateway replicas, and invoke through different replicas (restart)
+  Scenario: Restart controller and runtime with access key and STS credentials
     Given I generate a unique value from "aws-auth-restart-key" and store it as "keyApiName"
     And I generate a unique API version from "aws-auth-restart-key" and store it as "keyApiVersion"
     And I generate a unique API context from "/aws-auth-restart-key" and store it as "keyApiContext"
