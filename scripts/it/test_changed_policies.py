@@ -75,6 +75,7 @@ class SelectionTests(unittest.TestCase):
         write(self.root, "policies/dependent/it/it-suite.yaml")
         write(self.root, "policies/notests/go.mod", go_mod("notests"))
         write(self.root, "policies/tests-a/v2/go.mod", go_mod("tests-a/v2"))
+        write(self.root, "policies/tests-a/v2/policy-definition.yaml")
         write(self.root, "policies/tests-a/v2/it/it-suite.yaml")
         write(self.root, "policies/time-based-model-routing/go.mod", go_mod("time-based-model-routing"))
         write(self.root, "policies/time-based-model-routing/it/it-suite.yaml")
@@ -101,6 +102,16 @@ class SelectionTests(unittest.TestCase):
         self.change("policies/tests-a/v2/a.go")
         selected, _, _ = cp.select(self.root, "base")
         self.assertEqual(["tests-a/v2"], selected)
+
+    def test_a_v_folder_without_a_policy_definition_belongs_to_the_policy_around_it(self):
+        write(self.root, "policies/tests-a/v3/notes.md")
+        git(self.root, "add", "-A")
+        git(self.root, "commit", "-q", "-m", "notes")
+        git(self.root, "tag", "-f", "base")
+        self.change("policies/tests-a/v3/notes.md")
+        selected, _, _ = cp.select(self.root, "base")
+        self.assertEqual(["dependent", "tests-a"], selected)
+        self.assertNotIn("tests-a/v3", cp.policy_names(self.root))
 
     def test_requesting_a_v2_suite_by_id(self):
         selected, _, _ = cp.select(self.root, None, ["tests-a/v2"])

@@ -56,7 +56,13 @@ def policy_names(repo_root):
         if not (p.is_dir() and NAME_RE.match(p.name)):
             continue
         names.append(p.name)
-        names.extend(f"{p.name}/{v.name}" for v in p.iterdir() if v.is_dir() and VERSION_DIR_RE.match(v.name))
+        # A v<N> folder is a policy of its own only when it holds a policy-definition.yaml; any other
+        # v<N> folder is part of the policy around it.
+        names.extend(
+            f"{p.name}/{v.name}"
+            for v in p.iterdir()
+            if v.is_dir() and VERSION_DIR_RE.match(v.name) and (v / "policy-definition.yaml").is_file()
+        )
     return sorted(names)
 
 
