@@ -205,6 +205,68 @@ Feature: mcp-acl-list access decisions
     When I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
 
+  # MAC #14: the full discovery journey a client makes; the list and the call decisions agree.
+  # Deny mode with two exceptions leaves two tools to call and one (headers) to omit. The
+  # upstream is the MCP mock (testbench port 3009), so a permitted call returns the tool's real
+  # result. Every answer that came from the mock carries x-envoy-upstream-service-time, and the
+  # denial does not, which shows the policy answered it without reaching the mock. The denied
+  # call uses id 21 so its response can be held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario: The discovery journey can call every listed tool and no omitted tool
+    Given I generate a unique resource name from "mcp-acl-journey" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-journey" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-journey" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-journey" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add","echo"]}}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Handshake: initialize, then the notification that the client is ready.
+    When I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+    Then the response should be successful
+    And the JSON response field "result.serverInfo.name" should be "everything"
+    When I use the MCP Client to send a notifications/initialized notification to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 202
+    And the response body should be empty
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    # Discovery: exactly add and echo are listed, and headers is omitted.
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.tools" should have 2 items
+    And the JSON response array "result.tools" should contain an item with "name" equal to "add"
+    And the JSON response array "result.tools" should contain an item with "name" equal to "echo"
+    And the JSON response array "result.tools" should not contain an item with "name" equal to "headers"
+
+    # Every listed tool runs and returns its real result from the mock.
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send "echo" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "Echo: Hello, World!"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    # The omitted tool is denied by the policy and never reaches the mock.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"headers","arguments":{"name":"Authorization"}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
   # MAC #11: allow mode with no exceptions; the full discovery and call sequence behaves as if
   # no policy were attached.
   # Two proxies point at the same MCP mock (testbench port 3009): one without any policy, which
