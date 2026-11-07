@@ -446,7 +446,7 @@ Feature: AWS Authentication policy
     Given I generate a unique value from "aws-auth-payload" and store it as "apiName"
     And I generate a unique API version from "aws-auth-payload" and store it as "apiVersion"
     And I generate a unique API context from "/aws-auth-payload" and store it as "apiContext"
-    And I generate a payload of 512 KiB and store it as "largePayload"
+    And I generate a value of 512 KiB of "0123456789abcdefghijklmnopqrstuvwxyz" and store it as "largePayload"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}                    |
       | name                   | ${CTX:apiName}                               |
