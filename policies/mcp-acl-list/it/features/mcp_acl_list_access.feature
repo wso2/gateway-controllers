@@ -423,3 +423,118 @@ Feature: mcp-acl-list access decisions
     And I authenticate using basic auth as "admin"
     And I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
+
+  # MAC #23: deny mode, then an update to allow mode with the same exception, then an update
+  # that removes the policy; each update applies to the running proxy without redeploying it.
+  # The upstream is the MCP mock (testbench port 3009), which serves add, echo and headers.
+  # Each update is a PUT of the same proxy. A call that the previous configuration denied is
+  # repeated until it succeeds, which waits for the update to reach the gateway without a sleep.
+  # The proxy's stored createdAt is the same at the end as before the first update, while
+  # updatedAt has moved, so the proxy was updated in place and never deleted and created again.
+  # The denied calls use id 21 so their responses can be held to mcp-acl-list-tool-denied.json.
+  Scenario: An updated policy applies to the running proxy without redeploying it
+    Given I generate a unique resource name from "mcp-acl-update" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-update" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-update" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-update" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add"]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # The proxy's identity before any update.
+    When I get the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+    And I store the JSON response field "status.createdAt" as "createdAt"
+    And I store the JSON response field "status.updatedAt" as "firstUpdatedAt"
+
+    # Phase 1, deny mode with add as the exception: only add is listed and runs.
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 1 item
+    And the JSON response array "result.tools" should contain an item with "name" equal to "add"
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"echo","arguments":{"message":"denied"}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+
+    # Phase 2, updated to allow mode with the same exception: the verdicts swap.
+    When I update MCP proxy "${CTX:mcpName}" from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"allow","exceptions":["add"]}}}] |
+    Then the response should be successful
+    When I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"echo","arguments":{"message":"Hello, World!"}}}
+      """
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 2 items
+    And the JSON response array "result.tools" should contain an item with "name" equal to "echo"
+    And the JSON response array "result.tools" should contain an item with "name" equal to "headers"
+    And the JSON response array "result.tools" should not contain an item with "name" equal to "add"
+    When I use the MCP Client to send "echo" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "Echo: Hello, World!"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":60}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+
+    # Phase 3, updated without the policy: every tool is listed and runs.
+    When I update MCP proxy "${CTX:mcpName}" from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+    Then the response should be successful
+    When I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":60}}}
+      """
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 3 items
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    When I use the MCP Client to send "echo" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "Echo: Hello, World!"
+    When I use the MCP Client to send "headers" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should contain "Authorization:"
+
+    # The same proxy throughout: created once, updated twice.
+    When I get the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+    And the JSON response field "status.createdAt" should be "${CTX:createdAt}"
+    And the JSON response field "status.updatedAt" should not equal "${CTX:firstUpdatedAt}"
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
