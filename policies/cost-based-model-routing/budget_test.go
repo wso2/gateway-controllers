@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -373,6 +374,7 @@ func TestRedisLocalAsyncCacheKeyIncludesConnectionAndTuning(t *testing.T) {
 		"database":      func(cfg *config) { cfg.Redis.DB++ },
 		"credentials":   func(cfg *config) { cfg.Redis.Password = "rotated" },
 		"sync interval": func(cfg *config) { cfg.Local.SyncInterval += time.Millisecond },
+		"tls settings":  func(cfg *config) { cfg.Redis.TLSFingerprint = "tls-on" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -399,6 +401,68 @@ func TestRedisFailureModeClosedRejectsAnUnreachableServer(t *testing.T) {
 	_, err := GetPolicy(policy.PolicyMetadata{RouteName: uniqueRoute(t)}, params)
 	if err == nil {
 		t.Fatal("expected policy creation to fail when Redis is unreachable and failureMode is closed")
+	}
+}
+
+func TestRedisTLSParametersAreParsed(t *testing.T) {
+	params := validParams()
+	params["backend"] = "redis"
+	params["redis"] = map[string]interface{}{
+		"tls": map[string]interface{}{
+			"enabled":            true,
+			"caFile":             "/certs/ca.pem",
+			"serverName":         "redis.internal",
+			"insecureSkipVerify": true,
+			"certFile":           "/certs/client.crt",
+			"keyFile":            "/certs/client.key",
+		},
+	}
+	cfg, err := parseConfig(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Redis.TLS
+	if !got.Enabled || got.CAFile != "/certs/ca.pem" || got.ServerName != "redis.internal" ||
+		!got.InsecureSkipVerify || got.CertFile != "/certs/client.crt" || got.KeyFile != "/certs/client.key" {
+		t.Fatalf("parsed TLS config = %+v", got)
+	}
+
+	plain, err := parseConfig(validParams())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain.Redis.TLS.Enabled {
+		t.Fatal("TLS must be disabled by default")
+	}
+}
+
+func TestRedisTLSMisconfigurationFailsEvenWhenFailureModeIsOpen(t *testing.T) {
+	params := validParams()
+	params["backend"] = "redis"
+	params["redis"] = map[string]interface{}{
+		"host":        "127.0.0.1",
+		"port":        1,
+		"failureMode": "open",
+		"tls":         map[string]interface{}{"enabled": true, "caFile": "/does/not/exist.pem"},
+	}
+	_, err := GetPolicy(policy.PolicyMetadata{RouteName: uniqueRoute(t)}, params)
+	if err == nil || !strings.Contains(err.Error(), "ca_file") {
+		t.Fatalf("err = %v, want a ca_file error", err)
+	}
+}
+
+func TestRedisClientRegistrySeparatesTLSSettings(t *testing.T) {
+	opts := func() *redis.Options {
+		return &redis.Options{Addr: "127.0.0.1:1", DialTimeout: 10 * time.Millisecond, MaxRetries: -1}
+	}
+	plain, _, _ := getOrCreateRedisClient(opts(), "", 10*time.Millisecond)
+	withTLS, created, _ := getOrCreateRedisClient(opts(), "fp-a", 10*time.Millisecond)
+	again, createdAgain, _ := getOrCreateRedisClient(opts(), "fp-a", 10*time.Millisecond)
+	if !created || withTLS == plain {
+		t.Error("TLS settings must not reuse the plaintext client for the same address")
+	}
+	if createdAgain || again != withTLS {
+		t.Error("identical TLS settings must reuse the same client")
 	}
 }
 
