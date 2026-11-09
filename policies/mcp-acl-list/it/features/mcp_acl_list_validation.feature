@@ -76,16 +76,30 @@ Feature: mcp-acl-list rejection of malformed requests
     Then the response should be successful
 
     Examples: malformed requests
-      | case                                | body                                                                                       | error                               |
+      | case                                | body                                                                                       | error                                |
       # MAC #18: a body that is not valid JSON at all; 400 with -32700 Invalid JSON and "id":null.
       # The second row is a valid call cut short: it carries "id":7, and the answer still says
       # null, because nothing in a body that cannot be read is trusted.
-      | not JSON at all                     | {not json                                                                                  | mcp-acl-list-invalid-json           |
-      | a call cut short, carrying an id    | {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add"                       | mcp-acl-list-invalid-json           |
-      | plain text                          | hello                                                                                      | mcp-acl-list-invalid-json           |
+      | not JSON at all                     | {not json                                                                                  | mcp-acl-list-invalid-json            |
+      | a call cut short, carrying an id    | {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add"                       | mcp-acl-list-invalid-json            |
+      | plain text                          | hello                                                                                      | mcp-acl-list-invalid-json            |
       # MAC #17: the key that names the target differs per capability type (resources/read uses
       # params.uri, prompts/get uses params.name), so a request carrying the other key has no
       # name; 400 with -32602 and a message naming the type. The body was readable, so its id
       # is echoed.
-      | resources/read carrying params.name | {"jsonrpc":"2.0","id":31,"method":"resources/read","params":{"name":"file:///readme.txt"}} | mcp-acl-list-missing-resources-name |
-      | prompts/get carrying params.uri     | {"jsonrpc":"2.0","id":32,"method":"prompts/get","params":{"uri":"greeting"}}               | mcp-acl-list-missing-prompts-name   |
+      | resources/read carrying params.name | {"jsonrpc":"2.0","id":31,"method":"resources/read","params":{"name":"file:///readme.txt"}} | mcp-acl-list-missing-resources-name  |
+      | prompts/get carrying params.uri     | {"jsonrpc":"2.0","id":32,"method":"prompts/get","params":{"uri":"greeting"}}               | mcp-acl-list-missing-prompts-name    |
+      # MAC #16: tools/call whose params is missing or not an object (400, -32602 Invalid MCP
+      # request params), or whose name is unusable (400, -32602 Missing MCP tools name). Rows
+      # that give the same answer share an id, so they share an expected-error file.
+      # Gateway latest reads the body with its request resolver before the policy sees it, and
+      # answers differently, so it has its own files under expected-error-responses/latest/:
+      # a missing or non-object params answers Missing MCP tools name, and a name that is not
+      # a string answers -32600 "Request body has a member of the wrong type" with id null.
+      | tools/call without params           | {"jsonrpc":"2.0","id":41,"method":"tools/call"}                                            | mcp-acl-list-invalid-params          |
+      | tools/call with params a string     | {"jsonrpc":"2.0","id":41,"method":"tools/call","params":"add"}                             | mcp-acl-list-invalid-params          |
+      | tools/call with params an array     | {"jsonrpc":"2.0","id":41,"method":"tools/call","params":["add"]}                           | mcp-acl-list-invalid-params          |
+      | tools/call without a name           | {"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"arguments":{"a":1,"b":2}}}       | mcp-acl-list-missing-tools-name      |
+      | tools/call with a blank name        | {"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":""}}                       | mcp-acl-list-missing-tools-name      |
+      | tools/call with a whitespace name   | {"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"   "}}                    | mcp-acl-list-missing-tools-name      |
+      | tools/call with a number as name    | {"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":123}}                      | mcp-acl-list-tools-name-not-a-string |
