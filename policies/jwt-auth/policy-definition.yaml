@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.5.0
+version: v1.6.0
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -118,6 +118,16 @@ parameters:
                 items:
                   type: string
 
+    onAuthorizationFailureStatusCode:
+      type: integer
+      description: |
+        HTTP status code returned when the token is valid but does not satisfy `scopes`/`requiredScopes`
+        or `claims`/`requiredClaims`. Defaults to 403 Forbidden with `WWW-Authenticate: Bearer error="insufficient_scope"`
+        for a scope rejection (RFC 6750 section 3.1). Set 401 to keep the pre-v1.6 behavior.
+        Authentication failures (no token, bad or expired token) keep using `onFailureStatusCode`.
+      default: 403
+      minimum: 400
+      maximum: 499
     claimMappings:
       type: object
       x-wso2-policy-advanced-param: true
@@ -372,7 +382,7 @@ systemParameters:
 
     onFailureStatusCode:
       type: integer
-      description: HTTP status code to return on authentication failure (401 for Unauthorized, 403 for Forbidden).
+      description: HTTP status code to return on authentication failure (no token, or a malformed, unverifiable or expired token). Scope and claim rejections use onAuthorizationFailureStatusCode.
       default: 401
       "wso2/defaultValue": "${config.policy_configurations.jwtauth_v1.onfailurestatuscode}"
 

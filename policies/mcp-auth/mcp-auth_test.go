@@ -1853,3 +1853,30 @@ func assertMalformedRequestFault(t *testing.T, resp policy.ImmediateResponse, wa
 		t.Fatalf("JSON-RPC code = %+v, want %d", f.JSONRPC, wantCode)
 	}
 }
+
+// The delegated JWT Auth policy's own challenge (any casing) is replaced, so the response
+// carries exactly one WWW-Authenticate: this policy's, with resource_metadata.
+func TestSetChallenge_ReplacesDelegatedChallengeInAnyCase(t *testing.T) {
+	headers := map[string]string{
+		"content-type":     "application/json",
+		"www-authenticate": `Bearer error="invalid_token"`,
+		"Www-Authenticate": "Bearer",
+	}
+	setChallenge(headers, `Bearer resource_metadata="https://gw/.well-known/oauth-protected-resource"`)
+
+	n := 0
+	for name := range headers {
+		if strings.EqualFold(name, WWWAuthenticateHeader) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("challenge headers = %d, want 1: %v", n, headers)
+	}
+	if got := headers[WWWAuthenticateHeader]; !strings.Contains(got, "resource_metadata=") {
+		t.Fatalf("WWW-Authenticate = %q, want this policy's resource_metadata challenge", got)
+	}
+	if headers["content-type"] != "application/json" {
+		t.Fatalf("other headers must be kept: %v", headers)
+	}
+}
