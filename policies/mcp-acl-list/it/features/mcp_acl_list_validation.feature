@@ -175,3 +175,40 @@ Feature: mcp-acl-list rejection of malformed requests
 
     When I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
+
+  # ---- Invalid configurations -----------------------------------------------------------
+
+  # The gateway controller validates the policy reference and its params against the policy's
+  # definition before it creates the proxy, so an invalid configuration is refused at deploy
+  # time: 400 with status "error", and a message that names what is wrong. The MCP proxy API
+  # writes "configuration validation failed" in lower case where the REST API capitalises it,
+  # so the message is matched without regard to case. The proxy is then read back and must not
+  # exist, so the policy was never attached as a no-op.
+  Scenario Outline: An invalid policy configuration is refused at deploy time (<case>)
+    Given I generate a unique resource name from "mcp-acl-invalid" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-invalid" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-invalid" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-invalid" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"<version>","params":<params>}] |
+    Then the response status code should be 400
+    And the response should be valid JSON
+    And the JSON response field "status" should be "error"
+    And the response body should match pattern "(?i)configuration validation failed"
+    And the response body should contain "<message>"
+
+    When I get the MCP proxy "${CTX:mcpName}"
+    Then the response status code should be 404
+
+    Examples: invalid configurations
+      | case         | version | params | message                 |
+      # MAC #20: params with no tools, resources or prompts block; the definition requires at
+      # least one, so a policy that would check nothing cannot be attached.
+      | empty params | v1      | {}     | spec.policies[0].params |
