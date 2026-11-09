@@ -38,6 +38,10 @@ Feature: mcp-acl-list rejection of malformed requests
   # call goes first and carries x-envoy-upstream-service-time, which the gateway adds only to
   # an answer that came from the mock; the malformed request's answer must not carry it, so it
   # never reached the mock. Each answer is held to its recorded expected-error file.
+  # The policy checks a request's params only for a capability type that has a block in its
+  # configuration, so all three blocks are configured. The resources and prompts blocks deny
+  # everything; that does not matter here, because a malformed request is refused before the
+  # policy looks at the mode.
   Scenario Outline: A malformed request is rejected by the policy (<case>)
     Given I generate a unique resource name from "mcp-acl-malformed" and store it as "mcpName"
     And I generate a unique value from "mcp-acl-malformed" and store it as "mcpDisplayName"
@@ -51,7 +55,7 @@ Feature: mcp-acl-list rejection of malformed requests
       | context           | ${CTX:mcpContext} |
       | specVersion       | 2025-06-18 |
       | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
-      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add"]}}}] |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add"]},"resources":{"mode":"deny","exceptions":[]},"prompts":{"mode":"deny","exceptions":[]}}}] |
     Then the resource creation response should indicate successful deployment
     And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
 
@@ -72,10 +76,16 @@ Feature: mcp-acl-list rejection of malformed requests
     Then the response should be successful
 
     Examples: malformed requests
-      | case                                | body                                                                | error                       |
+      | case                                | body                                                                                       | error                               |
       # MAC #18: a body that is not valid JSON at all; 400 with -32700 Invalid JSON and "id":null.
       # The second row is a valid call cut short: it carries "id":7, and the answer still says
       # null, because nothing in a body that cannot be read is trusted.
-      | not JSON at all                     | {not json                                                           | mcp-acl-list-invalid-json   |
-      | a call cut short, carrying an id    | {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add" | mcp-acl-list-invalid-json   |
-      | plain text                          | hello                                                               | mcp-acl-list-invalid-json   |
+      | not JSON at all                     | {not json                                                                                  | mcp-acl-list-invalid-json           |
+      | a call cut short, carrying an id    | {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"add"                       | mcp-acl-list-invalid-json           |
+      | plain text                          | hello                                                                                      | mcp-acl-list-invalid-json           |
+      # MAC #17: the key that names the target differs per capability type (resources/read uses
+      # params.uri, prompts/get uses params.name), so a request carrying the other key has no
+      # name; 400 with -32602 and a message naming the type. The body was readable, so its id
+      # is echoed.
+      | resources/read carrying params.name | {"jsonrpc":"2.0","id":31,"method":"resources/read","params":{"name":"file:///readme.txt"}} | mcp-acl-list-missing-resources-name |
+      | prompts/get carrying params.uri     | {"jsonrpc":"2.0","id":32,"method":"prompts/get","params":{"uri":"greeting"}}               | mcp-acl-list-missing-prompts-name   |
