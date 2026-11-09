@@ -103,3 +103,75 @@ Feature: mcp-acl-list rejection of malformed requests
       | tools/call with a blank name        | {"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":""}}                       | mcp-acl-list-missing-tools-name      |
       | tools/call with a whitespace name   | {"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"   "}}                    | mcp-acl-list-missing-tools-name      |
       | tools/call with a number as name    | {"jsonrpc":"2.0","id":43,"method":"tools/call","params":{"name":123}}                      | mcp-acl-list-tools-name-not-a-string |
+
+  # ---- Method casing (known gap) --------------------------------------------------------
+
+  # MAC #19: a tools/call whose method is cased differently (Tools/Call, TOOLS/CALL) is not
+  # recognised as an MCP method, so the policy checks neither the call nor its tool name and
+  # forwards the request as it is. This is a known gap: a server that matched method names
+  # without regard to case would run a tool the policy denies. The scenario pins the current
+  # behaviour, so a fix shows up as a deliberate change to it.
+  # The upstream is the scripted MCP server (testbench port 3021). It compares method names
+  # exactly, so it answers the odd casing with its own -32601, and it records every request
+  # it receives under the scenario's partition, method spelled as sent. The same call in the
+  # normal casing is denied first, which shows echo is a tool the policy blocks. The log must
+  # hold the allowed add call and not a tools/call for echo, so it is the right log and records
+  # only what passed the policy.
+  @security
+  Scenario: A tools/call with the method cased differently is forwarded without a check
+    Given I generate a unique resource name from "mcp-acl-casing" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-casing" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-casing" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-casing" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-acl-casing" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add"]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # The normal casing: echo is denied by the policy.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"echo","arguments":{}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    # The same call in other casings passes the policy and is answered by the server.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":51,"method":"Tools/Call","params":{"name":"echo","arguments":{}}}
+      """
+    Then the response should be successful
+    And the JSON response field "error.message" should be "method not found: Tools/Call"
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":52,"method":"TOOLS/CALL","params":{"name":"echo","arguments":{}}}
+      """
+    Then the response should be successful
+    And the JSON response field "error.message" should be "method not found: TOOLS/CALL"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    # The allowed tool in the normal casing, so the log has a call that passed the policy.
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "ok"
+
+    When I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the response should be successful
+    And the JSON response array "requests" should contain an item with "method" equal to "Tools/Call"
+    And the JSON response array "requests" should contain an item with "method" equal to "TOOLS/CALL"
+    And the JSON response array "requests" should contain an item with "tool" equal to "add"
+    And the JSON response array "requests" should not contain an item with "tool" equal to "echo"
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
