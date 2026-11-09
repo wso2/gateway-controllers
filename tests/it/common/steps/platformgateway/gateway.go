@@ -2243,11 +2243,15 @@ func (g *Gateway) assertServiceLogs(ctx context.Context, service, marker string,
 	return nil
 }
 
+// logCountSettle is how long serviceLogLinesCount keeps reading after the count is reached, so a
+// duplicate logged a moment after the first line is still counted.
+const logCountSettle = 300 * time.Millisecond
+
 // serviceLogLinesCount asserts how many log lines of a service contain every fragment in the
-// table, one fragment per row. It waits until at least that many lines exist, then requires exactly
-// that many, so a line logged once per key can be told apart from one logged on every request. The
-// log is shared by every scenario on the gateway, so the fragments should include a value only this
-// scenario produces.
+// table, one fragment per row. It waits until at least that many lines exist, reads the log again
+// after logCountSettle, then requires exactly that many, so a line logged once per key can be told
+// apart from one logged on every request. The log is shared by every scenario on the gateway, so
+// the fragments should include a value only this scenario produces.
 func (g *Gateway) serviceLogLinesCount(ctx context.Context, service string, want int, table *godog.Table) error {
 	fragments, err := logFragments(ctx, table)
 	if err != nil {
@@ -2265,6 +2269,14 @@ func (g *Gateway) serviceLogLinesCount(ctx context.Context, service string, want
 	if err != nil && want > 0 {
 		return fmt.Errorf("waiting for %d %s log line(s) of service %q containing %q: found %d: %w",
 			want, resolved, service, fragments, len(matched), err)
+	}
+	if len(matched) <= want {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(logCountSettle):
+		}
+		matched = linesContainingAll(stack.Logs(ctx), fragments)
 	}
 	if len(matched) != want {
 		return fmt.Errorf("service %q has %d log line(s) containing %q, want %d: %s",

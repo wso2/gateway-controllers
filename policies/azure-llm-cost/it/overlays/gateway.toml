@@ -21,7 +21,7 @@
 [policy_configurations.azure_llm_cost_v1]
 pricing_file = "/etc/policy-engine/llm-pricing/model_prices.json"
 
-# The policy logs each calculated cost at debug level; azure_llm_cost.feature checks that those
-# lines carry no prompt or completion text.
+# The policy logs each calculated cost at debug level; azure_llm_cost_publishing.feature checks
+# that those lines carry no prompt or completion text.
 [policy_engine.logging]
 level = "debug"

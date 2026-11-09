@@ -90,11 +90,14 @@ const numericTolerance = 1e-9
 
 // numericMatches reports whether value, a JSON number or a numeric string, is finite and either
 // equals want within numericTolerance ("equal to"; a want of zero needs an exact zero) or is at
-// least want ("at least").
+// least want ("at least"). want must be finite too: an infinite want would match any value.
 func numericMatches(field string, value any, op, want string) error {
 	expected, err := strconv.ParseFloat(strings.TrimSpace(want), 64)
 	if err != nil {
 		return fmt.Errorf("expected value %q for %q is not a number", want, field)
+	}
+	if math.IsNaN(expected) || math.IsInf(expected, 0) {
+		return fmt.Errorf("expected value %q for %q is not a finite number", want, field)
 	}
 	var got float64
 	switch v := value.(type) {

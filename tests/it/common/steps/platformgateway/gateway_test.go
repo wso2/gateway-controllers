@@ -1073,7 +1073,9 @@ func TestAnalyticsMetadataResolvesNestedPaths(t *testing.T) {
 // numbers published either as JSON numbers or as numeric strings.
 func TestNumericMatches(t *testing.T) {
 	const eq, atLeast = "equal to", "at least"
-	require.NoError(t, numericMatches("cost", 0.1+0.2, eq, "0.3"))
+	// Variables, not constants: Go adds constants exactly, so 0.1+0.2 would be 0.3 with no rounding.
+	a, b := 0.1, 0.2
+	require.NoError(t, numericMatches("cost", a+b, eq, "0.3"))
 	require.NoError(t, numericMatches("cost", 4.2e-05, eq, "0.000042"))
 	require.NoError(t, numericMatches("cost", "0.0000420000", eq, "4.2e-5"))
 	require.NoError(t, numericMatches("cost", float64(0), eq, "0"))
@@ -1082,6 +1084,11 @@ func TestNumericMatches(t *testing.T) {
 	require.NoError(t, numericMatches("cost", 9.2e12, atLeast, "0"))
 
 	require.Error(t, numericMatches("cost", 0.000042, eq, "0.000043"))
+	require.Error(t, numericMatches("cost", 0.3000000006, eq, "0.3"))
+	for _, want := range []string{"Inf", "-Inf", "NaN"} {
+		require.Error(t, numericMatches("cost", float64(0), eq, want))
+		require.Error(t, numericMatches("cost", float64(0), atLeast, want))
+	}
 	require.Error(t, numericMatches("cost", 1e-12, eq, "0"))
 	require.Error(t, numericMatches("cost", -0.5, eq, "0.5"))
 	require.Error(t, numericMatches("cost", -0.143, atLeast, "0"))
