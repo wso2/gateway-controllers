@@ -2251,8 +2251,13 @@ const logCountSettle = 300 * time.Millisecond
 // table, one fragment per row. It waits until at least that many lines exist, reads the log again
 // after logCountSettle, then requires exactly that many, so a line logged once per key can be told
 // apart from one logged on every request. The log is shared by every scenario on the gateway, so
-// the fragments should include a value only this scenario produces.
+// the fragments should include a value only this scenario produces. The count must be at least one:
+// a log that could not be read is returned as a note that matches no fragment, so a zero count
+// would pass without the log being read.
 func (g *Gateway) serviceLogLinesCount(ctx context.Context, service string, want int, table *godog.Table) error {
+	if want < 1 {
+		return fmt.Errorf("the log line count must be at least 1, got %d; use \"the %q service logs should not contain\" to check that a line is absent", want, service)
+	}
 	fragments, err := logFragments(ctx, table)
 	if err != nil {
 		return err
@@ -2266,7 +2271,7 @@ func (g *Gateway) serviceLogLinesCount(ctx context.Context, service string, want
 		matched = linesContainingAll(stack.Logs(ctx), fragments)
 		return matched, nil
 	}, func(lines []string) bool { return len(lines) >= want })
-	if err != nil && want > 0 {
+	if err != nil {
 		return fmt.Errorf("waiting for %d %s log line(s) of service %q containing %q: found %d: %w",
 			want, resolved, service, fragments, len(matched), err)
 	}

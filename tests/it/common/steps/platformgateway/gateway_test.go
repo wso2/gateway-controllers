@@ -780,6 +780,17 @@ func TestLinesContainingAll(t *testing.T) {
 	require.Empty(t, linesContainingAll("", []string{"anything"}))
 }
 
+// A zero count is rejected before any log is read: an unreadable log matches no fragment, so a zero
+// count would pass without checking anything.
+func TestServiceLogLinesCountRejectsZero(t *testing.T) {
+	g := &Gateway{}
+	table := analyticsTable(t, []string{"not found in modelMappings"})
+	for _, want := range []int{0, -1} {
+		err := g.serviceLogLinesCount(context.Background(), "gateway-runtime", want, table)
+		require.ErrorContains(t, err, "must be at least 1")
+	}
+}
+
 func TestLogFragmentsFromTable(t *testing.T) {
 	local := tcontext.NewLocal("runner")
 	local.Set("deployment", "stray-deployment-run1")
