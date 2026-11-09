@@ -136,7 +136,7 @@ func TestJWTAuthPolicy_ScopeClaim_MissingClaimDenies(t *testing.T) {
 	params["requiredScopes"] = []interface{}{"api:read"}
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
-	assertAuthFailure(t, ctx, action, 401)
+	assertAuthFailure(t, ctx, action, 403)
 }
 
 // TestJWTAuthPolicy_ScopeClaim_CacheHitPreservesResolvedScopes verifies the token verdict cache

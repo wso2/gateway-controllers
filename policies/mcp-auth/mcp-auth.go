@@ -1014,7 +1014,7 @@ func (p *McpAuthPolicy) authenticate(ctx context.Context, headerCtx *policy.Requ
 			}
 		}
 		wwwAuthHeader := generateWwwAuthenticateHeaderFromFields(ds.Scheme, ds.Authority, headerCtx.Vhost, headerCtx.APIContext, params, scopes, escapedDesc)
-		headers[WWWAuthenticateHeader] = wwwAuthHeader
+		setChallenge(headers, wwwAuthHeader)
 		echoSessionID(headers, sessionId)
 		return policy.ImmediateResponse{
 			StatusCode: ir.StatusCode,
@@ -1123,4 +1123,18 @@ func generateWwwAuthenticateHeaderFromFields(scheme, authority, vhost, apiContex
 		headerValue += ", error=\"invalid_token\", error_description=\"" + errorDesc + "\""
 	}
 	return headerValue
+}
+
+// setChallenge makes value the response's only WWW-Authenticate challenge. The delegated
+// JWT Auth policy sets its own (from jwt-auth v1.6, under the lowercase key), and a header map
+// keyed by case-variant names would carry both: a client could then read the bare jwt-auth
+// challenge and never see this policy's resource_metadata, which is how an MCP client finds
+// the authorization server.
+func setChallenge(headers map[string]string, value string) {
+	for name := range headers {
+		if strings.EqualFold(name, WWWAuthenticateHeader) {
+			delete(headers, name)
+		}
+	}
+	headers[WWWAuthenticateHeader] = value
 }

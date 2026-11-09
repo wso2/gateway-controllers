@@ -52,7 +52,7 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "api:read" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
     And the response body should contain "Authentication failed"
 
     When I clear all headers
@@ -88,7 +88,7 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "api:read api:deploy" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -118,7 +118,7 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "api:read" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -153,14 +153,14 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "department=platform,status=suspended,role=external" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
     And the response body should contain "Authentication failed"
 
     # department not in the anyOf set -> rejected
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "department=sales,status=suspended,role=internal" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -190,7 +190,7 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "role=admin" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -225,25 +225,25 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:read api:deploy" and claims "status=active,department=engineering" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     # Scope anyOf satisfied but allOf incomplete (api:deploy missing) -> rejected
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:read api:write" and claims "status=active,department=platform" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     # Scopes fully satisfied but claim anyOf (department) not in set -> rejected
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:read api:deploy api:update" and claims "status=active,department=sales" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     # Scopes fully satisfied and claim anyOf ok but claim allOf (status) fails -> rejected
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:read api:deploy api:write" and claims "status=inactive,department=platform" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -278,7 +278,7 @@ Feature: JWT scope and claim authorization rules
 
     # Same Token A on op2: old requiredScopes ok, but new claim allOf status=inactive fails -> rejected.
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/op2"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     # Token B: scope "api:read" (no anyOf scope), role=user, status=active, department=engineering.
     # op2: old requiredScopes ok, new claim allOf(status=active) + anyOf(department) -> authorized.
@@ -289,7 +289,7 @@ Feature: JWT scope and claim authorization rules
 
     # Same Token B on op1: scope allOf(api:read) ok but anyOf(write/update) absent -> rejected.
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/op1"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -326,19 +326,19 @@ Feature: JWT scope and claim authorization rules
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:legacy" and claims "role=legacy" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     # New scope allOf ok but anyOf (write/update) absent -> rejected (proves anyOf enforced here too).
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:read" and claims "status=active,department=platform" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     # New scopes fully satisfied but claim anyOf (department) not in set -> rejected.
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token", scope "api:read api:write" and claims "status=active,department=sales" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -387,7 +387,7 @@ Feature: JWT scope and claim authorization rules
 
     # The second API reuses the cached verdict but must still reject a token without "api:admin".
     When I send a "GET" request to "${CTX:apiContextB}/${CTX:apiVersionB}/protected"
-    Then the response status code should be 401
+    Then the response status code should be 403
     And the response body should contain "Authentication failed"
 
     # The second API's rejection must not affect the first API.
@@ -439,7 +439,7 @@ Feature: JWT scope and claim authorization rules
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"GET","path":"/protected","policies":[{"name":"jwt-auth","version":"v1","params":{"issuers":["mock-jwks"],"scopes":{"allOf":["api:admin"]}}}]}] |
     Then the response should be successful
     When I set header "Authorization" to "Bearer ${CTX:token}"
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/protected" until status 403
     Then the response body should contain "Authentication failed"
 
     # Require the scope the token carries. The same token is accepted again.
