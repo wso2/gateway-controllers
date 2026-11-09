@@ -357,3 +357,69 @@ Feature: mcp-acl-list access decisions
     Then the response should be successful
     When I delete the MCP proxy "${CTX:baselineName}"
     Then the response should be successful
+
+  # ---- Sessions and updates -------------------------------------------------------------
+
+  # MAC #15: a denied call and then an allowed call on the same MCP session; the denial echoes
+  # Mcp-Session-Id, and the session survives it.
+  # The upstream is the session-keeping MCP mock (testbench port 3014). Its initialize answer
+  # names a new session in Mcp-Session-Id, and it refuses any later request whose session it
+  # does not know with 404 "session not found". The scenario's own partition keeps its sessions
+  # apart from other scenarios'. The last request sends a made-up session id and must get that
+  # 404, which proves the mock checks sessions, so the allowed call's 200 means the session was
+  # still alive after the denial. The denied call uses id 21 so its response can be held to the
+  # recorded mcp-acl-list-tool-denied.json; that file does not pin Mcp-Session-Id, so the echoed
+  # id is checked on its own line.
+  Scenario: A denied call does not end the MCP session it was made on
+    Given I generate a unique resource name from "mcp-acl-session" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-session" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-session" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-session" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-acl-session" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3014/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":["add"]}}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Handshake: the mock opens a session, and every request after this one carries its id.
+    When I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+    Then the response should be successful
+    And I store the response header "Mcp-Session-Id" as "mcpSession"
+    When I set header "Mcp-Session-Id" to "${CTX:mcpSession}"
+    And I use the MCP Client to send a notifications/initialized notification to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 202
+
+    # The denied call: the policy answers it with the session id echoed, without reaching the mock.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"echo","arguments":{"message":"denied"}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "Mcp-Session-Id" should be "${CTX:mcpSession}"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    # The allowed call on the same session still reaches the mock and returns its real result.
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    # Control: the same call with a session the mock never issued is refused, so the 200 above
+    # was decided by a live session.
+    When I set header "Mcp-Session-Id" to "not-a-real-session"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 404
+    And the response body should contain "session not found"
+
+    # Clearing the headers also clears the login, so authenticate again before the cleanup.
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
