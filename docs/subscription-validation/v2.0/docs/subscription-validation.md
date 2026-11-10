@@ -131,6 +131,12 @@ Inside `gateway/build.yaml`, ensure the policy modules are added under `policies
   gomodule: github.com/wso2/gateway-controllers/policies/subscription-validation/v2@v2
 - name: subscription-request-ratelimit
   gomodule: github.com/wso2/gateway-controllers/policies/subscription-request-ratelimit@v1
+# Optional: MCP APIs with tool-call limits in their plans
+- name: subscription-tool-ratelimit
+  gomodule: github.com/wso2/gateway-controllers/policies/subscription-tool-ratelimit@v1
+# Optional: LLM APIs with token limits in their plans
+- name: subscription-token-ratelimit
+  gomodule: github.com/wso2/gateway-controllers/policies/subscription-token-ratelimit@v1
 ```
 
 ## Reference Scenarios

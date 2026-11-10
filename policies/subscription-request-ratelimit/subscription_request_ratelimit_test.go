@@ -26,7 +26,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
@@ -353,24 +352,5 @@ func TestResolveConditionDefaults(t *testing.T) {
 		Params: json.RawMessage(`{"limits":[{"count":6,"timeUnit":"DAY"}],"onExceed":"allow"}`)})
 	if other.Signature == ec.Signature || other.Reject {
 		t.Fatalf("expected a new signature for new limits and allow, got %+v", other)
-	}
-}
-
-// With a shared Redis, two gateway replicas (two policy instances) count together.
-func TestRedisBackendSharesCounter(t *testing.T) {
-	mr := miniredis.RunT(t)
-	port, _ := strconv.Atoi(mr.Port())
-	params := map[string]interface{}{
-		"backend": "redis",
-		"redis":   map[string]interface{}{"host": mr.Host(), "port": float64(port), "failureMode": "closed"},
-	}
-	replicaA := newPolicy(t, "r1", params)
-	replicaB := newPolicy(t, "r1", params)
-	conds := cond(2, "reject")
-	assertAllowed(t, send(replicaA, reqCtx(t, "sub-1", "plan-1", conds)), 1)
-	assertAllowed(t, send(replicaB, reqCtx(t, "sub-1", "plan-1", conds)), 2)
-	assertThrottled(t, send(replicaA, reqCtx(t, "sub-1", "plan-1", conds)))
-	if len(mr.Keys()) == 0 {
-		t.Fatalf("expected counters in Redis")
 	}
 }

@@ -165,7 +165,7 @@ func (p *SubscriptionValidationPolicy) OnRequestHeaders(ctx context.Context, req
 		return p.forbiddenResponse("request context is missing", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
 	}
 
-	apiID := reqCtx.SharedContext.APIId
+	apiID := reqCtx.APIId
 	if strings.TrimSpace(apiID) == "" {
 		slog.Error("subscriptionValidation: APIId is empty in SharedContext; failing validation")
 		return p.forbiddenResponse("API id is missing", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
@@ -219,7 +219,7 @@ func (p *SubscriptionValidationPolicy) OnRequestHeaders(ctx context.Context, req
 		}
 	}
 
-	metadata := reqCtx.SharedContext.Metadata
+	metadata := reqCtx.Metadata
 	if metadata != nil {
 		if rawAppID, ok := metadata[applicationIDMetadataKey]; ok {
 			appID := strings.TrimSpace(fmt.Sprint(rawAppID))

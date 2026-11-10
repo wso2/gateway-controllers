@@ -3,10 +3,8 @@ module github.com/wso2/gateway-controllers/policies/subscription-request-ratelim
 go 1.26.10
 
 require (
-	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/wso2/api-platform/sdk/core v0.5.2
 	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0
-	golang.org/x/sync v0.20.0
 )
 
 require (
@@ -16,7 +14,6 @@ require (
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/google/cel-go v0.31.0 // indirect
 	github.com/redis/go-redis/v9 v9.17.3 // indirect
-	github.com/yuin/gopher-lua v1.1.1 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/exp v0.0.0-20260112195511-716be5621a96 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260128011058-8636f8732409 // indirect

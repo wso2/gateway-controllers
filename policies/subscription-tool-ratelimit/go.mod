@@ -5,7 +5,6 @@ go 1.26.10
 require (
 	github.com/wso2/api-platform/sdk/core v0.5.2
 	github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0
-	golang.org/x/sync v0.20.0
 )
 
 require (

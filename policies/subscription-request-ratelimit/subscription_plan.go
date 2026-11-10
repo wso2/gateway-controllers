@@ -32,8 +32,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
@@ -284,9 +282,9 @@ func delegateMetadata(m policy.PolicyMetadata, slot string) policy.PolicyMetadat
 // delegateCache holds one advanced-ratelimit delegate per cache key, and only the newest one of
 // each slot: a plan whose limits changed drops the delegate of its old limits.
 type delegateCache struct {
-	delegates sync.Map // cache key -> policy.Policy
-	current   sync.Map // slot -> cache key of its newest delegate
-	sf        singleflight.Group
+	delegates sync.Map          // cache key -> policy.Policy
+	mu        sync.Mutex        // serializes building, so each key is built once
+	current   map[string]string // slot -> cache key of its newest delegate; guarded by mu
 }
 
 // get returns the cached delegate for key, building it once. Building one for a slot that had
@@ -295,27 +293,27 @@ func (c *delegateCache) get(slot, key string, build func() (policy.Policy, error
 	if d, ok := c.delegates.Load(key); ok {
 		return d.(policy.Policy), nil
 	}
-	v, err, _ := c.sf.Do(key, func() (interface{}, error) {
-		if d, ok := c.delegates.Load(key); ok {
-			return d, nil
-		}
-		d, err := build()
-		if err != nil {
-			return nil, err
-		}
-		if d == nil {
-			return nil, errors.New("delegate is nil")
-		}
-		c.delegates.Store(key, d)
-		if prev, loaded := c.current.Swap(slot, key); loaded && prev.(string) != key {
-			c.delegates.Delete(prev)
-		}
-		return d, nil
-	})
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d, ok := c.delegates.Load(key); ok {
+		return d.(policy.Policy), nil
+	}
+	d, err := build()
 	if err != nil {
 		return nil, err
 	}
-	return v.(policy.Policy), nil
+	if d == nil {
+		return nil, errors.New("delegate is nil")
+	}
+	c.delegates.Store(key, d)
+	if c.current == nil {
+		c.current = map[string]string{}
+	}
+	if prev, ok := c.current[slot]; ok && prev != key {
+		c.delegates.Delete(prev)
+	}
+	c.current[slot] = key
+	return d, nil
 }
 
 // load returns a delegate built earlier.

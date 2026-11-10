@@ -1,6 +1,6 @@
 module github.com/wso2/gateway-controllers/policies/subscription-validation/v2/it
 
-go 1.26.5
+go 1.26.10
 
 require (
 	github.com/cucumber/godog v0.16.0
