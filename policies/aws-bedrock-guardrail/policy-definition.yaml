@@ -252,8 +252,9 @@ parameters:
             a violation found after the first tokens have been delivered cannot
             be answered with a 422 — the stream ends with an error event and the
             text already sent stays sent; and the guardrail is called once per
-            window instead of once per response, so AWS cost scales with
-            response length.
+            text unit of response text rather than once per response, so AWS
+            cost scales with response length. streamingTextUnitChars sets that
+            batch size and is the setting to tune for cost.
           default: false
         streamingJsonPath:
           type: string

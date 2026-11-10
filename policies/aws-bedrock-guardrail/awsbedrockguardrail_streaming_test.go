@@ -45,6 +45,8 @@ type countingBedrockClient struct {
 	texts  []string
 }
 
+// ApplyGuardrail records the call and the text it carried, so a test can assert
+// how many billable assessments a stream made and what was sent.
 func (c *countingBedrockClient) ApplyGuardrail(_ context.Context, params *bedrockruntime.ApplyGuardrailInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error) {
 	c.calls++
 	for _, content := range params.Content {
@@ -55,10 +57,13 @@ func (c *countingBedrockClient) ApplyGuardrail(_ context.Context, params *bedroc
 	return c.output, c.err
 }
 
+// makeNoInterventionOutput is the "no violation" decision.
 func makeNoInterventionOutput() *bedrockruntime.ApplyGuardrailOutput {
 	return &bedrockruntime.ApplyGuardrailOutput{Action: types.GuardrailActionNone}
 }
 
+// makeContentViolationOutput is a content-policy block, the decision that must
+// end a stream.
 func makeContentViolationOutput() *bedrockruntime.ApplyGuardrailOutput {
 	return &bedrockruntime.ApplyGuardrailOutput{
 		Action:      types.GuardrailActionGuardrailIntervened,
@@ -94,6 +99,8 @@ func streamingPolicy(client bedrockGuardrailClient, mutate func(*AWSBedrockGuard
 	}
 }
 
+// streamCtx is a response-stream context with the 200 status the streaming path
+// gates on, and empty metadata for the per-stream state to accumulate in.
 func streamCtx() *policy.ResponseStreamContext {
 	return &policy.ResponseStreamContext{
 		SharedContext:  &policy.SharedContext{Metadata: map[string]interface{}{}},
@@ -136,6 +143,9 @@ func feedStream(t *testing.T, p *AWSBedrockGuardrailPolicy, respCtx *policy.Resp
 	return actions
 }
 
+// TestMode_FollowsConfiguration is the regression guard for the defect behind
+// this version: a flow the attachment does not use must declare SKIP, because a
+// BUFFER declaration demotes every other policy on the route to buffered.
 func TestMode_FollowsConfiguration(t *testing.T) {
 	cases := []struct {
 		name                      string
@@ -197,6 +207,9 @@ func TestMode_FollowsConfiguration(t *testing.T) {
 	}
 }
 
+// TestNeedsMoreResponseData_WindowAndEventBoundary covers the flush pacer: the
+// byte floor, the SSE event boundary that keeps a flush from being cut mid-event,
+// and the unary JSON body that is held whole.
 func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
 
@@ -244,6 +257,9 @@ func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 	}
 }
 
+// TestStreaming_CleanStreamForwardsUnchangedAndValidatesPerWindow asserts a
+// passing stream is delivered byte-for-byte, and assessed in batches rather than
+// once per chunk.
 func TestStreaming_CleanStreamForwardsUnchangedAndValidatesPerWindow(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
@@ -338,6 +354,8 @@ func TestStreaming_PassthroughOnErrorForwardsInsteadOfTerminating(t *testing.T) 
 	}
 }
 
+// TestStreaming_RestoresMaskedPIIInFrames covers masking mode, where the request
+// flow replaced a value upstream and the response must put it back frame by frame.
 func TestStreaming_RestoresMaskedPIIInFrames(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
@@ -410,6 +428,9 @@ func TestStreaming_RedactsPIIInFrames(t *testing.T) {
 	}
 }
 
+// TestStreaming_NonSSEBodyIsValidatedWholeAtEndOfStream keeps the buffered
+// guarantee for a unary body that arrives over chunked transfer: it is held and
+// assessed whole, so nothing unassessed reaches the client.
 func TestStreaming_NonSSEBodyIsValidatedWholeAtEndOfStream(t *testing.T) {
 	client := &countingBedrockClient{output: makeContentViolationOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
@@ -435,6 +456,8 @@ func TestStreaming_NonSSEBodyIsValidatedWholeAtEndOfStream(t *testing.T) {
 	}
 }
 
+// TestStreaming_FramingOnlyFlushIsNotSentToTheGuardrail pins that wire framing is
+// never billed as guardrail text, and cannot trip a filter on its own.
 func TestStreaming_FramingOnlyFlushIsNotSentToTheGuardrail(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, nil)
@@ -457,6 +480,9 @@ func TestStreaming_FramingOnlyFlushIsNotSentToTheGuardrail(t *testing.T) {
 	}
 }
 
+// TestStreaming_DisabledInstanceIsInert covers an attachment whose response flow
+// is off while other policies make the route streaming: it must neither assess
+// nor interfere.
 func TestStreaming_DisabledInstanceIsInert(t *testing.T) {
 	client := &countingBedrockClient{output: makeContentViolationOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
@@ -476,6 +502,8 @@ func TestStreaming_DisabledInstanceIsInert(t *testing.T) {
 	}
 }
 
+// TestParseRequestResponseParams_StreamingParams covers the defaults, the
+// accepted numeric shapes (YAML and JSON deliver a float64), and the rejections.
 func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 	t.Run("response defaults", func(t *testing.T) {
 		got, err := parseRequestResponseParams(map[string]interface{}{"enabled": true}, true)
@@ -677,6 +705,8 @@ func TestStreaming_DoesNotBillAnUnderfilledTextUnit(t *testing.T) {
 	}
 }
 
+// TestStreaming_AssessesOncePerTextUnit is the cost guard: roughly one call per
+// text unit, and no call below the configured floor.
 func TestStreaming_AssessesOncePerTextUnit(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, nil)
@@ -906,5 +936,186 @@ func TestStreaming_ViolationInALaterUnitOfTheSameFlushTerminates(t *testing.T) {
 
 	if !action.TerminateStream() {
 		t.Fatalf("a violation in a later unit of the same flush must end the stream, got %T", action)
+	}
+}
+
+// ─── SSE field parsing and stream classification ─────────────────────────────
+
+// TestIsSSEChunk_AcceptsEverySSEFieldForm covers the framing variants a real
+// upstream emits. The space after the colon is optional in the specification, so
+// matching "data: " as a literal prefix skips every event from an upstream that
+// omits it, and a flush of keep-alives or id:/retry: lines is still SSE.
+func TestIsSSEChunk_AcceptsEverySSEFieldForm(t *testing.T) {
+	cases := map[string]bool{
+		"data: {\"a\":1}\n\n":                    true,
+		"data:{\"a\":1}\n\n":                     true, // no space — same event
+		"event: message\ndata: {\"a\":1}\n\n":    true,
+		": keep-alive\n\n":                       true, // comment only
+		"id: 42\n\n":                             true,
+		"retry: 3000\n\n":                        true,
+		"{\"choices\":[{\"message\":{}}]}":       false,
+		"":                                       false,
+		strings.Repeat("x", 40) + "\nplain text": false,
+	}
+	for input, want := range cases {
+		if got := isSSEChunk(input); got != want {
+			t.Errorf("isSSEChunk(%q) = %v, want %v", input, got, want)
+		}
+	}
+
+	// A data line beyond the first few lines must still classify the flush: an
+	// upstream can open with several comments before its first event.
+	late := strings.Repeat(": keep-alive\n\n", 8) + "data: {\"a\":1}\n\n"
+	if !isSSEChunk(late) {
+		t.Errorf("a data line after several comments must still classify as SSE")
+	}
+}
+
+// TestSSEDataPayload_ConsumesOneSpaceOnly pins that only the single optional
+// space is stripped. Further whitespace belongs to the value, and the prefix is
+// returned so a rewritten event keeps the form the upstream wrote.
+func TestSSEDataPayload_ConsumesOneSpaceOnly(t *testing.T) {
+	cases := []struct{ line, payload, prefix string }{
+		{"data: {\"a\":1}", "{\"a\":1}", "data: "},
+		{"data:{\"a\":1}", "{\"a\":1}", "data:"},
+		{"data:  {\"a\":1}", " {\"a\":1}", "data: "}, // second space is value
+	}
+	for _, c := range cases {
+		payload, prefix, ok := sseDataPayload(c.line)
+		if !ok || payload != c.payload || prefix != c.prefix {
+			t.Errorf("sseDataPayload(%q) = (%q, %q, %v), want (%q, %q, true)",
+				c.line, payload, prefix, ok, c.payload, c.prefix)
+		}
+	}
+	if _, _, ok := sseDataPayload("event: message"); ok {
+		t.Errorf("a non-data line must not parse as a data line")
+	}
+}
+
+// TestStreaming_ExtractsFromSpacelessDataLines is the end-to-end form of the
+// above: an upstream writing "data:{...}" must still have its text assessed.
+func TestStreaming_ExtractsFromSpacelessDataLines(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, nil)
+
+	spaceless := strings.Repeat(
+		"data:{\"choices\":[{\"index\":0,\"delta\":{\"content\":\"blocked \"}}]}\n\n", 200)
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk:       []byte(spaceless),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if !action.TerminateStream() {
+		t.Fatalf("text from spaceless data lines must be assessed, got %T", action)
+	}
+	if client.calls == 0 || !strings.Contains(client.texts[0], "blocked") {
+		t.Errorf("expected the extracted delta text, got %d calls %q", client.calls, client.texts)
+	}
+}
+
+// TestStreaming_KeepsTheSSEPathAcrossUnclassifiableFlushes covers a flush that
+// carries only a keep-alive. Judged alone it is not a data flush, and before the
+// remembered classification it took the non-SSE path, where the stream's
+// accumulated text was assessed as if it were a JSON body.
+func TestStreaming_KeepsTheSSEPathAcrossUnclassifiableFlushes(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(sseEvent("first words ")), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if sse, _ := respCtx.Metadata[metaKeySSEStream].(bool); !sse {
+		t.Fatalf("the stream should have been classified as SSE")
+	}
+
+	// Keep-alive only: must stay on the SSE path and not be accumulated as a body.
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(": keep-alive\n\n"), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if _, ok := respCtx.Metadata[metaKeyAccStreamedJSONBody]; ok {
+		t.Errorf("a keep-alive flush must not be accumulated as a non-SSE body")
+	}
+}
+
+// ─── Empty end-of-stream sentinel ────────────────────────────────────────────
+
+// TestStreaming_EmptyEndOfStreamChunkAssessesPendingText covers the sentinel
+// many streaming frameworks send after the last event. Returning early on an
+// empty chunk dropped the final batch, which AWS's guidance requires be
+// assessed — and which this policy's own documentation claims it is.
+func TestStreaming_EmptyEndOfStreamChunkAssessesPendingText(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	// Below a text unit, so nothing is assessed yet; text is held in pending.
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(strings.Repeat(sseEvent("short "), 5)), EndOfStream: false,
+	}, map[string]interface{}{})
+	if client.calls != 0 {
+		t.Fatalf("expected nothing assessed before end of stream, got %d", client.calls)
+	}
+
+	// The empty sentinel arrives. The held text must still be assessed.
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte{}, EndOfStream: true,
+	}, map[string]interface{}{})
+
+	if client.calls != 1 {
+		t.Fatalf("an empty end-of-stream chunk must assess the pending text, got %d calls", client.calls)
+	}
+	if !action.TerminateStream() {
+		t.Errorf("a violation in the final batch must end the stream, got %T", action)
+	}
+}
+
+// TestStreaming_EmptyMidStreamChunkIsStillANoOp keeps the other half: only the
+// end-of-stream sentinel is meaningful, an empty mid-stream chunk is not.
+func TestStreaming_EmptyMidStreamChunkIsStillANoOp(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, nil)
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk: []byte{}, EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if _, ok := action.(policy.ForwardResponseChunk); !ok {
+		t.Fatalf("an empty mid-stream chunk must forward, got %T", action)
+	}
+	if client.calls != 0 {
+		t.Errorf("an empty mid-stream chunk must not be assessed, got %d calls", client.calls)
+	}
+}
+
+// TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody covers the
+// non-SSE case: the accumulated body is assessed at end of stream, but a
+// modification cannot be applied to an empty final chunk — returning the body
+// there would deliver the whole response a second time.
+func TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.JsonPath = "$.msg"
+		params.RedactPII = true
+	})
+	respCtx := streamCtx()
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(`{"msg":"mail john@example.com"}`), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte{}, EndOfStream: true,
+	}, map[string]interface{}{})
+
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if forward.Body != nil {
+		t.Errorf("an empty final chunk must not be replaced with the accumulated body, got %q", string(forward.Body))
 	}
 }

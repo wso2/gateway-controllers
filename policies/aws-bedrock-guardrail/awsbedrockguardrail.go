@@ -89,9 +89,24 @@ const (
 	// the text unit.
 	streamFlushPacerBytes = 4096
 
-	sseDataPrefix  = "data: "
-	sseEventPrefix = "event:"
-	sseDone        = "[DONE]"
+	// SSE field names. The single space after the colon is optional in the
+	// specification — "data:{...}" and "data: {...}" are the same event — so
+	// these are the field names and the space is handled separately. Writing
+	// "data: " as a prefix would silently skip every event from an upstream
+	// that omits it.
+	sseDataField  = "data:"
+	sseEventField = "event:"
+	sseIDField    = "id:"
+	sseRetryField = "retry:"
+	// sseDataPrefix is only for events this policy emits itself.
+	sseDataPrefix = "data: "
+	sseDone       = "[DONE]"
+
+	// metaKeySSEStream records that this stream was classified as SSE. A later
+	// flush can carry only comments, "id:" or "retry:" lines and so look
+	// unclassifiable on its own; without this it would be mistaken for a
+	// non-SSE body and the accumulated text assessed as if it were one.
+	metaKeySSEStream = "awsbedrockguardrail:stream_is_sse"
 
 	// metaKeyPendingText holds assistant text seen but not yet validated: the
 	// remainder carried over when a batch is trimmed back to a word or sentence
@@ -1608,7 +1623,16 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 	if !p.hasResponseParams || !p.responseParams.Enabled || !p.responseParams.Streaming {
 		return policy.ForwardResponseChunk{}
 	}
-	if chunk == nil || len(chunk.Chunk) == 0 {
+	if chunk == nil {
+		return policy.ForwardResponseChunk{}
+	}
+	// An empty chunk mid-stream carries nothing to do. An empty chunk at end of
+	// stream is different: it is the bare sentinel many streaming frameworks send
+	// after the last event, and it is the last opportunity to assess the text
+	// still held in pending or the body accumulated from a non-SSE response.
+	// Returning early here would drop the final batch, which AWS's guidance is
+	// explicit must still be assessed.
+	if len(chunk.Chunk) == 0 && !chunk.EndOfStream {
 		return policy.ForwardResponseChunk{}
 	}
 	// applicableStatusCodes applies here exactly as it does on the buffered path
@@ -1624,10 +1648,21 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 	}
 
 	chunkStr := string(chunk.Chunk)
-	if !isSSEChunk(chunkStr) {
-		return p.handleNonSSEStreamFlush(chunkStr, chunk, respCtx)
+
+	// Classify once per stream and remember it. A later flush can carry only
+	// comments, "id:" or "retry:" lines — and the final one can be empty — so
+	// judging each flush alone would route the tail of an SSE stream down the
+	// non-SSE path and assess its accumulated text as a JSON body.
+	sseStream, _ := respCtx.Metadata[metaKeySSEStream].(bool)
+	if !sseStream && isSSEChunk(chunkStr) {
+		sseStream = true
+		respCtx.Metadata[metaKeySSEStream] = true
 	}
-	return p.handleSSEStreamFlush(chunkStr, chunk, respCtx)
+
+	if sseStream {
+		return p.handleSSEStreamFlush(chunkStr, chunk, respCtx)
+	}
+	return p.handleNonSSEStreamFlush(chunkStr, chunk, respCtx)
 }
 
 // handleNonSSEStreamFlush validates a non-SSE body that reached this path over
@@ -1669,6 +1704,15 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 		}
 	}
 	if modifications.Body != nil {
+		if len(chunkStr) == 0 {
+			// The flush we were handed is the empty end-of-stream sentinel, so
+			// there is nothing left to rewrite: replacing it with the modified
+			// body would deliver the whole response a second time. The
+			// assessment still ran — only the rewrite is dropped.
+			slog.Debug("AWSBedrockGuardrail: response modification not applicable to an empty final chunk",
+				"accumulated_bytes", len(full))
+			return policy.ForwardResponseChunk{}
+		}
 		return policy.ForwardResponseChunk{Body: modifications.Body}
 	}
 	return policy.ForwardResponseChunk{}
@@ -1991,14 +2035,61 @@ func (p *AWSBedrockGuardrailPolicy) buildSSEErrorEvent(reason string, validation
 // ─── SSE helpers ─────────────────────────────────────────────────────────────
 
 // isSSEChunk reports whether s looks like SSE framing.
+//
+// Any of the specification's field names counts, as does a comment line (one
+// beginning with ":", which is how upstreams send keep-alives). Testing only
+// "data:" and "event:" would misclassify a flush that happens to carry just
+// comments or just "id:"/"retry:" lines, and the whole flush is scanned rather
+// than its first few lines for the same reason.
 func isSSEChunk(s string) bool {
-	for _, line := range strings.SplitN(s, "\n", 5) {
-		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, sseDataPrefix) || strings.HasPrefix(line, sseEventPrefix) {
+	for rest := s; rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		if isSSEFieldLine(line) {
 			return true
 		}
 	}
 	return false
+}
+
+// isSSEFieldLine reports whether one line is an SSE field or comment line.
+func isSSEFieldLine(line string) bool {
+	if strings.HasPrefix(line, ":") {
+		return true // comment, e.g. ": keep-alive"
+	}
+	return strings.HasPrefix(line, sseDataField) ||
+		strings.HasPrefix(line, sseEventField) ||
+		strings.HasPrefix(line, sseIDField) ||
+		strings.HasPrefix(line, sseRetryField)
+}
+
+// nextLine splits off the first line of s, dropping its terminator, and returns
+// it with the remainder. Used instead of strings.Split so a scan can stop at the
+// first match without splitting a whole multi-kilobyte flush.
+func nextLine(s string) (line, rest string) {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSuffix(s[:i], "\r"), s[i+1:]
+	}
+	return strings.TrimSuffix(s, "\r"), ""
+}
+
+// sseDataPayload returns the value of a "data:" line, the exact prefix it was
+// written with, and whether the line is a data line at all.
+//
+// Only one leading space is consumed, per the specification; any further
+// whitespace belongs to the value and is preserved, so a rewritten event is
+// byte-identical to the original apart from the value this policy changed.
+func sseDataPayload(line string) (payload, prefix string, ok bool) {
+	if !strings.HasPrefix(line, sseDataField) {
+		return "", "", false
+	}
+	payload = line[len(sseDataField):]
+	prefix = sseDataField
+	if strings.HasPrefix(payload, " ") {
+		payload = payload[1:]
+		prefix += " "
+	}
+	return payload, prefix, true
 }
 
 // endsAtSSEEventBoundary reports whether s ends where one event ends, so a
@@ -2021,13 +2112,14 @@ func endsAtSSEEventBoundary(s []byte) bool {
 // guardrail on the wire format rather than on the model's words.
 func extractSSEDeltaContent(s string, streamingJsonPath string) string {
 	var sb strings.Builder
-	for _, line := range strings.Split(s, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if !strings.HasPrefix(line, sseDataPrefix) {
+	for rest := s; rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		payload, _, ok := sseDataPayload(line)
+		if !ok {
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, sseDataPrefix))
-		if payload == "" || payload == sseDone {
+		if trimmed := strings.TrimSpace(payload); trimmed == "" || trimmed == sseDone {
 			continue
 		}
 		text, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
@@ -2049,12 +2141,12 @@ func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform
 
 	for i, line := range lines {
 		carriage := strings.HasSuffix(line, "\r")
-		trimmed := strings.TrimRight(line, "\r")
-		if !strings.HasPrefix(trimmed, sseDataPrefix) {
+		trimmed := strings.TrimSuffix(line, "\r")
+		payload, prefix, ok := sseDataPayload(trimmed)
+		if !ok {
 			continue
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, sseDataPrefix))
-		if payload == "" || payload == sseDone {
+		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
 			continue
 		}
 
@@ -2081,7 +2173,7 @@ func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform
 			continue
 		}
 
-		rebuilt := sseDataPrefix + string(rewrittenPayload)
+		rebuilt := prefix + string(rewrittenPayload)
 		if carriage {
 			rebuilt += "\r"
 		}
