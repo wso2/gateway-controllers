@@ -266,18 +266,27 @@ parameters:
             OpenAI streaming format, which is also what the
             openai-to-bedrock-transformer emits.
           default: "$.choices[0].delta.content"
-        streamingWindowBytes:
+        streamingTextUnitChars:
           type: integer
           x-wso2-policy-advanced-param: true
           description: |
-            How many bytes of the streamed response to accumulate before each
-            AWS Bedrock Guardrail call. Applies only when streaming is true.
-            A smaller window detects a violation sooner and blocks less text,
-            at more AWS calls and a round trip between smaller groups of tokens;
-            a larger window costs less and streams more smoothly, but more text
-            reaches the client before it is validated.
-          minimum: 256
-          default: 2048
+            How many characters of response text to batch before each AWS Bedrock
+            Guardrail call. Applies only when streaming is true.
+            The default of 1000 is Amazon's text unit, which AWS recommends as the
+            batch size for applying guardrails to streaming output, and which is
+            also the billing unit — a call carrying 40 characters is billed the
+            same as one carrying 1000, so batching below a unit adds cost without
+            adding protection.
+            A batch is trimmed back to the end of the last sentence or word so a
+            phrase is never split across two calls, and the remainder is carried
+            into the next batch. The final batch is always assessed when the
+            stream ends.
+            Raising this lowers cost and lets more text reach the client before it
+            is assessed; lowering it assesses sooner for proportionally more calls.
+            Ignored when redactPII is true: redaction rewrites the frames it is
+            holding, so it assesses every flush rather than batching.
+          minimum: 100
+          default: 1000
   anyOf:
     - required: [ request ]
     - required: [ response ]

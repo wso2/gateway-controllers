@@ -70,11 +70,11 @@ func makeContentViolationOutput() *bedrockruntime.ApplyGuardrailOutput {
 // streaming on the response flow would get it.
 func streamingPolicy(client bedrockGuardrailClient, mutate func(*AWSBedrockGuardrailPolicyParams)) *AWSBedrockGuardrailPolicy {
 	params := AWSBedrockGuardrailPolicyParams{
-		Enabled:              true,
-		JsonPath:             ResponseDefaultJSONPath,
-		Streaming:            true,
-		StreamingJsonPath:    ResponseDefaultStreamingJSONPath,
-		StreamingWindowBytes: DefaultStreamingWindowBytes,
+		Enabled:                true,
+		JsonPath:               ResponseDefaultJSONPath,
+		Streaming:              true,
+		StreamingJsonPath:      ResponseDefaultStreamingJSONPath,
+		StreamingTextUnitChars: DefaultStreamingTextUnitChars,
 	}
 	if mutate != nil {
 		mutate(&params)
@@ -198,16 +198,14 @@ func TestMode_FollowsConfiguration(t *testing.T) {
 }
 
 func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
-	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = 256
-	})
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
 
 	short := sseEvent("hi")
 	if !p.NeedsMoreResponseData([]byte(short)) {
 		t.Errorf("below the window the policy must keep accumulating")
 	}
 
-	full := strings.Repeat(sseEvent("0123456789"), 20)
+	full := strings.Repeat(sseEvent("0123456789"), 120)
 	if p.NeedsMoreResponseData([]byte(full)) {
 		t.Errorf("at the window and on an event boundary the policy must release")
 	}
@@ -222,7 +220,7 @@ func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 
 	// CRLF framing is an event boundary too. Matching LF alone treats a CRLF
 	// stream as one event that never ends.
-	crlf := strings.Repeat("data: {\"choices\":[{\"delta\":{\"content\":\"0123456789\"}}]}\r\n\r\n", 20)
+	crlf := strings.Repeat("data: {\"choices\":[{\"delta\":{\"content\":\"0123456789\"}}]}\r\n\r\n", 120)
 	if p.NeedsMoreResponseData([]byte(crlf)) {
 		t.Errorf("CRLF event boundary must be recognised as a boundary")
 	}
@@ -233,7 +231,7 @@ func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 		t.Errorf("a unary JSON body must accumulate to end of stream")
 	}
 	// Even past the window — a half-received document is not validatable.
-	if !p.NeedsMoreResponseData([]byte(`{"x":"` + strings.Repeat("y", 600))) {
+	if !p.NeedsMoreResponseData([]byte(`{"x":"` + strings.Repeat("y", streamFlushPacerBytes+10))) {
 		t.Errorf("a partial JSON document must keep accumulating past the window")
 	}
 
@@ -249,7 +247,7 @@ func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 func TestStreaming_CleanStreamForwardsUnchangedAndValidatesPerWindow(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = 256
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 	})
 
 	// One SSE event per chunk — the framing a real upstream flushing per event
@@ -290,7 +288,7 @@ func TestStreaming_CleanStreamForwardsUnchangedAndValidatesPerWindow(t *testing.
 func TestStreaming_ViolationTerminatesWithSSEErrorEvent(t *testing.T) {
 	client := &countingBedrockClient{output: makeContentViolationOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 		params.ShowAssessment = true
 	})
 
@@ -321,7 +319,7 @@ func TestStreaming_PassthroughOnErrorForwardsInsteadOfTerminating(t *testing.T) 
 	failing := &countingBedrockClient{err: fmt.Errorf("bedrock unavailable")}
 
 	blocking := streamingPolicy(failing, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 	})
 	chunks := []string{strings.Repeat(sseEvent("hello"), 10), sseEvent("more")}
 	actions := feedStream(t, blocking, streamCtx(), chunks)
@@ -330,7 +328,7 @@ func TestStreaming_PassthroughOnErrorForwardsInsteadOfTerminating(t *testing.T) 
 	}
 
 	permissive := streamingPolicy(failing, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 		params.PassthroughOnError = true
 	})
 	for i, action := range feedStream(t, permissive, streamCtx(), chunks) {
@@ -343,7 +341,7 @@ func TestStreaming_PassthroughOnErrorForwardsInsteadOfTerminating(t *testing.T) 
 func TestStreaming_RestoresMaskedPIIInFrames(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 	})
 
 	respCtx := streamCtx()
@@ -384,7 +382,7 @@ func TestStreaming_RestoresMaskedPIIInFrames(t *testing.T) {
 func TestStreaming_RedactsPIIInFrames(t *testing.T) {
 	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 		params.RedactPII = true
 	})
 
@@ -490,23 +488,23 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 		if got.StreamingJsonPath != ResponseDefaultStreamingJSONPath {
 			t.Errorf("unexpected default streaming path: %q", got.StreamingJsonPath)
 		}
-		if got.StreamingWindowBytes != DefaultStreamingWindowBytes {
-			t.Errorf("unexpected default window: %d", got.StreamingWindowBytes)
+		if got.StreamingTextUnitChars != DefaultStreamingTextUnitChars {
+			t.Errorf("unexpected default text unit: %d", got.StreamingTextUnitChars)
 		}
 	})
 
 	t.Run("accepts configured values", func(t *testing.T) {
 		// A window arriving from YAML/JSON is a float64, not an int.
 		got, err := parseRequestResponseParams(map[string]interface{}{
-			"enabled":              true,
-			"streaming":            true,
-			"streamingJsonPath":    "$.delta.text",
-			"streamingWindowBytes": float64(4096),
+			"enabled":                true,
+			"streaming":              true,
+			"streamingJsonPath":      "$.delta.text",
+			"streamingTextUnitChars": float64(4096),
 		}, true)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !got.Streaming || got.StreamingJsonPath != "$.delta.text" || got.StreamingWindowBytes != 4096 {
+		if !got.Streaming || got.StreamingJsonPath != "$.delta.text" || got.StreamingTextUnitChars != 4096 {
 			t.Errorf("unexpected params: %+v", got)
 		}
 	})
@@ -516,8 +514,8 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 			{"streaming": "yes"},
 			{"streamingJsonPath": ""},
 			{"streamingJsonPath": 1},
-			{"streamingWindowBytes": float64(16)},
-			{"streamingWindowBytes": "big"},
+			{"streamingTextUnitChars": float64(16)},
+			{"streamingTextUnitChars": "big"},
 		}
 		for _, params := range cases {
 			if _, err := parseRequestResponseParams(params, true); err == nil {
@@ -527,7 +525,7 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 	})
 
 	t.Run("rejects streaming params on the request flow", func(t *testing.T) {
-		for _, key := range []string{"streaming", "streamingJsonPath", "streamingWindowBytes"} {
+		for _, key := range []string{"streaming", "streamingJsonPath", "streamingTextUnitChars"} {
 			if _, err := parseRequestResponseParams(map[string]interface{}{key: true}, false); err == nil {
 				t.Errorf("expected %q to be rejected on the request flow", key)
 			}
@@ -542,7 +540,7 @@ func TestStreaming_HonoursApplicableStatusCodes(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 		params.ApplicableStatusCodes = ranges
 	})
 
@@ -602,7 +600,7 @@ func encodeAmazonEventStreamFrame(payload string) []byte {
 // policy wants more data.
 func TestNeedsMoreResponseData_RawProviderFramingIsReleasedAtTheWindow(t *testing.T) {
 	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = 256
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 	})
 
 	short := encodeAmazonEventStreamFrame("contentBlockDelta")
@@ -611,7 +609,7 @@ func TestNeedsMoreResponseData_RawProviderFramingIsReleasedAtTheWindow(t *testin
 	}
 
 	var accumulated []byte
-	for len(accumulated) < 512 {
+	for len(accumulated) < streamFlushPacerBytes+64 {
 		accumulated = append(accumulated, encodeAmazonEventStreamFrame("contentBlockDelta")...)
 	}
 	if p.NeedsMoreResponseData(accumulated) {
@@ -625,14 +623,15 @@ func TestNeedsMoreResponseData_RawProviderFramingIsReleasedAtTheWindow(t *testin
 func TestStreaming_ValidatesTransformerOutputNotRawFraming(t *testing.T) {
 	client := &countingBedrockClient{output: makeContentViolationOutput()}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.StreamingWindowBytes = MinStreamingWindowBytes
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
 	})
 
 	// What openai-to-bedrock-transformer emits: data: {"choices":[{"index":0,
 	// "delta":{"content":"..."},"finish_reason":null}]}\n\n
+	// Enough events to exceed one text unit, so the batch is assessed mid-stream.
 	transformed := strings.Repeat(
 		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"claude\","+
-			"\"choices\":[{\"index\":0,\"delta\":{\"content\":\"blocked\"},\"finish_reason\":null}]}\n\n", 6)
+			"\"choices\":[{\"index\":0,\"delta\":{\"content\":\"blocked \"},\"finish_reason\":null}]}\n\n", 200)
 
 	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
 		Chunk:       []byte(transformed),
@@ -647,5 +646,196 @@ func TestStreaming_ValidatesTransformerOutputNotRawFraming(t *testing.T) {
 	}
 	if got := client.texts[0]; !strings.Contains(got, "blocked") || strings.Contains(got, "choices") {
 		t.Errorf("expected the extracted delta text, got %q", got)
+	}
+}
+
+// ─── Text-unit batching (AWS streaming guidance) ─────────────────────────────
+
+// TestStreaming_DoesNotBillAnUnderfilledTextUnit is the cost regression guard.
+// A text unit is ~1000 characters AND the Bedrock billing unit, so a 40-character
+// call costs exactly as much as a full one. Batching on wire bytes under-fills
+// every call by more than an order of magnitude — one SSE event is ~150 bytes of
+// framing around a few characters of text.
+func TestStreaming_DoesNotBillAnUnderfilledTextUnit(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil) // default 1000-character text unit
+
+	// ~20 events, ~40 characters of text, several kilobytes of SSE framing.
+	flush := strings.Repeat(sseEvent("hi "), 20)
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk:       []byte(flush),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if _, ok := action.(policy.ForwardResponseChunk); !ok {
+		t.Fatalf("a batch below one text unit must be forwarded, got %T", action)
+	}
+	if client.calls != 0 {
+		t.Errorf("a batch of ~40 characters must not be sent: a call is billed as a full "+
+			"1000-character text unit either way; got %d calls", client.calls)
+	}
+}
+
+func TestStreaming_AssessesOncePerTextUnit(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	// 300 events x 10 characters = ~3000 characters => about three text units.
+	for i := 0; i < 300; i++ {
+		p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk:       []byte(sseEvent("word rest ")),
+			EndOfStream: false,
+		}, map[string]interface{}{})
+	}
+
+	if client.calls < 2 || client.calls > 4 {
+		t.Errorf("expected roughly one call per 1000-character text unit (2-4 for ~3000 chars), got %d", client.calls)
+	}
+	for _, text := range client.texts {
+		if n := len([]rune(text)); n < MinStreamingTextUnitChars {
+			t.Errorf("a batch of %d characters was sent; batches should fill a text unit: %q", n, text)
+		}
+	}
+}
+
+// TestStreaming_FinalBatchIsAssessedAtEndOfStream covers AWS's requirement that
+// the last batch is evaluated even though it never reaches a full text unit.
+func TestStreaming_FinalBatchIsAssessedAtEndOfStream(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	// Below a text unit, so nothing is assessed yet.
+	if action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte(strings.Repeat(sseEvent("short "), 5)),
+		EndOfStream: false,
+	}, map[string]interface{}{}); action.TerminateStream() {
+		t.Fatalf("nothing should be assessed below a text unit mid-stream")
+	}
+	if client.calls != 0 {
+		t.Fatalf("expected no call before end of stream, got %d", client.calls)
+	}
+
+	// End of stream: the remainder must still be assessed, and a violation in it
+	// must still end the stream.
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte("data: [DONE]\n\n"),
+		EndOfStream: true,
+	}, map[string]interface{}{})
+
+	if !action.TerminateStream() {
+		t.Fatalf("the final batch must be assessed and its violation acted on, got %T", action)
+	}
+	if client.calls != 1 {
+		t.Errorf("expected exactly one final call, got %d", client.calls)
+	}
+}
+
+// TestSplitAtTextUnit_DoesNotSplitWordsOrSentences pins AWS's "batches don't
+// split words or sentences, carrying over any necessary context" rule. A phrase
+// cut in half and assessed as two batches can pass where the whole would not.
+func TestSplitAtTextUnit_DoesNotSplitWordsOrSentences(t *testing.T) {
+	t.Run("cuts at a sentence end", func(t *testing.T) {
+		text := "First sentence here. Second sentence trails on"
+		batch, carry := splitAtTextUnit(text, 30, false)
+		if batch != "First sentence here." {
+			t.Errorf("expected the cut at the sentence end, got %q", batch)
+		}
+		if carry != " Second sentence trails on" {
+			t.Errorf("unexpected carry %q", carry)
+		}
+	})
+
+	t.Run("falls back to a word end", func(t *testing.T) {
+		text := "aaaa bbbb cccc dddd eeee ffff"
+		batch, carry := splitAtTextUnit(text, 12, false)
+		if strings.HasSuffix(strings.TrimRight(batch, " "), "cc") && !strings.HasSuffix(batch, " ") {
+			t.Errorf("batch ended mid-word: %q", batch)
+		}
+		if batch+carry != text {
+			t.Errorf("split lost text: %q + %q != %q", batch, carry, text)
+		}
+	})
+
+	t.Run("holds everything below a unit", func(t *testing.T) {
+		batch, carry := splitAtTextUnit("too short", 1000, false)
+		if batch != "" || carry != "too short" {
+			t.Errorf("expected all text carried, got batch %q carry %q", batch, carry)
+		}
+	})
+
+	t.Run("releases everything at end of stream", func(t *testing.T) {
+		batch, carry := splitAtTextUnit("trailing words", 1000, true)
+		if batch != "trailing words" || carry != "" {
+			t.Errorf("end of stream must assess the remainder, got batch %q carry %q", batch, carry)
+		}
+	})
+
+	t.Run("boundary-free text cannot grow the carry without bound", func(t *testing.T) {
+		text := strings.Repeat("x", 5000)
+		batch, carry := splitAtTextUnit(text, 1000, false)
+		if len(batch) != 1000 {
+			t.Errorf("expected a cut at the unit when no boundary exists, got %d", len(batch))
+		}
+		if len(carry) != 4000 {
+			t.Errorf("unexpected carry length %d", len(carry))
+		}
+	})
+}
+
+// TestStreaming_CarriesTheRemainderIntoTheNextBatch asserts the carried text is
+// assessed with the batch that follows it, not dropped.
+func TestStreaming_CarriesTheRemainderIntoTheNextBatch(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte(sseEvent("CARRIED_MARKER ")),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+	if client.calls != 0 {
+		t.Fatalf("expected the first short flush to be held, got %d calls", client.calls)
+	}
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte(strings.Repeat(sseEvent("filler text "), 120)),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if client.calls == 0 {
+		t.Fatalf("expected a batch to be assessed once a text unit accumulated")
+	}
+	if !strings.Contains(client.texts[0], "CARRIED_MARKER") {
+		t.Errorf("the carried remainder must be assessed with the next batch; got %q", client.texts[0][:60])
+	}
+}
+
+// TestStreaming_RedactionValidatesEveryFlush covers why redaction opts out of
+// batching: a finding can only be applied to frames still in hand, so deferring
+// assessment would place it after the frames it belongs to had been forwarded.
+func TestStreaming_RedactionValidatesEveryFlush(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = true
+	})
+
+	// Well below a text unit: batching would have deferred this.
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk:       []byte(sseEvent("mail john@example.com now")),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if client.calls != 1 {
+		t.Fatalf("redaction must assess every flush, got %d calls", client.calls)
+	}
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if forward.Body == nil || !strings.Contains(string(forward.Body), "*****") {
+		t.Errorf("expected the flush's own frames to be redacted, got %q", string(forward.Body))
 	}
 }

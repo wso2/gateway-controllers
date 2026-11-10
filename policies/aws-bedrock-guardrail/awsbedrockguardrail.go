@@ -61,25 +61,47 @@ const (
 	// opt-in is what makes this version a drop-in replacement for it.
 	StreamingEnabledByDefault = false
 
-	// DefaultStreamingWindowBytes is how much of the response is accumulated
-	// before each ApplyGuardrail call. Unlike the guardrails that compute their
-	// verdict locally, every validation here is a billed AWS round trip, so
-	// validating per chunk would add a round trip between every pair of tokens
-	// and bill one call per token. The window trades detection granularity for
-	// cost and time-to-next-token; see the policy definition for the tradeoff.
-	DefaultStreamingWindowBytes = 2048
+	// DefaultStreamingTextUnitChars is how many characters of assistant text are
+	// batched before each ApplyGuardrail call.
+	//
+	// 1000 is Amazon's text unit: AWS's own guidance for streaming outputs is to
+	// batch chunks "into smaller batches that are closer to a text unit, which
+	// is approximately 1,000 characters", assessing as soon as the buffer
+	// exceeds one unit. It is also the billing unit, so a call carrying 40
+	// characters costs the same as one carrying 1000 — batching below a unit
+	// buys nothing and pays the same.
+	//
+	// This is counted in characters of extracted text, never in bytes of the
+	// wire format. One SSE event is ~150 bytes of framing around ~3 characters
+	// of content, so a byte-sized window under-fills a text unit by more than an
+	// order of magnitude and multiplies the bill accordingly.
+	DefaultStreamingTextUnitChars = 1000
 
-	// MinStreamingWindowBytes floors the configured window. A window below this
-	// approaches per-chunk validation, which is the cost blow-up the window
-	// exists to prevent.
-	MinStreamingWindowBytes = 256
+	// MinStreamingTextUnitChars floors the configured batch. Below this a batch
+	// cannot fill a text unit under any framing, so it only adds calls.
+	MinStreamingTextUnitChars = 100
+
+	// streamFlushPacerBytes is how many raw bytes accumulate before the kernel
+	// hands this policy a flush. It paces invocation and nothing else: whether
+	// an ApplyGuardrail call happens is decided by the text-unit batch above,
+	// which is measured on content this hook cannot see (see
+	// NeedsMoreResponseData). Not configurable — the operator-facing control is
+	// the text unit.
+	streamFlushPacerBytes = 4096
 
 	sseDataPrefix  = "data: "
 	sseEventPrefix = "event:"
 	sseDone        = "[DONE]"
 
+	// metaKeyPendingText holds assistant text seen but not yet validated: the
+	// remainder carried over when a batch is trimmed back to a word or sentence
+	// boundary, prepended to the next batch. AWS's guidance is that batches
+	// "don't split words or sentences, and by carrying over any necessary
+	// context from the previous batch" — this is that carry-over.
+	metaKeyPendingText = "awsbedrockguardrail:streamed_pending_text"
+
 	// metaKeyAccStreamedContent accumulates the assistant text already validated
-	// in this stream, so the final window can be recognised as such.
+	// in this stream.
 	metaKeyAccStreamedContent = "awsbedrockguardrail:streamed_content"
 
 	// metaKeyAccStreamedJSONBody accumulates a non-SSE chunked body across
@@ -179,9 +201,9 @@ type AWSBedrockGuardrailPolicyParams struct {
 	// Unused when Streaming is false.
 	StreamingJsonPath string
 
-	// StreamingWindowBytes is how many bytes of the response accumulate before
-	// each ApplyGuardrail call. Unused when Streaming is false.
-	StreamingWindowBytes int
+	// StreamingTextUnitChars is how many characters of assistant text are
+	// batched before each ApplyGuardrail call. Unused when Streaming is false.
+	StreamingTextUnitChars int
 }
 
 // statusCodeRange is an inclusive range of HTTP status codes. A single code is
@@ -336,11 +358,11 @@ func (p *AWSBedrockGuardrailPolicy) Mode() policy.ProcessingMode {
 // parseRequestResponseParams parses and validates request/response parameters from map to struct
 func parseRequestResponseParams(params map[string]interface{}, isResponse bool) (AWSBedrockGuardrailPolicyParams, error) {
 	result := AWSBedrockGuardrailPolicyParams{
-		JsonPath:             RequestDefaultJSONPath,
-		Enabled:              RequestFlowEnabledByDefault,
-		Streaming:            StreamingEnabledByDefault,
-		StreamingJsonPath:    ResponseDefaultStreamingJSONPath,
-		StreamingWindowBytes: DefaultStreamingWindowBytes,
+		JsonPath:               RequestDefaultJSONPath,
+		Enabled:                RequestFlowEnabledByDefault,
+		Streaming:              StreamingEnabledByDefault,
+		StreamingJsonPath:      ResponseDefaultStreamingJSONPath,
+		StreamingTextUnitChars: DefaultStreamingTextUnitChars,
 	}
 	if isResponse {
 		result.JsonPath = ResponseDefaultJSONPath
@@ -412,7 +434,7 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 	// incrementally, which it cannot: a request must be validated whole before it
 	// reaches the upstream, or there is nothing left to block.
 	if !isResponse {
-		for _, key := range []string{"streaming", "streamingJsonPath", "streamingWindowBytes"} {
+		for _, key := range []string{"streaming", "streamingJsonPath", "streamingTextUnitChars"} {
 			if _, ok := params[key]; ok {
 				return result, fmt.Errorf("'%s' is only valid on the response flow", key)
 			}
@@ -441,16 +463,16 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		result.StreamingJsonPath = streamingJsonPath
 	}
 
-	// Extract optional streamingWindowBytes parameter
-	if windowRaw, ok := params["streamingWindowBytes"]; ok {
-		window, err := extractInt(windowRaw)
+	// Extract optional streamingTextUnitChars parameter
+	if unitRaw, ok := params["streamingTextUnitChars"]; ok {
+		unit, err := extractInt(unitRaw)
 		if err != nil {
-			return result, fmt.Errorf("'streamingWindowBytes' must be a number: %w", err)
+			return result, fmt.Errorf("'streamingTextUnitChars' must be a number: %w", err)
 		}
-		if window < MinStreamingWindowBytes {
-			return result, fmt.Errorf("'streamingWindowBytes' must be at least %d", MinStreamingWindowBytes)
+		if unit < MinStreamingTextUnitChars {
+			return result, fmt.Errorf("'streamingTextUnitChars' must be at least %d", MinStreamingTextUnitChars)
 		}
-		result.StreamingWindowBytes = window
+		result.StreamingTextUnitChars = unit
 	}
 
 	return result, nil
@@ -1548,7 +1570,7 @@ func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bo
 	if looksLikeJSONDocument(accumulated) {
 		return true
 	}
-	if len(accumulated) < p.responseParams.StreamingWindowBytes {
+	if len(accumulated) < streamFlushPacerBytes {
 		return true
 	}
 	if isSSEChunk(string(accumulated)) {
@@ -1652,7 +1674,18 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 	return policy.ForwardResponseChunk{}
 }
 
-// handleSSEStreamFlush validates one window of a streamed response.
+// handleSSEStreamFlush batches the assistant text in this flush and validates a
+// text unit at a time.
+//
+// Follows AWS's guidance for applying ApplyGuardrail to streaming output:
+// accumulate into batches of about one text unit (~1000 characters), assess as
+// soon as the buffer exceeds a unit, keep batches from splitting words or
+// sentences by carrying the remainder into the next batch, and assess the final
+// batch once generation completes.
+//
+// The batch is counted in characters of extracted text, not bytes of SSE. The
+// text unit is also Amazon's billing unit, so a 40-character call costs a
+// 1000-character one; batching on wire bytes would under-fill every call.
 func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	chunkStr string,
 	chunk *policy.StreamBody,
@@ -1660,15 +1693,31 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 ) policy.StreamingResponseAction {
 	rp := p.responseParams
 
-	windowText := extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
-	if strings.TrimSpace(windowText) == "" {
-		// A flush carrying only framing — the opening role delta, a keep-alive
-		// comment, usage, [DONE]. There is nothing to validate, but a masked
-		// placeholder may still need restoring before it reaches the client.
+	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
+	pending += extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
+
+	if strings.TrimSpace(pending) == "" {
+		// Framing only — the opening role delta, a keep-alive comment, usage,
+		// [DONE]. Nothing to validate, though a masked placeholder may still
+		// need restoring before it reaches the client.
+		respCtx.Metadata[metaKeyPendingText] = pending
 		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
 	}
 
-	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(windowText, ""))
+	batch, carry := splitAtTextUnit(pending, p.effectiveTextUnit(), chunk.EndOfStream)
+	if batch == "" {
+		// Below a text unit and more is coming: hold the text, forward the
+		// bytes. AWS's own streaming example does the same — output is streamed
+		// and generation halted if a later batch is found to violate.
+		respCtx.Metadata[metaKeyPendingText] = carry
+		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+	}
+	respCtx.Metadata[metaKeyPendingText] = carry
+
+	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batch, ""))
+	if cleaned == "" {
+		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+	}
 
 	output, err := p.applyGuardrailToText(cleaned)
 	if err != nil {
@@ -1702,18 +1751,15 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 
 	if violation {
 		slog.Debug("AWSBedrockGuardrail: streaming violation detected",
-			"chunkIndex", chunk.Index, "windowBytes", len(chunkStr))
+			"chunkIndex", chunk.Index, "batchChars", len([]rune(cleaned)))
 		return policy.TerminateResponseChunk{
 			Body:              p.buildSSEErrorEvent("Violation of AWS Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
 			AnalyticsMetadata: guardrailHitAnalytics(),
 		}
 	}
 
-	// Record what has been validated so far. Nothing in this file reads it back
-	// to make a decision; it is here so the accumulated text is available for
-	// debugging a stream and for any end-of-stream check added later.
-	previous, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
-	respCtx.Metadata[metaKeyAccStreamedContent] = previous + windowText
+	validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
+	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batch
 
 	if rp.RedactPII && modifiedContent != "" && modifiedContent != cleaned {
 		if typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput); ok {
@@ -1727,6 +1773,95 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	}
 
 	return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+}
+
+// effectiveTextUnit returns the batch size to validate at.
+//
+// Redaction mode validates every flush instead of batching. Redaction rewrites
+// the frames of the flush it is holding, so a finding can only be applied to
+// text that has not yet been forwarded; batching would place the finding one or
+// more flushes after the frames it belongs to, which have already gone to the
+// client. The cost is more ApplyGuardrail calls, which is the price of
+// redacting in a stream at all.
+func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
+	if p.responseParams.RedactPII {
+		return 0
+	}
+	return p.responseParams.StreamingTextUnitChars
+}
+
+// splitAtTextUnit divides accumulated text into the batch to validate now and
+// the remainder to carry into the next batch.
+//
+// Below a text unit nothing is validated yet unless the stream has ended, in
+// which case the final batch is assessed whatever its size — AWS's guidance is
+// explicit that the last batch must still be evaluated, and there will be no
+// later batch to carry into.
+//
+// Above a unit the cut is moved back to the end of the last sentence, or
+// failing that the last word, so a batch never splits a phrase across two
+// calls. That matters for detection, not tidiness: "my SSN is 123-" and
+// "45-6789" assessed separately may each pass where the whole phrase would not.
+// If neither boundary exists within a reasonable distance the text is cut at
+// the unit, so a stream of boundary-free text cannot grow the carry without
+// bound.
+func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry string) {
+	if endOfStream {
+		return text, ""
+	}
+	runes := []rune(text)
+	if unit <= 0 {
+		return text, ""
+	}
+	if len(runes) < unit {
+		return "", text
+	}
+
+	cut := lastSentenceEnd(runes, unit)
+	if cut <= 0 {
+		cut = lastWordEnd(runes, unit)
+	}
+	if cut <= 0 {
+		cut = unit
+	}
+	return string(runes[:cut]), string(runes[cut:])
+}
+
+// maxBoundarySearchRunes bounds how far back a boundary is looked for, so a
+// batch is never trimmed to a small fraction of a text unit by one very long
+// sentence.
+const maxBoundarySearchRunes = 200
+
+// lastSentenceEnd returns the index just past the last sentence terminator at or
+// before limit, or 0 if there is none within the search distance.
+func lastSentenceEnd(runes []rune, limit int) int {
+	floor := limit - maxBoundarySearchRunes
+	if floor < 0 {
+		floor = 0
+	}
+	for i := limit - 1; i >= floor; i-- {
+		switch runes[i] {
+		case '.', '!', '?', '\n':
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// lastWordEnd returns the index just past the last whitespace at or before
+// limit, or 0 if there is none within the search distance.
+func lastWordEnd(runes []rune, limit int) int {
+	floor := limit - maxBoundarySearchRunes
+	if floor < 0 {
+		floor = 0
+	}
+	for i := limit - 1; i >= floor; i-- {
+		switch runes[i] {
+		case ' ', '\t', '\n', '\r':
+			return i + 1
+		}
+	}
+	return 0
 }
 
 // forwardWithPIIRestored forwards a flush, first putting back any value this
