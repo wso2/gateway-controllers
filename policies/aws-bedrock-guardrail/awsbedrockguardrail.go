@@ -2049,21 +2049,31 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlushHeld(
 		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
 	}
 
-	// Adding this flush would carry the batch past a unit: assess what is already
-	// buffered and release exactly the bytes that carried it, then begin a new
-	// batch from this flush.
-	if pending != "" && len([]rune(pending))+len([]rune(newText)) > unit {
-		action := p.assessAndRelease(pending, held, respCtx, rp, chunk)
+	combinedText := pending + newText
+	combinedHeld := held + chunkStr
+
+	// Past a text unit: trim the batch back to the end of a sentence, or failing
+	// that a word, exactly as the immediate-delivery path does — a phrase assessed
+	// as two halves can pass where the whole would not.
+	//
+	// The trim point generally falls inside a frame, so the bytes released are
+	// the frames whose text is wholly inside the batch and the straddling frame
+	// is retained. Withholding assessed text is harmless; releasing unassessed
+	// text is not.
+	if batch, carry := splitAtTextUnit(combinedText, unit, false); batch != "" {
+		release, retain := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, len([]rune(batch)))
+
+		action := p.assessBatchAndRelease(batch, release, respCtx, rp, chunk)
 		if action.TerminateStream() {
 			return action
 		}
-		respCtx.Metadata[metaKeyPendingText] = newText
-		respCtx.Metadata[metaKeyHeldBytes] = chunkStr
+		respCtx.Metadata[metaKeyPendingText] = carry
+		respCtx.Metadata[metaKeyHeldBytes] = retain
 		return action
 	}
 
-	respCtx.Metadata[metaKeyPendingText] = pending + newText
-	respCtx.Metadata[metaKeyHeldBytes] = held + chunkStr
+	respCtx.Metadata[metaKeyPendingText] = combinedText
+	respCtx.Metadata[metaKeyHeldBytes] = combinedHeld
 	// Withhold: a non-nil empty body replaces the chunk, so nothing is delivered
 	// for this flush. A nil body would pass the bytes straight through.
 	return policy.ForwardResponseChunk{Body: []byte{}}
@@ -2081,7 +2091,18 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 ) policy.StreamingResponseAction {
 	respCtx.Metadata[metaKeyPendingText] = ""
 	respCtx.Metadata[metaKeyHeldBytes] = ""
+	return p.assessBatchAndRelease(batchText, heldBytes, respCtx, rp, chunk)
+}
 
+// assessBatchAndRelease assesses one batch and releases the bytes it covers,
+// leaving the caller to record whatever text and bytes remain withheld.
+func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
+	batchText string,
+	heldBytes string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
 	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batchText, ""))
 	if cleaned == "" {
 		// Framing only — nothing to assess, but the bytes are still owed to the
@@ -2329,6 +2350,101 @@ func (p *AWSBedrockGuardrailPolicy) buildSSEErrorEvent(reason string, validation
 
 // ─── SSE helpers ─────────────────────────────────────────────────────────────
 
+// splitHeldAtTextBoundary divides withheld bytes at the frame boundary that
+// covers assessedChars of extracted text: the frames whose text is wholly inside
+// the assessed batch, and the remainder to keep withholding.
+//
+// This is what lets a batch be trimmed to a sentence while still being able to
+// release exact bytes. The trim point generally falls inside a frame, since a
+// frame carries a token rather than a sentence. That frame is retained whole —
+// withholding text that *has* been assessed is harmless, where releasing text
+// that has not is the thing this mode exists to prevent — and its text is
+// assessed again as part of the next batch, which costs nothing because the
+// batch is billed by size, not by novelty.
+//
+// Framing is kept with the block it introduces: an "event:", "id:" or "retry:"
+// line is released only once the data line it precedes is covered, so a block
+// is never released with its payload still withheld. Blank separators and
+// comments stand alone and are released as they are reached.
+func splitHeldAtTextBoundary(held, streamingJsonPath string, assessedChars int) (release, retain string) {
+	if assessedChars <= 0 {
+		return "", held
+	}
+
+	var (
+		chars     int
+		committed int // byte offset through which everything may be released
+		framing   int // byte offset where the current uncommitted framing run began
+	)
+	framing = -1
+
+	for i := 0; i < len(held); {
+		lineEnd := len(held)
+		if j := strings.IndexByte(held[i:], '\n'); j >= 0 {
+			lineEnd = i + j + 1
+		}
+		raw := held[i:lineEnd]
+		line := strings.TrimRight(raw, "\r\n")
+
+		switch {
+		case isSSEIntroducerLine(line):
+			// Introduces the data line below it; hold both or release both.
+			if framing < 0 {
+				framing = i
+			}
+		default:
+			payload, _, isData := sseDataPayload(line)
+			if !isData {
+				// Blank separator or comment: nothing depends on it.
+				if framing < 0 {
+					committed = lineEnd
+				}
+				break
+			}
+			n := len([]rune(frameText(payload, streamingJsonPath)))
+			if chars+n > assessedChars {
+				// This frame straddles the boundary. Retain it, and the framing
+				// that introduced it.
+				start := committed
+				if framing >= 0 {
+					start = framing
+				}
+				return held[:start], held[start:]
+			}
+			chars += n
+			committed = lineEnd
+			framing = -1
+		}
+		i = lineEnd
+	}
+
+	if framing >= 0 {
+		return held[:framing], held[framing:]
+	}
+	return held[:committed], held[committed:]
+}
+
+// isSSEIntroducerLine reports whether a line introduces the data line that
+// follows it, rather than standing on its own.
+func isSSEIntroducerLine(line string) bool {
+	return strings.HasPrefix(line, sseEventField) ||
+		strings.HasPrefix(line, sseIDField) ||
+		strings.HasPrefix(line, sseRetryField)
+}
+
+// frameText returns the assistant text one data payload carries, or "" for a
+// payload that carries none.
+func frameText(payload, streamingJsonPath string) string {
+	if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+		return ""
+	}
+	value, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+	if err != nil {
+		return ""
+	}
+	return textCleanRegexCompiled.ReplaceAllString(value, "")
+}
+
 // splitTrailingPartialLine divides s at its last line terminator, returning the
 // complete lines and the incomplete remainder. A flush with no terminator at all
 // is entirely incomplete.
@@ -2467,14 +2583,7 @@ func extractSSEDeltaContent(s string, streamingJsonPath string) string {
 		if !ok {
 			continue
 		}
-		if trimmed := strings.TrimSpace(payload); trimmed == "" || trimmed == sseDone {
-			continue
-		}
-		text, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
-		if err != nil {
-			continue
-		}
-		sb.WriteString(textCleanRegexCompiled.ReplaceAllString(text, ""))
+		sb.WriteString(frameText(payload, streamingJsonPath))
 	}
 	return sb.String()
 }

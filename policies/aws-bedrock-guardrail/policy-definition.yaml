@@ -299,14 +299,16 @@ parameters:
             adding protection.
             A batch is trimmed back to the end of the last sentence or word so a
             phrase is never split across two calls, and the remainder is carried
-            into the next batch. The final batch is always assessed when the
-            stream ends.
+            into the next batch — in both delivery modes. The final batch is
+            always assessed when the stream ends.
             Raising this lowers cost and lets more text reach the client before it
             is assessed; lowering it assesses sooner for proportionally more calls.
             Ignored when redactPII is true: redaction rewrites the frames it is
             holding, so it assesses every flush rather than batching.
             With streamingValidateBeforeDeliver enabled this is also the delivery
-            step, since a batch is released only once it has been assessed.
+            step, since a batch is released only once it has been assessed: the
+            frames whose text falls inside the batch are released and the frame
+            the trim point falls inside is held for the next one.
           minimum: 100
           default: 1000
   anyOf:

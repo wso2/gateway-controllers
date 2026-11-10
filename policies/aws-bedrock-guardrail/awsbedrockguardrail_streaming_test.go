@@ -1605,3 +1605,95 @@ func TestValidateBeforeDeliver_BoundsTheWithheldBuffer(t *testing.T) {
 		t.Errorf("a stream carrying no assessable text must still be delivered, not withheld forever")
 	}
 }
+
+// TestSplitHeldAtTextBoundary_CutsAtFrameBoundaries pins the mapping from an
+// assessed character count back to releasable bytes.
+func TestSplitHeldAtTextBoundary_CutsAtFrameBoundaries(t *testing.T) {
+	held := sseEvent("one ") + sseEvent("two ") + sseEvent("three")
+	path := ResponseDefaultStreamingJSONPath
+
+	t.Run("boundary inside a frame retains that frame whole", func(t *testing.T) {
+		// "one two " is 8 characters; 10 falls inside the third frame.
+		release, retain := splitHeldAtTextBoundary(held, path, 10)
+		if release != sseEvent("one ")+sseEvent("two ") {
+			t.Errorf("expected the two covered frames, got %q", release)
+		}
+		if retain != sseEvent("three") {
+			t.Errorf("expected the straddling frame retained, got %q", retain)
+		}
+	})
+
+	t.Run("nothing assessed releases nothing", func(t *testing.T) {
+		if release, retain := splitHeldAtTextBoundary(held, path, 0); release != "" || retain != held {
+			t.Errorf("expected all retained, got release %q", release)
+		}
+	})
+
+	t.Run("everything assessed releases everything", func(t *testing.T) {
+		if release, retain := splitHeldAtTextBoundary(held, path, 100); release != held || retain != "" {
+			t.Errorf("expected all released, got retain %q", retain)
+		}
+	})
+
+	t.Run("an introducer is retained with its data line", func(t *testing.T) {
+		withEvent := sseEvent("one ") + "event: message\n" + "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+		release, retain := splitHeldAtTextBoundary(withEvent, path, 4)
+		if strings.Contains(release, "event: message") {
+			t.Errorf("an event: line must not be released without its payload, got %q", release)
+		}
+		if !strings.HasPrefix(retain, "event: message") {
+			t.Errorf("the introducer must travel with its retained block, got %q", retain)
+		}
+	})
+}
+
+// TestValidateBeforeDeliver_TrimsBatchesToSentenceBoundaries is the point of the
+// mapping: a phrase assessed as two halves can pass where the whole would not,
+// so the safe mode must align batches the same way the immediate-delivery mode
+// does rather than cutting wherever a flush happened to end.
+func TestValidateBeforeDeliver_TrimsBatchesToSentenceBoundaries(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := heldPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars // 100
+	})
+	respCtx := streamCtx()
+
+	// Just under the unit, ending mid-sentence, then a flush that carries the
+	// sentence's end. The batch must stop at the full stop, not at the flush.
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte(strings.Repeat(sseEvent("filler. "), 12) + sseEvent("a split phra")),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte(sseEvent("se ends here. ") + strings.Repeat(sseEvent("more. "), 12)),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if client.calls == 0 {
+		t.Fatalf("expected at least one batch to be assessed")
+	}
+	for i, text := range client.texts {
+		trimmed := strings.TrimSpace(text)
+		if trimmed == "" {
+			continue
+		}
+		last := trimmed[len(trimmed)-1]
+		if last != '.' && last != '!' && last != '?' {
+			t.Errorf("batch %d ended mid-sentence at %q", i, tail(trimmed, 24))
+		}
+	}
+	// No phrase may be assessed in halves.
+	for _, text := range client.texts {
+		if strings.Contains(text, "a split phra") && !strings.Contains(text, "a split phrase") {
+			t.Errorf("a phrase was assessed split in half: %q", tail(text, 40))
+		}
+	}
+}
+
+// tail returns the last n characters of s, for readable failure messages.
+func tail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
+}
