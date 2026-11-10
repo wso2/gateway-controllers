@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -745,6 +746,70 @@ func TestGatewayLazyAndAnalyticsHelpers(t *testing.T) {
 	require.True(t, analyticsEventMatchesPath("/test", "/analytics/v1.0/test"))
 }
 
+// An event matches its request path with or without a query string on either side, since gateway
+// versions differ in whether the recorded URI keeps it.
+func TestAnalyticsEventMatchesPathIgnoresQueryStrings(t *testing.T) {
+	const path = "/ctx/openai/deployments/d1/chat/completions"
+	require.True(t, analyticsEventMatchesPath(path, path))
+	require.True(t, analyticsEventMatchesPath(path+"?api-version=2024-10-21", path+"?api-version=2024-10-21"))
+	require.True(t, analyticsEventMatchesPath(path, path+"?api-version=2024-10-21"))
+	require.True(t, analyticsEventMatchesPath(path+"?api-version=2024-10-21", path))
+	require.True(t, analyticsEventMatchesPath("/openai/deployments/d1/chat/completions?x=1", path))
+
+	require.False(t, analyticsEventMatchesPath(path, "/ctx/openai/deployments/d2/chat/completions?api-version=1"))
+	require.False(t, analyticsEventMatchesPath("?x=1", path))
+	require.False(t, analyticsEventMatchesPath(path, "?x=1"))
+	require.False(t, analyticsEventMatchesPath("/completions", "/ctx/chat-completions"))
+}
+
+// A line counts only when it contains every fragment, so a message logged for many keys is counted
+// for one key alone.
+func TestLinesContainingAll(t *testing.T) {
+	logs := strings.Join([]string{
+		`time=1 level=WARN msg="deployment not found in modelMappings" deployment=stray-deployment`,
+		`time=2 level=WARN msg="deployment not found in modelMappings" deployment=other-deployment`,
+		`time=3 level=INFO msg="request served" deployment=stray-deployment`,
+		`time=4 level=WARN msg="deployment not found in modelMappings" deployment=stray-deployment`,
+		``,
+	}, "\n")
+	require.Len(t, linesContainingAll(logs, []string{"not found in modelMappings", "deployment=stray-deployment"}), 2)
+	require.Len(t, linesContainingAll(logs, []string{"not found in modelMappings"}), 3)
+	require.Len(t, linesContainingAll(logs, []string{"deployment=other-deployment"}), 1)
+	require.Empty(t, linesContainingAll(logs, []string{"not found in modelMappings", "deployment=missing"}))
+	require.Empty(t, linesContainingAll(logs, nil))
+	require.Empty(t, linesContainingAll("", []string{"anything"}))
+}
+
+// A zero count is rejected before any log is read: an unreadable log matches no fragment, so a zero
+// count would pass without checking anything.
+func TestServiceLogLinesCountRejectsZero(t *testing.T) {
+	g := &Gateway{}
+	table := analyticsTable(t, []string{"not found in modelMappings"})
+	for _, want := range []int{0, -1} {
+		err := g.serviceLogLinesCount(context.Background(), "gateway-runtime", want, table)
+		require.ErrorContains(t, err, "must be at least 1")
+	}
+}
+
+func TestLogFragmentsFromTable(t *testing.T) {
+	local := tcontext.NewLocal("runner")
+	local.Set("deployment", "stray-deployment-run1")
+	ctx := tcontext.WithLocal(context.Background(), local)
+
+	fragments, err := logFragments(ctx, analyticsTable(t, []string{"not found in modelMappings"}, []string{"deployment=${CTX:deployment}"}))
+	require.NoError(t, err)
+	require.Equal(t, []string{"not found in modelMappings", "deployment=stray-deployment-run1"}, fragments)
+
+	_, err = logFragments(ctx, nil)
+	require.Error(t, err)
+	_, err = logFragments(ctx, &godog.Table{})
+	require.Error(t, err)
+	_, err = logFragments(ctx, analyticsTable(t, []string{"  "}))
+	require.Error(t, err)
+	_, err = logFragments(ctx, analyticsTable(t, []string{"a", "b"}))
+	require.Error(t, err)
+}
+
 func TestAnalyticsHeaderValuesMatch(t *testing.T) {
 	headers := map[string][]string{
 		"X-Multi-Response":  {"first", "second"},
@@ -1013,6 +1078,40 @@ func TestAnalyticsMetadataResolvesNestedPaths(t *testing.T) {
 	require.False(t, ok)
 	_, ok = traverseJSON(metadata, "apiName.jsonRpcMethod")
 	require.False(t, ok)
+}
+
+// The numeric metadata step absorbs floating-point rounding, but no real difference, and reads
+// numbers published either as JSON numbers or as numeric strings.
+func TestNumericMatches(t *testing.T) {
+	const eq, atLeast = "equal to", "at least"
+	// Variables, not constants: Go adds constants exactly, so 0.1+0.2 would be 0.3 with no rounding.
+	a, b := 0.1, 0.2
+	require.NoError(t, numericMatches("cost", a+b, eq, "0.3"))
+	require.NoError(t, numericMatches("cost", 4.2e-05, eq, "0.000042"))
+	require.NoError(t, numericMatches("cost", "0.0000420000", eq, "4.2e-5"))
+	require.NoError(t, numericMatches("cost", float64(0), eq, "0"))
+	require.NoError(t, numericMatches("tokens", float64(272001), eq, " 272001 "))
+	require.NoError(t, numericMatches("cost", float64(0), atLeast, "0"))
+	require.NoError(t, numericMatches("cost", 9.2e12, atLeast, "0"))
+
+	require.Error(t, numericMatches("cost", 0.000042, eq, "0.000043"))
+	require.Error(t, numericMatches("cost", 0.3000000006, eq, "0.3"))
+	for _, want := range []string{"Inf", "-Inf", "NaN"} {
+		require.Error(t, numericMatches("cost", float64(0), eq, want))
+		require.Error(t, numericMatches("cost", float64(0), atLeast, want))
+	}
+	require.Error(t, numericMatches("cost", 1e-12, eq, "0"))
+	require.Error(t, numericMatches("cost", -0.5, eq, "0.5"))
+	require.Error(t, numericMatches("cost", -0.143, atLeast, "0"))
+	require.Error(t, numericMatches("cost", math.Inf(1), atLeast, "0"))
+	require.Error(t, numericMatches("cost", math.NaN(), eq, "1"))
+	require.Error(t, numericMatches("cost", math.NaN(), atLeast, "0"))
+	require.Error(t, numericMatches("cost", "abc", eq, "1"))
+	require.Error(t, numericMatches("cost", nil, eq, "1"))
+	require.Error(t, numericMatches("cost", map[string]any{}, eq, "1"))
+	require.Error(t, numericMatches("cost", 1.0, eq, "one"))
+	require.Error(t, numericMatches("cost", 1.0, eq, ""))
+	require.Error(t, numericMatches("cost", 1.0, "at most", "2"))
 }
 
 func TestGatewayTemplatePathAndLiteralHelpers(t *testing.T) {
