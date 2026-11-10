@@ -50,6 +50,9 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
+      - name: azure-authentication-validation
+        features:
+          - features/azure_authentication_validation.feature
       - name: azure-authentication
         features:
           - features/azure_authentication.feature
