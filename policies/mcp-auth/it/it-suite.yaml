@@ -54,6 +54,11 @@ blocks:
       - name: mcp-auth
         features:
           - features/mcp_auth_error_compatibility.feature
+      # No gateway tag: the scenarios send handshake-style requests and build their upstream URL
+      # with ${CTX:gatewayMCPUpstreamPath}, so they run on 1.1.0, 1.2.0 and latest.
+      - name: mcp-auth-metadata
+        features:
+          - features/mcp_auth_metadata.feature
 
   - name: mcp-auth-gateway-host
     parallel: 1
