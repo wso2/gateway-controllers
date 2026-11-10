@@ -1,0 +1,55 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# The integration suite of the azure-authentication policy. The gateway runtime has the Azure
+# Workload Identity the test framework gives it (AZURE_* variables and a fixture federated token),
+# and the testbench entra service stands in for Microsoft Entra ID and the Entra-protected Azure
+# services. Feature paths are relative to this directory.
+
+suite: azure-authentication
+
+defaults:
+  # Blocks that run at once when the suite runs alone. Each block variant boots its own gateway,
+  # testbench and database, so they are isolated from each other.
+  parallel: 3
+  components:
+    platform-gateway:
+      db: sqlite
+      dbCompatibility:
+        sqlserver: "gateway-version>=1.2.0"
+  timeouts:
+    boot: 5m
+    propagation: 60s
+
+# No runner has a gateway-version tag: REST API scenarios run on every gateway tested, and the
+# LLM provider scenarios, which need upstream.auth type other (gateways after 1.2.0), each start
+# with a gateway version step.
+blocks:
+  # Runners on the default gateway configuration. They create their own APIs, and every scenario
+  # that counts token requests names its own Entra tenant, so they run at the same time.
+  - name: azure-authentication
+    parallel: 2
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: azure-authentication
+        features:
+          - features/azure_authentication.feature
