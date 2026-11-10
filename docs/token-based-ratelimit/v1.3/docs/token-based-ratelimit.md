@@ -97,7 +97,7 @@ To connect to Redis over TLS (TLS 1.2 or later), configure the following under `
 | `certFile` | string | No | `""` | Path to a PEM client certificate for mutual TLS. Must be set together with `keyFile`. |
 | `keyFile` | string | No | `""` | Path to the PEM private key for `certFile`. Must be set together with `certFile`. |
 
-All files are read and validated when the policy is created: a missing file, a CA file without valid PEM certificates, or a mismatched certificate and key fails policy creation regardless of `failureMode`. File paths are resolved inside the gateway runtime container, so the files must be mounted there. Rotated certificates take effect on the next configuration reload or restart.
+When `enabled` is `true`, all files are read and validated when the policy is created: a missing file, a CA file without valid PEM certificates, or a mismatched certificate and key fails policy creation regardless of `failureMode`. File paths are resolved inside the gateway runtime container, so the files must be mounted there. Rotated certificates take effect on the next configuration reload or restart.
 
 #### Memory Configuration
 

@@ -14,7 +14,7 @@ budget. Model matching is always enabled and list order does not affect routing.
 3. If the applicable budget has capacity, call the requested model. Exact matches
    use their configured provider; wildcard matches use the proxy's primary provider.
 4. If the applicable budget is missing or exhausted, follow `onExhausted`: use the
-   configured `fallback` (the default behavior), or return HTTP 429 for `reject`.
+   configured `fallback`, or return HTTP 429 for `reject` (the default).
 5. Fallback must have its own exact model budget. Check it once and charge it if
    available. Direct and fallback requests share this model budget. If missing or
    exhausted, return HTTP 429 without retrying wildcard or another model.
@@ -188,7 +188,7 @@ These values are supplied as system parameters by the gateway configuration:
 | `algorithm` | `fixed-window` | `fixed-window` resets the full budget at the window boundary. `gcra` replenishes capacity gradually. |
 | `backend` | `memory` | `memory` is per gateway instance. `redis` shares budgets across replicas. `redis-local-async` is accepted but uses the same synchronous query and charge behavior as `redis`. |
 | `redis.failureMode` | `open` | `open` continues on the route when budget state cannot be read. `closed` returns HTTP 503. Storage failure is never treated as budget exhaustion. |
-| `redis.tls.*` | disabled | Connects to Redis over TLS. Uses the shared `[policy_configurations.ratelimit_v1.redis.tls]` block (`enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`); see the advanced-ratelimit documentation for details. A TLS misconfiguration fails policy creation regardless of `redis.failureMode`. |
+| `redis.tls.*` | disabled | Connects to Redis over TLS. Uses the shared `[policy_configurations.ratelimit_v1.redis.tls]` block (`enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`); see the advanced-ratelimit documentation for details. When TLS is enabled, a missing or invalid TLS file fails policy creation regardless of `redis.failureMode`. |
 
 ## Routing metadata
 

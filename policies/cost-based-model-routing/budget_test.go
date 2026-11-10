@@ -19,11 +19,19 @@ package costbasedmodelrouting
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -464,6 +472,74 @@ func TestRedisClientRegistrySeparatesTLSSettings(t *testing.T) {
 	if createdAgain || again != withTLS {
 		t.Error("identical TLS settings must reuse the same client")
 	}
+}
+
+// Policy creation must hand the TLS settings to the Redis client it builds, not only fold
+// them into the registry key.
+func TestRedisTLSSettingsReachTheRedisClient(t *testing.T) {
+	username := uniqueRoute(t) // isolates this test's entry in the process-wide registry
+	params := validParams()
+	params["backend"] = "redis"
+	params["redis"] = map[string]interface{}{
+		"host":              "127.0.0.1",
+		"port":              1,
+		"username":          username,
+		"failureMode":       "open",
+		"connectionTimeout": "50ms",
+		"tls": map[string]interface{}{
+			"enabled":    true,
+			"caFile":     writeTestCAFile(t),
+			"serverName": "redis.internal",
+		},
+	}
+	if _, err := GetPolicy(policy.PolicyMetadata{RouteName: uniqueRoute(t)}, params); err != nil {
+		t.Fatalf("GetPolicy: %v", err)
+	}
+
+	redisClients.mu.Lock()
+	defer redisClients.mu.Unlock()
+	for key, client := range redisClients.m {
+		if key.username != username {
+			continue
+		}
+		tlsConfig := client.Options().TLSConfig
+		if tlsConfig == nil {
+			t.Fatal("the Redis client was created without TLS")
+		}
+		if tlsConfig.ServerName != "redis.internal" || tlsConfig.RootCAs == nil {
+			t.Fatalf("TLS config has server name %q and custom CA %v; want redis.internal and the CA from caFile",
+				tlsConfig.ServerName, tlsConfig.RootCAs != nil)
+		}
+		return
+	}
+	t.Fatal("no Redis client was registered for the policy")
+}
+
+// writeTestCAFile writes a throwaway self-signed CA certificate and returns its path.
+func writeTestCAFile(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate CA key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create CA certificate: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatalf("write CA file: %v", err)
+	}
+	return path
 }
 
 // ─── Cost parsing and scaling ────────────────────────────────────────────────

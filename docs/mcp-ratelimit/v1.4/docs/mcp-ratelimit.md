@@ -162,7 +162,7 @@ These parameters are set by the administrator and shared with the Advanced Rate 
 
 See the [Advanced Rate Limit policy](../../../advanced-ratelimit/v1.4/docs/advanced-ratelimit.md) documentation for the full `redis`, `memory`, and `headers` sub-fields and a sample `config.toml`.
 
-To connect to Redis over TLS, configure `redis.tls` through the shared `[policy_configurations.ratelimit_v1.redis.tls]` block (`enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`). TLS is disabled by default. See [Redis TLS Configuration](../../../advanced-ratelimit/v1.4/docs/advanced-ratelimit.md#redis-tls-configuration) for the parameters and a sample `config.toml`. A TLS misconfiguration fails policy creation regardless of `redis.failureMode`.
+To connect to Redis over TLS, configure `redis.tls` through the shared `[policy_configurations.ratelimit_v1.redis.tls]` block (`enabled`, `ca_file`, `server_name`, `insecure_skip_verify`, `cert_file`, `key_file`). TLS is disabled by default. See [Redis TLS Configuration](../../../advanced-ratelimit/v1.4/docs/advanced-ratelimit.md#redis-tls-configuration) for the parameters and a sample `config.toml`. When `enabled` is `true`, the TLS files are read and validated when the policy is created, and a missing or invalid file fails policy creation regardless of `redis.failureMode`.
 
 **Note:**
 
