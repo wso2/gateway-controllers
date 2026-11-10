@@ -1,0 +1,12 @@
+{
+  "name": "subscription-request-ratelimit",
+  "displayName": "Subscription Request Rate Limit",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "WebSub",
+    "WebBroker"
+  ],
+  "description": "Enforces the request limits of the caller's subscription plan, keeping a counter per subscription. On event APIs (WebSub and WebSocket in the event gateway) it enforces the plan's event limits, counting each event. Runs after subscription-validation v2, which records the subscription and plan, and delegates counting to the advanced-ratelimit engine with in-memory or Redis backends."
+}
