@@ -1704,65 +1704,53 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
 	}
 
-	batch, carry := splitAtTextUnit(pending, p.effectiveTextUnit(), chunk.EndOfStream)
-	if batch == "" {
-		// Below a text unit and more is coming: hold the text, forward the
-		// bytes. AWS's own streaming example does the same — output is streamed
-		// and generation halted if a later batch is found to violate.
-		respCtx.Metadata[metaKeyPendingText] = carry
-		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
-	}
-	respCtx.Metadata[metaKeyPendingText] = carry
+	// One flush can carry several text units — the testbench's mock model writes a
+	// whole stream in a single flush, and a real upstream can coalesce too. Assess
+	// every whole unit the buffer holds rather than one per flush, so a long flush
+	// is several unit-sized calls instead of one oversized one, and so text is not
+	// left unassessed behind a carry that only clears at end of stream.
+	unit := p.effectiveTextUnit()
+	var lastOutput interface{}
+	var lastModified, lastCleaned string
 
-	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batch, ""))
-	if cleaned == "" {
-		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
-	}
+	for {
+		batch, carry := splitAtTextUnit(pending, unit, chunk.EndOfStream)
+		if batch == "" {
+			// Below a text unit and more is coming: hold the text, forward the
+			// bytes. AWS's own streaming example does the same — output is
+			// streamed and generation halted if a later batch violates.
+			pending = carry
+			break
+		}
+		pending = carry
 
-	output, err := p.applyGuardrailToText(cleaned)
-	if err != nil {
-		if rp.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed, passthrough enabled",
-				"error", err, "chunkIndex", chunk.Index)
-			return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+		cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batch, ""))
+		if cleaned == "" {
+			if carry == "" {
+				break
+			}
+			continue
 		}
-		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
-			"error", err, "chunkIndex", chunk.Index)
-		return policy.TerminateResponseChunk{
-			Body:              p.buildSSEErrorEvent("Error calling AWS Bedrock Guardrail", err, rp.ShowAssessment, nil),
-			AnalyticsMetadata: guardrailHitAnalytics(),
-		}
-	}
 
-	violation, modifiedContent, err := p.evaluateGuardrailResponse(output, cleaned, rp.RedactPII, false, respCtx.Metadata)
-	if err != nil {
-		if rp.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed, passthrough enabled",
-				"error", err, "chunkIndex", chunk.Index)
-			return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+		action, output, modified, stop := p.assessStreamBatch(cleaned, chunkStr, respCtx, rp, chunk)
+		if stop {
+			respCtx.Metadata[metaKeyPendingText] = pending
+			return action
 		}
-		slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed",
-			"error", err, "chunkIndex", chunk.Index)
-		return policy.TerminateResponseChunk{
-			Body:              p.buildSSEErrorEvent("Error evaluating guardrail response", err, rp.ShowAssessment, output),
-			AnalyticsMetadata: guardrailHitAnalytics(),
+
+		validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
+		respCtx.Metadata[metaKeyAccStreamedContent] = validated + batch
+		lastOutput, lastModified, lastCleaned = output, modified, cleaned
+
+		if carry == "" {
+			break
 		}
 	}
 
-	if violation {
-		slog.Debug("AWSBedrockGuardrail: streaming violation detected",
-			"chunkIndex", chunk.Index, "batchChars", len([]rune(cleaned)))
-		return policy.TerminateResponseChunk{
-			Body:              p.buildSSEErrorEvent("Violation of AWS Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
-			AnalyticsMetadata: guardrailHitAnalytics(),
-		}
-	}
+	respCtx.Metadata[metaKeyPendingText] = pending
 
-	validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
-	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batch
-
-	if rp.RedactPII && modifiedContent != "" && modifiedContent != cleaned {
-		if typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput); ok {
+	if rp.RedactPII && lastModified != "" && lastModified != lastCleaned {
+		if typed, ok := lastOutput.(*bedrockruntime.ApplyGuardrailOutput); ok {
 			rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
 				return p.extractRedactedContent(typed, frameText)
 			})
@@ -1773,6 +1761,58 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	}
 
 	return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+}
+
+// assessStreamBatch runs one ApplyGuardrail call for a batch. stop is true when
+// the returned action must be delivered immediately — a violation, or a failure
+// that passthroughOnError does not excuse.
+func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
+	cleaned string,
+	chunkStr string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) (action policy.StreamingResponseAction, output interface{}, modified string, stop bool) {
+	output, err := p.applyGuardrailToText(cleaned)
+	if err != nil {
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed, passthrough enabled",
+				"error", err, "chunkIndex", chunk.Index)
+			return p.forwardWithPIIRestored(chunkStr, respCtx, rp), nil, "", true
+		}
+		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
+			"error", err, "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Error calling AWS Bedrock Guardrail", err, rp.ShowAssessment, nil),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}, nil, "", true
+	}
+
+	violation, modifiedContent, err := p.evaluateGuardrailResponse(output, cleaned, rp.RedactPII, false, respCtx.Metadata)
+	if err != nil {
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed, passthrough enabled",
+				"error", err, "chunkIndex", chunk.Index)
+			return p.forwardWithPIIRestored(chunkStr, respCtx, rp), nil, "", true
+		}
+		slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed",
+			"error", err, "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Error evaluating guardrail response", err, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}, nil, "", true
+	}
+
+	if violation {
+		slog.Debug("AWSBedrockGuardrail: streaming violation detected",
+			"chunkIndex", chunk.Index, "batchChars", len([]rune(cleaned)))
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Violation of AWS Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}, nil, "", true
+	}
+
+	return nil, output, modifiedContent, false
 }
 
 // effectiveTextUnit returns the batch size to validate at.
@@ -1796,7 +1836,9 @@ func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
 // Below a text unit nothing is validated yet unless the stream has ended, in
 // which case the final batch is assessed whatever its size — AWS's guidance is
 // explicit that the last batch must still be evaluated, and there will be no
-// later batch to carry into.
+// later batch to carry into. At or above a unit the cut happens even at end of
+// stream, so a caller looping over this function assesses a long buffer as
+// several unit-sized calls rather than one oversized one.
 //
 // Above a unit the cut is moved back to the end of the last sentence, or
 // failing that the last word, so a batch never splits a phrase across two
@@ -1806,14 +1848,15 @@ func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
 // the unit, so a stream of boundary-free text cannot grow the carry without
 // bound.
 func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry string) {
-	if endOfStream {
-		return text, ""
-	}
 	runes := []rune(text)
 	if unit <= 0 {
 		return text, ""
 	}
 	if len(runes) < unit {
+		// Below a unit: hold for more text, unless there will be none.
+		if endOfStream {
+			return text, ""
+		}
 		return "", text
 	}
 

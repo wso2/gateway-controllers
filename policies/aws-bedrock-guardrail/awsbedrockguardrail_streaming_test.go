@@ -766,10 +766,22 @@ func TestSplitAtTextUnit_DoesNotSplitWordsOrSentences(t *testing.T) {
 		}
 	})
 
-	t.Run("releases everything at end of stream", func(t *testing.T) {
+	t.Run("releases a short remainder at end of stream", func(t *testing.T) {
 		batch, carry := splitAtTextUnit("trailing words", 1000, true)
 		if batch != "trailing words" || carry != "" {
 			t.Errorf("end of stream must assess the remainder, got batch %q carry %q", batch, carry)
+		}
+	})
+
+	t.Run("still cuts at the unit at end of stream", func(t *testing.T) {
+		// So a caller looping over this assesses several unit-sized calls rather
+		// than one oversized one.
+		batch, carry := splitAtTextUnit(strings.Repeat("word ", 600), 1000, true)
+		if len([]rune(batch)) > 1000 {
+			t.Errorf("end-of-stream batch must still be bounded by the unit, got %d", len([]rune(batch)))
+		}
+		if carry == "" {
+			t.Errorf("expected a remainder to be carried for the next iteration")
 		}
 	})
 
@@ -837,5 +849,62 @@ func TestStreaming_RedactionValidatesEveryFlush(t *testing.T) {
 	}
 	if forward.Body == nil || !strings.Contains(string(forward.Body), "*****") {
 		t.Errorf("expected the flush's own frames to be redacted, got %q", string(forward.Body))
+	}
+}
+
+// TestStreaming_AssessesEveryUnitInOneFlush covers a flush that carries several
+// text units at once — the shape the testbench's mock model produces, since it
+// writes a whole stream in a single flush, and one a real upstream can produce
+// by coalescing. Assessing only the first unit per flush would leave the rest
+// unassessed behind a carry, and at end of stream would send one oversized call.
+func TestStreaming_AssessesEveryUnitInOneFlush(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil) // 1000-character text unit
+
+	// One flush, ~3000 characters of text => three units.
+	flush := strings.Repeat(sseEvent("filler text "), 250)
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk:       []byte(flush),
+		EndOfStream: true,
+	}, map[string]interface{}{})
+
+	if _, ok := action.(policy.ForwardResponseChunk); !ok {
+		t.Fatalf("expected the flush to be forwarded, got %T", action)
+	}
+	if client.calls < 3 {
+		t.Errorf("expected one call per text unit in the flush (>=3 for ~3000 chars), got %d", client.calls)
+	}
+	for i, text := range client.texts {
+		if n := len([]rune(text)); n > DefaultStreamingTextUnitChars+maxBoundarySearchRunes {
+			t.Errorf("call %d carried %d characters; batches must stay near one text unit", i, n)
+		}
+	}
+}
+
+// TestStreaming_ViolationInALaterUnitOfTheSameFlushTerminates makes sure the loop
+// does not stop assessing after the first clean unit.
+func TestStreaming_ViolationInALaterUnitOfTheSameFlushTerminates(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+
+	// The mock answers clean for the first call and blocks on the second.
+	calls := 0
+	p.newBedrockClientFunc = func(_ aws.Config) bedrockGuardrailClient {
+		calls++
+		if calls >= 2 {
+			return &countingBedrockClient{output: makeContentViolationOutput()}
+		}
+		return client
+	}
+
+	flush := strings.Repeat(sseEvent("filler text "), 250)
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk:       []byte(flush),
+		EndOfStream: true,
+	}, map[string]interface{}{})
+
+	if !action.TerminateStream() {
+		t.Fatalf("a violation in a later unit of the same flush must end the stream, got %T", action)
 	}
 }
