@@ -375,3 +375,186 @@ Feature: Azure Authentication policy
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # A throttled (429, honouring Retry-After) or failing (500) token request is retried within the
+  # same client request, which then succeeds: one client request, two token requests.
+  Scenario Outline: Retry a throttled or failing token request (<case>)
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-retry" and store it as "apiName"
+    And I generate a unique API version from "az-retry" and store it as "apiVersion"
+    And I generate a unique API context from "/az-retry" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/<prefix>${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"<prefix>${CTX:tenant}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 200
+    And the response header "X-Testbench-Entra-Tid" should be "<prefix>${CTX:tenant}"
+    When I send a "GET" request to the "entra" service at "/<prefix>${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 2
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+    Examples:
+      | case                     | prefix         |
+      | throttled with 429       | throttle-once- |
+      | transient server failure | error-once-    |
+
+  # Entra ID rejecting the identity fails the request with the policy's 502, which says nothing about
+  # the cause. The rejection is not retried, and the gateway runtime log has Entra ID's error code
+  # for this scenario's tenant but neither the federated token nor any access token.
+  Scenario: Entra ID rejecting the identity fails the request with 502
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-rejected" and store it as "apiName"
+    And I generate a unique API version from "az-rejected" and store it as "apiVersion"
+    And I generate a unique API context from "/az-rejected" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/invalid-client-${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"invalid-client-${CTX:tenant}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 502
+    And the response should match the expected error response "azure-authentication-upstream-auth-failed"
+    And the response body should not contain "testbench-federated-identity-token"
+    And the response body should not contain "testbench-entra."
+    When I send a "GET" request to the "entra" service at "/invalid-client-${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 1
+    And the "gateway-runtime" service logs should contain "invalid-client-${CTX:tenant}"
+    And the "gateway-runtime" service logs should contain "700213"
+    And the "gateway-runtime" service logs should not contain "testbench-federated-identity-token"
+    And the "gateway-runtime" service logs should not contain "testbench-entra."
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # A token endpoint that keeps failing is tried three times (the request and two retries), then
+  # the request fails with the policy's 502.
+  Scenario: A token endpoint that keeps failing is retried twice, then the request fails with 502
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-unavailable" and store it as "apiName"
+    And I generate a unique API version from "az-unavailable" and store it as "apiVersion"
+    And I generate a unique API context from "/az-unavailable" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/unavailable-${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"unavailable-${CTX:tenant}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 502
+    And the response should match the expected error response "azure-authentication-upstream-auth-failed"
+    When I send a "GET" request to the "entra" service at "/unavailable-${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 3
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # tokenRequestTimeout bounds the whole token request, retries included: Entra ID answering after
+  # 3 seconds fails a request whose policy allows 1 second, with the policy's 502.
+  Scenario: A token request that outlives tokenRequestTimeout fails the request with 502
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-slow" and store it as "apiName"
+    And I generate a unique API version from "az-slow" and store it as "apiVersion"
+    And I generate a unique API context from "/az-slow" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/slow-${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"slow-${CTX:tenant}","tokenRequestTimeout":"1s"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 502
+    And the response should match the expected error response "azure-authentication-upstream-auth-failed"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # A failed token request is not cached: once Entra ID accepts the identity again, the next request
+  # gets a token and succeeds, with no restart and no change to the API.
+  Scenario: Restore authentication after Entra ID rejected the identity
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-recover" and store it as "apiName"
+    And I generate a unique API version from "az-recover" and store it as "apiVersion"
+    And I generate a unique API context from "/az-recover" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/reject-once-${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"reject-once-${CTX:tenant}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 502
+    And the response should match the expected error response "azure-authentication-upstream-auth-failed"
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 200
+    And the response header "X-Testbench-Entra-Tid" should be "reject-once-${CTX:tenant}"
+    When I send a "GET" request to the "entra" service at "/reject-once-${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 2
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # A token for another resource is the upstream's to refuse: the gateway passes the upstream's 401
+  # through unchanged instead of failing the request itself.
+  Scenario: The upstream's 401 for a token issued for another resource reaches the client
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-audience" and store it as "apiName"
+    And I generate a unique API version from "az-audience" and store it as "apiVersion"
+    And I generate a unique API context from "/az-audience" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","scope":"https://cognitiveservices.azure.com/.default"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until the route answers 401
+    Then the response body should contain "audience"
+    And the response header "X-Testbench-Entra-Aud" should be "https://cognitiveservices.azure.com"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
