@@ -13,14 +13,18 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
+// TestAWSBedrockGuardrailPolicy_Mode covers the instance no flow is configured
+// on. GetPolicy rejects that shape, so this only pins that an instance which
+// validates nothing asks the kernel for nothing — the configured shapes are in
+// TestMode_FollowsConfiguration.
 func TestAWSBedrockGuardrailPolicy_Mode(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 	got := p.Mode()
 	want := policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
-		RequestBodyMode:    policy.BodyModeBuffer,
+		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   policy.BodyModeSkip,
 	}
 	if got != want {
 		t.Fatalf("unexpected mode: got %+v, want %+v", got, want)
