@@ -78,3 +78,300 @@ Feature: Azure Authentication policy
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # The policy sends the projected service account token as the client assertion and caches the
+  # token it gets per identity and scope, so two APIs and five requests make one token request.
+  Scenario: The federated token is the client assertion, and one cached token serves every API
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-shared-a" and store it as "apiName"
+    And I generate a unique API version from "az-shared-a" and store it as "apiVersion"
+    And I generate a unique API context from "/az-shared-a" and store it as "apiContext"
+    And I generate a unique value from "az-shared-b" and store it as "secondApiName"
+    And I generate a unique API version from "az-shared-b" and store it as "secondApiVersion"
+    And I generate a unique API context from "/az-shared-b" and store it as "secondApiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:secondApiName} |
+      | spec.displayName       | ${CTX:secondApiName} |
+      | spec.version           | ${CTX:secondApiVersion} |
+      | spec.context           | ${CTX:secondApiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    And I send a "POST" request to "${CTX:secondApiContext}/${CTX:secondApiVersion}/chat/completions" until status 200
+    And I send 3 "POST" requests to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 200
+    When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 1
+    And the JSON response field "requests[0].clientAssertion" should be "testbench-federated-identity-token"
+    And the JSON response field "requests[0].grantType" should be "client_credentials"
+    And the JSON response field "requests[0].clientAssertionType" should be "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+    And the JSON response field "requests[0].clientId" should be "5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e"
+    And the JSON response field "requests[0].scope" should be "https://ai.azure.com/.default"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+    When I delete the API "${CTX:secondApiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:secondApiContext}/${CTX:secondApiVersion}/chat/completions" until status 404
+
+  # Concurrent first requests on a cold cache wait for one token request instead of each making
+  # their own. The policy-free /health operation shows the route is live without requesting a token.
+  Scenario: Concurrent first requests share a single token request
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-concurrent" and store it as "apiName"
+    And I generate a unique API version from "az-concurrent" and store it as "apiVersion"
+    And I generate a unique API context from "/az-concurrent" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/{id}","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+
+    # Fails unless every request is answered 2xx.
+    When I send 20 concurrent "POST" requests to "${CTX:apiContext}/${CTX:apiVersion}/chat/{i}" with per-request body:
+      """
+      {"model":"chat","messages":[{"role":"user","content":"request {i}"}]}
+      """
+    When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 1
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # The policy refreshes a token in the background once it is due (Entra ID's refresh_in), while
+  # requests keep using the cached one: the first token is due after 2 seconds, and a later request
+  # carries a new token without any request failing.
+  Scenario: A token due for refresh is replaced in the background
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-refresh" and store it as "apiName"
+    And I generate a unique API version from "az-refresh" and store it as "apiVersion"
+    And I generate a unique API context from "/az-refresh" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/refresh-soon-${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"refresh-soon-${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    And I store the response header "X-Testbench-Entra-Token" as "firstToken"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until header "X-Testbench-Entra-Token" is not "${CTX:firstToken}"
+    Then the response status code should be 200
+    And the response header "X-Testbench-Entra-Token" should contain "testbench-entra."
+    When I send a "GET" request to the "entra" service at "/refresh-soon-${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 2
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # Attached at API level, the policy authenticates every operation of the API.
+  Scenario: Apply Azure Authentication at API level and operation level (API level)
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-api-level" and store it as "apiName"
+    And I generate a unique API version from "az-api-level" and store it as "apiVersion"
+    And I generate a unique API context from "/az-api-level" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"},{"method":"GET","path":"/models"}] |
+    Then the response should be successful
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    Then the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/models"
+    Then the response status code should be 200
+    And the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # Attached to one operation, the policy authenticates that operation only; the other reaches the
+  # upstream without a token, which the Entra-protected upstream refuses.
+  Scenario: Apply Azure Authentication at API level and operation level (operation level)
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-op-level" and store it as "apiName"
+    And I generate a unique API version from "az-op-level" and store it as "apiVersion"
+    And I generate a unique API context from "/az-op-level" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}]},{"method":"GET","path":"/models"}] |
+    Then the response should be successful
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    Then the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/models" until the route answers 401
+    Then the response header "X-Testbench-Entra-Token" should not exist
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # clientId, tenantId and scope from the policy parameters replace the runtime's identity and the
+  # default scope: the token is issued to that client in that tenant, for Azure OpenAI.
+  Scenario: The identity and scope come from the policy parameters
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-override" and store it as "apiName"
+    And I generate a unique API version from "az-override" and store it as "apiVersion"
+    And I generate a unique API context from "/az-override" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/cognitive |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","clientId":"11111111-2222-4333-8444-555555555555","scope":"https://cognitiveservices.azure.com/.default"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    Then the response header "X-Testbench-Entra-Aud" should be "https://cognitiveservices.azure.com"
+    And the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+    And the JSON response field "token.appid" should be "11111111-2222-4333-8444-555555555555"
+    When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "requests[0].clientId" should be "11111111-2222-4333-8444-555555555555"
+    And the JSON response field "requests[0].scope" should be "https://cognitiveservices.azure.com/.default"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # headerName and valuePrefix put the token in another header with another prefix, for upstreams
+  # that do not read the Authorization header. The upstream here echoes what it receives.
+  Scenario: The token is sent in a custom header with a custom prefix
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-header" and store it as "apiName"
+    And I generate a unique API version from "az-header" and store it as "apiVersion"
+    And I generate a unique API context from "/az-header" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3000 |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","headerName":"X-Upstream-Token","valuePrefix":"Token"}}] |
+      | spec.operations        | [{"method":"GET","path":"/get"}] |
+    Then the response should be successful
+
+    # The data-plane request carries no Authorization header of its own, so one reaching the
+    # upstream could only have come from the policy.
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+    Then the response should contain echoed header "X-Upstream-Token" containing "Token testbench-entra."
+    And the response should not contain echoed header "Authorization"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
+
+  # The policy sets the header rather than adding to it, so a token the client sends never reaches
+  # the upstream: the Entra-protected upstream would refuse it.
+  Scenario: An Authorization header from the client is replaced by the Entra token
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-replace" and store it as "apiName"
+    And I generate a unique API version from "az-replace" and store it as "apiVersion"
+    And I generate a unique API context from "/az-replace" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+
+    When I set header "Authorization" to "Bearer client-supplied-token"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    Then the response header "X-Testbench-Entra-Token" should contain "testbench-entra."
+    And the response should contain echoed header "Authorization" containing "Bearer testbench-entra."
+    And the response body should not contain "client-supplied-token"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # api-key-auth authenticates the client with a gateway API key, then azure-authentication
+  # authenticates the gateway to Azure: the client's key stays at the gateway and the upstream gets
+  # the Entra token.
+  Scenario: Configure Azure Authentication with api-key-auth for inbound authentication
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-apikey" and store it as "apiName"
+    And I generate a unique API version from "az-apikey" and store it as "apiVersion"
+    And I generate a unique API context from "/az-apikey" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"api-key-auth","version":"v1","params":{"key":"API-Key","in":"header"}},{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 401
+    And the JSON response field "message" should be "Valid API key required"
+
+    When I send a "POST" request to the "gateway-controller" service at "/rest-apis/${CTX:apiName}/api-keys" with body:
+      """
+      {"name":"az-key"}
+      """
+    Then the response status code should be 201
+    And I store the JSON response field "apiKey.apiKey" as "apiKey"
+    When I set header "API-Key" to "${CTX:apiKey}"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    Then the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+    And the response should contain echoed header "Authorization" containing "Bearer testbench-entra."
+    And the response should not contain echoed header "API-Key"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
