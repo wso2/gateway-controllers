@@ -4136,3 +4136,72 @@ func TestClosedByPeer(t *testing.T) {
 	}
 	require.False(t, closedByPeer(errors.New("timeout")))
 }
+
+// logReads returns a log reader that serves each log in turn and then keeps serving the last.
+func logReads(logs ...string) func(context.Context) string {
+	var reads atomic.Int32
+	return func(context.Context) string {
+		i := min(int(reads.Add(1))-1, len(logs)-1)
+		return logs[i]
+	}
+}
+
+func TestExpandLogTextResolvesScenarioValuesAndRejectsBlankText(t *testing.T) {
+	ctx := tcontext.WithLocal(
+		tcontext.WithShared(context.Background(), tcontext.NewShared("block")),
+		tcontext.NewLocal("runner"),
+	)
+	require.NoError(t, tcontext.Set(ctx, "apiName", "orders-1234"))
+
+	text, err := expandLogText(ctx, "request-${CTX:apiName}")
+	require.NoError(t, err)
+	require.Equal(t, "request-orders-1234", text)
+
+	_, err = expandLogText(ctx, "${CTX:missing}")
+	require.Error(t, err, "an unknown context value must fail, not match its literal placeholder")
+	_, err = expandLogText(ctx, "  ")
+	require.Error(t, err)
+}
+
+func TestAwaitLogsWaitsForTextWrittenLater(t *testing.T) {
+	read := logReads("starting\n", "starting\nready\n")
+	err := awaitLogs(context.Background(), read, func(logs string) bool { return strings.Contains(logs, "ready") },
+		`the log to contain "ready"`)
+	require.NoError(t, err)
+}
+
+func TestAwaitLogsFailsWhenTextNeverAppears(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := awaitLogs(ctx, logReads("starting\n"), func(logs string) bool { return strings.Contains(logs, "ready") },
+		`the log to contain "ready"`)
+	require.ErrorContains(t, err, `waiting for the log to contain "ready"`)
+}
+
+func TestAwaitLogEventFindsTextOnAnyLineWithTheMarker(t *testing.T) {
+	logs := "level=INFO apiName=orders msg=started\n" +
+		"level=ERROR apiName=orders msg=failed status=502\n" +
+		"level=ERROR apiName=payments msg=failed status=503\n"
+	require.NoError(t, awaitLogEvent(context.Background(), logReads(logs), "apiName=orders", "status=502", true, "runtime logs"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err := awaitLogEvent(ctx, logReads(logs), "apiName=orders", "status=503", true, "runtime logs")
+	require.ErrorContains(t, err, `containing "apiName=orders" and "status=503"`,
+		"a status on another API's line must not count")
+}
+
+func TestAwaitLogEventWithoutTextFailsOnAnyLineWithTheMarker(t *testing.T) {
+	logs := "level=INFO request=included-request\n" +
+		"level=INFO request=included-request header=excluded-request\n"
+	err := awaitLogEvent(context.Background(), logReads(logs), "included-request", "excluded-request", false, "runtime logs")
+	require.ErrorContains(t, err, `also contains "excluded-request"`)
+
+	require.NoError(t, awaitLogEvent(context.Background(), logReads(logs), "included-request", "secret", false, "runtime logs"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	err = awaitLogEvent(ctx, logReads("level=INFO other\n"), "included-request", "secret", false, "runtime logs")
+	require.ErrorContains(t, err, `to hold an event containing "included-request"`,
+		"a missing event must fail, not pass for want of anything to check")
+}
