@@ -227,10 +227,14 @@ func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 		t.Errorf("CRLF event boundary must be recognised as a boundary")
 	}
 
-	// A non-SSE body accumulates whole, so nothing unvalidated reaches the
+	// A unary JSON body accumulates whole, so nothing unvalidated reaches the
 	// client; the kernel's end-of-stream flush is what releases it.
 	if !p.NeedsMoreResponseData([]byte(`{"choices":[{"message":{"content":"hello"}}]}`)) {
-		t.Errorf("a non-SSE body must accumulate to end of stream")
+		t.Errorf("a unary JSON body must accumulate to end of stream")
+	}
+	// Even past the window — a half-received document is not validatable.
+	if !p.NeedsMoreResponseData([]byte(`{"x":"` + strings.Repeat("y", 600))) {
+		t.Errorf("a partial JSON document must keep accumulating past the window")
 	}
 
 	// A buffered instance must never ask the kernel to accumulate.
@@ -569,5 +573,79 @@ func TestStreaming_HonoursApplicableStatusCodes(t *testing.T) {
 	}
 	if client.calls == 0 {
 		t.Errorf("expected the guardrail to be called for a configured status")
+	}
+}
+
+// encodeAmazonEventStreamFrame builds a byte sequence shaped like one Amazon
+// event-stream frame: a 4-byte total length, a 4-byte header length, then opaque
+// bytes. Only the framing shape matters here — the point is that these bytes are
+// neither SSE nor JSON.
+func encodeAmazonEventStreamFrame(payload string) []byte {
+	frame := []byte{0x00, 0x00, 0x01, 0x2c, 0x00, 0x00, 0x00, 0x3c, 0x7a, 0x1f, 0x00, 0x00}
+	frame = append(frame, payload...)
+	return frame
+}
+
+// TestNeedsMoreResponseData_RawProviderFramingIsReleasedAtTheWindow pins the
+// distinction between what the two streaming hooks are given.
+//
+// NeedsMoreResponseData receives the RAW accumulated upstream bytes, before any
+// policy runs. On a Bedrock-backed route that is Amazon's binary event-stream
+// framing, not SSE — the OpenAI SSE this policy validates only exists after
+// openai-to-bedrock-transformer has rewritten the flush, which happens later, in
+// OnResponseBodyChunk.
+//
+// So this hook must not decide "not SSE, therefore accumulate": that holds every
+// Bedrock stream to end of stream and reproduces the bug this policy is meant to
+// fix. Frame integrity is the transformer's job — it declares its own
+// NeedsMoreResponseData for a partial frame, and the kernel flushes only when no
+// policy wants more data.
+func TestNeedsMoreResponseData_RawProviderFramingIsReleasedAtTheWindow(t *testing.T) {
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingWindowBytes = 256
+	})
+
+	short := encodeAmazonEventStreamFrame("contentBlockDelta")
+	if !p.NeedsMoreResponseData(short) {
+		t.Errorf("below the window, raw provider framing must still accumulate")
+	}
+
+	var accumulated []byte
+	for len(accumulated) < 512 {
+		accumulated = append(accumulated, encodeAmazonEventStreamFrame("contentBlockDelta")...)
+	}
+	if p.NeedsMoreResponseData(accumulated) {
+		t.Fatalf("raw provider framing must be released at the window; holding it buffers the whole response and defeats streaming")
+	}
+}
+
+// TestStreaming_ValidatesTransformerOutputNotRawFraming is the other half: the
+// chunk OnResponseBodyChunk receives on such a route is the transformer's OpenAI
+// SSE, so the default streamingJsonPath applies to it.
+func TestStreaming_ValidatesTransformerOutputNotRawFraming(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingWindowBytes = MinStreamingWindowBytes
+	})
+
+	// What openai-to-bedrock-transformer emits: data: {"choices":[{"index":0,
+	// "delta":{"content":"..."},"finish_reason":null}]}\n\n
+	transformed := strings.Repeat(
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"claude\","+
+			"\"choices\":[{\"index\":0,\"delta\":{\"content\":\"blocked\"},\"finish_reason\":null}]}\n\n", 6)
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk:       []byte(transformed),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if !action.TerminateStream() {
+		t.Fatalf("expected the transformer's SSE output to be validated, got %T", action)
+	}
+	if client.calls != 1 {
+		t.Fatalf("expected one validation call, got %d", client.calls)
+	}
+	if got := client.texts[0]; !strings.Contains(got, "blocked") || strings.Contains(got, "choices") {
+		t.Errorf("expected the extracted delta text, got %q", got)
 	}
 }

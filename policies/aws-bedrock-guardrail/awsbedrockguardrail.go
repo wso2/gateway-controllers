@@ -1509,35 +1509,70 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 // billed ApplyGuardrail round trip. Flushing per chunk would put an AWS call
 // between every pair of tokens.
 //
-// Three cases:
+// Four cases:
 //
-//   - A body that is not SSE (plain JSON over chunked transfer) accumulates
-//     whole. Such a response is not incrementally consumable by a client
-//     anyway, so there is no latency to protect, and holding it keeps the
-//     buffered path's property that nothing reaches the client until it has
-//     been validated. The kernel always flushes at end of stream, so this
-//     cannot stall.
+//   - A unary JSON document that happens to arrive over chunked transfer
+//     accumulates whole. Such a response is not incrementally consumable by a
+//     client anyway, so there is no latency to protect, and holding it keeps the
+//     buffered path's property that nothing unvalidated reaches the client. The
+//     kernel always flushes at end of stream, so this cannot stall.
 //   - Below the window, keep accumulating.
-//   - At or past the window, release — but only on an SSE event boundary. A
-//     flush cut through the middle of a `data:` line leaves JSON that no
-//     JSONPath can read, which is what produces the "Error extracting value
-//     from JSONPath" failure this path exists to avoid.
+//   - At or past the window: an SSE buffer is released only on an event
+//     boundary, because a flush cut through the middle of a `data:` line leaves
+//     JSON that no JSONPath can read — the original failure. Anything else is
+//     released as soon as the window is reached; see below for why that is safe.
+//
+// Note what this hook is given: the kernel passes the *raw* accumulated upstream
+// bytes, before any policy has run. That is not what OnResponseBodyChunk
+// receives. On a Bedrock-backed route, openai-to-bedrock-transformer sits later
+// in the chain, so by reverse response ordering it runs first and rewrites each
+// flush into OpenAI SSE — which is what this policy then validates. Here the
+// bytes are still Amazon's binary event-stream framing.
+//
+// So an "is this SSE?" test cannot decide whether to hold: answering "not SSE,
+// therefore accumulate" would hold every Bedrock stream to end of stream and
+// defeat the whole point. Frame integrity for that format is not this policy's
+// problem either — the transformer declares its own NeedsMoreResponseData for a
+// partial frame, and the kernel flushes only when *no* policy wants more data,
+// so releasing here can never cut a frame.
+//
+// The one case that must still be held is a unary JSON body, which is why the
+// discriminator below is "does this look like a JSON document", not "is this
+// SSE". An opaque framing with no transformer ahead of it in the chain is
+// forwarded unvalidated until end of stream; that is logged by
+// handleNonSSEStreamFlush.
 func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bool {
 	if !p.hasResponseParams || !p.responseParams.Enabled || !p.responseParams.Streaming {
 		return false
 	}
-	// This hook receives only the accumulated bytes, so it cannot see the
-	// upstream status that applicableStatusCodes is matched against. A response
-	// outside those codes is therefore still accumulated here and then forwarded
-	// untouched by OnResponseBodyChunk — buffering it costs a delay, never a
-	// verdict.
-	if !isSSEChunk(string(accumulated)) {
+	if looksLikeJSONDocument(accumulated) {
 		return true
 	}
 	if len(accumulated) < p.responseParams.StreamingWindowBytes {
 		return true
 	}
-	return !endsAtSSEEventBoundary(accumulated)
+	if isSSEChunk(string(accumulated)) {
+		return !endsAtSSEEventBoundary(accumulated)
+	}
+	return false
+}
+
+// looksLikeJSONDocument reports whether b opens a JSON object or array, ignoring
+// leading whitespace. It is deliberately a test of the first meaningful byte
+// rather than a parse: it runs on every accumulated chunk, and a partially
+// received document must answer the same as a complete one.
+func looksLikeJSONDocument(b []byte) bool {
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // OnResponseBodyChunk implements policy.StreamingResponsePolicy. It is called
@@ -1587,11 +1622,12 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 	respCtx.Metadata[metaKeyAccStreamedJSONBody] = full
 
 	if !chunk.EndOfStream {
-		// Only reachable when the kernel force-flushed at its accumulator
-		// ceiling. The body is already past any size this policy should be
-		// validating as one payload, and it is on its way to the client, so
-		// there is nothing to decide here.
-		slog.Warn("AWSBedrockGuardrail: non-SSE response flushed before end of stream, validation deferred",
+		// Two ways to get here: the kernel force-flushed at its accumulator
+		// ceiling, or the response is in a framing this policy cannot read and
+		// no transformer ahead of it in the chain rewrote it into SSE. Either
+		// way the bytes are on their way to the client and there is nothing to
+		// decide now; the accumulated body is still validated at end of stream.
+		slog.Warn("AWSBedrockGuardrail: unrecognised streaming response format flushed before end of stream, validation deferred to end of stream",
 			"accumulated_bytes", len(full))
 		return policy.ForwardResponseChunk{}
 	}
