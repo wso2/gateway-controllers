@@ -56,3 +56,33 @@ blocks:
       - name: azure-authentication
         features:
           - features/azure_authentication.feature
+
+  # The restart runner restarts gateway services, which would interrupt any runner beside it, so it
+  # gets a block of its own.
+  - name: azure-authentication-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: azure-authentication-restart
+        features:
+          - features/azure_authentication_restart.feature
+
+  # The staged token file gives the gateway runtime an empty federated service account token, a
+  # setting that applies to every runner in a block, so this runner gets a block of its own.
+  - name: azure-authentication-token-file
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        stagedFiles:
+          azure-identity-token: tests/framework/core/catalog/platformgateway/resources/azure/identity-token-empty
+      - name: testbench
+    runners:
+      - name: azure-authentication-token-file
+        features:
+          - features/azure_authentication_token_file.feature
