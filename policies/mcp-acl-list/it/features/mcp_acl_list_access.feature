@@ -138,6 +138,8 @@ Feature: mcp-acl-list access decisions
       | case                                   | resources                                                            | allowed                    | text                   | denied                     |
       # MAC #4: deny mode with R1 as the only exception; R1 returns the mock's content, R2 is denied.
       | deny mode with one exception           | {"mode":"deny","exceptions":["file:///docs/readme.txt"]}             | file:///docs/readme.txt    | This is the readme.    | file:///docs/changelog.txt |
+      # MAC #5: allow mode with R1 as the only exception; R2 succeeds, R1 is denied.
+      | allow mode with one exception          | {"mode":"allow","exceptions":["file:///docs/readme.txt"]}            | file:///docs/changelog.txt | v1.0.0: first release. | file:///docs/readme.txt    |
       # MAC #4: resources are matched on the URI, not the name. R1 is listed by its name only and
       # is denied; R2 is listed by its URI and is read, which shows the exceptions are applied.
       | exceptions match the uri, not the name | {"mode":"deny","exceptions":["readme","file:///docs/changelog.txt"]} | file:///docs/changelog.txt | v1.0.0: first release. | file:///docs/readme.txt    |
