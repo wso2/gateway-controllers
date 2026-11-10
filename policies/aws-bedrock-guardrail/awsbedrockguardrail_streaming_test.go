@@ -276,14 +276,24 @@ func TestStreaming_CleanStreamForwardsUnchangedAndValidatesPerWindow(t *testing.
 
 	actions := feedStream(t, p, streamCtx(), chunks)
 
+	// The delivered stream must be byte-identical to what arrived. Asserting a
+	// nil body instead would pin the mechanism rather than the property: this
+	// path withholds a trailing incomplete line and re-emits it with the next
+	// flush, so it sets the body explicitly even when nothing is rewritten.
+	var delivered string
 	for i, action := range actions {
 		forward, ok := action.(policy.ForwardResponseChunk)
 		if !ok {
 			t.Fatalf("flush %d: expected ForwardResponseChunk, got %T", i, action)
 		}
-		if forward.Body != nil {
-			t.Errorf("flush %d: a clean stream must pass through untouched, got a rewritten body", i)
+		if forward.Body == nil {
+			delivered += string(chunks[i])
+			continue
 		}
+		delivered += string(forward.Body)
+	}
+	if want := strings.Join(chunks, ""); delivered != want {
+		t.Errorf("a clean stream must be delivered unchanged:\n got %d bytes\nwant %d bytes", len(delivered), len(want))
 	}
 
 	if client.calls == 0 {
@@ -1404,12 +1414,24 @@ func TestStreaming_DropsAnOverlongPartialLine(t *testing.T) {
 	respCtx := streamCtx()
 	respCtx.Metadata[metaKeySSEStream] = true
 
-	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
-		Chunk: []byte("data: " + strings.Repeat("x", maxPartialLineBytes+100)), EndOfStream: false,
+	oversized := "data: " + strings.Repeat("x", maxPartialLineBytes+100)
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(oversized), EndOfStream: false,
 	}, map[string]interface{}{})
 
 	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got != "" {
-		t.Errorf("an over-limit fragment must be dropped, got %d bytes", len(got))
+		t.Errorf("an over-limit fragment must not stay held, got %d bytes", len(got))
+	}
+	// It is emitted rather than discarded: withholding it would truncate the
+	// response, and dropping it would lose bytes the client is owed. Delivering
+	// it unrewritten is the lesser failure.
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if string(forward.Body) != oversized {
+		t.Errorf("the over-limit fragment must still be delivered, got %d of %d bytes",
+			len(forward.Body), len(oversized))
 	}
 }
 
@@ -1514,5 +1536,42 @@ func TestStreaming_RedactsWhenTheValueIsWithinOneFrame(t *testing.T) {
 	body := string(forward.Body)
 	if strings.Contains(body, "john@example.com") || !strings.Contains(body, "*****") {
 		t.Errorf("expected the value redacted in place, got %q", body)
+	}
+}
+
+// TestStreaming_RewritesAPlaceholderSplitAcrossFlushes is the other half of
+// retaining an incomplete line. Retaining it for assessment alone is not enough:
+// if its bytes are forwarded with the flush that cut it, the frame this policy
+// never got to rewrite is already at the client. Before the bytes were held too,
+// both flushes passed through untouched and EMAIL_0000 was delivered verbatim.
+func TestStreaming_RewritesAPlaceholderSplitAcrossFlushes(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	// The event is cut mid-payload, inside the placeholder itself.
+	first := "data: {\"choices\":[{\"delta\":{\"content\":\"write EMAIL_0"
+	second := "000 now\"}}]}\n\n"
+
+	a1 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(first), EndOfStream: false,
+	}, map[string]interface{}{})
+	a2 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(second), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	delivered := string(a1.(policy.ForwardResponseChunk).Body) +
+		string(a2.(policy.ForwardResponseChunk).Body)
+
+	if strings.Contains(delivered, "EMAIL_0000") {
+		t.Errorf("the placeholder survived a split flush: %q", delivered)
+	}
+	if !strings.Contains(delivered, "john@example.com") {
+		t.Errorf("the masked value must be restored once the line completes, got %q", delivered)
+	}
+	// Nothing may be lost or duplicated by the withholding.
+	if want := first + second; len(delivered) < len(want)-len("EMAIL_0000")+len("john@example.com") {
+		t.Errorf("delivered stream is shorter than the frames that arrived: %q", delivered)
 	}
 }

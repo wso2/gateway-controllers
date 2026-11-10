@@ -1845,15 +1845,16 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		return p.handleSSEStreamFlushHeld(chunkStr, chunk, respCtx, rp)
 	}
 
+	emit, flushText := p.prepareFlush(chunkStr, chunk.EndOfStream, respCtx, rp)
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
-	pending += p.extractFlushText(chunkStr, chunk.EndOfStream, respCtx, rp)
+	pending += flushText
 
 	if strings.TrimSpace(pending) == "" {
 		// Framing only — the opening role delta, a keep-alive comment, usage,
 		// [DONE]. Nothing to validate, though a masked placeholder may still
 		// need restoring before it reaches the client.
 		respCtx.Metadata[metaKeyPendingText] = pending
-		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+		return p.forwardWithPIIRestored(emit, respCtx, rp)
 	}
 
 	// One flush can carry several text units — the testbench's mock model writes a
@@ -1884,7 +1885,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 			continue
 		}
 
-		action, output, modified, stop := p.assessStreamBatch(cleaned, chunkStr, respCtx, rp, chunk)
+		action, output, modified, stop := p.assessStreamBatch(cleaned, emit, respCtx, rp, chunk)
 		if stop {
 			respCtx.Metadata[metaKeyPendingText] = pending
 			return action
@@ -1902,7 +1903,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	respCtx.Metadata[metaKeyPendingText] = pending
 
 	if rp.RedactPII && lastModified != "" && lastModified != lastCleaned {
-		rewritten, changed, leaked := p.redactedFlush(chunkStr, lastOutput, rp)
+		rewritten, changed, leaked := p.redactedFlush(emit, lastOutput, rp)
 		if leaked {
 			slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; ending the stream rather than delivering it",
 				"chunkIndex", chunk.Index)
@@ -1917,7 +1918,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		}
 	}
 
-	return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+	return p.forwardWithPIIRestored(emit, respCtx, rp)
 }
 
 // assessStreamBatch runs one ApplyGuardrail call for a batch. stop is true when
@@ -1925,7 +1926,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 // that passthroughOnError does not excuse.
 func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 	cleaned string,
-	chunkStr string,
+	emit string,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 	chunk *policy.StreamBody,
@@ -1935,7 +1936,7 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 		if rp.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed, passthrough enabled",
 				"error", err, "chunkIndex", chunk.Index)
-			return p.forwardWithPIIRestored(chunkStr, respCtx, rp), nil, "", true
+			return p.forwardWithPIIRestored(emit, respCtx, rp), nil, "", true
 		}
 		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
 			"error", err, "chunkIndex", chunk.Index)
@@ -1950,7 +1951,7 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 		if rp.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed, passthrough enabled",
 				"error", err, "chunkIndex", chunk.Index)
-			return p.forwardWithPIIRestored(chunkStr, respCtx, rp), nil, "", true
+			return p.forwardWithPIIRestored(emit, respCtx, rp), nil, "", true
 		}
 		slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed",
 			"error", err, "chunkIndex", chunk.Index)
@@ -2001,7 +2002,9 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlushHeld(
 ) policy.StreamingResponseAction {
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
 	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
-	newText := p.extractFlushText(chunkStr, chunk.EndOfStream, respCtx, rp)
+	// Bytes accumulate in metaKeyHeldBytes here, so only the text split matters:
+	// prepareFlush's emit portion is ignored and the raw flush is held whole.
+	_, newText := p.prepareFlush(chunkStr, chunk.EndOfStream, respCtx, rp)
 	unit := p.effectiveTextUnit()
 
 	// Assess and release everything once the stream ends; there is no later
@@ -2222,27 +2225,31 @@ func lastWordEnd(runes []rune, limit int) int {
 // all — but it is not a guarantee, and an API that needs one should keep the
 // response flow buffered.
 func (p *AWSBedrockGuardrailPolicy) forwardWithPIIRestored(
-	chunkStr string,
+	emit string,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) policy.StreamingResponseAction {
+	// The body is always set explicitly, never left nil to pass the original
+	// chunk through: this path withholds a trailing incomplete line and
+	// re-emits it with the next flush, so the bytes to deliver are no longer
+	// the bytes that arrived.
 	if rp.RedactPII {
-		return policy.ForwardResponseChunk{}
+		return policy.ForwardResponseChunk{Body: []byte(emit)}
 	}
 	raw, exists := respCtx.Metadata[MetadataKeyPIIEntities]
 	if !exists {
-		return policy.ForwardResponseChunk{}
+		return policy.ForwardResponseChunk{Body: []byte(emit)}
 	}
 	maskedPII, ok := raw.(map[string]string)
 	if !ok || len(maskedPII) == 0 {
-		return policy.ForwardResponseChunk{}
+		return policy.ForwardResponseChunk{Body: []byte(emit)}
 	}
 
-	rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
+	rewritten, changed := rewriteSSEDeltaContent(emit, rp.StreamingJsonPath, func(frameText string) string {
 		return p.restorePIIInResponse(frameText, maskedPII)
 	})
 	if !changed {
-		return policy.ForwardResponseChunk{}
+		return policy.ForwardResponseChunk{Body: []byte(emit)}
 	}
 	return policy.ForwardResponseChunk{Body: []byte(rewritten)}
 }
@@ -2302,35 +2309,47 @@ func splitTrailingPartialLine(s string) (complete, partial string) {
 	return "", s
 }
 
-// extractFlushText returns the assistant text of this flush, joining it to any
-// incomplete line retained from the previous one and retaining this flush's own
-// incomplete tail for the next.
+// prepareFlush joins this flush to any incomplete line retained from the
+// previous one and divides the result into the bytes that may be emitted now and
+// the assistant text they carry.
 //
-// At end of stream nothing further is coming, so the tail is treated as complete
-// and the retained state cleared — a truncated final line still yields no text,
-// but it is not held for a flush that will never arrive.
-func (p *AWSBedrockGuardrailPolicy) extractFlushText(
+// An SSE line cut in half is the problem being solved. A truncated "data:"
+// payload is unparseable JSON, so its text is extracted from neither flush, and
+// a placeholder or a value needing redaction inside it is rewritten in neither.
+// Retaining the fragment fixes both, but only if the *bytes* are retained too:
+// forwarding them and merely remembering the text would leave the client holding
+// the half-frame this policy never got to rewrite.
+//
+// So the trailing fragment is withheld and re-emitted at the head of the next
+// flush. Byte order is preserved and nothing is dropped; end of stream emits
+// whatever is left, since no further flush is coming.
+//
+// Over maxPartialLineBytes the fragment is emitted rather than held: a stream
+// carrying no line terminator would otherwise grow it without limit, and
+// delivering an unrewritten fragment is better than withholding the response.
+func (p *AWSBedrockGuardrailPolicy) prepareFlush(
 	chunkStr string,
 	endOfStream bool,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
-) string {
+) (emit, text string) {
 	carried, _ := respCtx.Metadata[metaKeyPartialLine].(string)
 	joined := carried + chunkStr
 
 	if endOfStream {
 		delete(respCtx.Metadata, metaKeyPartialLine)
-		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+		return joined, extractSSEDeltaContent(joined, rp.StreamingJsonPath)
 	}
 
 	complete, partial := splitTrailingPartialLine(joined)
 	if len(partial) > maxPartialLineBytes {
-		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, dropping it",
+		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, emitting it unrewritten",
 			"partial_bytes", len(partial), "limit", maxPartialLineBytes)
-		partial = ""
+		delete(respCtx.Metadata, metaKeyPartialLine)
+		return joined, extractSSEDeltaContent(complete, rp.StreamingJsonPath)
 	}
 	respCtx.Metadata[metaKeyPartialLine] = partial
-	return extractSSEDeltaContent(complete, rp.StreamingJsonPath)
+	return complete, extractSSEDeltaContent(complete, rp.StreamingJsonPath)
 }
 
 // isSSEChunk reports whether s looks like SSE framing.
