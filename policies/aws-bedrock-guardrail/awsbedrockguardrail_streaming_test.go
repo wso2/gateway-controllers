@@ -1343,3 +1343,176 @@ func TestValidateBeforeDeliver_DefaultsOff(t *testing.T) {
 		t.Errorf("expected the parameter to be rejected on the request flow")
 	}
 }
+
+// ─── Flushes that stop mid-line ──────────────────────────────────────────────
+
+// TestSplitTrailingPartialLine_DividesAtTheLastTerminator pins the split used to
+// retain an incomplete line.
+func TestSplitTrailingPartialLine_DividesAtTheLastTerminator(t *testing.T) {
+	complete, partial := splitTrailingPartialLine("data: {\"a\":1}\n\ndata: {\"b\":")
+	if complete != "data: {\"a\":1}\n\n" || partial != "data: {\"b\":" {
+		t.Errorf("unexpected split: complete %q, partial %q", complete, partial)
+	}
+	if c, p := splitTrailingPartialLine("no terminator at all"); c != "" || p != "no terminator at all" {
+		t.Errorf("a flush with no terminator is wholly incomplete, got %q / %q", c, p)
+	}
+}
+
+// TestStreaming_RetainsADataLineSplitAcrossFlushes is the defect this guards: a
+// truncated "data:" payload is unparseable JSON, so before the retained
+// fragment the text was extracted from neither flush and never assessed. The
+// engine force-flushes at its accumulator ceiling regardless of event
+// boundaries, and an upstream whose writes do not align with them produces the
+// same shape.
+func TestStreaming_RetainsADataLineSplitAcrossFlushes(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
+	})
+	respCtx := streamCtx()
+
+	// Enough complete events to reach the batch, then one cut mid-payload.
+	first := strings.Repeat(sseEvent("padding xx"), 11) +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"SPLITMARK"
+	second := "ER\"}}]}\n\n"
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(first), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got == "" {
+		t.Fatalf("the incomplete line must be retained for the next flush")
+	}
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(second), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	var assessed string
+	for _, text := range client.texts {
+		assessed += text
+	}
+	if !strings.Contains(assessed, "SPLITMARKER") {
+		t.Errorf("text from a split data line must be assessed, not skipped; assessed %q", assessed)
+	}
+}
+
+// TestStreaming_DropsAnOverlongPartialLine bounds the retention: a stream with no
+// line terminator must not grow the retained fragment without limit.
+func TestStreaming_DropsAnOverlongPartialLine(t *testing.T) {
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[metaKeySSEStream] = true
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte("data: " + strings.Repeat("x", maxPartialLineBytes+100)), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got != "" {
+		t.Errorf("an over-limit fragment must be dropped, got %d bytes", len(got))
+	}
+}
+
+// ─── Non-SSE finalisation ────────────────────────────────────────────────────
+
+// TestStreaming_EmptyNonSSEBodyIsNotRejected covers a streamed response that
+// carries no body: there is nothing to assess, and handing it to validatePayload
+// failed extraction and rejected the response.
+func TestStreaming_EmptyNonSSEBodyIsNotRejected(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, nil)
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk: []byte("   "), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	if _, ok := action.(policy.ForwardResponseChunk); !ok {
+		t.Fatalf("an empty body must be forwarded, not rejected, got %T", action)
+	}
+	if client.calls != 0 {
+		t.Errorf("an empty body must not be assessed, got %d calls", client.calls)
+	}
+}
+
+// TestStreaming_DoesNotResendANonSSEBodyAfterAForcedFlush covers the other way a
+// rewrite becomes undeliverable: once a flush has gone downstream, replacing a
+// later chunk with the accumulated body would repeat every byte already sent.
+func TestStreaming_DoesNotResendANonSSEBodyAfterAForcedFlush(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.JsonPath = "$.msg"
+		params.RedactPII = true
+	})
+	respCtx := streamCtx()
+
+	// A mid-stream flush: the engine force-flushed, so these bytes are delivered.
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(`{"msg":"mail john`), EndOfStream: false,
+	}, map[string]interface{}{})
+	if forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool); !forwarded {
+		t.Fatalf("a mid-stream non-SSE flush must be recorded as forwarded")
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(`@example.com"}`), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if forward.Body != nil {
+		t.Errorf("the accumulated body must not be re-sent after an earlier flush, got %q", string(forward.Body))
+	}
+}
+
+// ─── Redaction across frame boundaries ───────────────────────────────────────
+
+// TestStreaming_FailsClosedWhenRedactionSpansFrames is the leak guard. Redaction
+// is written back frame by frame, so a value the model emitted across two events
+// is present in neither frame's text and is replaced in neither. Forwarding it
+// would defeat the one thing redaction mode exists for, so the stream ends
+// instead.
+func TestStreaming_FailsClosedWhenRedactionSpansFrames(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = true
+	})
+
+	// The address is split: "john@" in one event, "example.com" in the next.
+	flush := sseEvent("mail john@") + sseEvent("example.com now")
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk: []byte(flush), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	term, ok := action.(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("an unredactable value must end the stream, got %T", action)
+	}
+	if strings.Contains(string(term.Body), "john@example.com") {
+		t.Errorf("the value must not appear in the final event, got %q", string(term.Body))
+	}
+}
+
+// TestStreaming_RedactsWhenTheValueIsWithinOneFrame keeps the ordinary case
+// working: a value contained in a single event is redacted and delivered.
+func TestStreaming_RedactsWhenTheValueIsWithinOneFrame(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = true
+	})
+
+	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
+		Chunk: []byte(sseEvent("mail john@example.com now")), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("a redactable value must be delivered redacted, got %T", action)
+	}
+	body := string(forward.Body)
+	if strings.Contains(body, "john@example.com") || !strings.Contains(body, "*****") {
+		t.Errorf("expected the value redacted in place, got %q", body)
+	}
+}

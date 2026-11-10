@@ -95,6 +95,11 @@ const (
 	// the text unit.
 	streamFlushPacerBytes = 4096
 
+	// maxPartialLineBytes bounds the retained incomplete line. A stream carrying
+	// no line terminator at all would otherwise grow it without limit; past this
+	// the fragment is dropped with a warning rather than held.
+	maxPartialLineBytes = 64 * 1024
+
 	// SSE field names. The single space after the colon is optional in the
 	// specification — "data:{...}" and "data: {...}" are the same event — so
 	// these are the field names and the space is handled separately. Writing
@@ -113,6 +118,18 @@ const (
 	// unclassifiable on its own; without this it would be mistaken for a
 	// non-SSE body and the accumulated text assessed as if it were one.
 	metaKeySSEStream = "awsbedrockguardrail:stream_is_sse"
+
+	// metaKeyPartialLine retains the trailing bytes of a flush that stopped in the
+	// middle of an SSE line. A truncated "data:" payload is unparseable JSON, so
+	// without this the text it carries is extracted from neither flush and is
+	// never assessed. Reached when the engine force-flushes at its accumulator
+	// ceiling, or whenever an upstream's writes do not align with event
+	// boundaries.
+	metaKeyPartialLine = "awsbedrockguardrail:partial_line"
+
+	// metaKeyNonSSEForwarded records that a non-SSE flush was already delivered,
+	// so the accumulated body must not be re-sent as a rewrite of a later chunk.
+	metaKeyNonSSEForwarded = "awsbedrockguardrail:non_sse_forwarded"
 
 	// metaKeyHeldBytes holds the flush bytes withheld from the client while the
 	// text they carry is still unassessed. Only used when ValidateBeforeDeliver
@@ -1290,35 +1307,78 @@ func (p *AWSBedrockGuardrailPolicy) processPIIEntitiesForMasking(output *bedrock
 // extractRedactedContent extracts redacted content from guardrail outputs
 func (p *AWSBedrockGuardrailPolicy) extractRedactedContent(output *bedrockruntime.ApplyGuardrailOutput, originalContent string) string {
 	redactedText := originalContent
-	// Replace all PII entity matches with *****
-	if output != nil && len(output.Assessments) > 0 && output.Assessments[0].SensitiveInformationPolicy != nil {
-		// Collect all matches first
-		var matches []string
-
-		for _, entity := range output.Assessments[0].SensitiveInformationPolicy.PiiEntities {
-			match := aws.ToString(entity.Match)
-			if match != "" {
-				matches = append(matches, match)
-			}
-		}
-		for _, regex := range output.Assessments[0].SensitiveInformationPolicy.Regexes {
-			match := aws.ToString(regex.Match)
-			if match != "" {
-				matches = append(matches, match)
-			}
-		}
-
-		// Sort matches by length (longest first) to prevent substring collisions
-		sort.Slice(matches, func(i, j int) bool {
-			return len(matches[i]) > len(matches[j])
-		})
-
-		// Process matches in order (longest first)
-		for _, match := range matches {
-			redactedText = strings.ReplaceAll(redactedText, match, "*****")
-		}
+	// Process matches longest first to prevent substring collisions
+	for _, match := range redactionMatches(output) {
+		redactedText = strings.ReplaceAll(redactedText, match, "*****")
 	}
 	return redactedText
+}
+
+// redactionMatches returns the values the guardrail reported, longest first.
+//
+// Shared by the redaction rewrite and the leak check that follows it: the same
+// list that says what to replace is what says whether anything was missed.
+func redactionMatches(output *bedrockruntime.ApplyGuardrailOutput) []string {
+	if output == nil || len(output.Assessments) == 0 || output.Assessments[0].SensitiveInformationPolicy == nil {
+		return nil
+	}
+
+	var matches []string
+	for _, entity := range output.Assessments[0].SensitiveInformationPolicy.PiiEntities {
+		if match := aws.ToString(entity.Match); match != "" {
+			matches = append(matches, match)
+		}
+	}
+	for _, regex := range output.Assessments[0].SensitiveInformationPolicy.Regexes {
+		if match := aws.ToString(regex.Match); match != "" {
+			matches = append(matches, match)
+		}
+	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		return len(matches[i]) > len(matches[j])
+	})
+	return matches
+}
+
+// redactedFlush applies the guardrail's redactions to a flush and reports
+// whether any reported value survived.
+//
+// Redaction is written back frame by frame, because that is the only place an
+// SSE value can be replaced without re-framing the stream. A value the model
+// emitted across two events — "john@" in one, "example.com" in the next — is
+// therefore present in neither frame's text and is replaced in neither, so the
+// rewrite alone cannot guarantee it is gone.
+//
+// The check closes that: the rewritten flush is re-read as a whole and tested
+// against the same match list. A survivor means this flush cannot be delivered
+// redacted, and the caller fails closed rather than forward the value — the one
+// thing redaction mode exists to prevent.
+func (p *AWSBedrockGuardrailPolicy) redactedFlush(
+	flush string,
+	output interface{},
+	rp AWSBedrockGuardrailPolicyParams,
+) (rewritten string, changed, leaked bool) {
+	typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
+	if !ok {
+		return flush, false, false
+	}
+	matches := redactionMatches(typed)
+	if len(matches) == 0 {
+		return flush, false, false
+	}
+
+	rewritten, changed = rewriteSSEDeltaContent(flush, rp.StreamingJsonPath, func(frameText string) string {
+		return p.extractRedactedContent(typed, frameText)
+	})
+
+	joined := extractSSEDeltaContent(rewritten, rp.StreamingJsonPath)
+	for _, match := range matches {
+		if strings.Contains(joined, match) {
+			return rewritten, changed, true
+		}
+	}
+	return rewritten, changed, false
 }
 
 // restorePIIInResponse handles PII restoration in responses when redactPII is disabled
@@ -1717,6 +1777,16 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 		// decide now; the accumulated body is still validated at end of stream.
 		slog.Warn("AWSBedrockGuardrail: unrecognised streaming response format flushed before end of stream, validation deferred to end of stream",
 			"accumulated_bytes", len(full))
+		// Remember that bytes went downstream: the accumulated body can no longer
+		// be delivered as a rewrite of a later chunk without repeating them.
+		respCtx.Metadata[metaKeyNonSSEForwarded] = true
+		return policy.ForwardResponseChunk{}
+	}
+
+	// An empty body has nothing to assess, and handing it to validatePayload
+	// would fail JSONPath extraction and reject a response that carries no
+	// content at all.
+	if strings.TrimSpace(full) == "" {
 		return policy.ForwardResponseChunk{}
 	}
 
@@ -1735,12 +1805,16 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 		}
 	}
 	if modifications.Body != nil {
-		if len(chunkStr) == 0 {
-			// The flush we were handed is the empty end-of-stream sentinel, so
-			// there is nothing left to rewrite: replacing it with the modified
-			// body would deliver the whole response a second time. The
-			// assessment still ran — only the rewrite is dropped.
-			slog.Debug("AWSBedrockGuardrail: response modification not applicable to an empty final chunk",
+		forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool)
+		if len(chunkStr) == 0 || forwarded {
+			// Two reasons the rewrite cannot be delivered: the flush in hand is
+			// the empty end-of-stream sentinel, so there is nothing to replace;
+			// or earlier flushes already went downstream, so replacing this one
+			// with the accumulated body would repeat everything sent before it.
+			// Either way the assessment still ran — only the rewrite is dropped.
+			slog.Debug("AWSBedrockGuardrail: response modification not delivered",
+				"reason_empty_final_chunk", len(chunkStr) == 0,
+				"reason_earlier_flush_forwarded", forwarded,
 				"accumulated_bytes", len(full))
 			return policy.ForwardResponseChunk{}
 		}
@@ -1772,7 +1846,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	}
 
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
-	pending += extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
+	pending += p.extractFlushText(chunkStr, chunk.EndOfStream, respCtx, rp)
 
 	if strings.TrimSpace(pending) == "" {
 		// Framing only — the opening role delta, a keep-alive comment, usage,
@@ -1828,13 +1902,18 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	respCtx.Metadata[metaKeyPendingText] = pending
 
 	if rp.RedactPII && lastModified != "" && lastModified != lastCleaned {
-		if typed, ok := lastOutput.(*bedrockruntime.ApplyGuardrailOutput); ok {
-			rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
-				return p.extractRedactedContent(typed, frameText)
-			})
-			if changed {
-				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+		rewritten, changed, leaked := p.redactedFlush(chunkStr, lastOutput, rp)
+		if leaked {
+			slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; ending the stream rather than delivering it",
+				"chunkIndex", chunk.Index)
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+					nil, rp.ShowAssessment, lastOutput),
+				AnalyticsMetadata: guardrailHitAnalytics(),
 			}
+		}
+		if changed {
+			return policy.ForwardResponseChunk{Body: []byte(rewritten)}
 		}
 	}
 
@@ -1922,7 +2001,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlushHeld(
 ) policy.StreamingResponseAction {
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
 	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
-	newText := extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
+	newText := p.extractFlushText(chunkStr, chunk.EndOfStream, respCtx, rp)
 	unit := p.effectiveTextUnit()
 
 	// Assess and release everything once the stream ends; there is no later
@@ -2007,10 +2086,18 @@ func (p *AWSBedrockGuardrailPolicy) releaseBytes(
 	rp AWSBedrockGuardrailPolicyParams,
 ) policy.StreamingResponseAction {
 	if rp.RedactPII {
-		if typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput); ok && modified != "" {
-			if rewritten, changed := rewriteSSEDeltaContent(heldBytes, rp.StreamingJsonPath, func(frameText string) string {
-				return p.extractRedactedContent(typed, frameText)
-			}); changed {
+		if modified != "" {
+			rewritten, changed, leaked := p.redactedFlush(heldBytes, output, rp)
+			if leaked {
+				slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; discarding the held bytes",
+					"held_bytes", len(heldBytes))
+				return policy.TerminateResponseChunk{
+					Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+						nil, rp.ShowAssessment, output),
+					AnalyticsMetadata: guardrailHitAnalytics(),
+				}
+			}
+			if changed {
 				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
 			}
 		}
@@ -2204,6 +2291,47 @@ func (p *AWSBedrockGuardrailPolicy) buildSSEErrorEvent(reason string, validation
 }
 
 // ─── SSE helpers ─────────────────────────────────────────────────────────────
+
+// splitTrailingPartialLine divides s at its last line terminator, returning the
+// complete lines and the incomplete remainder. A flush with no terminator at all
+// is entirely incomplete.
+func splitTrailingPartialLine(s string) (complete, partial string) {
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return s[:i+1], s[i+1:]
+	}
+	return "", s
+}
+
+// extractFlushText returns the assistant text of this flush, joining it to any
+// incomplete line retained from the previous one and retaining this flush's own
+// incomplete tail for the next.
+//
+// At end of stream nothing further is coming, so the tail is treated as complete
+// and the retained state cleared — a truncated final line still yields no text,
+// but it is not held for a flush that will never arrive.
+func (p *AWSBedrockGuardrailPolicy) extractFlushText(
+	chunkStr string,
+	endOfStream bool,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) string {
+	carried, _ := respCtx.Metadata[metaKeyPartialLine].(string)
+	joined := carried + chunkStr
+
+	if endOfStream {
+		delete(respCtx.Metadata, metaKeyPartialLine)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+	}
+
+	complete, partial := splitTrailingPartialLine(joined)
+	if len(partial) > maxPartialLineBytes {
+		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, dropping it",
+			"partial_bytes", len(partial), "limit", maxPartialLineBytes)
+		partial = ""
+	}
+	respCtx.Metadata[metaKeyPartialLine] = partial
+	return extractSSEDeltaContent(complete, rp.StreamingJsonPath)
+}
 
 // isSSEChunk reports whether s looks like SSE framing.
 //
