@@ -24,9 +24,10 @@ Feature: mcp-auth protected-resource metadata
 
   # Every scenario sends handshake-style requests (specVersion 2025-06-18) and builds its upstream
   # URL with ${CTX:gatewayMCPUpstreamPath}, so it runs on gateways 1.1.0, 1.2.0 and latest. The
-  # block's overlay (overlays/gateway.toml) configures the key managers mock-jwks (issuer
-  # http://testbench:3001/token) and wrong-issuer-km (issuer http://expected-issuer.com), and the
-  # gatewayurl that the metadata's resource URL is built from.
+  # block's overlay (overlays/gateway.toml) configures three key managers, in this order: mock-jwks
+  # (issuer http://testbench:3001/token), wrong-issuer-km (issuer http://expected-issuer.com) and
+  # oidc-km (issuer https://testbench:3015/oauth2/token). It also sets the gatewayurl that the
+  # metadata's resource URL is built from.
 
   Background:
     Given the gateway services are running
@@ -93,7 +94,11 @@ Feature: mcp-auth protected-resource metadata
     Then the response should be successful
 
     Examples: issuers
-      | case                          | params                    | servers                         |
+      | case                          | params                    | servers                                                                                            |
       # MAN #2: issuers names only KM1 while KM1 and KM2 exist; only ISS1 is listed, as its issuer URL.
       # It also holds MAN #1's checks: the metadata answers without a token, with the resource URL.
-      | issuers names one key manager | {"issuers":["mock-jwks"]} | ["http://testbench:3001/token"] |
+      | issuers names one key manager | {"issuers":["mock-jwks"]} | ["http://testbench:3001/token"]                                                                    |
+      # MAN #3: issuers left out; every configured key manager's issuer is listed, in config order.
+      | issuers left out              | {}                        | ["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"] |
+      # MAN #3: issuers given as an empty list; an empty list also means every key manager.
+      | issuers is an empty list      | {"issuers":[]}            | ["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"] |
