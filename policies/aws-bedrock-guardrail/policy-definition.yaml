@@ -271,18 +271,21 @@ parameters:
           type: boolean
           x-wso2-policy-advanced-param: false
           description: |
-            If true, each batch is withheld from the client until its text has
-            been assessed, so no unassessed character is ever delivered. A batch
-            that violates is discarded and the client receives only the guardrail
-            event.
-            If false (default), text is delivered as it arrives and the stream is
-            ended if a later batch violates — the pattern AWS's own streaming
-            guidance describes, and the one that streams most smoothly.
-            The cost of enabling it is delivery in batch-sized steps rather than
+            If true (default), each batch is withheld from the client until its
+            text has been assessed, so no unassessed character is ever delivered.
+            A batch that violates is discarded and the client receives only the
+            guardrail event.
+            If false, text is delivered as it arrives and the stream is ended if a
+            later batch violates — the pattern AWS's own streaming guidance
+            describes, and the one that streams most smoothly. It also means up
+            to one streamingTextUnitChars batch of model output reaches the
+            client unassessed, so set it to false only where that is acceptable.
+            The cost of the default is delivery in batch-sized steps rather than
             continuously: time to first byte becomes roughly the time to generate
-            one streamingTextUnitChars batch instead of one flush. Applies only
-            when streaming is true.
-          default: false
+            one streamingTextUnitChars batch instead of one flush. Lower
+            streamingTextUnitChars to tighten that, at proportionally more AWS
+            calls. Applies only when streaming is true.
+          default: true
         streamingTextUnitChars:
           type: integer
           x-wso2-policy-advanced-param: true

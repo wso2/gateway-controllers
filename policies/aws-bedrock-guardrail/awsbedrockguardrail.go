@@ -77,11 +77,18 @@ const (
 	// order of magnitude and multiplies the bill accordingly.
 	DefaultStreamingTextUnitChars = 1000
 
-	// ValidateBeforeDeliverByDefault keeps the default behaviour AWS's own
-	// streaming example describes: output is delivered as it arrives and
-	// generation is halted if a later batch violates. The opt-in inverts that —
-	// see AWSBedrockGuardrailPolicyParams.ValidateBeforeDeliver.
-	ValidateBeforeDeliverByDefault = false
+	// ValidateBeforeDeliverByDefault withholds each batch until it has been
+	// assessed. It defaults ON because the alternative — AWS's own streaming
+	// example, where output is delivered as it arrives and generation halted if a
+	// later batch violates — means up to one text unit of model output reaches
+	// the client with no assessment at all. For a policy whose entire purpose is
+	// to stop content reaching the client, that is the wrong default to ship.
+	//
+	// Nothing existing changes by defaulting it on: streaming is itself off by
+	// default, so this is only ever read by an attachment that opted into
+	// streaming, and such an attachment can opt back out with
+	// streamingValidateBeforeDeliver: false where smooth delivery matters more.
+	ValidateBeforeDeliverByDefault = true
 
 	// MinStreamingTextUnitChars floors the configured batch. Below this a batch
 	// cannot fill a text unit under any framing, so it only adds calls.
@@ -94,6 +101,20 @@ const (
 	// NeedsMoreResponseData). Not configurable — the operator-facing control is
 	// the text unit.
 	streamFlushPacerBytes = 4096
+
+	// maxHeldFlushBytes bounds the bytes withheld while their text is unassessed.
+	//
+	// The batch boundary is a character count, so a stream whose events carry no
+	// assessable text — keep-alive comments, role deltas, usage frames — never
+	// reaches it, and without this the withheld buffer grows for as long as the
+	// stream runs while the client receives nothing. One text unit of SSE is
+	// ~50 KB at typical framing, so this leaves room for a framing-heavy stream
+	// before forcing the issue.
+	//
+	// Hitting it assesses whatever text has accumulated and releases, rather than
+	// releasing unassessed: the guarantee is kept, at the cost of a batch billed
+	// below a full text unit.
+	maxHeldFlushBytes = 256 * 1024
 
 	// maxPartialLineBytes bounds the retained incomplete line. A stream carrying
 	// no line terminator at all would otherwise grow it without limit; past this
@@ -2016,6 +2037,15 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlushHeld(
 	// Redaction assesses every flush (unit 0), so a flush is never held past its
 	// own assessment.
 	if unit <= 0 {
+		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
+	}
+
+	// The withheld buffer has grown as far as it may. Reached by a stream whose
+	// events carry little or no assessable text, which never trips the character
+	// boundary below.
+	if len(held)+len(chunkStr) > maxHeldFlushBytes {
+		slog.Warn("AWSBedrockGuardrail: withheld response bytes reached the limit; assessing and releasing early",
+			"held_bytes", len(held), "limit", maxHeldFlushBytes, "pending_chars", len([]rune(pending)))
 		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
 	}
 

@@ -1324,22 +1324,24 @@ func TestValidateBeforeDeliver_RestoresMaskedPIIOnRelease(t *testing.T) {
 	}
 }
 
-// TestValidateBeforeDeliver_DefaultsOff keeps the opt-in an opt-in: the shipped
-// default delivers as text arrives, as AWS's own example does.
-func TestValidateBeforeDeliver_DefaultsOff(t *testing.T) {
+// TestValidateBeforeDeliver_DefaultsOn pins the safe default: an attachment that
+// opts into streaming without saying more must not deliver model output the
+// guardrail has not seen. Opting out is explicit.
+func TestValidateBeforeDeliver_DefaultsOn(t *testing.T) {
 	got, err := parseRequestResponseParams(map[string]interface{}{"enabled": true}, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got.ValidateBeforeDeliver {
-		t.Errorf("streamingValidateBeforeDeliver must default to false")
+	if !got.ValidateBeforeDeliver {
+		t.Errorf("streamingValidateBeforeDeliver must default to true: a streaming guardrail " +
+			"that delivers unassessed text is not doing its job")
 	}
 
 	got, err = parseRequestResponseParams(map[string]interface{}{
-		"enabled": true, "streamingValidateBeforeDeliver": true,
+		"enabled": true, "streamingValidateBeforeDeliver": false,
 	}, true)
-	if err != nil || !got.ValidateBeforeDeliver {
-		t.Errorf("expected the opt-in to be honoured, got %+v err %v", got, err)
+	if err != nil || got.ValidateBeforeDeliver {
+		t.Errorf("expected the opt-out to be honoured, got %+v err %v", got, err)
 	}
 
 	if _, err := parseRequestResponseParams(map[string]interface{}{
@@ -1573,5 +1575,33 @@ func TestStreaming_RewritesAPlaceholderSplitAcrossFlushes(t *testing.T) {
 	// Nothing may be lost or duplicated by the withholding.
 	if want := first + second; len(delivered) < len(want)-len("EMAIL_0000")+len("john@example.com") {
 		t.Errorf("delivered stream is shorter than the frames that arrived: %q", delivered)
+	}
+}
+
+// TestValidateBeforeDeliver_BoundsTheWithheldBuffer covers a stream whose events
+// carry no assessable text — SSE keep-alives, role deltas, usage frames. The
+// batch boundary is a character count, so such a stream never reaches it, and
+// without a byte limit the withheld buffer grows for as long as the stream runs
+// while the client receives nothing.
+func TestValidateBeforeDeliver_BoundsTheWithheldBuffer(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := heldPolicy(client, nil)
+	respCtx := streamCtx()
+
+	keepAlive := strings.Repeat(": keep-alive\n\n", 100) // ~1.4 KB per flush
+	var delivered int
+	for i := 0; i < 400; i++ { // ~560 KB, well past the limit
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(keepAlive), EndOfStream: false,
+		}, map[string]interface{}{})
+		delivered += len(action.(policy.ForwardResponseChunk).Body)
+	}
+
+	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	if len(held) > maxHeldFlushBytes {
+		t.Errorf("the withheld buffer must stay within its limit, got %d bytes", len(held))
+	}
+	if delivered == 0 {
+		t.Errorf("a stream carrying no assessable text must still be delivered, not withheld forever")
 	}
 }
