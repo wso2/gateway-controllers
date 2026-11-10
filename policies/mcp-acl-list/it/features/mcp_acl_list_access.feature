@@ -144,6 +144,58 @@ Feature: mcp-acl-list access decisions
       # is denied; R2 is listed by its URI and is read, which shows the exceptions are applied.
       | exceptions match the uri, not the name | {"mode":"deny","exceptions":["readme","file:///docs/changelog.txt"]} | file:///docs/changelog.txt | v1.0.0: first release. | file:///docs/readme.txt    |
 
+  # ---- Prompt gets ----------------------------------------------------------------------
+
+  # The upstream is the MCP mock (testbench port 3009), which serves two fixed prompts:
+  # greeting ("Say hello to <name>.", World when no name is given) and summary ("Summarize
+  # this text: <text>"). Prompts are matched on their name. The permitted get returns the
+  # mock's own user message and carries x-envoy-upstream-service-time; the denied get must not
+  # carry it, so it never reached the mock. The denial body is the same as for a tool, so the
+  # denied get uses id 21 and is held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario Outline: A prompts/get is decided by the prompts block (<case>)
+    Given I generate a unique resource name from "mcp-acl-prompt" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-prompt" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-prompt" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-prompt" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"prompts":<prompts>}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":41,"method":"prompts/get","params":{"name":"<allowed>","arguments":<arguments>}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.messages[0].role" should be "user"
+    And the JSON response field "result.messages[0].content.text" should be "<text>"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"prompts/get","params":{"name":"<denied>"}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: prompts
+      | case                          | prompts                                    | allowed  | arguments          | text                         | denied   |
+      # MAC #6: prompts with P1 (greeting) as the exception, first in deny mode and then in allow
+      # mode; P1 returns its messages and P2 is denied, then the verdicts swap.
+      | deny mode with one exception  | {"mode":"deny","exceptions":["greeting"]}  | greeting | {}                 | Say hello to World.          | summary  |
+      | allow mode with one exception | {"mode":"allow","exceptions":["greeting"]} | summary  | {"text":"a story"} | Summarize this text: a story | greeting |
+
   # ---- Tool lists -----------------------------------------------------------------------
 
   # The upstream is the MCP mock (testbench port 3009), which serves three real tools: add,
