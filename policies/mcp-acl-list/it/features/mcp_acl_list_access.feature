@@ -313,6 +313,86 @@ Feature: mcp-acl-list access decisions
     When I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
 
+  # MAC #9: resources/list and prompts/list keep only what their own block permits, and the
+  # entry the policy keeps reaches the client with its fields unchanged. One proxy carries a
+  # resources block and a prompts block and no tools block, so tools/list must stay complete.
+  # Each expected value is the MCP mock's own definition (testbench port 3009); the same lists
+  # sent straight to the mock at the end still hold the removed entries, so the shorter lists
+  # were made by the policy. The mock answers in SSE, which the JSON steps cannot read, so the
+  # direct answers are matched as text.
+  Scenario: A resources/list and a prompts/list keep only permitted entries, with their fields unchanged
+    Given I generate a unique resource name from "mcp-acl-lists" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-lists" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-lists" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-lists" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"resources":{"mode":"deny","exceptions":["file:///docs/readme.txt"]},"prompts":{"mode":"deny","exceptions":["greeting"]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # Resources: only R1, with every field the mock defines.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.resources" should have 1 item
+    And the JSON response array "result.resources" should not contain an item with "uri" equal to "file:///docs/changelog.txt"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "name" equal to "readme"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "title" equal to "Readme"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "description" equal to "A short project readme"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "mimeType" equal to "text/plain"
+    And the JSON response field "result.cacheScope" should be "public"
+
+    # Prompts: only greeting, with every field the mock defines.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.prompts" should have 1 item
+    And the JSON response array "result.prompts" should not contain an item with "name" equal to "summary"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "title" equal to "Greeting"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "description" equal to "Greets someone by name"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "arguments[0].name" equal to "name"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "arguments[0].description" equal to "Who to greet; World when omitted"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should not have field "arguments[1]"
+    And the JSON response field "result.cacheScope" should be "public"
+
+    # Tools: no tools block, so the list is untouched.
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 3 items
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    # The same lists straight from the mock still hold the entries the policy removed.
+    When I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to the "mcp" service at "/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should contain "file:///docs/readme.txt"
+    And the response body should contain "file:///docs/changelog.txt"
+    When I send a "POST" request to the "mcp" service at "/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should contain "Greets someone by name"
+    And the response body should contain "Asks for a summary of a text"
+
   # MAC #14: the full discovery journey a client makes; the list and the call decisions agree.
   # Deny mode with two exceptions leaves two tools to call and one (headers) to omit. The
   # upstream is the MCP mock (testbench port 3009), so a permitted call returns the tool's real
