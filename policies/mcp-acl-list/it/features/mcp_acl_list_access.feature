@@ -88,6 +88,60 @@ Feature: mcp-acl-list access decisions
       # so the listed tool runs and an unlisted tool is denied (allow would swap the verdicts).
       | no mode, defaults to deny                             | {"exceptions":["add"]}                      | add     | echo    |
 
+  # ---- Resource reads -------------------------------------------------------------------
+
+  # The upstream is the MCP mock (testbench port 3009), which serves two fixed resources:
+  # file:///docs/readme.txt (name readme, text "This is the readme.") and
+  # file:///docs/changelog.txt (name changelog, text "v1.0.0: first release."). The permitted
+  # read returns the mock's own text and carries x-envoy-upstream-service-time, which the
+  # gateway adds only to an answer that came from the mock; the denied read must not carry it,
+  # so it never reached the mock. The denial body is the same as for a tool, so the denied read
+  # uses id 21 and is held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario Outline: A resources/read is decided by the resources block (<case>)
+    Given I generate a unique resource name from "mcp-acl-read" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-read" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-read" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-read" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"resources":<resources>}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":41,"method":"resources/read","params":{"uri":"<allowed>"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.contents[0].uri" should be "<allowed>"
+    And the JSON response field "result.contents[0].text" should be "<text>"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"resources/read","params":{"uri":"<denied>"}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: resources
+      | case                                   | resources                                                            | allowed                    | text                   | denied                     |
+      # MAC #4: deny mode with R1 as the only exception; R1 returns the mock's content, R2 is denied.
+      | deny mode with one exception           | {"mode":"deny","exceptions":["file:///docs/readme.txt"]}             | file:///docs/readme.txt    | This is the readme.    | file:///docs/changelog.txt |
+      # MAC #4: resources are matched on the URI, not the name. R1 is listed by its name only and
+      # is denied; R2 is listed by its URI and is read, which shows the exceptions are applied.
+      | exceptions match the uri, not the name | {"mode":"deny","exceptions":["readme","file:///docs/changelog.txt"]} | file:///docs/changelog.txt | v1.0.0: first release. | file:///docs/readme.txt    |
+
   # ---- Tool lists -----------------------------------------------------------------------
 
   # The upstream is the MCP mock (testbench port 3009), which serves three real tools: add,
