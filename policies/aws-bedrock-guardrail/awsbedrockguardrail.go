@@ -77,6 +77,12 @@ const (
 	// order of magnitude and multiplies the bill accordingly.
 	DefaultStreamingTextUnitChars = 1000
 
+	// ValidateBeforeDeliverByDefault keeps the default behaviour AWS's own
+	// streaming example describes: output is delivered as it arrives and
+	// generation is halted if a later batch violates. The opt-in inverts that —
+	// see AWSBedrockGuardrailPolicyParams.ValidateBeforeDeliver.
+	ValidateBeforeDeliverByDefault = false
+
 	// MinStreamingTextUnitChars floors the configured batch. Below this a batch
 	// cannot fill a text unit under any framing, so it only adds calls.
 	MinStreamingTextUnitChars = 100
@@ -107,6 +113,12 @@ const (
 	// unclassifiable on its own; without this it would be mistaken for a
 	// non-SSE body and the accumulated text assessed as if it were one.
 	metaKeySSEStream = "awsbedrockguardrail:stream_is_sse"
+
+	// metaKeyHeldBytes holds the flush bytes withheld from the client while the
+	// text they carry is still unassessed. Only used when ValidateBeforeDeliver
+	// is set; it is released verbatim once its text passes, and discarded
+	// without ever being delivered if the text fails.
+	metaKeyHeldBytes = "awsbedrockguardrail:held_bytes"
 
 	// metaKeyPendingText holds assistant text seen but not yet validated: the
 	// remainder carried over when a batch is trimmed back to a word or sentence
@@ -219,6 +231,12 @@ type AWSBedrockGuardrailPolicyParams struct {
 	// StreamingTextUnitChars is how many characters of assistant text are
 	// batched before each ApplyGuardrail call. Unused when Streaming is false.
 	StreamingTextUnitChars int
+
+	// ValidateBeforeDeliver withholds each batch from the client until its text
+	// has been assessed, instead of delivering as it arrives. No unassessed
+	// character reaches the client, at the cost of delivery happening in
+	// batch-sized steps rather than continuously. Unused when Streaming is false.
+	ValidateBeforeDeliver bool
 }
 
 // statusCodeRange is an inclusive range of HTTP status codes. A single code is
@@ -378,6 +396,7 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		Streaming:              StreamingEnabledByDefault,
 		StreamingJsonPath:      ResponseDefaultStreamingJSONPath,
 		StreamingTextUnitChars: DefaultStreamingTextUnitChars,
+		ValidateBeforeDeliver:  ValidateBeforeDeliverByDefault,
 	}
 	if isResponse {
 		result.JsonPath = ResponseDefaultJSONPath
@@ -449,7 +468,10 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 	// incrementally, which it cannot: a request must be validated whole before it
 	// reaches the upstream, or there is nothing left to block.
 	if !isResponse {
-		for _, key := range []string{"streaming", "streamingJsonPath", "streamingTextUnitChars"} {
+		for _, key := range []string{
+			"streaming", "streamingJsonPath", "streamingTextUnitChars",
+			"streamingValidateBeforeDeliver",
+		} {
 			if _, ok := params[key]; ok {
 				return result, fmt.Errorf("'%s' is only valid on the response flow", key)
 			}
@@ -476,6 +498,15 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 			return result, fmt.Errorf("'streamingJsonPath' must not be empty")
 		}
 		result.StreamingJsonPath = streamingJsonPath
+	}
+
+	// Extract optional streamingValidateBeforeDeliver parameter
+	if holdRaw, ok := params["streamingValidateBeforeDeliver"]; ok {
+		hold, ok := holdRaw.(bool)
+		if !ok {
+			return result, fmt.Errorf("'streamingValidateBeforeDeliver' must be a boolean")
+		}
+		result.ValidateBeforeDeliver = hold
 	}
 
 	// Extract optional streamingTextUnitChars parameter
@@ -1736,6 +1767,9 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	respCtx *policy.ResponseStreamContext,
 ) policy.StreamingResponseAction {
 	rp := p.responseParams
+	if rp.ValidateBeforeDeliver {
+		return p.handleSSEStreamFlushHeld(chunkStr, chunk, respCtx, rp)
+	}
 
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
 	pending += extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
@@ -1857,6 +1891,143 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 	}
 
 	return nil, output, modifiedContent, false
+}
+
+// handleSSEStreamFlushHeld assesses a batch before any of its bytes reach the
+// client, for a response flow with streamingValidateBeforeDeliver set.
+//
+// The flush bytes are withheld — returned as an empty body, which the engine
+// forwards as an empty streamed chunk — while their text accumulates. Once
+// adding the next flush would carry the batch past a text unit, the batch is
+// assessed: if it passes, the exact bytes that carried it are released; if it
+// fails, they are discarded and the client never receives them. That is the
+// guarantee this mode exists for, and it is the only way to get it on a Bedrock
+// route, where the engine's own accumulator holds binary frames the text cannot
+// be counted in.
+//
+// The batch boundary is AWS's rule — assess when len(buffer + new) exceeds a
+// text unit — rather than this policy's sentence trimming. Assessing the buffer
+// *before* the new text keeps each call just under a unit, so one call is billed
+// one unit, and keeps the held bytes an exact match for the assessed text: no
+// frame is released whose text has not been through the guardrail.
+//
+// The cost is delivery in batch-sized steps instead of continuously. For a
+// 1,000-character unit that is roughly one delivery per 1,000 characters
+// generated, so time to first byte is a text unit rather than a flush.
+func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlushHeld(
+	chunkStr string,
+	chunk *policy.StreamBody,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) policy.StreamingResponseAction {
+	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
+	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	newText := extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
+	unit := p.effectiveTextUnit()
+
+	// Assess and release everything once the stream ends; there is no later
+	// batch to carry into, and nothing may be left undelivered.
+	if chunk.EndOfStream {
+		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
+	}
+
+	// Redaction assesses every flush (unit 0), so a flush is never held past its
+	// own assessment.
+	if unit <= 0 {
+		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
+	}
+
+	// Adding this flush would carry the batch past a unit: assess what is already
+	// buffered and release exactly the bytes that carried it, then begin a new
+	// batch from this flush.
+	if pending != "" && len([]rune(pending))+len([]rune(newText)) > unit {
+		action := p.assessAndRelease(pending, held, respCtx, rp, chunk)
+		if action.TerminateStream() {
+			return action
+		}
+		respCtx.Metadata[metaKeyPendingText] = newText
+		respCtx.Metadata[metaKeyHeldBytes] = chunkStr
+		return action
+	}
+
+	respCtx.Metadata[metaKeyPendingText] = pending + newText
+	respCtx.Metadata[metaKeyHeldBytes] = held + chunkStr
+	// Withhold: a non-nil empty body replaces the chunk, so nothing is delivered
+	// for this flush. A nil body would pass the bytes straight through.
+	return policy.ForwardResponseChunk{Body: []byte{}}
+}
+
+// assessAndRelease assesses one batch and, if it passes, releases the bytes that
+// carried it. On a violation the bytes are dropped and the stream ends with the
+// guardrail event alone, so nothing unassessed was ever delivered.
+func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
+	batchText string,
+	heldBytes string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
+	respCtx.Metadata[metaKeyPendingText] = ""
+	respCtx.Metadata[metaKeyHeldBytes] = ""
+
+	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batchText, ""))
+	if cleaned == "" {
+		// Framing only — nothing to assess, but the bytes are still owed to the
+		// client.
+		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+	}
+
+	action, output, modified, stop := p.assessStreamBatch(cleaned, heldBytes, respCtx, rp, chunk)
+	if stop {
+		if action.TerminateStream() {
+			slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
+				"held_bytes", len(heldBytes), "chunkIndex", chunk.Index)
+			return action
+		}
+		// passthroughOnError: the batch was not assessed, but withholding the
+		// bytes indefinitely would stall the stream, so they are released.
+		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+	}
+
+	validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
+	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batchText
+
+	return p.releaseBytes(heldBytes, output, modified, respCtx, rp)
+}
+
+// releaseBytes delivers withheld bytes, applying redaction or placeholder
+// restoration to them first. An empty release is still returned as an empty body
+// rather than nil, so the engine does not fall back to forwarding the original
+// chunk.
+func (p *AWSBedrockGuardrailPolicy) releaseBytes(
+	heldBytes string,
+	output interface{},
+	modified string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) policy.StreamingResponseAction {
+	if rp.RedactPII {
+		if typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput); ok && modified != "" {
+			if rewritten, changed := rewriteSSEDeltaContent(heldBytes, rp.StreamingJsonPath, func(frameText string) string {
+				return p.extractRedactedContent(typed, frameText)
+			}); changed {
+				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+			}
+		}
+		return policy.ForwardResponseChunk{Body: []byte(heldBytes)}
+	}
+
+	raw, exists := respCtx.Metadata[MetadataKeyPIIEntities]
+	if exists {
+		if maskedPII, ok := raw.(map[string]string); ok && len(maskedPII) > 0 {
+			if rewritten, changed := rewriteSSEDeltaContent(heldBytes, rp.StreamingJsonPath, func(frameText string) string {
+				return p.restorePIIInResponse(frameText, maskedPII)
+			}); changed {
+				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+			}
+		}
+	}
+	return policy.ForwardResponseChunk{Body: []byte(heldBytes)}
 }
 
 // effectiveTextUnit returns the batch size to validate at.

@@ -1119,3 +1119,227 @@ func TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody(t *testing.T) {
 		t.Errorf("an empty final chunk must not be replaced with the accumulated body, got %q", string(forward.Body))
 	}
 }
+
+// ─── validate-before-deliver ─────────────────────────────────────────────────
+
+// heldPolicy configures the opt-in mode: nothing reaches the client until the
+// batch carrying it has been assessed.
+func heldPolicy(client bedrockGuardrailClient, mutate func(*AWSBedrockGuardrailPolicyParams)) *AWSBedrockGuardrailPolicy {
+	return streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.ValidateBeforeDeliver = true
+		if mutate != nil {
+			mutate(params)
+		}
+	})
+}
+
+// TestValidateBeforeDeliver_WithholdsUntilAssessed is the guarantee: a flush
+// whose text has not been assessed is answered with an empty body, so the engine
+// forwards an empty chunk and the client receives nothing.
+func TestValidateBeforeDeliver_WithholdsUntilAssessed(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := heldPolicy(client, nil)
+	respCtx := streamCtx()
+
+	for i := 0; i < 5; i++ {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(sseEvent("held text ")), EndOfStream: false,
+		}, map[string]interface{}{})
+
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok {
+			t.Fatalf("flush %d: expected ForwardResponseChunk, got %T", i, action)
+		}
+		if forward.Body == nil {
+			t.Fatalf("flush %d: a nil body passes the bytes through — it must be an empty body", i)
+		}
+		if len(forward.Body) != 0 {
+			t.Errorf("flush %d: nothing may be delivered before assessment, got %q", i, string(forward.Body))
+		}
+	}
+	if client.calls != 0 {
+		t.Errorf("below a text unit nothing should be assessed yet, got %d calls", client.calls)
+	}
+}
+
+// TestValidateBeforeDeliver_ReleasesExactlyTheAssessedBytes covers the release:
+// once the batch passes, the withheld bytes are delivered verbatim, and the
+// bytes of the flush that triggered the assessment are held for the next batch.
+func TestValidateBeforeDeliver_ReleasesExactlyTheAssessedBytes(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := heldPolicy(client, nil) // 1000-character unit
+	respCtx := streamCtx()
+
+	// ~110 characters of text per flush, so a unit is reached after ~10 flushes.
+	flush := strings.Repeat(sseEvent("ten chars "), 11)
+	var released string
+	for i := 0; i < 12; i++ {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(flush), EndOfStream: false,
+		}, map[string]interface{}{})
+		forward := action.(policy.ForwardResponseChunk)
+		released += string(forward.Body)
+	}
+
+	if client.calls != 1 {
+		t.Fatalf("expected one assessment once a text unit accumulated, got %d", client.calls)
+	}
+	if n := len([]rune(client.texts[0])); n > DefaultStreamingTextUnitChars {
+		t.Errorf("a batch assessed before delivery must stay within one text unit, got %d characters", n)
+	}
+	if released == "" {
+		t.Fatalf("the assessed bytes must be released once the batch passes")
+	}
+	if !strings.HasPrefix(released, "data: ") || !strings.HasSuffix(released, "\n\n") {
+		t.Errorf("released bytes must be the original frames verbatim, got %q…%q",
+			released[:20], released[len(released)-10:])
+	}
+}
+
+// TestValidateBeforeDeliver_DiscardsBytesOnViolation is the point of the mode:
+// a failing batch is never delivered, so the client sees the guardrail event and
+// none of the text that violated.
+func TestValidateBeforeDeliver_DiscardsBytesOnViolation(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := heldPolicy(client, nil)
+	respCtx := streamCtx()
+
+	var delivered string
+	for i := 0; i < 12; i++ {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(strings.Repeat(sseEvent("blocked xx"), 11)), EndOfStream: false,
+		}, map[string]interface{}{})
+
+		if term, ok := action.(policy.TerminateResponseChunk); ok {
+			body := string(term.Body)
+			if !strings.Contains(body, "AWS_BEDROCK_GUARDRAIL") {
+				t.Errorf("expected the guardrail event as the final body, got %q", body)
+			}
+			if strings.Contains(body, "blocked") {
+				t.Errorf("the violating text must not be delivered, got %q", body)
+			}
+			if strings.Contains(delivered, "blocked") {
+				t.Fatalf("violating text reached the client before the verdict: %q", delivered)
+			}
+			return
+		}
+		delivered += string(action.(policy.ForwardResponseChunk).Body)
+	}
+	t.Fatalf("expected the stream to be terminated once the batch was assessed")
+}
+
+// TestValidateBeforeDeliver_ReleasesTheRemainderAtEndOfStream covers the tail:
+// a batch below a unit is still assessed when the stream ends, and its bytes are
+// delivered rather than lost.
+func TestValidateBeforeDeliver_ReleasesTheRemainderAtEndOfStream(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := heldPolicy(client, nil)
+	respCtx := streamCtx()
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(sseEvent("short tail ")), EndOfStream: false,
+	}, map[string]interface{}{})
+	if client.calls != 0 {
+		t.Fatalf("expected nothing assessed below a unit, got %d calls", client.calls)
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte("data: [DONE]\n\n"), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected the remainder to be released, got %T", action)
+	}
+	if client.calls != 1 {
+		t.Errorf("the final batch must still be assessed, got %d calls", client.calls)
+	}
+	if !strings.Contains(string(forward.Body), "short tail") {
+		t.Errorf("the withheld frames must be delivered at end of stream, got %q", string(forward.Body))
+	}
+	if !strings.Contains(string(forward.Body), "[DONE]") {
+		t.Errorf("the terminating event must be delivered too, got %q", string(forward.Body))
+	}
+}
+
+// TestValidateBeforeDeliver_PassthroughOnErrorStillReleases keeps the stream from
+// stalling: if the guardrail cannot be reached and passthroughOnError is set, the
+// withheld bytes are delivered rather than held indefinitely.
+func TestValidateBeforeDeliver_PassthroughOnErrorStillReleases(t *testing.T) {
+	client := &countingBedrockClient{err: fmt.Errorf("bedrock unavailable")}
+	p := heldPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.PassthroughOnError = true
+	})
+	respCtx := streamCtx()
+
+	var delivered string
+	for i := 0; i < 12; i++ {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(strings.Repeat(sseEvent("ten chars "), 11)), EndOfStream: false,
+		}, map[string]interface{}{})
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok {
+			t.Fatalf("passthroughOnError must not end the stream, got %T", action)
+		}
+		delivered += string(forward.Body)
+	}
+	if delivered == "" {
+		t.Errorf("withheld bytes must be released when the assessment cannot run")
+	}
+}
+
+// TestValidateBeforeDeliver_RestoresMaskedPIIOnRelease pins that the released
+// bytes go through the same placeholder restoration as the delivered-as-you-go
+// path, rather than bypassing it.
+func TestValidateBeforeDeliver_RestoresMaskedPIIOnRelease(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := heldPolicy(client, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(sseEvent("write to EMAIL_0000 ")), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte("data: [DONE]\n\n"), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	body := string(action.(policy.ForwardResponseChunk).Body)
+	if !strings.Contains(body, "john@example.com") {
+		t.Errorf("the masked value must be restored on release, got %q", body)
+	}
+	if strings.Contains(body, "EMAIL_0000") {
+		t.Errorf("the placeholder must not survive release, got %q", body)
+	}
+}
+
+// TestValidateBeforeDeliver_DefaultsOff keeps the opt-in an opt-in: the shipped
+// default delivers as text arrives, as AWS's own example does.
+func TestValidateBeforeDeliver_DefaultsOff(t *testing.T) {
+	got, err := parseRequestResponseParams(map[string]interface{}{"enabled": true}, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.ValidateBeforeDeliver {
+		t.Errorf("streamingValidateBeforeDeliver must default to false")
+	}
+
+	got, err = parseRequestResponseParams(map[string]interface{}{
+		"enabled": true, "streamingValidateBeforeDeliver": true,
+	}, true)
+	if err != nil || !got.ValidateBeforeDeliver {
+		t.Errorf("expected the opt-in to be honoured, got %+v err %v", got, err)
+	}
+
+	if _, err := parseRequestResponseParams(map[string]interface{}{
+		"streamingValidateBeforeDeliver": "yes",
+	}, true); err == nil {
+		t.Errorf("expected a non-boolean to be rejected")
+	}
+	if _, err := parseRequestResponseParams(map[string]interface{}{
+		"streamingValidateBeforeDeliver": true,
+	}, false); err == nil {
+		t.Errorf("expected the parameter to be rejected on the request flow")
+	}
+}

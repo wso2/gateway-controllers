@@ -267,6 +267,22 @@ parameters:
             OpenAI streaming format, which is also what the
             openai-to-bedrock-transformer emits.
           default: "$.choices[0].delta.content"
+        streamingValidateBeforeDeliver:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            If true, each batch is withheld from the client until its text has
+            been assessed, so no unassessed character is ever delivered. A batch
+            that violates is discarded and the client receives only the guardrail
+            event.
+            If false (default), text is delivered as it arrives and the stream is
+            ended if a later batch violates — the pattern AWS's own streaming
+            guidance describes, and the one that streams most smoothly.
+            The cost of enabling it is delivery in batch-sized steps rather than
+            continuously: time to first byte becomes roughly the time to generate
+            one streamingTextUnitChars batch instead of one flush. Applies only
+            when streaming is true.
+          default: false
         streamingTextUnitChars:
           type: integer
           x-wso2-policy-advanced-param: true
@@ -286,6 +302,8 @@ parameters:
             is assessed; lowering it assesses sooner for proportionally more calls.
             Ignored when redactPII is true: redaction rewrites the frames it is
             holding, so it assesses every flush rather than batching.
+            With streamingValidateBeforeDeliver enabled this is also the delivery
+            step, since a batch is released only once it has been assessed.
           minimum: 100
           default: 1000
   anyOf:
