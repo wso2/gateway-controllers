@@ -208,10 +208,14 @@ Feature: mcp-acl-list rejection of malformed requests
     Then the response status code should be 404
 
     Examples: invalid configurations
-      | case         | version | params | message                                                           |
+      | case                                       | version | params                                         | message                                                                                                   |
       # MAC #20: params with no tools, resources or prompts block; the definition requires at
       # least one (an anyOf), so a policy that would check nothing cannot be attached. The
       # message names the anyOf failure, which only this case produces; the second error the
       # gateway adds ("tools is required") is left unchecked, because resources or prompts
       # alone would also satisfy the definition.
-      | empty params | v1      | {}     | spec.policies[0].params: Must validate at least one schema (anyOf) |
+      | empty params                               | v1      | {}                                             | spec.policies[0].params: Must validate at least one schema (anyOf)                                        |
+      # MAC #22: a policy version the gateway build does not have. The params are valid, so the
+      # version is the only thing wrong, and the message names the field, the policy and the
+      # missing major version.
+      | a policy version the gateway does not have | v9      | {"tools":{"mode":"deny","exceptions":["add"]}} | spec.policies[0].version: policy 'mcp-acl-list' major version 'v9' not found in loaded policy definitions |
