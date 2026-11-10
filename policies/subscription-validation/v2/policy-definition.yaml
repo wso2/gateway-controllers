@@ -1,0 +1,37 @@
+name: subscription-validation
+version: v2.0.0
+description: |
+  Validates that the request has an active subscription to the
+  requested API. Checks the Subscription-Key header first; if not found,
+  checks the subscription key cookie (when configured), then the
+  application id fallback.
+
+  Does not enforce plan limits. On success it records the subscription
+  id, plan id and plan conditions in the request metadata so the
+  subscription-request-ratelimit, subscription-tool-ratelimit and
+  subscription-token-ratelimit policies can enforce them.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    subscriptionKeyHeader:
+      type: string
+      default: Subscription-Key
+      x-wso2-policy-advanced-param: false
+      description: >
+        Request header name containing the subscription token.
+        Checked first before cookie or applicationId fallback.
+    subscriptionKeyCookie:
+      type: string
+      default: ""
+      x-wso2-policy-advanced-param: true
+      description: >
+        Optional cookie name containing the subscription token.
+        When set, checked after the header if no token was found.
+        When empty, cookie lookup is skipped.
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties: {}
