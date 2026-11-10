@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.1.0
+version: v1.1.1
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
@@ -87,6 +87,44 @@ parameters:
             If true, includes detailed assessment information from AWS Bedrock Guardrail in error responses.
             If false, returns minimal error information.
           default: false
+        streaming:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            If true, validates a streamed response incrementally so tokens reach
+            the client as they arrive. If false (default), the whole response is
+            buffered and validated once.
+            Enable this only for an API whose responses are streamed
+            (stream: true / text/event-stream). Two consequences to weigh:
+            a violation found after the first tokens have been delivered cannot
+            be answered with a 422 — the stream ends with an error event and the
+            text already sent stays sent; and the guardrail is called once per
+            window instead of once per response, so AWS cost scales with
+            response length.
+          default: false
+        streamingJsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            JSONPath expression locating the assistant text inside one streamed
+            event. Applies only when streaming is true, and is separate from
+            jsonPath because a streamed response carries text incrementally
+            under a different field than a buffered one. The default suits the
+            OpenAI streaming format, which is also what the
+            openai-to-bedrock-transformer emits.
+          default: "$.choices[0].delta.content"
+        streamingWindowBytes:
+          type: integer
+          x-wso2-policy-advanced-param: true
+          description: |
+            How many bytes of the streamed response to accumulate before each
+            AWS Bedrock Guardrail call. Applies only when streaming is true.
+            A smaller window detects a violation sooner and blocks less text,
+            at more AWS calls and a round trip between smaller groups of tokens;
+            a larger window costs less and streams more smoothly, but more text
+            reaches the client before it is validated.
+          minimum: 256
+          default: 2048
   anyOf:
     - required: [ request ]
     - required: [ response ]

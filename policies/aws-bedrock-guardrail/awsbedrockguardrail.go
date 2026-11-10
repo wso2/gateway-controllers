@@ -45,6 +45,44 @@ const (
 	ResponseDefaultJSONPath      = "$.choices[0].message.content"
 	RequestFlowEnabledByDefault  = true
 	ResponseFlowEnabledByDefault = false
+
+	// ResponseDefaultStreamingJSONPath locates the assistant text inside one SSE
+	// data frame. A streamed response carries text incrementally under
+	// choices[0].delta.content, so ResponseDefaultJSONPath — which addresses the
+	// non-streamed choices[0].message.content — never matches on a stream. The
+	// two paths cannot be collapsed into one: they address different shapes of
+	// the same response.
+	ResponseDefaultStreamingJSONPath = "$.choices[0].delta.content"
+
+	// StreamingEnabledByDefault keeps the response flow buffered unless an API
+	// author opts in. Buffered is what every release up to v1.1.0 did, and the
+	// opt-in is what makes this version a drop-in replacement for it.
+	StreamingEnabledByDefault = false
+
+	// DefaultStreamingWindowBytes is how much of the response is accumulated
+	// before each ApplyGuardrail call. Unlike the guardrails that compute their
+	// verdict locally, every validation here is a billed AWS round trip, so
+	// validating per chunk would add a round trip between every pair of tokens
+	// and bill one call per token. The window trades detection granularity for
+	// cost and time-to-next-token; see the policy definition for the tradeoff.
+	DefaultStreamingWindowBytes = 2048
+
+	// MinStreamingWindowBytes floors the configured window. A window below this
+	// approaches per-chunk validation, which is the cost blow-up the window
+	// exists to prevent.
+	MinStreamingWindowBytes = 256
+
+	sseDataPrefix  = "data: "
+	sseEventPrefix = "event:"
+	sseDone        = "[DONE]"
+
+	// metaKeyAccStreamedContent accumulates the assistant text already validated
+	// in this stream, so the final window can be recognised as such.
+	metaKeyAccStreamedContent = "awsbedrockguardrail:streamed_content"
+
+	// metaKeyAccStreamedJSONBody accumulates a non-SSE chunked body across
+	// flushes, so it can be validated whole at end of stream.
+	metaKeyAccStreamedJSONBody = "awsbedrockguardrail:streamed_json_body"
 )
 
 var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
@@ -83,6 +121,18 @@ type AWSBedrockGuardrailPolicyParams struct {
 	RedactPII          bool
 	PassthroughOnError bool
 	ShowAssessment     bool
+
+	// Streaming applies to the response flow only. When false the response is
+	// buffered and validated whole, exactly as in v1.1.0.
+	Streaming bool
+
+	// StreamingJsonPath addresses the assistant text inside one SSE data frame.
+	// Unused when Streaming is false.
+	StreamingJsonPath string
+
+	// StreamingWindowBytes is how many bytes of the response accumulate before
+	// each ApplyGuardrail call. Unused when Streaming is false.
+	StreamingWindowBytes int
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -183,20 +233,49 @@ func GetPolicy(
 }
 
 // Mode returns the processing mode for the AWS Bedrock guardrail policy.
+// Mode declares this instance's body requirements from its own configuration.
+//
+// Up to v1.1.0 this returned BodyModeBuffer unconditionally, which had two
+// consequences an API author could not configure away. A flow the attachment
+// does not use still had its body buffered, so a request-only attachment forced
+// the whole response to be held; and because the kernel clears
+// SupportsResponseStreaming for the entire chain as soon as any policy declares
+// BUFFER, one such attachment also demoted every other policy on the route to
+// buffered. Declaring SKIP for an unused flow removes both.
+//
+// The response flow declares STREAM only when streaming is explicitly enabled,
+// so an attachment carried over from v1.1.0 keeps buffering and keeps the
+// buffered path's behaviour exactly.
 func (p *AWSBedrockGuardrailPolicy) Mode() policy.ProcessingMode {
+	requestBodyMode := policy.BodyModeSkip
+	if p.hasRequestParams && p.requestParams.Enabled {
+		requestBodyMode = policy.BodyModeBuffer
+	}
+
+	responseBodyMode := policy.BodyModeSkip
+	if p.hasResponseParams && p.responseParams.Enabled {
+		responseBodyMode = policy.BodyModeBuffer
+		if p.responseParams.Streaming {
+			responseBodyMode = policy.BodyModeStream
+		}
+	}
+
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
-		RequestBodyMode:    policy.BodyModeBuffer,
+		RequestBodyMode:    requestBodyMode,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   responseBodyMode,
 	}
 }
 
 // parseRequestResponseParams parses and validates request/response parameters from map to struct
 func parseRequestResponseParams(params map[string]interface{}, isResponse bool) (AWSBedrockGuardrailPolicyParams, error) {
 	result := AWSBedrockGuardrailPolicyParams{
-		JsonPath: RequestDefaultJSONPath,
-		Enabled:  RequestFlowEnabledByDefault,
+		JsonPath:             RequestDefaultJSONPath,
+		Enabled:              RequestFlowEnabledByDefault,
+		Streaming:            StreamingEnabledByDefault,
+		StreamingJsonPath:    ResponseDefaultStreamingJSONPath,
+		StreamingWindowBytes: DefaultStreamingWindowBytes,
 	}
 	if isResponse {
 		result.JsonPath = ResponseDefaultJSONPath
@@ -248,7 +327,79 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		}
 	}
 
+	// The streaming parameters below configure the response flow only. Accepting
+	// them on the request flow would imply the request can be validated
+	// incrementally, which it cannot: a request must be validated whole before it
+	// reaches the upstream, or there is nothing left to block.
+	if !isResponse {
+		for _, key := range []string{"streaming", "streamingJsonPath", "streamingWindowBytes"} {
+			if _, ok := params[key]; ok {
+				return result, fmt.Errorf("'%s' is only valid on the response flow", key)
+			}
+		}
+		return result, nil
+	}
+
+	// Extract optional streaming parameter
+	if streamingRaw, ok := params["streaming"]; ok {
+		if streaming, ok := streamingRaw.(bool); ok {
+			result.Streaming = streaming
+		} else {
+			return result, fmt.Errorf("'streaming' must be a boolean")
+		}
+	}
+
+	// Extract optional streamingJsonPath parameter
+	if streamingJsonPathRaw, ok := params["streamingJsonPath"]; ok {
+		streamingJsonPath, ok := streamingJsonPathRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'streamingJsonPath' must be a string")
+		}
+		if strings.TrimSpace(streamingJsonPath) == "" {
+			return result, fmt.Errorf("'streamingJsonPath' must not be empty")
+		}
+		result.StreamingJsonPath = streamingJsonPath
+	}
+
+	// Extract optional streamingWindowBytes parameter
+	if windowRaw, ok := params["streamingWindowBytes"]; ok {
+		window, err := extractInt(windowRaw)
+		if err != nil {
+			return result, fmt.Errorf("'streamingWindowBytes' must be a number: %w", err)
+		}
+		if window < MinStreamingWindowBytes {
+			return result, fmt.Errorf("'streamingWindowBytes' must be at least %d", MinStreamingWindowBytes)
+		}
+		result.StreamingWindowBytes = window
+	}
+
 	return result, nil
+}
+
+// extractInt accepts the numeric shapes a policy parameter can arrive as. A
+// value decoded from JSON or YAML reaches a policy as float64 rather than int,
+// so an int-only assertion would reject every configured window.
+func extractInt(value interface{}) (int, error) {
+	switch v := value.(type) {
+	case int:
+		return v, nil
+	case int32:
+		return int(v), nil
+	case int64:
+		return int(v), nil
+	case float32:
+		if v != float32(int(v)) {
+			return 0, fmt.Errorf("value %v is not a whole number", v)
+		}
+		return int(v), nil
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("value %v is not a whole number", v)
+		}
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("unsupported numeric type %T", value)
+	}
 }
 
 // getStringParam safely extracts a string parameter
@@ -892,6 +1043,386 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 		content = respCtx.ResponseBody.Content
 	}
 	return p.validatePayload(content, p.responseParams, true, respCtx.Metadata).(policy.ResponseAction)
+}
+
+// ─── Streaming response path ─────────────────────────────────────────────────
+//
+// The response flow can validate a streamed response incrementally instead of
+// holding it whole. The division of labour is the one the SDK defines: the
+// kernel owns the buffer and asks NeedsMoreResponseData whether to keep
+// accumulating, and this policy owns the stop condition and the verdict.
+//
+// What this path cannot do, by construction: once a chunk has been flushed
+// downstream the response status and headers are committed, so a violation
+// found mid-stream cannot become a 422. It ends the stream with a final SSE
+// error event instead, which means text already delivered stays delivered.
+// That is a property of streaming, not of this implementation — an API that
+// must never emit unvalidated text has to stay buffered (streaming: false).
+
+// NeedsMoreResponseData implements policy.StreamingResponsePolicy.
+//
+// It is the window rule, and the reason this policy cannot simply flush every
+// chunk the way the locally-computed guardrails do: every validation here is a
+// billed ApplyGuardrail round trip. Flushing per chunk would put an AWS call
+// between every pair of tokens.
+//
+// Three cases:
+//
+//   - A body that is not SSE (plain JSON over chunked transfer) accumulates
+//     whole. Such a response is not incrementally consumable by a client
+//     anyway, so there is no latency to protect, and holding it keeps the
+//     buffered path's property that nothing reaches the client until it has
+//     been validated. The kernel always flushes at end of stream, so this
+//     cannot stall.
+//   - Below the window, keep accumulating.
+//   - At or past the window, release — but only on an SSE event boundary. A
+//     flush cut through the middle of a `data:` line leaves JSON that no
+//     JSONPath can read, which is what produces the "Error extracting value
+//     from JSONPath" failure this path exists to avoid.
+func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bool {
+	if !p.hasResponseParams || !p.responseParams.Enabled || !p.responseParams.Streaming {
+		return false
+	}
+	if !isSSEChunk(string(accumulated)) {
+		return true
+	}
+	if len(accumulated) < p.responseParams.StreamingWindowBytes {
+		return true
+	}
+	return !endsAtSSEEventBoundary(accumulated)
+}
+
+// OnResponseBodyChunk implements policy.StreamingResponsePolicy. It is called
+// once per flush released by NeedsMoreResponseData, never once per chunk.
+func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
+	ctx context.Context,
+	respCtx *policy.ResponseStreamContext,
+	chunk *policy.StreamBody,
+	_ map[string]interface{},
+) policy.StreamingResponseAction {
+	if !p.hasResponseParams || !p.responseParams.Enabled || !p.responseParams.Streaming {
+		return policy.ForwardResponseChunk{}
+	}
+	if chunk == nil || len(chunk.Chunk) == 0 {
+		return policy.ForwardResponseChunk{}
+	}
+	if respCtx.Metadata == nil {
+		respCtx.Metadata = make(map[string]interface{})
+	}
+
+	chunkStr := string(chunk.Chunk)
+	if !isSSEChunk(chunkStr) {
+		return p.handleNonSSEStreamFlush(chunkStr, chunk, respCtx)
+	}
+	return p.handleSSEStreamFlush(chunkStr, chunk, respCtx)
+}
+
+// handleNonSSEStreamFlush validates a non-SSE body that reached this path over
+// chunked transfer. NeedsMoreResponseData accumulates such a body whole, so the
+// flush is normally the complete response and is validated by exactly the same
+// code as the buffered path.
+func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
+	chunkStr string,
+	chunk *policy.StreamBody,
+	respCtx *policy.ResponseStreamContext,
+) policy.StreamingResponseAction {
+	previous, _ := respCtx.Metadata[metaKeyAccStreamedJSONBody].(string)
+	full := previous + chunkStr
+	respCtx.Metadata[metaKeyAccStreamedJSONBody] = full
+
+	if !chunk.EndOfStream {
+		// Only reachable when the kernel force-flushed at its accumulator
+		// ceiling. The body is already past any size this policy should be
+		// validating as one payload, and it is on its way to the client, so
+		// there is nothing to decide here.
+		slog.Warn("AWSBedrockGuardrail: non-SSE response flushed before end of stream, validation deferred",
+			"accumulated_bytes", len(full))
+		return policy.ForwardResponseChunk{}
+	}
+
+	result := p.validatePayload([]byte(full), p.responseParams, true, respCtx.Metadata)
+	modifications, ok := result.(policy.DownstreamResponseModifications)
+	if !ok {
+		return policy.ForwardResponseChunk{}
+	}
+	if modifications.StatusCode != nil {
+		// The buffered path answers a violation with a status; this one cannot,
+		// because the status went downstream with the headers. The body it built
+		// is still the right thing to deliver as the stream's last event.
+		return policy.TerminateResponseChunk{
+			Body:              modifications.Body,
+			AnalyticsMetadata: modifications.AnalyticsMetadata,
+		}
+	}
+	if modifications.Body != nil {
+		return policy.ForwardResponseChunk{Body: modifications.Body}
+	}
+	return policy.ForwardResponseChunk{}
+}
+
+// handleSSEStreamFlush validates one window of a streamed response.
+func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
+	chunkStr string,
+	chunk *policy.StreamBody,
+	respCtx *policy.ResponseStreamContext,
+) policy.StreamingResponseAction {
+	rp := p.responseParams
+
+	windowText := extractSSEDeltaContent(chunkStr, rp.StreamingJsonPath)
+	if strings.TrimSpace(windowText) == "" {
+		// A flush carrying only framing — the opening role delta, a keep-alive
+		// comment, usage, [DONE]. There is nothing to validate, but a masked
+		// placeholder may still need restoring before it reaches the client.
+		return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+	}
+
+	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(windowText, ""))
+
+	output, err := p.applyGuardrailToText(cleaned)
+	if err != nil {
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed, passthrough enabled",
+				"error", err, "chunkIndex", chunk.Index)
+			return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+		}
+		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
+			"error", err, "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Error calling AWS Bedrock Guardrail", err, rp.ShowAssessment, nil),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}
+	}
+
+	violation, modifiedContent, err := p.evaluateGuardrailResponse(output, cleaned, rp.RedactPII, false, respCtx.Metadata)
+	if err != nil {
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed, passthrough enabled",
+				"error", err, "chunkIndex", chunk.Index)
+			return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+		}
+		slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed",
+			"error", err, "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Error evaluating guardrail response", err, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}
+	}
+
+	if violation {
+		slog.Debug("AWSBedrockGuardrail: streaming violation detected",
+			"chunkIndex", chunk.Index, "windowBytes", len(chunkStr))
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Violation of AWS Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}
+	}
+
+	// Record what has been validated so far. Nothing in this file reads it back
+	// to make a decision; it is here so the accumulated text is available for
+	// debugging a stream and for any end-of-stream check added later.
+	previous, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
+	respCtx.Metadata[metaKeyAccStreamedContent] = previous + windowText
+
+	if rp.RedactPII && modifiedContent != "" && modifiedContent != cleaned {
+		if typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput); ok {
+			rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
+				return p.extractRedactedContent(typed, frameText)
+			})
+			if changed {
+				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+			}
+		}
+	}
+
+	return p.forwardWithPIIRestored(chunkStr, respCtx, rp)
+}
+
+// forwardWithPIIRestored forwards a flush, first putting back any value this
+// request's own request flow masked on the way to the upstream. The buffered
+// path does this at the top of validatePayload; a streamed response needs it
+// per flush, frame by frame, because there is no single payload to rewrite.
+//
+// Limitation worth knowing: a placeholder is restored only where it appears
+// whole inside one frame's text. An upstream that splits `EMAIL_0000` across
+// two SSE events leaves each half unmatched and the client sees the
+// placeholder. Masked output reaching the client is visible rather than silent,
+// and it is no worse than the buffered path, which cannot read an SSE body at
+// all — but it is not a guarantee, and an API that needs one should keep the
+// response flow buffered.
+func (p *AWSBedrockGuardrailPolicy) forwardWithPIIRestored(
+	chunkStr string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) policy.StreamingResponseAction {
+	if rp.RedactPII {
+		return policy.ForwardResponseChunk{}
+	}
+	raw, exists := respCtx.Metadata[MetadataKeyPIIEntities]
+	if !exists {
+		return policy.ForwardResponseChunk{}
+	}
+	maskedPII, ok := raw.(map[string]string)
+	if !ok || len(maskedPII) == 0 {
+		return policy.ForwardResponseChunk{}
+	}
+
+	rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
+		return p.restorePIIInResponse(frameText, maskedPII)
+	})
+	if !changed {
+		return policy.ForwardResponseChunk{}
+	}
+	return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+}
+
+// applyGuardrailToText runs one ApplyGuardrail call for the given text.
+func (p *AWSBedrockGuardrailPolicy) applyGuardrailToText(text string) (interface{}, error) {
+	loadConfig := p.loadAWSConfigFunc
+	if loadConfig == nil {
+		loadConfig = p.loadAWSConfig
+	}
+	awsCfg, err := loadConfig(context.Background(), p.region)
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, text)
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+// guardrailHitAnalytics matches the analytics the buffered path reports, so a
+// stream terminated by this policy is attributed the same way as a buffered
+// rejection.
+func guardrailHitAnalytics() map[string]interface{} {
+	return map[string]interface{}{
+		"isGuardrailHit": true,
+		"guardrailName":  "AWS Bedrock Guardrail",
+	}
+}
+
+// buildSSEErrorEvent renders the rejection as the stream's final event. The
+// payload is the same shape the buffered path returns as a 422 body, so a
+// client parsing one already understands the other.
+func (p *AWSBedrockGuardrailPolicy) buildSSEErrorEvent(reason string, validationError error, showAssessment bool, output interface{}) []byte {
+	assessment := p.buildAssessmentObject(reason, validationError, true, showAssessment, output)
+	responseBody := map[string]interface{}{
+		"type":    "AWS_BEDROCK_GUARDRAIL",
+		"message": assessment,
+	}
+	bodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		bodyBytes = []byte(`{"type":"AWS_BEDROCK_GUARDRAIL","message":"Internal error"}`)
+	}
+	return []byte(sseDataPrefix + string(bodyBytes) + "\n\n")
+}
+
+// ─── SSE helpers ─────────────────────────────────────────────────────────────
+
+// isSSEChunk reports whether s looks like SSE framing.
+func isSSEChunk(s string) bool {
+	for _, line := range strings.SplitN(s, "\n", 5) {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, sseDataPrefix) || strings.HasPrefix(line, sseEventPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// endsAtSSEEventBoundary reports whether s ends where one event ends, so a
+// flush released here never cuts a `data:` line in half.
+//
+// Both terminators are accepted: matching "\n\n" alone would treat a CRLF
+// stream as one event that never ends, and accumulate it to the kernel's
+// ceiling instead of releasing it.
+func endsAtSSEEventBoundary(s []byte) bool {
+	text := string(s)
+	return strings.HasSuffix(text, "\n\n") || strings.HasSuffix(text, "\r\n\r\n")
+}
+
+// extractSSEDeltaContent concatenates the assistant text carried by every
+// complete data frame in s, read at streamingJsonPath.
+//
+// Frames with no text at that path — the opening role delta, usage frames,
+// `[DONE]`, comments — contribute nothing rather than contributing their raw
+// JSON. Sending framing to ApplyGuardrail would bill for it and could trip a
+// guardrail on the wire format rather than on the model's words.
+func extractSSEDeltaContent(s string, streamingJsonPath string) string {
+	var sb strings.Builder
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(line, sseDataPrefix) {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, sseDataPrefix))
+		if payload == "" || payload == sseDone {
+			continue
+		}
+		text, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+		if err != nil {
+			continue
+		}
+		sb.WriteString(textCleanRegexCompiled.ReplaceAllString(text, ""))
+	}
+	return sb.String()
+}
+
+// rewriteSSEDeltaContent applies transform to the text at streamingJsonPath in
+// every data frame of chunkStr, returning the rewritten flush and whether
+// anything changed. A frame whose payload is not JSON, carries no text at that
+// path, or is unchanged by transform is passed through byte-for-byte.
+func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform func(string) string) (string, bool) {
+	lines := strings.Split(chunkStr, "\n")
+	changed := false
+
+	for i, line := range lines {
+		carriage := strings.HasSuffix(line, "\r")
+		trimmed := strings.TrimRight(line, "\r")
+		if !strings.HasPrefix(trimmed, sseDataPrefix) {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, sseDataPrefix))
+		if payload == "" || payload == sseDone {
+			continue
+		}
+
+		var frame map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+			continue
+		}
+		original, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+		if err != nil {
+			continue
+		}
+		replacement := transform(original)
+		if replacement == original {
+			continue
+		}
+		if err := utils.SetValueAtJSONPath(frame, streamingJsonPath, replacement); err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
+				"jsonPath", streamingJsonPath, "error", err)
+			continue
+		}
+		rewrittenPayload, err := json.Marshal(frame)
+		if err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to marshal rewritten SSE frame", "error", err)
+			continue
+		}
+
+		rebuilt := sseDataPrefix + string(rewrittenPayload)
+		if carriage {
+			rebuilt += "\r"
+		}
+		lines[i] = rebuilt
+		changed = true
+	}
+
+	if !changed {
+		return chunkStr, false
+	}
+	return strings.Join(lines, "\n"), true
 }
 
 // validatePayload validates payload against AWS Bedrock Guardrail, returning policy actions.
