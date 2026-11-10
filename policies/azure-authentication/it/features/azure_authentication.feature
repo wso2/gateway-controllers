@@ -558,3 +558,227 @@ Feature: Azure Authentication policy
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # The policy can be added to, changed on and removed from a deployed API. Changing the scope gets a
+  # token for the new audience; removing the policy stops the token, which the upstream then refuses.
+  Scenario: Add, modify and remove Azure Authentication on an already deployed API
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-lifecycle" and store it as "apiName"
+    And I generate a unique API version from "az-lifecycle" and store it as "apiVersion"
+    And I generate a unique API context from "/az-lifecycle" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until the route answers 401
+    And the response header "X-Testbench-Entra-Token" should not exist
+
+    When I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    And the response header "X-Testbench-Entra-Aud" should be "https://ai.azure.com"
+
+    When I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/cognitive |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","scope":"https://cognitiveservices.azure.com/.default"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until header "X-Testbench-Entra-Aud" is "https://cognitiveservices.azure.com"
+    Then the response status code should be 200
+    When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 2
+    And the JSON response field "requests[1].scope" should be "https://cognitiveservices.azure.com/.default"
+
+    When I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/cognitive |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 401
+    And the response header "X-Testbench-Entra-Token" should not exist
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # Tokens are cached per identity and scope, not per API: an API deleted and created again with the
+  # same identity is served from the token the first one obtained.
+  Scenario: Delete and recreate an API using Azure Authentication
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-recreate" and store it as "apiName"
+    And I generate a unique API version from "az-recreate" and store it as "apiVersion"
+    And I generate a unique API context from "/az-recreate" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    And the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+    When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 1
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+
+  # An LLM provider names the policy in upstream.auth (type other, gateways after 1.2.0), and the
+  # gateway calls the Foundry upstream with an Entra token for the provider's identity.
+  Scenario: An LLM provider with upstream auth type other calls Azure AI Foundry with an Entra token
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique resource name from "az-llm" and store it as "providerName"
+    And I generate a unique value from "az-llm" and store it as "providerDisplayName"
+    And I generate a unique API version from "az-llm" and store it as "providerVersion"
+    And I generate a unique API context from "/az-llm" and store it as "providerContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion} |
+      | name               | ${CTX:providerName} |
+      | displayName        | ${CTX:providerDisplayName} |
+      | version            | ${CTX:providerVersion} |
+      | template           | azureai-foundry |
+      | spec.context       | ${CTX:providerContext} |
+      | spec.upstream.url  | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}} |
+      | accessControl.mode | allow_all |
+    Then the response status code should be 201
+    When I send a "POST" request to "${CTX:providerContext}/chat/completions" until status 200 with body:
+      """
+      {"model":"chat","messages":[{"role":"user","content":"hello"}]}
+      """
+    Then the JSON response field "object" should be "chat.completion"
+    And the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
+    And the response header "X-Testbench-Entra-Aud" should be "https://ai.azure.com"
+
+    When I delete the LLM provider "${CTX:providerName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/chat/completions" until status 404
+
+  # The LLM provider fails the request with the same 502 as an API when Entra ID rejects the identity.
+  Scenario: An LLM provider fails the request with 502 when Entra ID rejects the identity
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique resource name from "az-llm-rejected" and store it as "providerName"
+    And I generate a unique value from "az-llm-rejected" and store it as "providerDisplayName"
+    And I generate a unique API version from "az-llm-rejected" and store it as "providerVersion"
+    And I generate a unique API context from "/az-llm-rejected" and store it as "providerContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion} |
+      | name               | ${CTX:providerName} |
+      | displayName        | ${CTX:providerDisplayName} |
+      | version            | ${CTX:providerVersion} |
+      | template           | azureai-foundry |
+      | spec.context       | ${CTX:providerContext} |
+      | spec.upstream.url  | http://testbench:3027/invalid-client-${CTX:tenant}/foundry |
+      | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"workload-identity","tenantId":"invalid-client-${CTX:tenant}"}} |
+      | accessControl.mode | allow_all |
+    Then the response status code should be 201
+    When I send a "POST" request to "${CTX:providerContext}/chat/completions" until status 502 with body:
+      """
+      {"model":"chat","messages":[{"role":"user","content":"hello"}]}
+      """
+    Then the response should match the expected error response "azure-authentication-upstream-auth-failed"
+    And the response body should not contain "testbench-federated-identity-token"
+    And the response body should not contain "testbench-entra."
+
+    When I delete the LLM provider "${CTX:providerName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/chat/completions" until status 404
+
+  # The controller does not validate the parameters of a policy it injects for upstream.auth, so a
+  # provider with an unusable clientId deploys. Its routes then fail closed with 500, and nothing
+  # else is affected. The API deployed after it shows the provider's routes have reached the gateway.
+  Scenario: An LLM provider whose injected policy cannot be built fails closed without affecting other APIs
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique resource name from "az-llm-broken" and store it as "providerName"
+    And I generate a unique value from "az-llm-broken" and store it as "providerDisplayName"
+    And I generate a unique API version from "az-llm-broken" and store it as "providerVersion"
+    And I generate a unique API context from "/az-llm-broken" and store it as "providerContext"
+    And I generate a unique value from "az-llm-sibling" and store it as "apiName"
+    And I generate a unique API version from "az-llm-sibling" and store it as "apiVersion"
+    And I generate a unique API context from "/az-llm-sibling" and store it as "apiContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion} |
+      | name               | ${CTX:providerName} |
+      | displayName        | ${CTX:providerDisplayName} |
+      | version            | ${CTX:providerVersion} |
+      | template           | azureai-foundry |
+      | spec.context       | ${CTX:providerContext} |
+      | spec.upstream.url  | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","clientId":"not-a-guid"}} |
+      | accessControl.mode | allow_all |
+    Then the response status code should be 201
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
+      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+
+    When I send a "POST" request to "${CTX:providerContext}/chat/completions" with body:
+      """
+      {"model":"chat","messages":[{"role":"user","content":"hello"}]}
+      """
+    Then the response status code should be 500
+    And the JSON response field "error" should be "Internal Server Error"
+    And the response body should not contain "clientId"
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 200
+    And the "gateway-runtime" service logs should contain "must be an application (client) ID in GUID form"
+
+    When I delete the LLM provider "${CTX:providerName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/chat/completions" until status 404
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
