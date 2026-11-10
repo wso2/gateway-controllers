@@ -1,0 +1,214 @@
+name: nvidia-switchyard-router
+version: v0.8.0
+displayName: NVIDIA Switchyard Router
+description: |
+  Chooses between an efficient and a capable model tier for each request by
+  asking NVIDIA's switchyard-server, then sends the request through the
+  gateway's own upstream. The server runs a routing profile, such as the Stage
+  router, which reads the agent's recent tool results to tell routine work
+  from exploration or error recovery. Switchyard only returns the decision; it
+  never calls the selected model. When the server fails or returns an unusable
+  decision, the request goes to the configured fallback model or is rejected
+  with an error.
+
+parameters:
+  type: object
+  x-wso2-policy-property-order: [profile, mode, modelPool, tierBalancing, fallback, promptDisclosure, sessionHeader, sessionFromPrompt, responseHeaders]
+  properties:
+    profile:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Name of the routing profile on switchyard-server: a route id in the
+        server's configuration, such as "coding-agents". The profile sets how
+        tiers are chosen; this policy sets which models serve each tier.
+      minLength: 1
+    mode:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        enforce routes each request to the decided model. observe_only asks
+        switchyard-server and records the tier and model it would have chosen
+        in analytics, but leaves every request unchanged and never rejects
+        one; use it to check a profile on real traffic before enforcing it.
+      enum:
+        - enforce
+        - observe_only
+      default: enforce
+    modelPool:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        The models the router may choose between. Each model belongs to the
+        efficient tier (cheaper, for routine work) or the capable tier
+        (stronger, for exploration and recovery). Each tier needs at least one
+        model. tierBalancing sets which model of the selected tier serves the
+        request.
+      minItems: 2
+      items:
+        type: object
+        additionalProperties: false
+        x-wso2-policy-property-order: [provider, model, tier, weight]
+        properties:
+          provider:
+            type: string
+            description: |
+              Optional destination provider. Use the LlmProxy additionalProviders[].as
+              alias, or provider id when as is absent. Empty or omitted preserves
+              the current upstream (normally the primary provider).
+          model:
+            type: string
+            description: Model ID written into the routed request.
+            minLength: 1
+          tier:
+            type: string
+            description: |
+              efficient for routine work such as writing and editing; capable
+              for exploration and error recovery.
+            enum:
+              - efficient
+              - capable
+          weight:
+            type: integer
+            description: |
+              Share of the tier's requests this model gets with round_robin or
+              session_affinity balancing. A model with weight 3 gets three
+              times the requests of a model with weight 1.
+            minimum: 1
+            maximum: 100
+            default: 1
+        required:
+          - model
+          - tier
+    tierBalancing:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        How a tier with several models chooses one. "first" always uses the
+        tier's first model. "round_robin" rotates through the tier's models
+        by weight. "session_affinity" keeps each session on one model of the
+        tier, chosen by weight, so the provider's prompt cache stays warm;
+        requests without a session ID rotate.
+      enum:
+        - first
+        - round_robin
+        - session_affinity
+      default: first
+    fallback:
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      x-wso2-policy-property-order: [mode, provider, model]
+      description: |
+        What happens when switchyard-server fails or returns an unusable
+        decision. "error" rejects the request. "model" sends it to the named
+        model, which must be in the model pool.
+      properties:
+        mode:
+          type: string
+          enum:
+            - error
+            - model
+          default: error
+        provider:
+          type: string
+          description: Provider of the fallback model, using the same alias rules as the model pool.
+        model:
+          type: string
+          description: The fallback model ID.
+    promptDisclosure:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        How much of the conversation switchyard-server sees. Redacted turns
+        keep their role and position, with their text replaced by its length;
+        system prompts, tool definitions and generation settings are never
+        sent. "none" sends roles and sizes only, for profiles such as random.
+        "tool_activity" keeps tool calls and results, which is all the Stage
+        router reads. "task_and_tool_activity" also keeps the opening user
+        request and the latest user message, which a judge reads. "full"
+        sends the whole request. The routed request is never redacted.
+      enum:
+        - none
+        - tool_activity
+        - task_and_tool_activity
+        - full
+      default: task_and_tool_activity
+    sessionHeader:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Request header carrying a stable session ID. Its value is passed to
+        switchyard-server, which keeps holds per session, so clients should
+        send the same ID for every request of an agent run. Coding agents'
+        own session headers, such as Claude Code's x-claude-code-session-id
+        and Codex's turn metadata, are forwarded as well and need no setup.
+      minLength: 1
+      default: x-switchyard-session-id
+    sessionFromPrompt:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        When a request carries no session ID in any recognized header, derive
+        one from a hash of the conversation's first user message, so holds
+        still work for clients that send none. Conversations that open with
+        the same message share a session, so leave this off for agents that
+        start sub-agents with a fixed prompt.
+      default: false
+    responseHeaders:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: |
+        Add x-switchyard-tier, x-switchyard-outcome (routed, observed,
+        fallback, rejected or decision_failed) and, on a failure,
+        x-switchyard-error to the response, so clients can see how their
+        request was routed.
+      default: true
+  required:
+    - modelPool
+    - profile
+
+systemParameters:
+  type: object
+  properties:
+    switchyardEndpoint:
+      type: string
+      format: uri
+      description: |
+        Full URL of switchyard-server's decision endpoint, for example
+        http://switchyard-server:4000/v1/decision.
+      "wso2/defaultValue": "${config.policy_configurations.nvidia_switchyard_router_v0.switchyard_endpoint}"
+    switchyardApiKey:
+      type: string
+      description: |
+        Optional bearer credential, for a proxy placed in front of
+        switchyard-server. switchyard-server itself does not authenticate
+        callers. Leave empty to send no credential.
+      "wso2/defaultValue": "${config.policy_configurations.nvidia_switchyard_router_v0.switchyard_api_key}"
+    switchyardTimeout:
+      type: string
+      description: |
+        Maximum time to wait for switchyard-server. Greater than zero and at
+        most 10s. For a profile with a judge, set it above the judge's timeout,
+        for example 4s.
+      default: "1s"
+      "wso2/defaultValue": "${config.policy_configurations.nvidia_switchyard_router_v0.switchyard_timeout}"
+    requestModel:
+      type: object
+      description: |
+        Where the model name appears in the request. Supplied by the gateway
+        from the LLM provider template.
+      properties:
+        location:
+          type: string
+          enum:
+            - payload
+        identifier:
+          type: string
+          description: JSONPath identifying the model field in the request body.
+      required:
+        - location
+        - identifier
+  required:
+    - switchyardEndpoint
+    - requestModel

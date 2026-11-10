@@ -1,0 +1,10 @@
+{
+  "body": {
+    "code": "nvidia_switchyard_router_decision_failed",
+    "error": "The routing decision could not be made."
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 503
+}
