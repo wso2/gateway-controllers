@@ -103,6 +103,46 @@ Feature: mcp-auth protected-resource metadata
       # MAN #3: issuers given as an empty list; an empty list also means every key manager.
       | issuers is an empty list      | {"issuers":[]}            | ["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"] |
 
+  # MAN #4: issuers names only a key manager the gateway does not have, so the proxy trusts no
+  # issuer at all. The metadata then fails with the failure status (401 by default) instead of
+  # listing an empty authorization_servers. That answer is built by mcp-auth itself and carries no
+  # WWW-Authenticate challenge (held to the recorded mcp-auth-no-matching-issuers.json), unlike
+  # the 401 for a token, which does. A valid mock-jwks token is refused too: nobody is trusted.
+  Scenario: The metadata fails when issuers names no key manager the gateway has
+    Given I generate a unique resource name from "mcp-auth-no-issuer" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-no-issuer" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-no-issuer" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-no-issuer" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["no-such-km"]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling until 401 waits until the proxy's routes are live.
+    When I clear all headers
+    And I send a "GET" request to "${CTX:mcpContext}/.well-known/oauth-protected-resource" until status 401
+    Then the response should match the expected error response "mcp-auth-no-matching-issuers"
+    And the response header "WWW-Authenticate" should not exist
+
+    # A valid mock-jwks token is refused, and that refusal does carry the challenge, which shows
+    # the header check above could have failed.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 401
+    And the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
   # ---- Scopes -----------------------------------------------------------------------------
 
   # MAN #5: requiredScopes is advertised only. The scopes appear in the 401 challenge's scope
