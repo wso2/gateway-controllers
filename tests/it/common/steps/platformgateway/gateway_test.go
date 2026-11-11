@@ -4191,13 +4191,16 @@ func TestAwaitLogEventFindsTextOnAnyLineWithTheMarker(t *testing.T) {
 		"a status on another API's line must not count")
 }
 
-func TestAwaitLogEventWithoutTextFailsOnAnyLineWithTheMarker(t *testing.T) {
-	logs := "level=INFO request=included-request\n" +
-		"level=INFO request=included-request header=excluded-request\n"
-	err := awaitLogEvent(context.Background(), logReads(logs), "included-request", "excluded-request", false, "runtime logs")
+func TestAwaitLogEventWithoutTextChecksTheFirstLineWithTheMarker(t *testing.T) {
+	leaked := "level=INFO request=included-request header=excluded-request\n"
+	err := awaitLogEvent(context.Background(), logReads(leaked), "included-request", "excluded-request", false, "runtime logs")
 	require.ErrorContains(t, err, `also contains "excluded-request"`)
 
-	require.NoError(t, awaitLogEvent(context.Background(), logReads(logs), "included-request", "secret", false, "runtime logs"))
+	// A line another logger writes later with the same marker, such as a traffic log of the whole
+	// request, is not the event the marker identifies.
+	logs := "level=INFO request=included-request\n" +
+		"component=traffic request=included-request header=excluded-request\n"
+	require.NoError(t, awaitLogEvent(context.Background(), logReads(logs), "included-request", "excluded-request", false, "runtime logs"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()

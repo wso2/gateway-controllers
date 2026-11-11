@@ -2197,8 +2197,9 @@ func (g *Gateway) serviceLogsNotContain(ctx context.Context, service, text strin
 	return nil
 }
 
-// serviceLogEvent waits for a log line containing marker and checks text against every such
-// line: "should contain" needs one of them to contain text, "should not contain" needs none to.
+// serviceLogEvent waits for a log line containing marker. "should contain" passes once any such
+// line also contains text; "should not contain" checks the first such line, the event the marker
+// identifies, so a line another logger writes later with the same marker does not count.
 func (g *Gateway) serviceLogEvent(ctx context.Context, service, marker, negation, text string) error {
 	marker, err := expandLogText(ctx, marker)
 	if err != nil {
@@ -2217,7 +2218,7 @@ func (g *Gateway) serviceLogEvent(ctx context.Context, service, marker, negation
 }
 
 // awaitLogEvent waits for a line of read's log containing marker. With want, it waits until one
-// such line also contains text; without, it fails if any such line contains text.
+// such line also contains text; without, it fails if the first such line contains text.
 func awaitLogEvent(
 	ctx context.Context, read func(context.Context) string, marker, text string, want bool, where string,
 ) error {
@@ -2236,13 +2237,9 @@ func awaitLogEvent(
 	if err := awaitLogs(ctx, read, accept, what); err != nil {
 		return err
 	}
-	if !want {
-		for _, line := range events {
-			if strings.Contains(line, text) {
-				return fmt.Errorf("%s: the event containing %q also contains %q: %s",
-					where, marker, text, truncateLog(line))
-			}
-		}
+	if !want && strings.Contains(events[0], text) {
+		return fmt.Errorf("%s: the event containing %q also contains %q: %s",
+			where, marker, text, truncateLog(events[0]))
 	}
 	return nil
 }
