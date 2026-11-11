@@ -71,6 +71,26 @@ description: |
   the first target was not allowed to receive. What an attempt does NOT carry is the previous
   attempt's provider-specific work: its context path, its transformation, its credential.
 
+  WHERE TO ATTACH IT, AND WHY ITS POSITION IS NOT YOURS TO SET. Attach it once, in the
+  operation's `operationPolicies`. Within that list its position does not matter: the gateway
+  always moves it to the END of the request chain, whatever order you wrote it in, and logs that
+  it did so when it actually moved something. Write it wherever the configuration reads best.
+
+  It is moved because it consumes what every earlier policy decided — the provider a routing
+  policy selected, the body a guardrail rewrote — so it has to run after them. Chain order looks
+  like it already says that, but it only half does, and the half it misses is invisible in the
+  configuration: the gateway runs EVERY policy's request-header phase before ANY policy's
+  request-body phase, and this policy resolves its chain in the body phase. So a routing policy
+  that publishes in the header phase is honoured wherever it sits, while one that publishes in
+  the body phase would be silently ignored if written after this policy — identical-looking
+  configuration, opposite outcomes, decided by something no policy's configuration declares.
+  Rather than ask you to know which is which, the gateway places this one for you.
+
+  The same reasoning places it FIRST on the fault chain, where it writes the exhaustion error as
+  a default your own fault entries can still reshape. And because response phases run the chain
+  in reverse, last-on-request makes it first-on-response — which is wanted: it grades the
+  provider's own status and headers before another response policy reshapes them.
+
 parameters:
   type: object
   additionalProperties: false
