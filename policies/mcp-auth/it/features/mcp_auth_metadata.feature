@@ -102,3 +102,59 @@ Feature: mcp-auth protected-resource metadata
       | issuers left out              | {}                        | ["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"] |
       # MAN #3: issuers given as an empty list; an empty list also means every key manager.
       | issuers is an empty list      | {"issuers":[]}            | ["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"] |
+
+  # ---- Scopes -----------------------------------------------------------------------------
+
+  # MAN #5: requiredScopes is advertised only. The scopes appear in the 401 challenge's scope
+  # parameter (held to the recorded mcp-auth-required-scopes-challenge.json, since a step's text
+  # cannot contain the quotes around them) and in the metadata's scopes_supported, but mcp-auth
+  # removes requiredScopes before jwt-auth checks the token, so a token without them still gets in.
+  # The token below asks the testbench for the scope "default", which is neither of the two.
+  Scenario: requiredScopes are advertised in the challenge and the metadata but not enforced
+    Given I generate a unique resource name from "mcp-auth-scopes" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-scopes" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-scopes" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-scopes" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"requiredScopes":["mcp:read","mcp:write"]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # A failure names both scopes, space-separated, in the challenge. Polling until the 401 also
+    # waits until the proxy's routes are live.
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+    Then the response header "WWW-Authenticate" should contain "mcp:read mcp:write"
+    And the response should match the expected error response "mcp-auth-required-scopes-challenge"
+
+    # The metadata lists both scopes in scopes_supported, after every key manager's issuer.
+    When I clear all headers
+    And I send a "GET" request to "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+    Then the response status code should be 200
+    And the response body should be:
+      """
+      {"resource":"https://mcp-e2e-gatewayurl.example.com:7777${CTX:mcpContext}/mcp","authorization_servers":["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"],"scopes_supported":["mcp:read","mcp:write"]}
+      """
+
+    # A token holding neither scope still reaches the backend.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "default" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
