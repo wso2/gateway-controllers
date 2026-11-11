@@ -592,6 +592,8 @@ with the action `BLOCKED` is rejected, and reported with the PII code.
 When Bedrock reports more than one finding, a sensitive information (PII) finding decides the code
 first, then a content filter, then a word filter, then a denied topic. A blocked content filter that
 comes with a PII finding is therefore reported with the PII code.
+For content filters, the first recognized filter in assessment order decides the code, regardless
+of its action. The code can name a non-blocking filter rather than the filter that caused the rejection.
 
 The fault's `Description` carries the internal reason, for example
 `Violation of AWS Bedrock Guardrails detected` or `Error calling AWS Bedrock Guardrail`.
