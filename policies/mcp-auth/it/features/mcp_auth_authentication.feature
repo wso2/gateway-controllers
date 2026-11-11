@@ -219,3 +219,48 @@ Feature: mcp-auth authentication of MCP requests
       | mock-jwks       | http://testbench:3001/token |
       # MAN #30: the token's issuer belongs to wrong-issuer-km.
       | wrong-issuer-km | http://expected-issuer.com  |
+
+  # A request with no JSON-RPC body names no method, tool, resource or prompt, so the exception
+  # lists cannot apply to it: mcp-auth checks the token in the header phase instead. The control
+  # sends the same request with a valid token and proves it reaches the mock (the router's
+  # x-envoy-upstream-service-time header), so the first 401 came from mcp-auth and not from a
+  # missing route. The mock accepts only POST, so it answers GET and DELETE with 405.
+  Scenario Outline: A request that names no capability is checked on the transport (<method>)
+    Given I generate a unique resource name from "mcp-auth-transport" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-transport" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-transport" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-transport" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-transport" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":<params>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "<method>" request to "${CTX:mcpContext}/mcp" until status 401
+    Then the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I send a "<method>" request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be <tokenStatus>
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: transport requests
+      | method | params | tokenStatus |
+      # MAN #26: default configuration; GET /mcp without a token is rejected in the header phase.
+      | GET    | {}     | 405         |
+      # MAN #26: default configuration; DELETE /mcp without a token is rejected in the header phase.
+      | DELETE | {}     | 405         |
