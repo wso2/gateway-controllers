@@ -72,3 +72,46 @@ blocks:
       - name: mcp-auth-gateway-host
         features:
           - features/mcp_auth_gateway_host.feature
+
+
+  # MAN #32: a broken key manager configuration can only come from the gateway's own settings, so
+  # each variant has its own block, overlay and feature file. No gateway tag: the scenarios are
+  # version-neutral.
+  - name: mcp-auth-km-blank-issuer
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/mcp-auth-km-blank-issuer.toml
+      - name: testbench
+    runners:
+      - name: mcp-auth-km-blank-issuer
+        features:
+          - features/mcp_auth_km_blank_issuer.feature
+
+  - name: mcp-auth-km-blank-name
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/mcp-auth-km-blank-name.toml
+      - name: testbench
+    runners:
+      - name: mcp-auth-km-blank-name
+        features:
+          - features/mcp_auth_km_blank_name.feature
+
+  - name: mcp-auth-km-not-array
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/mcp-auth-km-not-array.toml
+      - name: testbench
+    runners:
+      - name: mcp-auth-km-not-array
+        features:
+          - features/mcp_auth_km_not_array.feature
