@@ -146,7 +146,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/{id}","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}]}] |
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
     # Fails unless every request is answered 2xx.
     When I send 20 concurrent "POST" requests to "${CTX:apiContext}/${CTX:apiVersion}/chat/{i}" with per-request body:
@@ -239,7 +239,7 @@ Feature: Azure Authentication policy
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
     Then the response header "X-Testbench-Entra-Tid" should be "${CTX:tenant}"
-    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/models" until the route answers 401
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/models" until status 401
     Then the response header "X-Testbench-Entra-Token" should not exist
 
     When I delete the API "${CTX:apiName}"
@@ -392,7 +392,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/<prefix>${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"<prefix>${CTX:tenant}"}}]}] |
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
     Then the response status code should be 200
@@ -427,7 +427,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/invalid-client-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"invalid-client-${CTX:tenant}"}}]}] |
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
     Then the response status code should be 502
@@ -462,7 +462,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/unavailable-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"unavailable-${CTX:tenant}"}}]}] |
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
     Then the response status code should be 502
@@ -491,7 +491,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/slow-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"slow-${CTX:tenant}","tokenRequestTimeout":"1s"}}]}] |
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
     Then the response status code should be 502
@@ -517,7 +517,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/reject-once-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"reject-once-${CTX:tenant}"}}]}] |
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until the route answers 401
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
     Then the response status code should be 502
@@ -551,7 +551,7 @@ Feature: Azure Authentication policy
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
 
-    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until the route answers 401
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 401
     Then the response body should contain "audience"
     And the response header "X-Testbench-Entra-Aud" should be "https://cognitiveservices.azure.com"
 
@@ -575,7 +575,7 @@ Feature: Azure Authentication policy
       | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
-    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until the route answers 401
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 401
     And the response header "X-Testbench-Entra-Token" should not exist
 
     When I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
