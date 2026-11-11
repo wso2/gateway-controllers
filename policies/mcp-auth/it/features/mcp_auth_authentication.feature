@@ -224,7 +224,10 @@ Feature: mcp-auth authentication of MCP requests
   # lists cannot apply to it: mcp-auth checks the token in the header phase instead. The control
   # sends the same request with a valid token and proves it reaches the mock (the router's
   # x-envoy-upstream-service-time header), so the first 401 came from mcp-auth and not from a
-  # missing route. The mock accepts only POST, so it answers GET and DELETE with 405.
+  # missing route. The mock accepts only POST, so it answers GET and DELETE with 405, and it
+  # answers an empty POST with 400 parse error. A named tools/call sent without a token shows
+  # how the proxy treats a request the exception lists can match: protected under default
+  # params (401), open with every group disabled (200), while the bodiless request stays 401.
   Scenario Outline: A request that names no capability is checked on the transport (<method>)
     Given I generate a unique resource name from "mcp-auth-transport" and store it as "mcpName"
     And I generate a unique value from "mcp-auth-transport" and store it as "mcpDisplayName"
@@ -247,7 +250,11 @@ Feature: mcp-auth authentication of MCP requests
     Then the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
     And the response header "x-envoy-upstream-service-time" should not exist
 
-    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be <namedStatus>
+
+    When I clear all headers
+    And I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
     And I send a "<method>" request to "${CTX:mcpContext}/mcp"
     Then the response status code should be <tokenStatus>
@@ -259,8 +266,10 @@ Feature: mcp-auth authentication of MCP requests
     Then the response should be successful
 
     Examples: transport requests
-      | method | params | tokenStatus |
+      | method | params                                                                                                            | namedStatus | tokenStatus |
       # MAN #26: default configuration; GET /mcp without a token is rejected in the header phase.
-      | GET    | {}     | 405         |
+      | GET    | {}                                                                                                                | 401         | 405         |
       # MAN #26: default configuration; DELETE /mcp without a token is rejected in the header phase.
-      | DELETE | {}     | 405         |
+      | DELETE | {}                                                                                                                | 401         | 405         |
+      # MAN #12: every group disabled, so a named call passes without a token, yet an empty POST is still rejected.
+      | POST   | {"tools":{"enabled":false},"resources":{"enabled":false},"prompts":{"enabled":false},"methods":{"enabled":false}} | 200         | 400         |
