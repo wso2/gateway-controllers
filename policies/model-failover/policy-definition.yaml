@@ -9,6 +9,13 @@ description: |
   publisher can give gpt-4o one chain, gpt-4.1 another, and let everything else fall through to a
   catch-all.
 
+  A request whose model matches no chain is NOT left alone. The route carries its cluster
+  specifier unconditionally, so such a request still traverses the configured group order -
+  publishing no ordering means the order is not overridden, not that failover is bypassed. The
+  practical consequence is that an unmatched model can be re-attempted against a target the
+  publisher never chose for it. Declare a "*" catch-all naming a destination you are willing to
+  send unmatched traffic to, rather than relying on an absent entry to mean "do nothing".
+
   Attachable to any API kind whose operations resolve model targets (RestApi, LlmProxy), matching
   model-round-robin. APIs that do not attach it are unaffected, including those routing to the same
   shared provider upstream.
