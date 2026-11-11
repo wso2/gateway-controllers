@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": -32602,
+      "message": "Invalid MCP request params"
+    },
+    "id": 41,
+    "jsonrpc": "2.0"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}

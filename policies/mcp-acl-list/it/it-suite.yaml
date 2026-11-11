@@ -49,3 +49,12 @@ blocks:
       - name: mcp-acl-list
         features:
           - features/mcp_acl_list_error_compatibility.feature
+      # Handshake-style requests and a version-neutral upstream path, so no version tag.
+      - name: mcp-acl-list-access
+        features:
+          - features/mcp_acl_list_access.feature
+      # Handshake-style requests and a version-neutral upstream path, so no version tag; a
+      # gateway that answers a row differently gets its own expected-error file instead.
+      - name: mcp-acl-list-validation
+        features:
+          - features/mcp_acl_list_validation.feature

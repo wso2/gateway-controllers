@@ -1815,6 +1815,9 @@ var serviceEndpoints = map[string]struct {
 	"jev-tls": {component: "testbench", endpoint: "jev-tls"},
 	// The scripted MCP server, addressed like jev: a scenario names its own partition.
 	"mcp-scripted": {component: "testbench", endpoint: "mcp-scripted"},
+	// The stateless MCP server (port 3009), addressed directly so a scenario can compare what
+	// the gateway serves with what the server itself serves.
+	"mcp": {component: "testbench", endpoint: "mcp"},
 	// Metrics live on a DIFFERENT compose service from the one tests normally address —
 	// controller metrics on the controller, policy-engine metrics on the runtime — which the
 	// component contract resolves via Endpoint.Service. No base path: a scrape is not an API.
