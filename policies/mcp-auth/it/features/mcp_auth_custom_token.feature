@@ -79,3 +79,64 @@ Feature: mcp-auth with a custom token header, scheme and failure status
     When I authenticate using basic auth as "admin"
     And I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
+
+  # MAN #10 and #9: on this gateway the token goes in X-MCP-Token with the scheme Token. Each row
+  # first sends a correctly shaped token (200), so the refusal is about the shape alone, then the
+  # wrong shape (403, this gateway's failure status). The mock's log holds only the first call,
+  # so the refused one never reached it.
+
+  Scenario Outline: Only a token in the configured header and scheme gets in (<case>)
+    Given I generate a unique resource name from "mcp-auth-custom-shape" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-custom-shape" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-custom-shape" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-custom-shape" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-custom-shape" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 403
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "X-MCP-Token" to "Token ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I set header "<header>" to "<value>"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 403
+    And the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: wrong header or shape
+      | case                 | header        | value               |
+      # MAN #10: a valid token in Authorization does not authenticate when headerName is X-MCP-Token.
+      | Authorization header | Authorization | Bearer ${CTX:token} |
+      # MAN #9: the scheme is enforced per authHeaderScheme; Bearer is rejected when it is Token.
+      | Bearer scheme        | X-MCP-Token   | Bearer ${CTX:token} |
+      # MAN #9: the token without the Token prefix is rejected.
+      | no scheme            | X-MCP-Token   | ${CTX:token}        |
+      # MAN #9: the configured header present but empty is rejected.
+      | empty header         | X-MCP-Token   |                     |
