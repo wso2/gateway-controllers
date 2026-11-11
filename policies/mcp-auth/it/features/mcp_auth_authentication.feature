@@ -334,3 +334,73 @@ Feature: mcp-auth authentication of MCP requests
       | Basic scheme  | Authorization | Basic ${CTX:token}  |
       # MAN #9: the Authorization header present but empty is rejected.
       | empty header  | Authorization |                     |
+      # MAN #8: a structurally malformed token is rejected.
+      | malformed     | Authorization | Bearer not-a-jwt    |
+
+  # MAN #8: a token that cannot be validated is rejected. Each row first sends a control token
+  # minted by the same testbench OIDC provider (200), so the refusal comes from the one claim the
+  # row changes: an exp in the past, an issuer whose key manager does not publish the provider's
+  # key, or an issuer no key manager has. The malformed token is a row of the outline above.
+  # The spreadsheet expects an error_description derived from each failure. mcp-auth gives every
+  # failure the same configured message ("Authentication failed") on purpose, so a client learns
+  # nothing about why its token failed; the recorded answer pins that generic description.
+  Scenario Outline: A token that cannot be validated is rejected (<case>)
+    Given I generate a unique resource name from "mcp-auth-bad-token" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-bad-token" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-bad-token" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-bad-token" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-bad-token" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I mint a JWT token from the testbench OIDC provider expiring in 3600 seconds and store it as "goodToken" with claims:
+      """
+      {}
+      """
+    And I set header "Authorization" to "Bearer ${CTX:goodToken}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I mint a JWT token from the testbench OIDC provider expiring in <expiresIn> seconds and store it as "badToken" with claims:
+      """
+      <claims>
+      """
+    And I set header "Authorization" to "Bearer ${CTX:badToken}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-invalid-token"
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: tokens that cannot be validated
+      | case                | expiresIn | claims                                   |
+      # MAN #8: the token expired an hour ago.
+      | expired             | -3600     | {}                                       |
+      # MAN #8: signed by a key the issuer's JWKS does not publish (mock-jwks publishes only its own key).
+      | unpublished key     | 3600      | {"iss":"http://testbench:3001/token"}    |
+      # MAN #8: issued by an issuer no key manager is configured for.
+      | unconfigured issuer | 3600      | {"iss":"https://nobody.example.com"}     |
