@@ -71,10 +71,19 @@ description: |
   the first target was not allowed to receive. What an attempt does NOT carry is the previous
   attempt's provider-specific work: its context path, its transformation, its credential.
 
-  WHERE TO ATTACH IT, AND WHY ITS POSITION IS NOT YOURS TO SET. Attach it once, in the
-  operation's `operationPolicies`. Within that list its position does not matter: the gateway
-  always moves it to the END of the request chain, whatever order you wrote it in, and logs that
-  it did so when it actually moved something. Write it wherever the configuration reads best.
+  WHERE TO ATTACH IT, AND WHY ITS POSITION IS NOT YOURS TO SET. Attach it once, at whichever
+  scope you want it to cover: `globalPolicies` applies it to every operation of the API,
+  `operationPolicies` to one. A chain is keyed by the model the client asked for and never by
+  path, so the API level is usually what you want — "fall back from gpt-4o wherever this API
+  serves it" — and attaching per path is the special case. An operation that writes its own
+  attachment overrides the API-level one for that operation rather than adding to it: a route
+  carries one failover configuration, so the two cannot be merged, and the discarded one is
+  reported at deployment rather than dropped quietly.
+
+  Where you attach it decides which operations it covers. It does NOT decide when it runs: the
+  gateway always moves it to the END of the request chain, whatever order you wrote it in and at
+  whichever scope, and logs that it did so when it actually moved something. Write it wherever
+  the configuration reads best.
 
   It is moved because it consumes what every earlier policy decided — the provider a routing
   policy selected, the body a guardrail rewrote — so it has to run after them. Chain order looks
