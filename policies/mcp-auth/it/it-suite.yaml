@@ -118,3 +118,16 @@ blocks:
       - name: mcp-auth-km-not-array
         features:
           - features/mcp_auth_km_not_array.feature
+
+  - name: mcp-auth-custom-token
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/mcp-auth-custom-token.toml
+      - name: testbench
+    runners:
+      - name: mcp-auth-custom-token
+        features:
+          - features/mcp_auth_custom_token.feature
