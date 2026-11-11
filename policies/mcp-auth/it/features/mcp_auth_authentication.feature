@@ -110,3 +110,112 @@ Feature: mcp-auth authentication of MCP requests
     And I authenticate using basic auth as "admin"
     And I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
+
+  # ---- Empty params -----------------------------------------------------------------------
+
+  # MAN #30: empty params are accepted, and every group then defaults to enabled, so every kind
+  # of MCP request needs a token (unlike mcp-acl-list, whose empty params are refused at deploy).
+  # The upstream is the scripted MCP mock (testbench port 3021), which answers any request
+  # without a handshake and records every request it receives under the scenario's partition.
+  # Each row sends one kind of request without a token: it is refused and the log stays empty.
+  # The same request with a token then reaches the mock and is logged, which shows the empty log
+  # could have been otherwise. The 401's exact shape is pinned by mcp_auth_error_compatibility.
+  Scenario Outline: With empty params every kind of MCP request needs a token (<method>)
+    Given I generate a unique resource name from "mcp-auth-empty" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-empty" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-empty" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-empty" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-empty" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <body>
+      """
+    Then the response status code should be 401
+    And the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+    When I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 0 items
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <body>
+      """
+    Then the response status code should be <status>
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+    And the JSON response array "requests" should contain an item with "method" equal to "<method>"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: request kinds
+      | method                    | status | body                                                                                                                                                  |
+      # MAN #30: every kind of MCP request below is refused without a token under empty params.
+      | initialize                | 200    | {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"it","version":"1.0"}}} |
+      | notifications/initialized | 202    | {"jsonrpc":"2.0","method":"notifications/initialized"}                                                                                                |
+      | ping                      | 200    | {"jsonrpc":"2.0","id":1,"method":"ping"}                                                                                                              |
+      | tools/list                | 200    | {"jsonrpc":"2.0","id":2,"method":"tools/list"}                                                                                                        |
+      | tools/call                | 200    | {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"add","arguments":{}}}                                                                 |
+      | resources/read            | 200    | {"jsonrpc":"2.0","id":4,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}                                                         |
+      | prompts/get               | 200    | {"jsonrpc":"2.0","id":5,"method":"prompts/get","params":{"name":"greeting"}}                                                                          |
+
+  # MAN #30: with empty params every configured key manager is trusted, so a token from each one
+  # gets in. The tool name in each call marks which token reached the mock's request log.
+  # (oidc-km is tested with MAN #8, which adds the step that mints its tokens.)
+  Scenario Outline: With empty params a token from each configured key manager gets in (<keyManager>)
+    Given I generate a unique resource name from "mcp-auth-every-km" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-every-km" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-every-km" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-every-km" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-every-km" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I get a JWT token from the mock JWKS server with issuer "<issuer>" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "<keyManager>" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "ok"
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array "requests" should contain an item with "tool" equal to "<keyManager>"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: key managers
+      | keyManager      | issuer                      |
+      # MAN #30: the token's issuer belongs to mock-jwks.
+      | mock-jwks       | http://testbench:3001/token |
+      # MAN #30: the token's issuer belongs to wrong-issuer-km.
+      | wrong-issuer-km | http://expected-issuer.com  |
