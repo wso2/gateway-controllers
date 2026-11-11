@@ -1,5 +1,5 @@
 name: host-rewrite
-version: v1.0.1
+version: v1.1.0
 description: |
   Rewrite the Host header of incoming requests before forwarding to the upstream.
 

@@ -34,6 +34,8 @@ defaults:
     propagation: 60s
 
 blocks:
+  # Runners stay one at a time: the restart runner restarts the block's gateway, which would
+  # interrupt the others.
   - name: basic-auth
     parallel: 1
     components:
@@ -45,3 +47,24 @@ blocks:
       - name: basic-auth
         features:
           - features/basic_auth.feature
+      - name: basic-auth-validation
+        features:
+          - features/basic_auth_validation.feature
+      - name: basic-auth-restart
+        features:
+          - features/basic_auth_restart.feature
+
+  # The default-header-capture overlay restores the gateway's default of capturing no headers for
+  # analytics, which applies to every runner in a block, so this runner gets a block of its own.
+  - name: basic-auth-default-header-capture
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/default-header-capture.toml
+      - name: testbench
+    runners:
+      - name: basic-auth-default-header-capture
+        features:
+          - features/basic_auth_analytics.feature

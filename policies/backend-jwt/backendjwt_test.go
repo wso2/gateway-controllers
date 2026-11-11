@@ -27,6 +27,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -1871,5 +1872,61 @@ func TestClaimMapping_SourceNotDuplicated(t *testing.T) {
 	// Non-remapped claims still forwarded normally.
 	if claims["role"] != "admin" {
 		t.Errorf("non-mapped claim 'role' must still be forwarded, got %v", claims["role"])
+	}
+}
+
+// TestGenerationFailureDeclaresFault covers the fault declaration on the paths where the
+// backend JWT cannot be built. Each refuses the request, so each must be a fault: an
+// unusable parameter is a configuration fault, a token that cannot be signed a mediation one.
+func TestGenerationFailureDeclaresFault(t *testing.T) {
+	tests := []struct {
+		name     string
+		params   map[string]interface{}
+		wantType string
+	}{
+		{
+			name:     "unsupported algorithm",
+			params:   map[string]interface{}{"algorithm": "NotAnAlgorithm"},
+			wantType: policy.FaultTypeConfiguration,
+		},
+		{
+			name:     "unparseable signing key",
+			params:   map[string]interface{}{"signingKey": map[string]interface{}{"inline": "not a PEM key"}},
+			wantType: policy.FaultTypeMediation,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := &BackendJWTPolicy{}
+			reqCtx := newRequestContext(&policy.AuthContext{
+				Authenticated: true, AuthType: "jwt", Subject: "henry",
+			})
+			result := p.OnRequestHeaders(context.Background(), reqCtx, tt.params)
+
+			resp, ok := result.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", result)
+			}
+			if !resp.IsFault {
+				t.Fatalf("expected IsFault=true when the backend JWT cannot be built")
+			}
+			if resp.Fault == nil {
+				t.Fatalf("expected Error to be populated")
+			}
+			if resp.Fault.Code != policy.FaultCodeMediationFailed {
+				t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+			}
+			if resp.Fault.Type != tt.wantType {
+				t.Fatalf("expected Error.Type=%q, got %q", tt.wantType, resp.Fault.Type)
+			}
+			if resp.Fault.Description == "" {
+				t.Fatalf("expected Error.Description to carry the internal reason")
+			}
+			// The gateway's own diagnostic must not reach the caller's body.
+			if strings.Contains(string(resp.Body), resp.Fault.Description) {
+				t.Fatalf("Description leaked into the client body: %q", resp.Fault.Description)
+			}
+		})
 	}
 }

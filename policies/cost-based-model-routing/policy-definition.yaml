@@ -1,5 +1,5 @@
 name: cost-based-model-routing
-version: v0.9.0
+version: v0.10.0
 displayName: Cost-Based Model Routing
 description: |
   Routes each request using its exact model budget, shared across callers.

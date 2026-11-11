@@ -21,8 +21,7 @@ Every setting can be configured per policy attachment or gateway-wide. An attach
 - **Per-attachment AWS identity**: Each attachment can set its own `awsAuth`, letting the guardrail live in a different AWS account
 - **Credential modes**: gateway-wide (`system`, the default), IRSA, STS AssumeRole, default credential chain, or static access keys
 - **Gateway-level allowlists**: Operators can restrict which regions, guardrails, roles, and credential modes attachments may select
-- **JSONPath support**: Extract and validate specific fields within JSON payloads, with wildcards and every string inside a selected object
-- **MCP support**: Validates MCP tool calls and tool results, including Server-Sent Events (Streamable HTTP) responses
+- **JSONPath support**: Extract and validate specific fields within JSON payloads
 - **Separate request/response configuration**: Independent configuration for request and response phases
 - **Response status code selection**: Validate only responses with the configured upstream status codes, so provider error responses reach the client unchanged
 
@@ -153,7 +152,7 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `true` | Enables validation for the request flow. |
-| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression selecting the request content to validate. When it selects an object or array, every string inside it is validated. If empty, validates the entire payload as a string. See [JSONPath Support](#jsonpath-support). |
+| `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract a specific value from the request JSON payload. If empty, validates the entire payload as a string. |
 | `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with `*****` (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows the request to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
@@ -163,7 +162,7 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `false` | Enables validation for the response flow. |
-| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression selecting the response content to validate. When it selects an object or array, every string inside it is validated. For a Server-Sent Events response, it is applied to the JSON in each event. If empty, validates the entire payload as a string. See [JSONPath Support](#jsonpath-support). |
+| `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression to extract a specific value from the response JSON payload. If empty, validates the entire payload as a string. |
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
 | `applicableStatusCodes` | string | No | – | Comma-separated upstream response status codes and inclusive ranges to validate, such as `"200-299,422"`. Codes must be between `100` and `599`, and a range must not start after it ends. Responses with any other status code are passed through to the client unchanged. If not set, every response is validated. |
@@ -177,25 +176,8 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 - `$.items[0].text` - Extracts text from the first item in an array
 - `$.messages[0].content` - Extracts content from the first message in a messages array
 - `$.messages[-1].content` - Extracts content from the last message in a messages array
-- `$.items[*].text` - Extracts `text` from every item in an array (`$.items.*.text` is equivalent)
-- `$.params.arguments` - Selects an object, so every string inside it is validated
 
-When the selected value is an object or an array, every string inside it is sent to the guardrail. A path that matches nothing, or that selects only `true`, `false`, or `null`, is an extraction error, handled according to `passthroughOnError`. Numbers are validated only when selected directly.
-
-If `jsonPath` is set to an empty string (`""`), the entire payload is treated as a string and validated. If `jsonPath` is omitted, the default path for that phase is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses).
-
-#### MCP routes
-
-The default paths target OpenAI-style chat completions. An MCP `tools/call` has no `messages` and a tool result has no `choices`, so set the paths for MCP traffic:
-
-| Phase | `jsonPath` | Validates |
-|-------|------------|-----------|
-| Request | `$.params.arguments` | Every string argument of the tool call, whatever the argument names |
-| Response | `$.result.content[*].text` | The text of every content item in the tool result |
-
-MCP servers using Streamable HTTP may reply with a Server-Sent Events body (`Content-Type: text/event-stream`). The policy reads each event's `data:` JSON and applies the response `jsonPath` to it. Events the path does not match, such as progress notifications, are left unchanged.
-
-The policy runs on every message of the MCP proxy, not only `tools/call`. A JSON-RPC message the path does not match, such as `initialize`, `tools/list` or a tool result without text content, has nothing to validate and passes unchanged. The same applies to an event stream whose events are all JSON-RPC messages. A body that is not JSON-RPC, a JSON-RPC batch, or an event stream with other JSON that the path does not match is still treated as an extraction error.
+If `jsonPath` is empty or not specified, the entire payload is treated as a string and validated.
 
 **Note:**
 
@@ -459,40 +441,7 @@ awsbedrock_allowed_auth_types    = ["system", "irsa", "sts-assume-role", "defaul
 
 An attachment selecting `iam-user-access-key`, a region outside the list, or a role ARN outside the prefix is rejected at deploy time.
 
-### Example 8: MCP route
-
-Validates every tool argument and every text item of tool results, including Server-Sent Events responses:
-
-```yaml
-apiVersion: gateway.api-platform.wso2.com/v1
-kind: Mcp
-metadata:
-  name: guarded-mcp
-spec:
-  displayName: Guarded MCP
-  version: v1.0
-  context: /guarded-mcp
-  specVersion: "2025-06-18"
-  upstream:
-    url: http://mcp-server:8080/mcp
-  policies:
-    - name: aws-bedrock-guardrail
-      version: v1
-      params:
-        awsAuth:
-          authenticationType: system
-        request:
-          jsonPath: "$.params.arguments"
-        response:
-          enabled: true
-          jsonPath: "$.result.content[*].text"
-```
-
-A tool call or tool result that triggers a blocking guardrail policy returns HTTP `422`. PII that the guardrail anonymizes in a tool result is replaced with its type in braces, such as `{EMAIL}`.
-
-The policy applies to every message on the route, not only `tools/call`. Messages such as `initialize`, `tools/list` and notifications have no `params.arguments` or tool result text, so they have nothing to validate and pass unchanged, without a Bedrock call. See [MCP routes](#mcp-routes).
-
-### Example 9: Validating only successful responses
+### Example 8: Validating only successful responses
 
 An error response from the LLM provider, such as an expired credential or an invalid model, carries the provider's error rather than generated content. Setting `applicableStatusCodes` limits response validation to the listed upstream status codes, so the provider's error reaches the client unchanged:
 
@@ -515,28 +464,27 @@ With this configuration, an upstream `403` is returned to the client as is, whil
 #### Request Phase
 
 1. **Content extraction**: Extracts content using `jsonPath`, or uses the entire payload.
-2. **Guardrail evaluation**: Calls `ApplyGuardrail` once with every extracted string, using the effective region, guardrail ID, and version, and the identity resolved from `awsAuth` or the gateway-wide settings.
-3. **Violation handling**: Blocks and returns HTTP `422` when any finding has the action `BLOCKED`, such as a prompt attack, denied topic, blocked word, or a PII type configured to block. This applies even when PII was also found.
-4. **PII processing**: When every finding is `ANONYMIZED`, masks PII. With `redactPII: false`, masks PII with placeholders for later restoration. With `redactPII: true`, replaces PII with `*****` permanently.
+2. **Guardrail evaluation**: Calls `ApplyGuardrail` with the effective region, guardrail ID, and version, using the identity resolved from `awsAuth` or the gateway-wide settings.
+3. **PII processing**: With `redactPII: false`, masks PII with placeholders for later restoration. With `redactPII: true`, replaces PII with `*****` permanently.
+4. **Violation handling**: Blocks and returns HTTP `422` when Bedrock reports a violation.
 5. **Error Strategy**: Applies `passthroughOnError` behavior to decide whether to fail closed or allow traffic on Bedrock API failures.
 
 #### Response Phase
 
 1. **Status check**: When `applicableStatusCodes` is set, a response whose upstream status code is not listed is passed through unchanged and the remaining steps are skipped. A response with an unknown status code is always validated.
-2. **Content extraction**: Extracts content using `jsonPath` from a JSON body or from each event of a Server-Sent Events body, or uses the entire payload.
-3. **Guardrail evaluation**: Validates the response content through the guardrail, before any placeholder is restored.
-4. **Violation handling**: Blocks and returns HTTP `422` when any finding has the action `BLOCKED`.
-5. **PII masking**: PII that the guardrail anonymizes in the response is replaced with its type in braces, such as `{EMAIL}` (or `*****` with `redactPII: true`). This covers PII that the upstream adds, such as an MCP tool result.
-6. **PII restoration**: In masking mode, restores the request's placeholders with the original values when mappings are available from request metadata.
-7. **Error Strategy**: Applies `passthroughOnError` behavior for extraction errors and Bedrock API failures.
+2. **Content extraction**: Extracts content using `jsonPath`, or uses the entire payload.
+3. **Guardrail evaluation**: Validates response content through the guardrail.
+4. **PII restoration**: In masking mode, restores masked PII values when mappings are available from request metadata.
+5. **Violation handling**: Blocks and returns HTTP `422` on violation.
+6. **Error Strategy**: Applies `passthroughOnError` behavior for Bedrock API failures.
 
 #### Credential resolution
 
-The credentials provider is built **once**, when the policy attachment is created, and reused across requests. Role assumption therefore happens on first use and on refresh near expiry, not on every request. A configuration that cannot be used at all, such as a missing role ARN or a missing IRSA environment, rejects the attachment at deploy time. A role that cannot be assumed is only found on the first `ApplyGuardrail` call, because the role is assumed then: that request fails as a guardrail error and follows `passthroughOnError`.
+The credentials provider is built **once**, when the policy attachment is created, and reused across requests. Role assumption therefore happens on first use and on refresh near expiry, not on every request. A failure to build it — an unassumable role, a missing IRSA environment — rejects the attachment at deploy time rather than failing at request time.
 
 #### PII Handling Modes
 
-- **Masking mode (`redactPII: false`)**: In the request, PII entities are replaced with placeholders such as `EMAIL_0001`, `PHONE_0002`, restorable in the response phase. In the response, new PII is replaced with its type, such as `{EMAIL}`, and is not restored.
+- **Masking mode (`redactPII: false`)**: PII entities are replaced with placeholders such as `EMAIL_0001`, `PHONE_0002`, restorable in the response phase.
 - **Redaction mode (`redactPII: true`)**: PII entities are permanently replaced with `*****`.
 
 ## Notes
@@ -547,6 +495,47 @@ The credentials provider is built **once**, when the policy attachment is create
 - PII masking with restoration stores the mapping between original and masked values in request metadata.
 - Content modifications (PII masking) are forwarded upstream if no blocking violation occurs.
 - Request and response phases are validated independently when both are configured.
-- A guardrail intervention is masked only when every finding is `ANONYMIZED`. Any `BLOCKED` finding blocks the content, and an intervention with no finding the policy can identify is blocked.
-- Keep `showAssessment` set to `false` in production. The assessment tells the caller which filter matched, which helps an attacker tune a bypass.
 - Credential material is never written to logs. The session name, not the credentials, is what identifies the gateway in the target account's CloudTrail.
+
+## Fault reporting
+
+From v1.4, every rejection this policy makes is also reported to the gateway as a **fault**:
+a stable code and type alongside the response. A gateway that supports fault policies uses it
+for the analytics event and hands it to the API's fault policies (for example `log-message`, to
+log the failure). The status and body the client receives are the same as in v1.3. A gateway
+without fault policy support ignores the fault, and the policy behaves exactly as v1.3.
+
+A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
+It also names the intervening guardrail (`aws-bedrock-guardrail`) and records that it intervened; the
+assessment is attached only when `showAssessment` is enabled, because it can hold the blocked content.
+A rejection made because the policy could not run its check is not a verdict and carries no
+guardrail details: a request body that cannot be read is reported as `960001` (`validation`),
+because it is the caller's, and every other such failure as `960000` (`mediation`).
+
+The response phase only rejects responses that it validates: when `applicableStatusCodes` is set,
+a response whose upstream status is not listed passes through without a fault. With
+`passthroughOnError` enabled, the errors in the last three rows pass the request or response through
+instead of rejecting it, and no fault is reported. An intervention that includes a PII finding is
+masked or redacted rather than rejected, so it produces no fault.
+
+| When | Status | Code | Type |
+|------|--------|------|------|
+| Request or response: Bedrock intervenes because of the hate content filter | `422` | `906001` | `guardrail` |
+| Request or response: Bedrock intervenes because of the sexual content filter | `422` | `906002` | `guardrail` |
+| Request or response: Bedrock intervenes because of the violence content filter | `422` | `906004` | `guardrail` |
+| Request or response: Bedrock intervenes because of the insults content filter | `422` | `906005` | `guardrail` |
+| Request or response: Bedrock intervenes because of the misconduct content filter | `422` | `906006` | `guardrail` |
+| Request or response: Bedrock intervenes because of the prompt attack filter | `422` | `906008` | `guardrail` |
+| Request or response: Bedrock intervenes because of a word filter (custom words or a managed word list) | `422` | `906007` | `guardrail` |
+| Request or response: Bedrock intervenes because of a denied topic | `422` | `906301` | `guardrail` |
+| Request or response: Bedrock intervenes for any other reason | `422` | `906099` | `guardrail` |
+| Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
+| Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
+| Request or response: the AWS configuration cannot be loaded, the Bedrock call fails, or Bedrock returns an invalid or unexpected response | `422` | `960000` | `mediation` |
+
+When Bedrock reports more than one finding, a content filter decides the code ahead of a word
+filter, and a word filter ahead of a denied topic.
+
+The fault's `Description` carries the internal reason, for example
+`Violation of AWS Bedrock Guardrails detected` or `Error calling AWS Bedrock Guardrail`.
+It is passed to fault policies and analytics only, never to the client.

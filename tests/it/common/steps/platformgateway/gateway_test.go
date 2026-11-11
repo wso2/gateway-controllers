@@ -19,6 +19,7 @@
 package platformgateway
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -27,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"iter"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -411,6 +413,56 @@ func TestPolicyParameterValue(t *testing.T) {
 	require.False(t, found)
 }
 
+func TestCheckAllHealthUntilUnhealthyConvergesOnFailure(t *testing.T) {
+	var routerUnhealthy atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/ready") {
+			if routerUnhealthy.Load() {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"healthy"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	definition := &components.Definition{
+		Name: "platform-gateway", Alias: "platform-gateway",
+		Endpoints: []components.Endpoint{
+			{Name: "admin", Port: port, Scheme: "http"},
+			{Name: "envoy-admin", Port: port, Scheme: "http"},
+			{Name: "policy-admin", Port: port, Scheme: "http"},
+		},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "localhost", map[int]int{port: port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+
+	steps := &Steps{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("health-until-runner"))
+
+	go func() {
+		time.Sleep(200 * time.Millisecond)
+		routerUnhealthy.Store(true)
+	}()
+
+	require.NoError(t, steps.checkAllHealthUntilUnhealthy(ctx, "router"))
+
+	stored, ok := tcontext.Get(ctx, healthResultsKey)
+	require.True(t, ok)
+	results, ok := stored.(map[string]healthResult)
+	require.True(t, ok)
+	require.False(t, results["router"].healthy)
+}
+
 func TestHealthyStatus(t *testing.T) {
 	tests := []struct {
 		name string
@@ -694,6 +746,70 @@ func TestGatewayLazyAndAnalyticsHelpers(t *testing.T) {
 	require.True(t, analyticsEventMatchesPath("/test", "/analytics/v1.0/test"))
 }
 
+// An event matches its request path with or without a query string on either side, since gateway
+// versions differ in whether the recorded URI keeps it.
+func TestAnalyticsEventMatchesPathIgnoresQueryStrings(t *testing.T) {
+	const path = "/ctx/openai/deployments/d1/chat/completions"
+	require.True(t, analyticsEventMatchesPath(path, path))
+	require.True(t, analyticsEventMatchesPath(path+"?api-version=2024-10-21", path+"?api-version=2024-10-21"))
+	require.True(t, analyticsEventMatchesPath(path, path+"?api-version=2024-10-21"))
+	require.True(t, analyticsEventMatchesPath(path+"?api-version=2024-10-21", path))
+	require.True(t, analyticsEventMatchesPath("/openai/deployments/d1/chat/completions?x=1", path))
+
+	require.False(t, analyticsEventMatchesPath(path, "/ctx/openai/deployments/d2/chat/completions?api-version=1"))
+	require.False(t, analyticsEventMatchesPath("?x=1", path))
+	require.False(t, analyticsEventMatchesPath(path, "?x=1"))
+	require.False(t, analyticsEventMatchesPath("/completions", "/ctx/chat-completions"))
+}
+
+// A line counts only when it contains every fragment, so a message logged for many keys is counted
+// for one key alone.
+func TestLinesContainingAll(t *testing.T) {
+	logs := strings.Join([]string{
+		`time=1 level=WARN msg="deployment not found in modelMappings" deployment=stray-deployment`,
+		`time=2 level=WARN msg="deployment not found in modelMappings" deployment=other-deployment`,
+		`time=3 level=INFO msg="request served" deployment=stray-deployment`,
+		`time=4 level=WARN msg="deployment not found in modelMappings" deployment=stray-deployment`,
+		``,
+	}, "\n")
+	require.Len(t, linesContainingAll(logs, []string{"not found in modelMappings", "deployment=stray-deployment"}), 2)
+	require.Len(t, linesContainingAll(logs, []string{"not found in modelMappings"}), 3)
+	require.Len(t, linesContainingAll(logs, []string{"deployment=other-deployment"}), 1)
+	require.Empty(t, linesContainingAll(logs, []string{"not found in modelMappings", "deployment=missing"}))
+	require.Empty(t, linesContainingAll(logs, nil))
+	require.Empty(t, linesContainingAll("", []string{"anything"}))
+}
+
+// A zero count is rejected before any log is read: an unreadable log matches no fragment, so a zero
+// count would pass without checking anything.
+func TestServiceLogLinesCountRejectsZero(t *testing.T) {
+	g := &Gateway{}
+	table := analyticsTable(t, []string{"not found in modelMappings"})
+	for _, want := range []int{0, -1} {
+		err := g.serviceLogLinesCount(context.Background(), "gateway-runtime", want, table)
+		require.ErrorContains(t, err, "must be at least 1")
+	}
+}
+
+func TestLogFragmentsFromTable(t *testing.T) {
+	local := tcontext.NewLocal("runner")
+	local.Set("deployment", "stray-deployment-run1")
+	ctx := tcontext.WithLocal(context.Background(), local)
+
+	fragments, err := logFragments(ctx, analyticsTable(t, []string{"not found in modelMappings"}, []string{"deployment=${CTX:deployment}"}))
+	require.NoError(t, err)
+	require.Equal(t, []string{"not found in modelMappings", "deployment=stray-deployment-run1"}, fragments)
+
+	_, err = logFragments(ctx, nil)
+	require.Error(t, err)
+	_, err = logFragments(ctx, &godog.Table{})
+	require.Error(t, err)
+	_, err = logFragments(ctx, analyticsTable(t, []string{"  "}))
+	require.Error(t, err)
+	_, err = logFragments(ctx, analyticsTable(t, []string{"a", "b"}))
+	require.Error(t, err)
+}
+
 func TestAnalyticsHeaderValuesMatch(t *testing.T) {
 	headers := map[string][]string{
 		"X-Multi-Response":  {"first", "second"},
@@ -962,6 +1078,40 @@ func TestAnalyticsMetadataResolvesNestedPaths(t *testing.T) {
 	require.False(t, ok)
 	_, ok = traverseJSON(metadata, "apiName.jsonRpcMethod")
 	require.False(t, ok)
+}
+
+// The numeric metadata step absorbs floating-point rounding, but no real difference, and reads
+// numbers published either as JSON numbers or as numeric strings.
+func TestNumericMatches(t *testing.T) {
+	const eq, atLeast = "equal to", "at least"
+	// Variables, not constants: Go adds constants exactly, so 0.1+0.2 would be 0.3 with no rounding.
+	a, b := 0.1, 0.2
+	require.NoError(t, numericMatches("cost", a+b, eq, "0.3"))
+	require.NoError(t, numericMatches("cost", 4.2e-05, eq, "0.000042"))
+	require.NoError(t, numericMatches("cost", "0.0000420000", eq, "4.2e-5"))
+	require.NoError(t, numericMatches("cost", float64(0), eq, "0"))
+	require.NoError(t, numericMatches("tokens", float64(272001), eq, " 272001 "))
+	require.NoError(t, numericMatches("cost", float64(0), atLeast, "0"))
+	require.NoError(t, numericMatches("cost", 9.2e12, atLeast, "0"))
+
+	require.Error(t, numericMatches("cost", 0.000042, eq, "0.000043"))
+	require.Error(t, numericMatches("cost", 0.3000000006, eq, "0.3"))
+	for _, want := range []string{"Inf", "-Inf", "NaN"} {
+		require.Error(t, numericMatches("cost", float64(0), eq, want))
+		require.Error(t, numericMatches("cost", float64(0), atLeast, want))
+	}
+	require.Error(t, numericMatches("cost", 1e-12, eq, "0"))
+	require.Error(t, numericMatches("cost", -0.5, eq, "0.5"))
+	require.Error(t, numericMatches("cost", -0.143, atLeast, "0"))
+	require.Error(t, numericMatches("cost", math.Inf(1), atLeast, "0"))
+	require.Error(t, numericMatches("cost", math.NaN(), eq, "1"))
+	require.Error(t, numericMatches("cost", math.NaN(), atLeast, "0"))
+	require.Error(t, numericMatches("cost", "abc", eq, "1"))
+	require.Error(t, numericMatches("cost", nil, eq, "1"))
+	require.Error(t, numericMatches("cost", map[string]any{}, eq, "1"))
+	require.Error(t, numericMatches("cost", 1.0, eq, "one"))
+	require.Error(t, numericMatches("cost", 1.0, eq, ""))
+	require.Error(t, numericMatches("cost", 1.0, "at most", "2"))
 }
 
 func TestGatewayTemplatePathAndLiteralHelpers(t *testing.T) {
@@ -3810,4 +3960,179 @@ func TestManagementEndpointDeleteRetriesConflictsOnlyForCertificates(t *testing.
 		require.Equal(t, wantCalls, calls.Load(), "collection %s", collection)
 		require.Equal(t, collection != certificatesCollection, err != nil, "collection %s: %v", collection, err)
 	}
+}
+
+func TestRawHeaderLines(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, tcontext.Set(ctx, "cred", "YQ=="))
+	lines, err := rawHeaderLines(ctx, analyticsTable(t,
+		[]string{"authorization", "Basic ${CTX:cred}"},
+		[]string{"X-Ctl", `a\rb\nc\td\\e\x00f\xC3\xA9`},
+		[]string{"X-Empty", ""}))
+	require.NoError(t, err)
+	require.Equal(t, []string{"authorization: Basic YQ==", "X-Ctl: a\rb\nc\td\\e\x00f\u00e9", "X-Empty: "}, lines)
+
+	_, err = rawHeaderLines(ctx, nil)
+	require.ErrorContains(t, err, "is required")
+	_, err = rawHeaderLines(ctx, analyticsTable(t, []string{"A"}))
+	require.ErrorContains(t, err, "exactly two cells")
+	_, err = rawHeaderLines(ctx, analyticsTable(t, []string{" ", "v"}))
+	require.ErrorContains(t, err, "empty header name")
+	for value, want := range map[string]string{
+		`\`:    "lone backslash",
+		`\q`:   `unknown escape \q`,
+		`\x4`:  "two hex digits",
+		`\xZZ`: "two hex digits",
+	} {
+		_, err := rawHeaderLines(ctx, analyticsTable(t, []string{"A", value}))
+		require.ErrorContains(t, err, want, value)
+	}
+}
+
+func TestRawHTTPRequestWritesLinesVerbatim(t *testing.T) {
+	request := rawHTTPRequest("GET", "/ctx/v1/p", "gw.local",
+		[]string{"authorization: Basic YQ==", "Authorization: Basic Yg=="})
+	require.Equal(t,
+		"GET /ctx/v1/p HTTP/1.1\r\nHost: gw.local\r\nauthorization: Basic YQ==\r\nAuthorization: Basic Yg==\r\n"+
+			"Connection: close\r\n\r\n",
+		string(request))
+}
+
+func TestRawHTTPExchangeSendsTheBytesAndParsesTheResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	received := make(chan string, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		reader := bufio.NewReader(conn)
+		var head strings.Builder
+		for {
+			line, err := reader.ReadString('\n')
+			head.WriteString(line)
+			if err != nil || line == "\r\n" {
+				break
+			}
+		}
+		received <- head.String()
+		_, _ = conn.Write([]byte("HTTP/1.1 401 Unauthorized\r\nWww-Authenticate: Basic realm=\"R\"\r\n" +
+			"Content-Length: 5\r\n\r\nnope!"))
+	}()
+
+	request := rawHTTPRequest("GET", "/p", "gw", []string{"AUTHORIZATION: Basic YQ==", "Authorization: x"})
+	response, err := rawHTTPExchange(context.Background(), listener.Addr().String(), "GET", request)
+	require.NoError(t, err)
+	require.Equal(t, string(request), <-received)
+	require.Equal(t, 401, response.StatusCode)
+	require.Equal(t, `Basic realm="R"`, response.Headers.Get("WWW-Authenticate"))
+	require.Equal(t, "nope!", string(response.Body))
+	require.Equal(t, "GET", response.Method)
+}
+
+func TestRawHTTPExchangeReportsAConnectionClosedWithoutAResponse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_ = conn.Close()
+		}
+	}()
+	_, err = rawHTTPExchange(context.Background(), listener.Addr().String(), "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+	require.ErrorIs(t, err, errClosedWithoutResponse)
+
+	// A connection that cannot be made is not a refusal: the gateway is not there.
+	address := listener.Addr().String()
+	require.NoError(t, listener.Close())
+	_, err = rawHTTPExchange(context.Background(), address, "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+	require.Error(t, err)
+	require.NotErrorIs(t, err, errClosedWithoutResponse)
+}
+
+func TestRawHTTPExchangeTreatsAPartialResponseAsAnError(t *testing.T) {
+	for _, partial := range []string{"HTTP/1.1 401 Unauthorized\r\n", "HTTP/1.1 401 Unauthorized\r\nWww-Authenticate: Basic"} {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		require.NoError(t, err)
+		go func() {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_, _ = conn.Write([]byte(partial))
+			_ = conn.Close()
+		}()
+		_, err = rawHTTPExchange(context.Background(), listener.Addr().String(), "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+		require.Error(t, err, partial)
+		require.NotErrorIs(t, err, errClosedWithoutResponse, "a response cut off part way is not a refusal: %q", partial)
+		_ = listener.Close()
+	}
+}
+
+func TestRawHTTPExchangeStopsWhenTheContextIsCancelled(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.Close() }()
+		time.Sleep(5 * time.Second) // accept the request, then never answer within the test
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = rawHTTPExchange(ctx, listener.Addr().String(), "GET", []byte("GET / HTTP/1.1\r\n\r\n"))
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotErrorIs(t, err, errClosedWithoutResponse)
+	require.Less(t, time.Since(started), 3*time.Second, "cancelling ctx must not wait for the 30 s socket deadline")
+}
+
+func TestRawRequestRefused(t *testing.T) {
+	ctx := agentTestContext()
+	funnel := httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: time.Second}), 0, 0)
+	const closing = "by closing the connection"
+	withStatus := func(n string) (string, string) { return "with status " + n, n }
+
+	require.ErrorContains(t, rawRequestRefused(ctx, closing, ""), "no raw request was sent")
+	how, n := withStatus("401")
+	require.ErrorContains(t, rawRequestRefused(ctx, how, n), "no raw request was sent")
+
+	// The gateway closed the connection.
+	require.NoError(t, tcontext.Set(ctx, keyRawClosedWithoutResponse, true))
+	require.NoError(t, rawRequestRefused(ctx, closing, ""))
+	require.ErrorContains(t, rawRequestRefused(ctx, how, n), "closed the connection without a response")
+
+	// The gateway answered 401.
+	require.NoError(t, tcontext.Set(ctx, keyRawClosedWithoutResponse, false))
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 401, Method: "GET", URL: "http://gw/p"}))
+	require.NoError(t, rawRequestRefused(ctx, how, n))
+	require.ErrorContains(t, rawRequestRefused(ctx, closing, ""), "expected the gateway to close the connection")
+	how400, n400 := withStatus("400")
+	require.ErrorContains(t, rawRequestRefused(ctx, how400, n400), "expected the gateway to refuse the request with status 400")
+
+	// A routing 404 is not the refusal a scenario names.
+	require.NoError(t, funnel.Publish(ctx, &httpx.Response{StatusCode: 404, Method: "GET", URL: "http://gw/p"}))
+	require.Error(t, rawRequestRefused(ctx, how, n))
+
+	for _, bad := range []string{"200", "302", "500", "x"} {
+		how, n := withStatus(bad)
+		require.ErrorContains(t, rawRequestRefused(ctx, how, n), "must be a 4xx status", bad)
+	}
+}
+
+func TestClosedByPeer(t *testing.T) {
+	for _, err := range []error{io.EOF, io.ErrUnexpectedEOF, syscall.ECONNRESET, syscall.EPIPE,
+		fmt.Errorf("read: %w", syscall.ECONNRESET)} {
+		require.True(t, closedByPeer(err), err.Error())
+	}
+	require.False(t, closedByPeer(errors.New("timeout")))
 }

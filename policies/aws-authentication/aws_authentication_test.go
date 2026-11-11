@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -617,5 +618,75 @@ func TestBuildHTTPRequest_InvalidUpstreamURL(t *testing.T) {
 
 	if _, err := buildHTTPRequest(reqCtx, nil); err == nil {
 		t.Error("expected an error for an invalid upstream URL")
+	}
+}
+
+// TestSigningFailureDeclaresFault covers the fault declaration on the gateway's own
+// failures to sign: credentials it cannot resolve, and a SigV4 signature it cannot
+// produce. Only the deployment can fix a bad role ARN or an unreachable STS, so these are
+// precisely the failures a fault policy exists to notify on.
+func TestSigningFailureDeclaresFault(t *testing.T) {
+	validCreds := func(ctx context.Context) (aws.Credentials, error) {
+		return aws.Credentials{AccessKeyID: "AKIAEXAMPLE", SecretAccessKey: "secret"}, nil
+	}
+	tests := []struct {
+		name       string
+		retrieve   func(ctx context.Context) (aws.Credentials, error)
+		signErr    error
+		wantReason string
+	}{
+		{
+			name: "credentials cannot be resolved",
+			retrieve: func(ctx context.Context) (aws.Credentials, error) {
+				return aws.Credentials{}, errors.New("boom")
+			},
+			wantReason: "failed to resolve AWS credentials",
+		},
+		{
+			name:       "request cannot be signed",
+			retrieve:   validCreds,
+			signErr:    errors.New("boom"),
+			wantReason: "failed to sign AWS SigV4 request",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newTestPolicy()
+			p.retrieveCredentialsFunc = tt.retrieve
+			p.signFunc = func(ctx context.Context, creds aws.Credentials, req *http.Request, payloadHash, service, region string, signingTime time.Time) error {
+				return tt.signErr
+			}
+
+			reqCtx := newRequestBodyCtx(nil, nil)
+			action := p.OnRequestBody(context.Background(), reqCtx, nil)
+
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
+			}
+			if !resp.IsFault {
+				t.Fatalf("expected IsFault=true on a signing failure")
+			}
+			if resp.Fault == nil {
+				t.Fatalf("expected Error to be populated")
+			}
+			if resp.Fault.Code != policy.FaultCodeMediationFailed {
+				t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+			}
+			if resp.Fault.Type != policy.FaultTypeMediation {
+				t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, resp.Fault.Type)
+			}
+			if !strings.HasPrefix(resp.Fault.Description, tt.wantReason) {
+				t.Fatalf("expected Error.Description to start with %q, got %q", tt.wantReason, resp.Fault.Description)
+			}
+			// The gateway's own diagnostic must not reach the caller's body.
+			if strings.Contains(string(resp.Body), resp.Fault.Description) {
+				t.Fatalf("Description leaked into the client body: %q", resp.Fault.Description)
+			}
+			if strings.Contains(string(resp.Body), "boom") {
+				t.Fatalf("underlying error leaked into the client body: %s", resp.Body)
+			}
+		})
 	}
 }

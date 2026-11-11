@@ -537,3 +537,106 @@ func baseRRModels() []interface{} {
 		map[string]interface{}{"model": "gpt-35"},
 	}
 }
+
+// TestModelRoundRobin_RejectionsDeclareFault covers the conditions this policy refuses on, and pins
+// which code each takes.
+func TestModelRoundRobin_RejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action interface{}, wantStatus int, wantBody, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		// The client response is unchanged by the fault declaration.
+		if resp.StatusCode != wantStatus {
+			t.Fatalf("expected status %d, got %d", wantStatus, resp.StatusCode)
+		}
+		if resp.Headers["Content-Type"] != "application/json" {
+			t.Fatalf("unexpected headers: %v", resp.Headers)
+		}
+		if string(resp.Body) != wantBody {
+			t.Fatalf("expected body %s, got %s", wantBody, resp.Body)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated on a rejection")
+		}
+		if resp.Fault.Code != wantCode {
+			t.Fatalf("expected Error.Code=%q, got %q", wantCode, resp.Fault.Code)
+		}
+		if resp.Fault.Type != wantType {
+			t.Fatalf("expected Error.Type=%q, got %q", wantType, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+	}
+
+	t.Run("empty request body", func(t *testing.T) {
+		p := &ModelRoundRobinPolicy{}
+		p.params.RequestModel.Location = "payload"
+		p.params.RequestModel.Identifier = "$.model"
+		reqCtx := &policy.RequestContext{
+			SharedContext: &policy.SharedContext{
+				Metadata: map[string]interface{}{MetadataKeySelectedModel: "gpt-4"},
+			},
+			Body: nil,
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
+			`{"error":"Request body is empty."}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("request body is not JSON", func(t *testing.T) {
+		p := &ModelRoundRobinPolicy{}
+		p.params.RequestModel.Location = "payload"
+		p.params.RequestModel.Identifier = "$.model"
+		reqCtx := &policy.RequestContext{
+			SharedContext: &policy.SharedContext{
+				Metadata: map[string]interface{}{MetadataKeySelectedModel: "gpt-4"},
+			},
+			Body: &policy.Body{Content: []byte("{not json"), Present: true},
+		}
+		var v map[string]interface{}
+		parseErr := json.Unmarshal([]byte("{not json"), &v)
+		if parseErr == nil {
+			t.Fatalf("expected the test body to be invalid JSON")
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
+			`{"error":"Invalid JSON in request body: `+parseErr.Error()+`"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("model path is not in the request body", func(t *testing.T) {
+		p := &ModelRoundRobinPolicy{}
+		p.params.RequestModel.Location = "payload"
+		p.params.RequestModel.Identifier = "$.nested.model"
+		reqCtx := &policy.RequestContext{
+			SharedContext: &policy.SharedContext{
+				Metadata: map[string]interface{}{MetadataKeySelectedModel: "gpt-4"},
+			},
+			Body: &policy.Body{Content: []byte(`{"model":"test"}`), Present: true},
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), reqCtx, nil), 400,
+			`{"error":"Invalid or missing model at '$.nested.model': key not found: nested"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("all models suspended", func(t *testing.T) {
+		p := mustGetRRPolicy(t, map[string]interface{}{
+			"models": baseRRModels(),
+			"requestModel": map[string]interface{}{
+				"location":   "header",
+				"identifier": "x-model",
+			},
+		})
+		until := time.Now().Add(10 * time.Minute)
+		p.suspendedModels[suspensionKey("", "gpt-4")] = until
+		p.suspendedModels[suspensionKey("", "gpt-35")] = until
+		ctx := &policy.RequestHeaderContext{
+			SharedContext: rrSharedContext(),
+			Headers:       policy.NewHeaders(map[string][]string{"x-model": {"orig"}}),
+		}
+		assertFault(t, p.OnRequestHeaders(context.Background(), ctx, nil), 503,
+			`{"error": "All models are currently unavailable"}`, policy.FaultCodeNoModelAvailable, policy.FaultTypeMediation)
+	})
+}

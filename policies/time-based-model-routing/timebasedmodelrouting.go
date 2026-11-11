@@ -70,16 +70,16 @@ func (p *TimeBasedModelRoutingPolicy) OnRequestBody(_ context.Context, reqCtx *p
 	payload := map[string]interface{}{}
 	if p.config.RequestModel.Location == "payload" {
 		if reqCtx.Body == nil || len(reqCtx.Body.Content) == 0 {
-			return badRequest("request body must contain a JSON object")
+			return badRequest(policy.FaultCodeInvalidRequestBody, "request body must contain a JSON object")
 		}
 		var decoded interface{}
 		if err := json.Unmarshal(reqCtx.Body.Content, &decoded); err != nil {
-			return badRequest("request body contains malformed JSON")
+			return badRequest(policy.FaultCodeInvalidRequestBody, "request body contains malformed JSON")
 		}
 		var bodyOK bool
 		payload, bodyOK = decoded.(map[string]interface{})
 		if !bodyOK || payload == nil {
-			return badRequest("request body must be a JSON object")
+			return badRequest(policy.FaultCodeInvalidRequestBody, "request body must be a JSON object")
 		}
 	}
 
@@ -127,7 +127,7 @@ func (p *TimeBasedModelRoutingPolicy) applyTarget(
 	switch p.config.RequestModel.Location {
 	case "payload":
 		if err := utils.SetValueAtJSONPath(payload, identifier, selected.Model); err != nil {
-			return badRequest(fmt.Sprintf("model location '%s' is missing or invalid", identifier))
+			return badRequest(policy.FaultCodeInvalidRequestBody, fmt.Sprintf("model location '%s' is missing or invalid", identifier))
 		}
 		updated, err := json.Marshal(payload)
 		if err != nil {
@@ -135,6 +135,14 @@ func (p *TimeBasedModelRoutingPolicy) applyTarget(
 				StatusCode: 500,
 				Headers:    map[string]string{"Content-Type": "application/json"},
 				Body:       []byte(`{"error":"failed to prepare routed request"}`),
+				IsFault:    true,
+				Fault: &policy.FaultDetails{
+					Code:        policy.FaultCodeMediationFailed,
+					Type:        policy.FaultTypeMediation,
+					Direction:   policy.DirectionRequest,
+					Message:     "failed to prepare routed request",
+					Description: err.Error(),
+				},
 			}
 		}
 		mods.Body = updated
@@ -143,13 +151,13 @@ func (p *TimeBasedModelRoutingPolicy) applyTarget(
 	case "queryParam":
 		path, ok := rewriteQueryParameter(reqCtx.Path, identifier, selected.Model)
 		if !ok {
-			return badRequest(fmt.Sprintf("request path could not be rewritten for model query parameter '%s'", identifier))
+			return badRequest(policy.FaultCodeInvalidRequestURI, fmt.Sprintf("request path could not be rewritten for model query parameter '%s'", identifier))
 		}
 		mods.Path = &path
 	case "pathParam":
 		path, ok := rewritePathParameter(reqCtx.Path, p.config.RequestModel.PathExpression, p.config.RequestModel.PathModelGroup, selected.Model)
 		if !ok {
-			return badRequest(fmt.Sprintf("model path expression '%s' did not match the request", identifier))
+			return badRequest(policy.FaultCodeInvalidRequestURI, fmt.Sprintf("model path expression '%s' did not match the request", identifier))
 		}
 		mods.Path = &path
 	}
@@ -175,12 +183,21 @@ func (p *TimeBasedModelRoutingPolicy) applyTarget(
 	return mods
 }
 
-func badRequest(message string) policy.ImmediateResponse {
+// badRequest rejects a request the caller got wrong. code names what was wrong with it:
+// FaultCodeInvalidRequestBody for the body, FaultCodeInvalidRequestURI for the path or query.
+func badRequest(code, message string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{"error": message})
 	return policy.ImmediateResponse{
 		StatusCode: 400,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+		},
 	}
 }
 

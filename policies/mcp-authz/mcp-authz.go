@@ -55,6 +55,19 @@ const (
 	ErrorInsufficientScope = "insufficient_scope"
 )
 
+// apimErrorFor maps the RFC 6750 Bearer error code this policy already chose onto the
+// fault code and type that describe the same condition.
+func apimErrorFor(bearerErrorCode string) (code, errorType string) {
+	switch bearerErrorCode {
+	case ErrorInvalidToken:
+		return policy.FaultCodeAuthMissingCredentials, policy.FaultTypeAuthentication
+	case ErrorInsufficientScope:
+		return policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization
+	default: // ErrorInvalidRequest
+		return policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation
+	}
+}
+
 // MCPRequest represents the JSON-RPC MCP request structure
 type MCPRequest struct {
 	Method string           `json:"method"`
@@ -487,16 +500,14 @@ func (p *McpAuthzPolicy) governFromMirroredHeaders(
 	// legacy path lets through, so a modern request without one is malformed.
 	if !facts.HasMethod() {
 		slog.Debug("MCP Authorization Policy: Rejecting a modern request that mirrored no method")
-		return p.handleAuthFailure(reqCtx, http.StatusBadRequest, ErrorInvalidRequest,
-			headerMcpMethod+" header is required", nil)
+		return p.handleHeaderFailure(reqCtx, headerMcpMethod+" header is required")
 	}
 	// Mcp-Name is required on the three capability methods; an undecodable one counts as missing.
 	// Left in, the empty name would match no capability rule, "*" included.
 	if facts.MissingRequiredName() {
 		slog.Debug("MCP Authorization Policy: Rejecting a modern request that mirrored no capability name",
 			"method", facts.Method)
-		return p.handleAuthFailure(reqCtx, http.StatusBadRequest, ErrorInvalidRequest,
-			headerMcpName+" header is required for "+facts.Method, nil)
+		return p.handleHeaderFailure(reqCtx, headerMcpName+" header is required for "+facts.Method)
 	}
 	return p.applyRules(reqCtx, facts)
 }
@@ -705,11 +716,30 @@ func (p *McpAuthzPolicy) handleAuthFailure(reqCtx *policy.RequestHeaderContext, 
 	}
 	bodyBytes, _ := json.Marshal(errResponse)
 
+	code, errorType := apimErrorFor(errorCode)
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       bodyBytes,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: policy.DirectionRequest,
+			// errorMessage already goes to the client as the body message.
+			Message: errorMessage,
+		},
 	}
+}
+
+// handleHeaderFailure rejects a request whose mirrored MCP header is missing. The client gets
+// exactly the invalid_request response handleAuthFailure builds; only the fault names the header,
+// not the body, as what could not be used.
+func (p *McpAuthzPolicy) handleHeaderFailure(reqCtx *policy.RequestHeaderContext, errorMessage string) policy.ImmediateResponse {
+	resp := p.handleAuthFailure(reqCtx, http.StatusBadRequest, ErrorInvalidRequest, errorMessage, nil)
+	resp.Fault.Code = policy.FaultCodeInvalidRequestHeader
+	resp.Fault.Type = policy.FaultTypeValidation
+	return resp
 }
 
 // getAttributeTypeFromMethod extracts the attribute type from the MCP method

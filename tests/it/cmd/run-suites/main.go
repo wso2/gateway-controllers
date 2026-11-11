@@ -102,7 +102,7 @@ func run() int {
 			continue
 		}
 		for _, block := range blocks {
-			name := displayName(policy, block.Name)
+			name := jobName(r.items, policy, block.Name)
 			r.items[name] = item{policy: policy, block: block.Name}
 			jobs = append(jobs, runsuites.Job{Name: name, Priority: block.Runners})
 		}
@@ -235,10 +235,26 @@ func (r *runner) say(format string, args ...any) {
 // displayName names a block in the output: the block's own name when it begins with the policy's,
 // otherwise the policy and the block.
 func displayName(policy, block string) string {
-	if block == policy || strings.HasPrefix(block, policy+"/") || strings.HasPrefix(block, policy+"-") {
+	if flat := strings.ReplaceAll(policy, "/", "-"); block == policy || strings.HasPrefix(block, policy+"/") ||
+		strings.HasPrefix(block, policy+"-") || block == flat || strings.HasPrefix(block, flat+"-") {
 		return block
 	}
 	return policy + "/" + block
+}
+
+// jobName names a block's job. It is the display name unless another suite's block already took it,
+// and then the policy and the block, which is unique because block names are unique within a suite.
+// Two blocks never share a job, so a failure report always names the block that failed.
+func jobName(taken map[string]item, policy, block string) string {
+	if name := displayName(policy, block); !hasItem(taken, name) {
+		return name
+	}
+	return policy + "/" + block
+}
+
+func hasItem(items map[string]item, name string) bool {
+	_, ok := items[name]
+	return ok
 }
 
 func splitList(value string) []string {

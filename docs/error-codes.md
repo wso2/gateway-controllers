@@ -51,27 +51,32 @@ A literal is unverifiable at review time and drifts silently when the vocabulary
 constants are the single source; if the one you need is missing, add it there rather than
 inventing a number locally.
 
-### The two codes most policies need
+### The shared policy codes
 
-Nearly every policy can hit these two, so they are shared rather than allocated per policy:
+Many policies can hit these, so they are shared rather than allocated per policy:
 
-| Constant | Use when |
-|---|---|
-| `policy.FaultCodeMediationFailed` | **The policy could not do its job.** A transformation that failed, a credential it could not mint, a rewrite it could not apply. The failure is the gateway's. |
-| `policy.FaultCodeInvalidRequestBody` | **The caller's payload could not be read.** Malformed JSON, an envelope that is not one, a body whose shape the configuration does not fit. The failure is the caller's. |
+| Code | Constant | Use when |
+|---|---|---|
+| `960000` | `policy.FaultCodeMediationFailed` | **The policy could not do its job.** A transformation that failed, a credential it could not mint, a rewrite it could not apply. The failure is the gateway's. Type `Mediation`. |
+| `960001` | `policy.FaultCodeInvalidRequestBody` | **The caller's payload could not be read.** Malformed JSON, an envelope that is not one, a body whose shape the configuration does not fit. The failure is the caller's. Type `Validation`. |
+| `960002` | `policy.FaultCodeProviderStreamFailed` | **A provider ended a streamed response with a failure** after the response began: an error event, an exception frame. Type `Mediation`, direction `Response`. |
+| `960003` | `policy.FaultCodeNoModelAvailable` | **A model-routing policy has no model left to route to** — every configured model suspended or excluded, so the request never reached a provider. Type `Mediation`, direction `Request`. |
+| `960004` | `policy.FaultCodeInvalidRequestHeader` | **A request header the policy needed is missing, malformed, or contradicts the body.** The failure is the caller's. Type `Validation`, direction `Request`. |
+| `960005` | `policy.FaultCodeInvalidRequestURI` | **The request path or query string could not be used** — a query string that does not parse, a path that does not match the shape the policy rewrites. The failure is the caller's. Type `Validation`, direction `Request`. |
 
-Do not allocate a per-policy code for either. `FaultDetails.Policy` already carries *which*
+Do not allocate a per-policy code for any of these. `FaultDetails.Policy` already carries *which*
 policy failed — the gateway fills it in and it reaches the analytics event — so a code that
 encodes the policy name a second time tells a reader nothing new and costs a registry entry to
 keep straight.
 
 ### Codes for a specific condition
 
-Where the condition is genuinely the policy's own and the policy name does not already say it —
-no model available to route to, a provider's stream breaking mid-response — use the constant for
-that condition if one exists (`policy.FaultCodeUpstreamUnavailable`,
-`policy.FaultCodeUpstreamGeneric`, the auth and throttling codes, the guardrail block), and add
-one to the SDK if it does not.
+Where the condition is genuinely the policy's own and the policy name does not already say it,
+use the constant for that condition if one exists (the shared codes above, the auth and
+throttling codes, the guardrail block), and add one to the SDK if it does not. The
+`policy.FaultCodeUpstream*` codes are the gateway's own, for the router failing to proxy a
+request; a policy does not use them — no model left to route to is `FaultCodeNoModelAvailable`,
+and a provider's stream breaking mid-response is `FaultCodeProviderStreamFailed`.
 
 ## 3. Code ranges, and why the number matters
 
@@ -84,7 +89,7 @@ the wrong range files the rejection as the wrong kind of failure.
 | `900800`–`900899` | throttling | `policy.FaultCodeThrottled*` |
 | `101500`–`101599`, `303001` | upstream / target | `policy.FaultCodeUpstream*` |
 | `906000`–`906399` | guardrail | `policy.GuardrailCode*` — one block, one range test |
-| `960000`–`964999` | **shipped policies** — `other` | `FaultCodeMediationFailed`, `FaultCodeInvalidRequestBody`, plus any specific ones |
+| `960000`–`964999` | **shipped policies** — `other` | `FaultCodeMediationFailed`, `FaultCodeInvalidRequestBody`, `FaultCodeProviderStreamFailed`, `FaultCodeNoModelAvailable`, `FaultCodeInvalidRequestHeader`, `FaultCodeInvalidRequestURI` (`960000`–`960005`), plus any specific ones |
 | `965000`–`969999` | **reserved for your own policies** — `other` | yours to allocate; nothing shipped will ever take a number here |
 
 Classifying as `other` is the honest answer for a condition the taxonomy has no category for —

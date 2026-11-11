@@ -16,16 +16,53 @@
  * under the License.
  */
 
-// Package steps holds the step definitions only the api-key-auth policy's scenarios need. The shared
-// steps in tests/it/common/steps are bound before these, so search them first and do not repeat
-// one here.
+// Package steps holds the step definitions only the api-key-auth policy's scenarios need. The
+// shared steps in tests/it/common/steps are bound before these, so search them first and do not
+// repeat one here.
 package steps
 
 import (
+	"context"
+	"time"
+
 	"github.com/cucumber/godog"
 
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
+	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
+
+	sharedsteps "github.com/wso2/gateway-controllers/tests/it/common/steps"
 )
 
+const requestTimeout = 30 * time.Second
+
+type requestBase interface {
+	GatewayURL(path string) (string, error)
+	ScenarioHeaders(ctx context.Context) map[string]string
+	RequestHost(ctx context.Context) string
+}
+
+type Steps struct {
+	base   requestBase
+	topo   *frameworkruntime.Topology
+	funnel *httpx.Funnel
+
+	controlPlane controlPlane
+}
+
+func newSteps(base requestBase, topo *frameworkruntime.Topology) *Steps {
+	client := httpx.NewClient(httpx.Options{Timeout: requestTimeout, MaxRetries: 3, RetryDelay: 2 * time.Second})
+	return &Steps{
+		base:   base,
+		topo:   topo,
+		funnel: httpx.NewFunnel(client, 3, 2*time.Second),
+	}
+}
+
 // Register binds the policy's own steps to the scenario.
-func Register(_ *godog.ScenarioContext, _ *frameworkruntime.Topology) {}
+func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, topo *frameworkruntime.Topology) {
+	s := newSteps(base, topo)
+	s.registerDataPlane(sc)
+	s.registerBackgroundTraffic(sc)
+	s.registerProcessSignals(sc)
+	s.registerControlPlane(sc)
+}

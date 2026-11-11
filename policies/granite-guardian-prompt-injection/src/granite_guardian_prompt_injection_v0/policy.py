@@ -30,7 +30,17 @@ from apip_sdk_core import (
     UpstreamRequestModifications,
 )
 
+# The fault contract, when the gateway's SDK has it. The Python SDK is the one the gateway
+# runtime ships, not one this policy pins, so on a gateway that predates the contract these
+# names do not exist; the rejections then go out exactly as before, with no fault fields.
+try:
+    from apip_sdk_core import FaultCode, FaultDetails, FaultType, GuardrailCode, GuardrailDetails
+except ImportError:  # pragma: no cover - exercised on gateways without the fault contract
+    FaultDetails = None
+
 LOGGER = logging.getLogger(__name__)
+
+_GUARDRAIL_NAME = "granite-guardian-prompt-injection"
 
 _DEFAULT_RISKS: list[str] = ["jailbreak", "prompt_injection"]
 _DEFAULT_JSON_PATH = "$.messages[-1].content"
@@ -100,6 +110,7 @@ class GraniteGuardianPromptInjectionPolicy(RequestPolicy):
                         "type": "GRANITE_GUARDIAN_PROMPT_INJECTION",
                         "message": {"action": "SERVICE_UNAVAILABLE", "actionReason": "Guardrail service unavailable."},
                     }).encode(),
+                    **_service_unavailable_fault(risk_name),
                 )
 
             if blocked:
@@ -115,6 +126,7 @@ class GraniteGuardianPromptInjectionPolicy(RequestPolicy):
                     status_code=req_params.block_status_code,
                     headers={"content-type": "application/json"},
                     body=json.dumps({"type": "GRANITE_GUARDIAN_PROMPT_INJECTION", "message": msg}).encode(),
+                    **_intervention_fault(risk_name, msg.get("assessments")),
                 )
 
         return _PASSTHROUGH
@@ -181,6 +193,46 @@ class GraniteGuardianPromptInjectionPolicy(RequestPolicy):
         if confidence is not None:
             assessment["confidence"] = round(confidence, 4)
         return blocked, assessment
+
+
+def _intervention_fault(risk_name: str, assessments: dict | None) -> dict[str, Any]:
+    """The fault fields for a blocked prompt; empty on an SDK without the fault contract."""
+    if FaultDetails is None:
+        return {}
+    return {
+        "is_fault": True,
+        "fault": FaultDetails(
+            code=GuardrailCode.PROMPT_INJECTION,
+            type=FaultType.GUARDRAIL,
+            direction="Request",
+            message="Prompt injection or jailbreak attempt detected.",
+            description=f"risk {risk_name} detected",
+            guardrail=GuardrailDetails(
+                intervening_guardrail=_GUARDRAIL_NAME,
+                action_reason="Prompt injection or jailbreak attempt detected.",
+                # Only where the operator opted in through showAssessment, as in the body.
+                assessments=assessments,
+            ),
+        ),
+    }
+
+
+def _service_unavailable_fault(risk_name: str) -> dict[str, Any]:
+    """The fault fields when the guardian service could not be reached; empty on an SDK
+    without the fault contract. Not a guardrail verdict: the gateway failed to reach its own
+    dependency."""
+    if FaultDetails is None:
+        return {}
+    return {
+        "is_fault": True,
+        "fault": FaultDetails(
+            code=FaultCode.MEDIATION_FAILED,
+            type=FaultType.MEDIATION,
+            direction="Request",
+            message="Guardrail service unavailable.",
+            description=f"granite-guardian call failed while checking risk {risk_name}",
+        ),
+    }
 
 
 def get_policy(metadata, params):

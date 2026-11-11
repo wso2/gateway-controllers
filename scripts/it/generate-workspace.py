@@ -23,7 +23,11 @@ GO_VERSION_RE = re.compile(r"^go\s+(\S+)\s*$", re.MULTILINE)
 
 
 def suite_names(repo_root):
-    return sorted(path.parent.parent.name for path in (Path(repo_root) / "policies").glob("*/it/go.mod"))
+    """Suite ids: <name>, and <name>/v<N> for a major version released beside v1."""
+    policies = Path(repo_root) / "policies"
+    found = [path.parent.parent for path in policies.glob("*/it/go.mod")]
+    found += [path.parent.parent for path in policies.glob("*/v[0-9]*/it/go.mod")]
+    return sorted(path.relative_to(policies).as_posix() for path in found)
 
 
 def render(repo_root):

@@ -1,5 +1,5 @@
 name: typesafe-jev-mcp-tool-result-screening
-version: v0.8.0
+version: v0.9.0
 displayName: TypeSafe Jev MCP Tool Result Screening
 description: |
   Screens the results of MCP tools/call requests using TypeSafe AI's Jev

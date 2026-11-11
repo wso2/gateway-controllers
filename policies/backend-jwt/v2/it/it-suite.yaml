@@ -1,0 +1,52 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# The integration suite of the backend-jwt v2 policy. Feature paths are relative to this directory.
+# Give a runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release
+# newer than the oldest one tested.
+
+suite: backend-jwt-v2
+
+defaults:
+  parallel: 1
+  components:
+    platform-gateway:
+      db: sqlite
+  timeouts:
+    boot: 5m
+    propagation: 60s
+
+# Both a gateway signing key and a policy-level key are configured, so the scenarios verify the
+# backend JWT against either public key (resources/keys/signing-keys.jwks.json). The caller tokens
+# are signed by the scenarios themselves, trusted through the suite-caller-key key manager. The
+# signing choice and the claim types do not depend on the database, so one engine runs.
+blocks:
+  - name: backend-jwt-v2-claim-types
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/policy-signing-key.toml
+      - name: testbench
+    wiring:
+      platform-gateway:
+        signingKeys: true
+    runners:
+      - name: backend-jwt-v2-claim-types
+        features:
+          - features/backend_jwt_claim_types.feature

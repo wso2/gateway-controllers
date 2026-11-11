@@ -303,7 +303,7 @@ func (p *InterceptorServicePolicy) OnRequestBody(ctx context.Context, reqCtx *po
 		if p.requestCfg.PassthroughOnError {
 			return policy.UpstreamRequestModifications{}
 		}
-		return interceptorErrorImmediate(err)
+		return interceptorErrorImmediate(err, policy.DirectionRequest)
 	}
 
 	if reply.InterceptorContext != nil && reqCtx.SharedContext != nil {
@@ -355,7 +355,7 @@ func (p *InterceptorServicePolicy) OnResponseBody(ctx context.Context, respCtx *
 		if p.responseCfg.PassthroughOnError {
 			return policy.DownstreamResponseModifications{}
 		}
-		return interceptorErrorImmediate(err)
+		return interceptorErrorImmediate(err, policy.DirectionResponse)
 	}
 
 	mods := policy.DownstreamResponseModifications{
@@ -520,11 +520,21 @@ func buildUpstreamModifications(reply *interceptorReply) policy.UpstreamRequestM
 	return mods
 }
 
-func interceptorErrorImmediate(err error) policy.ImmediateResponse {
+func interceptorErrorImmediate(err error, direction string) policy.ImmediateResponse {
 	slog.Error("InterceptorService: returning 500 to client", "error", err)
 	return policy.ImmediateResponse{
 		StatusCode: interceptorErrorStatus,
 		Headers:    map[string]string{"Content-Type": contentTypeJSON},
 		Body:       []byte(interceptorErrorBody),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: direction,
+			Message:   "Interceptor service unavailable",
+			// err names the gateway's own connectivity problem; the renderer withholds
+			// Description from the client body.
+			Description: err.Error(),
+		},
 	}
 }

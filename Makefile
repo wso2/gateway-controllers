@@ -27,7 +27,10 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # Policy integration tests. Each policy owns a suite in policies/<name>/it, a Go module of its own,
 # and the targets below run those suites. They need Docker and run against a released gateway image:
 #   make it POLICIES=time-based-model-routing GATEWAY_VERSION=1.2.0
-# POLICIES is a comma-separated list and defaults to every policy that has a suite. DB limits the run
+# POLICIES is a comma-separated list and defaults to every policy that has a suite. A major version
+# released beside v1 has its suite in policies/<name>/v<N>/it and is selected as <name>/v<N>:
+#   make it POLICIES=backend-jwt/v2 GATEWAY_VERSION=1.2.0
+# DB limits the run
 # to one database (sqlite, postgres or sqlserver); GATEWAY_HOST replaces the image repository prefix.
 # One run builds the gateway once, on the base images of GATEWAY_VERSION, and every selected suite
 # boots that build. It carries every policy of the repository; GATEWAY_POLICIES, a comma-separated
@@ -45,7 +48,7 @@ endif
 IT_TIMELINE ?=
 comma := ,
 space := $(subst ,, )
-IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml)))
+IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml policies/*/v*/it/it-suite.yaml)))
 IT_STANDARDS_IMPORTS = github.com/wso2/gateway-controllers/tests/it/
 it it-unit it-standards: export GOWORK = $(abspath tests/it/it.work)
 it it-unit it-standards: it-workspace

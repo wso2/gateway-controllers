@@ -1,0 +1,12 @@
+{
+  "gpt-4o-mini": {
+    "provider": "openai",
+    "input_cost_per_token": 0.00000015,
+    "output_cost_per_token": 0.0000006
+  },
+  "anthropic/claude-opus-4-5": {
+    "provider": "anthropic",
+    "input_cost_per_token": 0.000005,
+    "output_cost_per_token": 0.000025
+  }
+}

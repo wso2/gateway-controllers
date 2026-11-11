@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       policies:
-        description: "Comma-separated policies to test, or 'all' for every policy with integration tests"
+        description: "Comma-separated policies to test (a major version beside v1 is <name>/v<N>, e.g. backend-jwt/v2), or 'all' for every policy with integration tests"
         required: true
         default: all
       block_parallel:
@@ -73,10 +73,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.10'
           cache-dependency-path: |
             gateway-controllers/tests/it/go.sum
             gateway-controllers/policies/*/it/go.sum
+            gateway-controllers/policies/*/v*/it/go.sum
 
       - name: Check the shared steps and the selected policies' suites against the framework standards
         working-directory: gateway-controllers
@@ -109,10 +110,11 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
-          go-version: '1.26.5'
+          go-version: '1.26.10'
           cache-dependency-path: |
             gateway-controllers/tests/it/go.sum
             gateway-controllers/policies/*/it/go.sum
+            gateway-controllers/policies/*/v*/it/go.sum
 
       # The suite's database matrix boots several short-lived containers and
       # published ports. Under concurrent connection churn, the default

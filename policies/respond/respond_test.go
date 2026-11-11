@@ -3,6 +3,7 @@ package respond
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -36,6 +37,19 @@ func assertConfigError(t *testing.T, resp policy.ImmediateResponse) {
 	}
 	if payload["message"] == "" {
 		t.Fatalf("expected non-empty config error message")
+	}
+	// A misconfigured policy refuses every request, so the fault policies should see it.
+	if !resp.IsFault {
+		t.Fatalf("expected IsFault=true on a configuration error")
+	}
+	if resp.Fault == nil {
+		t.Fatalf("expected Error to be populated on a configuration error")
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+	}
+	if resp.Fault.Type != policy.FaultTypeConfiguration {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeConfiguration, resp.Fault.Type)
 	}
 }
 
@@ -167,6 +181,39 @@ func TestOnRequestHeadersHeaderObjectValidation(t *testing.T) {
 				"headers": tt.headers,
 			}))
 			assertConfigError(t, resp)
+		})
+	}
+}
+
+// A configured response is a deliberate end to the request, whatever status the operator
+// chose. This policy therefore describes nothing: it has no failure to account for.
+//
+// It does not declare a fault either, at any status. A configured 404 or 503 is the answer
+// the operator asked for, and this policy has no grounds for overruling that — which is
+// exactly what an explicit declaration lets it avoid. A status rule could not: it would
+// report every canned 404 as a failure and leave the operator narrowing it back out with
+// `executionCondition: 'fault.Status < 500'`.
+//
+// What must NOT happen is this policy inventing a description for a response the operator
+// chose, which is what the assertion below still guards.
+func TestConfiguredResponseIsNotDescribed(t *testing.T) {
+	for _, status := range []int{200, 404, 418, 503} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			p := &RespondPolicy{}
+			action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{}, map[string]interface{}{
+				"statusCode": float64(status),
+				"body":       "configured body",
+			})
+			resp := mustImmediateResponse(t, action)
+			if resp.StatusCode != status {
+				t.Fatalf("expected status %d, got %d", status, resp.StatusCode)
+			}
+			if resp.IsFault {
+				t.Fatalf("a configured %d response must not be a fault", status)
+			}
+			if resp.Fault != nil {
+				t.Fatalf("a configured %d response must not describe an error", status)
+			}
 		})
 	}
 }

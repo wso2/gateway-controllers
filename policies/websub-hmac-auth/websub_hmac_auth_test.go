@@ -24,6 +24,7 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/hex"
+	"encoding/json"
 	"testing"
 
 	"github.com/wso2/api-platform/common/webhooksecret"
@@ -650,6 +651,119 @@ func TestParseSignatureHeader(t *testing.T) {
 			}
 			if digest != tt.wantDigest {
 				t.Errorf("digest: got %q, want %q", digest, tt.wantDigest)
+			}
+		})
+	}
+}
+
+// TestNoSecretsDeclaresConfigurationFault checks that an API with no webhook secrets is an
+// operator configuration fault, not a caller authentication failure. The body is unchanged.
+func TestNoSecretsDeclaresConfigurationFault(t *testing.T) {
+	setupStore(t, nil)
+	p := &WebSubHMACAuthPolicy{algorithm: algorithmSHA256, signatureHeader: defaultSignatureHeader}
+	ctx := newRequestBodyCtx(map[string][]string{defaultSignatureHeader: {"sha256=deadbeef"}}, []byte(`{}`))
+
+	resp, ok := p.OnRequestBody(context.Background(), ctx, nil).(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse")
+	}
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected a fault, got IsFault=%v Fault=%v", resp.IsFault, resp.Fault)
+	}
+	if resp.Fault.Code != policy.FaultCodeMediationFailed || resp.Fault.Type != policy.FaultTypeConfiguration {
+		t.Fatalf("fault = %s/%s, want %s/%s", resp.Fault.Code, resp.Fault.Type, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
+	}
+	if want := `{"error":"Unauthorized","message":"no webhook secrets configured for this API"}`; string(resp.Body) != want {
+		t.Fatalf("body = %s, want %s", resp.Body, want)
+	}
+}
+
+// TestRejectionDeclaresFault pins the fault declaration and the code chosen per rejection
+func TestRejectionDeclaresFault(t *testing.T) {
+	setupStore(t, map[string]string{"key1": "my-secret-key"})
+	payload := []byte(`{"topic":"https://example.com/events"}`)
+
+	newPolicy := func() *WebSubHMACAuthPolicy {
+		return &WebSubHMACAuthPolicy{
+			algorithm:       algorithmSHA256,
+			signatureHeader: defaultSignatureHeader,
+		}
+	}
+
+	tests := []struct {
+		name        string
+		run         func(*WebSubHMACAuthPolicy) interface{}
+		wantCode    string
+		wantMessage string
+	}{
+		{
+			name: "header phase, no signature header",
+			run: func(p *WebSubHMACAuthPolicy) interface{} {
+				return p.OnRequestHeaders(context.Background(), newRequestHeaderCtx(map[string][]string{}), nil)
+			},
+			wantCode:    policy.FaultCodeAuthMissingCredentials,
+			wantMessage: "missing signature header: " + defaultSignatureHeader,
+		},
+		{
+			name: "body phase, no signature header",
+			run: func(p *WebSubHMACAuthPolicy) interface{} {
+				return p.OnRequestBody(context.Background(), newRequestBodyCtx(map[string][]string{}, payload), nil)
+			},
+			wantCode:    policy.FaultCodeAuthMissingCredentials,
+			wantMessage: "missing signature header: " + defaultSignatureHeader,
+		},
+		{
+			name: "malformed signature header",
+			run: func(p *WebSubHMACAuthPolicy) interface{} {
+				ctx := newRequestBodyCtx(map[string][]string{defaultSignatureHeader: {"garbage"}}, payload)
+				return p.OnRequestBody(context.Background(), ctx, nil)
+			},
+			wantCode:    policy.FaultCodeAuthInvalidCredentials,
+			wantMessage: "malformed signature header",
+		},
+		{
+			name: "signature does not match",
+			run: func(p *WebSubHMACAuthPolicy) interface{} {
+				ctx := newRequestBodyCtx(map[string][]string{defaultSignatureHeader: {"sha256=deadbeef"}}, payload)
+				return p.OnRequestBody(context.Background(), ctx, nil)
+			},
+			wantCode:    policy.FaultCodeAuthInvalidCredentials,
+			wantMessage: "invalid HMAC signature",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			action := tt.run(newPolicy())
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
+			}
+			if !resp.IsFault {
+				t.Fatalf("expected IsFault=true on an auth rejection")
+			}
+			if resp.Fault == nil {
+				t.Fatalf("expected Error to be populated on an auth rejection")
+			}
+			if resp.Fault.Code != tt.wantCode {
+				t.Fatalf("expected Error.Code=%q, got %q", tt.wantCode, resp.Fault.Code)
+			}
+			if resp.Fault.Type != policy.FaultTypeAuthentication {
+				t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+			}
+			if resp.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+			}
+			if resp.Fault.Message != tt.wantMessage {
+				t.Fatalf("expected Error.Message=%q, got %q", tt.wantMessage, resp.Fault.Message)
+			}
+			// The body the client receives is unchanged by the fault declaration.
+			var body map[string]string
+			if err := json.Unmarshal(resp.Body, &body); err != nil {
+				t.Fatalf("response body is not JSON: %v", err)
+			}
+			if body["error"] != "Unauthorized" || body["message"] != tt.wantMessage {
+				t.Fatalf("body = %s, want error %q and message %q", resp.Body, "Unauthorized", tt.wantMessage)
 			}
 		})
 	}

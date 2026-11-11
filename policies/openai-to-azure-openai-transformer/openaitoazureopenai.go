@@ -86,7 +86,8 @@ func (p *TranslatorPolicy) OnRequestBody(
 
 	deployment, err := p.resolveDeployment(reqCtx)
 	if err != nil {
-		return errResponse(400, err.Error())
+		return errResponse(400, err.Error(),
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 
 	newPath := buildAzurePath(deployment, p.params.PathSuffix, p.params.APIVersion)
@@ -234,11 +235,26 @@ func optionalString(params map[string]interface{}, key string) (string, error) {
 	return strings.TrimSpace(v), nil
 }
 
-func errResponse(statusCode int, message string) policy.ImmediateResponse {
+// errResponse refuses the exchange and describes why.
+//
+// direction states which side was refused: DirectionRequest when the caller's payload could
+// not be read or converted, DirectionResponse when the provider's could not be translated
+// back. Those are operationally different events that share nothing but this function, and
+// only the caller knows which it is — which is why it is a parameter rather than inferred
+// from the status.
+func errResponse(statusCode int, message, code, direction, errorType string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{"error": message})
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: direction,
+			// message already goes to the client as the body's error text.
+			Message: message,
+		},
 	}
 }

@@ -50,3 +50,24 @@ blocks:
         tags: "gateway-version>=1.2.0"
         features:
           - features/jwt_auth_scope_claim_rules.feature
+
+  # The application identity jwt-auth sets, and the policies that read it. Redis backs
+  # semantic-cache.
+  - name: jwt-auth-application-identity
+    parallel: 2
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/application-identity.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      - name: jwt-auth-application-subscriptions
+        features:
+          - features/jwt_auth_application_subscriptions.feature
+      - name: jwt-auth-application-identity-policies
+        tags: "~@known-issue"
+        features:
+          - features/jwt_auth_application_identity_policies.feature

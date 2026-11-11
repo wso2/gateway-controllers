@@ -834,3 +834,80 @@ func TestTransformToRatelimitParams_ConsumerBased_True(t *testing.T) {
 		t.Errorf("Expected second entry fallback 'default', got %v", second["fallback"])
 	}
 }
+
+// stubThrottlingDelegate is a delegate stub whose request-header phase rejects with a
+// fixed action, standing in for an advanced-ratelimit delegate whose quota is exhausted.
+type stubThrottlingDelegate struct {
+	stubChunkPolicer
+	onRequestHeadersAction policy.RequestHeaderAction
+}
+
+func (s *stubThrottlingDelegate) OnRequestHeaders(context.Context, *policy.RequestHeaderContext, map[string]interface{}) policy.RequestHeaderAction {
+	return s.onRequestHeadersAction
+}
+
+// TestDelegateFaultDeclarationIsPassedThrough covers what this policy contributes to the
+// fault contract: nothing, deliberately. It returns the advanced-ratelimit delegate's
+// action unchanged, so the delegate's IsFault and Fault reach the gateway untouched.
+//
+// The test exists because the alternative — rebuilding the response field-by-field to add
+// or reshape something — is the mistake that silently drops both fields, and it is not
+// visible from reading this policy alone.
+func TestDelegateFaultDeclarationIsPassedThrough(t *testing.T) {
+	const providerName = "fault-passthrough-provider"
+	const templateHandle = "fault-passthrough-template"
+	store := policy.GetLazyResourceStoreInstance()
+	template := &policy.LazyResource{
+		ID:           templateHandle,
+		ResourceType: ResourceTypeLlmProviderTemplate,
+		Resource:     map[string]interface{}{"spec": map[string]interface{}{}},
+	}
+	for _, r := range []*policy.LazyResource{
+		{
+			ID:           providerName,
+			ResourceType: ResourceTypeProviderTemplateMapping,
+			Resource:     map[string]interface{}{"template_handle": templateHandle},
+		},
+		template,
+	} {
+		if err := store.StoreResource(r); err != nil {
+			t.Fatalf("StoreResource: %v", err)
+		}
+		t.Cleanup(func() { _ = store.RemoveResourceByIDAndType(r.ID, r.ResourceType) })
+	}
+
+	throttled := policy.ImmediateResponse{
+		StatusCode: 429,
+		Body:       []byte("Message throttled out"),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      "900800", // API_THROTTLE_OUT_ERROR_CODE
+			Type:      "throttling",
+			Direction: policy.DirectionRequest,
+			Message:   "Message throttled out",
+		},
+	}
+	p := &TokenBasedRateLimitPolicy{metadata: policy.PolicyMetadata{RouteName: "fault-route"}}
+	// Cache the stub under the key resolveDelegate computes for this template, so the
+	// request path reuses it instead of building a real delegate.
+	p.delegates.Store(providerName, &stubThrottlingDelegate{onRequestHeadersAction: throttled})
+	p.delegateCacheKeys.Store(providerName, providerName+":"+computeResourceHash(template.Resource))
+
+	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{
+			MetadataKeyProviderName: providerName,
+		}},
+		Headers: policy.NewHeaders(map[string][]string{}),
+	}, map[string]interface{}{})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("the delegate's IsFault must reach the gateway unchanged")
+	}
+	if resp.Fault == nil || resp.Fault.Code != "900800" {
+		t.Fatalf("the delegate's Fault must reach the gateway unchanged, got %+v", resp.Fault)
+	}
+}

@@ -27,7 +27,9 @@ import (
 	"github.com/wso2/gateway-controllers/policies/basic-auth/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// The scenarios chain basic-auth with basic-ratelimit, which the gateway controller does not
+// require, so a direct run builds it in.
+var config = suite.Config{Register: steps.Register, Companions: []string{"basic-ratelimit"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

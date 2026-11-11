@@ -1323,6 +1323,7 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	sc.Step(`^I register the "([^"]*)" "([^"]*)" for cleanup$`, g.registerAdminResourceForCleanup)
 	sc.Step(`^the "([^"]*)" service logs should contain "([^"]*)"$`, g.serviceLogsContain)
 	sc.Step(`^the "([^"]*)" service logs should not contain "([^"]*)"$`, g.serviceLogsNotContain)
+	sc.Step(`^the "([^"]*)" service logs should have exactly (\d+) lines? containing:$`, g.serviceLogLinesCount)
 	sc.Step(`^the "([^"]*)" service log event containing "([^"]*)" should not contain "([^"]*)"$`,
 		g.serviceLogEventExcludes)
 	sc.Step(`^I send a "([^"]*)" request to the "([^"]*)" service at "([^"]*)" until lazy resource "([^"]*)" has display name "([^"]*)"$`,
@@ -1347,6 +1348,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 		g.analyticsResponseStatus)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have metadata field "([^"]*)" with value "([^"]*)"$`,
 		g.analyticsMetadataField)
+	sc.Step(`^the latest analytics event for path "([^"]*)" should have numeric metadata field "([^"]*)" (equal to|at least) "([^"]*)"$`,
+		g.analyticsNumericMetadataField)
 	sc.Step(`^the response should be an oob-template list$`, g.oobTemplateList)
 	sc.Step(`^the lazy resources should contain template "([^"]*)" of type "([^"]*)"$`, g.lazyTemplatePresent)
 	sc.Step(`^the lazy resources should not contain template "([^"]*)"$`, g.lazyTemplateAbsent)
@@ -2240,6 +2243,94 @@ func (g *Gateway) assertServiceLogs(ctx context.Context, service, marker string,
 	return nil
 }
 
+// logCountSettle is how long serviceLogLinesCount keeps reading after the count is reached, so a
+// duplicate logged a moment after the first line is still counted.
+const logCountSettle = 300 * time.Millisecond
+
+// serviceLogLinesCount asserts how many log lines of a service contain every fragment in the
+// table, one fragment per row. It waits until at least that many lines exist, reads the log again
+// after logCountSettle, then requires exactly that many, so a line logged once per key can be told
+// apart from one logged on every request. The log is shared by every scenario on the gateway, so
+// the fragments should include a value only this scenario produces. The count must be at least one:
+// a log that could not be read is returned as a note that matches no fragment, so a zero count
+// would pass without the log being read.
+func (g *Gateway) serviceLogLinesCount(ctx context.Context, service string, want int, table *godog.Table) error {
+	if want < 1 {
+		return fmt.Errorf("the log line count must be at least 1, got %d; use \"the %q service logs should not contain\" to check that a line is absent", want, service)
+	}
+	fragments, err := logFragments(ctx, table)
+	if err != nil {
+		return err
+	}
+	stack, resolved, err := g.topo.ServiceControl(service)
+	if err != nil {
+		return err
+	}
+	var matched []string
+	_, err = retry.Until(ctx, retry.Options{Interval: 200 * time.Millisecond}, func(ctx context.Context) ([]string, error) {
+		matched = linesContainingAll(stack.Logs(ctx), fragments)
+		return matched, nil
+	}, func(lines []string) bool { return len(lines) >= want })
+	if err != nil {
+		return fmt.Errorf("waiting for %d %s log line(s) of service %q containing %q: found %d: %w",
+			want, resolved, service, fragments, len(matched), err)
+	}
+	if len(matched) <= want {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(logCountSettle):
+		}
+		matched = linesContainingAll(stack.Logs(ctx), fragments)
+	}
+	if len(matched) != want {
+		return fmt.Errorf("service %q has %d log line(s) containing %q, want %d: %s",
+			service, len(matched), fragments, want, truncateLog(strings.Join(matched, "\n")))
+	}
+	return nil
+}
+
+// logFragments reads one non-empty fragment from each row of a single-column table, expanding any
+// ${CTX:...} reference.
+func logFragments(ctx context.Context, table *godog.Table) ([]string, error) {
+	if table == nil || len(table.Rows) == 0 {
+		return nil, fmt.Errorf("the log line step needs a table of fragments, one per row")
+	}
+	fragments := make([]string, 0, len(table.Rows))
+	for i, row := range table.Rows {
+		if len(row.Cells) != 1 {
+			return nil, fmt.Errorf("log fragment row %d must have one cell, has %d", i+1, len(row.Cells))
+		}
+		fragment, err := stepscommon.Expand(ctx, row.Cells[0].Value)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(fragment) == "" {
+			return nil, fmt.Errorf("log fragment row %d is empty", i+1)
+		}
+		fragments = append(fragments, fragment)
+	}
+	return fragments, nil
+}
+
+// linesContainingAll returns the lines of logs that contain every fragment.
+func linesContainingAll(logs string, fragments []string) []string {
+	var matched []string
+	for _, line := range strings.Split(logs, "\n") {
+		all := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				all = false
+				break
+			}
+		}
+		if all && len(fragments) > 0 {
+			matched = append(matched, line)
+		}
+	}
+	return matched
+}
+
 func truncateLog(logs string) string {
 	const max = 2000
 	if len(logs) <= max {
@@ -2786,6 +2877,25 @@ func (g *Gateway) analyticsMetadataField(ctx context.Context, path, field, want 
 	return nil
 }
 
+// analyticsNumericMetadataField compares a numeric metadata field with a number: equal within a
+// relative tolerance, since a cost computed in floating point rarely prints as the decimal a
+// scenario states, or at least that number.
+func (g *Gateway) analyticsNumericMetadataField(ctx context.Context, path, field, op, want string) error {
+	event, err := g.analyticsEventForPath(ctx, path)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	value, ok := traverseJSON(event.Metadata, field)
+	if !ok {
+		return fmt.Errorf("latest analytics event metadata has no field %q", field)
+	}
+	return numericMatches(field, value, op, resolved)
+}
+
 func analyticsHeaderValue(headers map[string][]string, wanted string) (string, bool) {
 	for name, value := range headers {
 		if strings.EqualFold(name, wanted) {
@@ -2798,9 +2908,13 @@ func analyticsHeaderValue(headers map[string][]string, wanted string) (string, b
 	return "", false
 }
 
+// analyticsEventMatchesPath reports whether an event's request URI is the requested path. Query
+// strings are ignored on both sides: some gateway versions record the URI with the query string and
+// others without it.
 func analyticsEventMatchesPath(eventURI, requestedPath string) bool {
-	eventURI = strings.TrimSpace(eventURI)
-	requestedPath = strings.TrimRight(strings.TrimSpace(requestedPath), "/")
+	eventURI, _, _ = strings.Cut(strings.TrimSpace(eventURI), "?")
+	requestedPath, _, _ = strings.Cut(strings.TrimSpace(requestedPath), "?")
+	requestedPath = strings.TrimRight(requestedPath, "/")
 	if eventURI == "" || requestedPath == "" {
 		return false
 	}
