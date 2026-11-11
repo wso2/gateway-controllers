@@ -318,6 +318,27 @@ func TestExtractPayloadRebuild(t *testing.T) {
 	}
 }
 
+// An event stream passes unchecked only when it carries JSON-RPC messages the path does not
+// apply to. A stream with no JSON event has nothing vouching for it, so it must be an error.
+func TestExtractPayloadEventStreamWithoutJSONRPC(t *testing.T) {
+	const path = "$.result.content[*].text"
+
+	notification := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n"
+	if _, err := extractPayload([]byte(notification), path); err != nil {
+		t.Fatalf("a stream of JSON-RPC messages the path does not match should pass, got: %v", err)
+	}
+
+	for name, body := range map[string]string{
+		"only a DONE marker": "data: [DONE]\n\n",
+		"comments only":      ": keep-alive\n\n",
+		"empty events":       "event: message\n\n",
+	} {
+		if _, err := extractPayload([]byte(body), path); err == nil {
+			t.Fatalf("%s: expected an error, the stream has no JSON-RPC message to vouch for it", name)
+		}
+	}
+}
+
 // withPassingBedrock wires a mocked Bedrock that reports no intervention.
 func withPassingBedrock(p *AWSBedrockGuardrailPolicy) *AWSBedrockGuardrailPolicy {
 	mockClient := &mockBedrockClient{

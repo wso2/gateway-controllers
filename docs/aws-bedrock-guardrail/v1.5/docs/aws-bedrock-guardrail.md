@@ -99,7 +99,7 @@ At least one of `request` or `response` must be provided.
 
 `region`, `guardrailID`, and `guardrailVersion` resolve independently — an attachment can set only the version and inherit the rest.
 
-> **`localGuardrailID` / `localGuardrailVersion` are deprecated.** Still work exactly as previously, therefore no existing attachment needs changing. Prefer `guardrailID` / `guardrailVersion` for new attachments. Please migrate existing attachments to the new parameter names.
+> **`localGuardrailID` / `localGuardrailVersion` are deprecated.** Still work exactly as previously, therefore no existing attachment needs changing. Prefer `guardrailID` / `guardrailVersion` for new attachments. Please migrate existing attachments to the new parameter names. If an attachment sets both a deprecated key and its replacement, the deprecated key wins, so adding `guardrailID` or `guardrailVersion` without removing `localGuardrailID` or `localGuardrailVersion` does not change the selected guardrail or version. Remove the deprecated key when you migrate.
 
 #### `awsAuth` — per-attachment AWS identity
 
@@ -583,13 +583,15 @@ with the action `BLOCKED` is rejected, and reported with the PII code.
 | Request or response: Bedrock intervenes because of the prompt attack filter | `422` | `906008` | `guardrail` |
 | Request or response: Bedrock intervenes because of a word filter (custom words or a managed word list) | `422` | `906007` | `guardrail` |
 | Request or response: Bedrock intervenes because of a denied topic | `422` | `906301` | `guardrail` |
+| Request or response: Bedrock intervenes because of a sensitive information (PII or regex) finding that is `BLOCKED` | `422` | `906101` | `guardrail` |
 | Request or response: Bedrock intervenes for any other reason | `422` | `906099` | `guardrail` |
 | Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
 | Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
 | Request or response: the AWS configuration cannot be loaded, the Bedrock call fails, or Bedrock returns an invalid or unexpected response | `422` | `960000` | `mediation` |
 
-When Bedrock reports more than one finding, a content filter decides the code ahead of a word
-filter, and a word filter ahead of a denied topic.
+When Bedrock reports more than one finding, a sensitive information (PII) finding decides the code
+first, then a content filter, then a word filter, then a denied topic. A blocked content filter that
+comes with a PII finding is therefore reported with the PII code.
 
 The fault's `Description` carries the internal reason, for example
 `Violation of AWS Bedrock Guardrails detected` or `Error calling AWS Bedrock Guardrail`.

@@ -189,6 +189,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 	var segments []*textSegment
 	matched := false
 	allJSONRPC := true
+	sawJSONRPC := false
 	for _, event := range events {
 		data, ok := eventData(event.lines)
 		if !ok {
@@ -199,7 +200,9 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 			// Not JSON (e.g. a "[DONE]" marker); nothing to check in this event.
 			continue
 		}
-		if !isJSONRPCMessage(doc) {
+		if isJSONRPCMessage(doc) {
+			sawJSONRPC = true
+		} else {
 			allJSONRPC = false
 		}
 		event.doc = doc
@@ -212,9 +215,10 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		matched = true
 		segments = append(segments, eventSegments...)
 	}
-	if !matched && allJSONRPC {
+	if !matched && allJSONRPC && sawJSONRPC {
 		// Only JSON-RPC messages the path does not apply to, e.g. a stream of
-		// MCP progress notifications or an initialize result.
+		// MCP progress notifications or an initialize result. A stream with no JSON
+		// event at all is not one: it has nothing to vouch for it, so it is an error.
 		return unchangedPayload(payload), nil
 	}
 	if !matched {
