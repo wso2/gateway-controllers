@@ -41,7 +41,8 @@ defaults:
 # with a gateway version step.
 blocks:
   # Runners on the default gateway configuration. They create their own APIs, and every scenario
-  # that counts token requests names its own Entra tenant, so they run at the same time.
+  # that counts token requests names its own Entra tenant or managed identity, so they run at the
+  # same time.
   - name: azure-authentication
     parallel: 2
     components:
@@ -56,6 +57,9 @@ blocks:
       - name: azure-authentication
         features:
           - features/azure_authentication.feature
+      - name: azure-authentication-managed-identity
+        features:
+          - features/azure_authentication_managed_identity.feature
 
   # The restart runner restarts gateway services, which would interrupt any runner beside it, so it
   # gets a block of its own.
