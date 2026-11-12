@@ -25,15 +25,15 @@ Feature: Azure Authentication policy configuration validation
   # Configurations the gateway rejects when the API is created: policy parameters or a policy
   # version that do not match the policy definition. Parameters given through an LLM provider's
   # upstream.auth are not validated when the provider is created; that case is in
-  # azure_authentication.feature. No configuration here carries a credential, and a response
-  # without "testbench-federated-identity-token" or "testbench-entra." discloses none.
+  # azure_authentication.feature. A rejected API is not stored, so the controller has no API of
+  # that name afterwards.
 
   Background:
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
   # The controller validates the policy reference and its parameters against the policy
-  # definition: authenticationType is a required string with the single value workload-identity,
+  # definition: authenticationType is a required string, workload-identity or managed-identity,
   # scope ends in /.default, clientId is a GUID, tenantId a GUID or domain name, headerName an HTTP
   # token, tokenRequestTimeout whole seconds up to 30s or milliseconds up to 30000ms, valuePrefix has
   # no control characters, and the policy version must be a major version the gateway has loaded.
@@ -56,10 +56,8 @@ Feature: Azure Authentication policy configuration validation
     And the response body should contain "Configuration validation failed"
     And the response body should contain "<error>"
     And the response body should contain "<field>"
-    And the response body should not contain "testbench-federated-identity-token"
-    And the response body should not contain "testbench-entra."
 
-    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    When I get the API "${CTX:apiName}"
     Then the response status code should be 404
 
     Examples:
