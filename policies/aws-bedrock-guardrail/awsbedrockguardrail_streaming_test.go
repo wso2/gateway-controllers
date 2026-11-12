@@ -870,30 +870,73 @@ func TestStreaming_CarriesTheRemainderIntoTheNextBatch(t *testing.T) {
 	}
 }
 
-// TestStreaming_RedactionValidatesEveryFlush covers why redaction opts out of
-// batching: a finding can only be applied to frames still in hand, so deferring
-// assessment would place it after the frames it belongs to had been forwarded.
-func TestStreaming_RedactionValidatesEveryFlush(t *testing.T) {
+// TestStreaming_RedactsOnRelease covers redaction now that it batches like
+// everything else. It used to assess every flush, on the reasoning that it
+// rewrites the frames in hand and could not defer a finding past them — but no
+// flush is forwarded until its batch is assessed, so that reason is gone.
+func TestStreaming_RedactsOnRelease(t *testing.T) {
 	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
 		params.RedactPII = true
 	})
 
-	// Well below a text unit: batching would have deferred this.
 	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
-		Chunk:       []byte(sseEvent("mail john@example.com now")),
-		EndOfStream: false,
+		Chunk: []byte(sseEvent("mail john@example.com now")), EndOfStream: true,
 	}, map[string]interface{}{})
 
 	if client.calls != 1 {
-		t.Fatalf("redaction must assess every flush, got %d calls", client.calls)
+		t.Fatalf("expected the batch to be assessed once, got %d calls", client.calls)
 	}
 	forward, ok := action.(policy.ForwardResponseChunk)
 	if !ok {
 		t.Fatalf("expected ForwardResponseChunk, got %T", action)
 	}
-	if forward.Body == nil || !strings.Contains(string(forward.Body), "*****") {
-		t.Errorf("expected the flush's own frames to be redacted, got %q", string(forward.Body))
+	if body := string(forward.Body); strings.Contains(body, "john@example.com") || !strings.Contains(body, "*****") {
+		t.Errorf("expected the value redacted on release, got %q", body)
+	}
+}
+
+// TestStreaming_RedactsAValueSplitAcrossFlushes is why the special case had to
+// go. Assessing each flush alone meant a value the model emitted across two
+// flushes was in neither flush's text, so neither assessment reported it and it
+// went to the client unredacted. Batching joins the text first.
+//
+// The value also spans two frames here, so it cannot be written back in place —
+// the stream fails closed instead, which is the documented outcome. What must
+// never happen is the value being delivered.
+func TestStreaming_RedactsAValueSplitAcrossFlushes(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = true
+	})
+	respCtx := streamCtx()
+
+	var delivered string
+	for _, chunk := range []struct {
+		body string
+		eos  bool
+	}{
+		{sseEvent("mail john@"), false},
+		{sseEvent("example.com now"), true},
+	} {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(chunk.body), EndOfStream: chunk.eos,
+		}, map[string]interface{}{})
+		switch v := action.(type) {
+		case policy.ForwardResponseChunk:
+			delivered += string(v.Body)
+		case policy.TerminateResponseChunk:
+			delivered += string(v.Body)
+		}
+	}
+
+	// Reassemble what a client's SSE parser would produce. Checking the raw bytes
+	// is not enough: with the halves in separate frames, JSON framing sits
+	// between them and the value never appears contiguously on the wire even
+	// when the client ends up with it.
+	seen := extractSSEDeltaContent(delivered, ResponseDefaultStreamingJSONPath)
+	if strings.Contains(seen, "john@example.com") {
+		t.Errorf("a value split across flushes must not reach the client unredacted: %q", seen)
 	}
 }
 
@@ -1473,7 +1516,7 @@ func TestStreaming_FailsClosedWhenRedactionSpansFrames(t *testing.T) {
 	flush := sseEvent("mail john@") + sseEvent("example.com now")
 
 	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
-		Chunk: []byte(flush), EndOfStream: false,
+		Chunk: []byte(flush), EndOfStream: true,
 	}, map[string]interface{}{})
 
 	term, ok := action.(policy.TerminateResponseChunk)
@@ -1494,7 +1537,7 @@ func TestStreaming_RedactsWhenTheValueIsWithinOneFrame(t *testing.T) {
 	})
 
 	action := p.OnResponseBodyChunk(context.Background(), streamCtx(), &policy.StreamBody{
-		Chunk: []byte(sseEvent("mail john@example.com now")), EndOfStream: false,
+		Chunk: []byte(sseEvent("mail john@example.com now")), EndOfStream: true,
 	}, map[string]interface{}{})
 
 	forward, ok := action.(policy.ForwardResponseChunk)
@@ -1859,5 +1902,43 @@ func TestStreaming_WholeResponseAssessmentHoldsUntilEndOfStream(t *testing.T) {
 	}
 	if body := action.(policy.ForwardResponseChunk).Body; len(body) == 0 {
 		t.Errorf("the withheld response must be delivered at end of stream")
+	}
+}
+
+// TestStreaming_NeverReleasesAPartialLineAtTheHeldLimit covers the withheld-byte
+// limit. It assesses what has accumulated and releases, but the text of a
+// trailing incomplete line was never readable and so is not in that assessment —
+// its bytes must stay withheld for the flush that completes it, or an
+// unassessed half-frame goes to the client.
+func TestStreaming_NeverReleasesAPartialLineAtTheHeldLimit(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[metaKeySSEStream] = true
+
+	// Fill the withheld buffer with framing that carries no assessable text, so
+	// the character boundary is never reached and the byte limit is what fires.
+	filler := strings.Repeat(": keep-alive\n\n", 2000) // ~28 KB per flush
+	for i := 0; i < 9; i++ {
+		p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(filler), EndOfStream: false,
+		}, map[string]interface{}{})
+	}
+
+	// The next flush trips the limit and ends mid-line.
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk:       []byte(filler + "data: {\"choices\":[{\"delta\":{\"content\":\"SECRET"),
+		EndOfStream: false,
+	}, map[string]interface{}{})
+
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if strings.Contains(string(forward.Body), "SECRET") {
+		t.Errorf("an unassessed partial line was released at the byte limit")
+	}
+	if retained, _ := respCtx.Metadata[metaKeyHeldBytes].(string); !strings.Contains(retained, "SECRET") {
+		t.Errorf("the partial line must stay withheld, got %q", retained)
 	}
 }

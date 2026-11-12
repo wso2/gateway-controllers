@@ -1888,13 +1888,6 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
 	}
 
-	// Redaction (unit < 0) assesses every flush, so a flush is never held past
-	// its own assessment. A zero unit is the opposite — assess the whole
-	// response — and falls through to accumulate.
-	if unit < 0 {
-		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
-	}
-
 	// The withheld buffer has grown as far as it may. Reached by a stream whose
 	// events carry little or no assessable text, which never trips the character
 	// boundary below.
@@ -1956,8 +1949,18 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	rp AWSBedrockGuardrailPolicyParams,
 	chunk *policy.StreamBody,
 ) policy.StreamingResponseAction {
+	// A trailing incomplete line's text is not in batchText — flushText could not
+	// read it — so its bytes must not be released here either. Mid-stream it
+	// stays withheld for the flush that completes it; at end of stream there is
+	// no such flush, and flushText has already joined it into the final text.
+	release := heldBytes
+	retain := ""
+	if !chunk.EndOfStream {
+		release, retain = splitTrailingPartialLine(heldBytes)
+	}
+
 	respCtx.Metadata[metaKeyPendingText] = ""
-	respCtx.Metadata[metaKeyHeldBytes] = ""
+	respCtx.Metadata[metaKeyHeldBytes] = retain
 	respCtx.Metadata[metaKeyAssessedInHeld] = 0
 
 	// The batch plan decides when to assess; the size of each call is bounded
@@ -1990,17 +1993,17 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 			continue
 		}
 
-		action, output, modified, stop := p.assessStreamBatch(cleaned, heldBytes, respCtx, rp, chunk)
+		action, output, modified, stop := p.assessStreamBatch(cleaned, release, respCtx, rp, chunk)
 		if stop {
 			if action.TerminateStream() {
 				slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
-					"held_bytes", len(heldBytes), "chunkIndex", chunk.Index)
+					"held_bytes", len(release), "chunkIndex", chunk.Index)
 				return action
 			}
 			// passthroughOnError: this batch was not assessed, but withholding
 			// the bytes indefinitely would stall the stream, so they are
 			// released.
-			return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+			return p.releaseBytes(release, nil, "", respCtx, rp)
 		}
 
 		validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
@@ -2015,9 +2018,9 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	if !assessed {
 		// Framing only — nothing to assess, but the bytes are still owed to the
 		// client.
-		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+		return p.releaseBytes(release, nil, "", respCtx, rp)
 	}
-	return p.releaseBytes(heldBytes, lastOutput, lastModified, respCtx, rp)
+	return p.releaseBytes(release, lastOutput, lastModified, respCtx, rp)
 }
 
 // assessBatchAndRelease assesses one batch and releases the bytes it covers,
@@ -2097,18 +2100,16 @@ func (p *AWSBedrockGuardrailPolicy) releaseBytes(
 	return policy.ForwardResponseChunk{Body: []byte(heldBytes)}
 }
 
-// effectiveTextUnit returns the batch size to validate at.
+// effectiveTextUnit returns the batch size to assess at.
 //
-// Redaction mode validates every flush instead of batching. Redaction rewrites
-// the frames of the flush it is holding, so a finding can only be applied to
-// text that has not yet been forwarded; batching would place the finding one or
-// more flushes after the frames it belongs to, which have already gone to the
-// client. The cost is more ApplyGuardrail calls, which is the price of
-// redacting in a stream at all.
+// Redaction used to be a special case here, assessing every flush rather than
+// batching: it rewrites the frames of the flush in hand, so a finding deferred
+// to a later batch would arrive after those frames had been forwarded. That
+// reason is gone — no flush is forwarded until the batch covering it has been
+// assessed — and keeping the special case made redaction *worse*: a value split
+// across two flushes was in neither flush's text, so neither assessment
+// reported it and it was delivered unredacted. Batching joins the text first.
 func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
-	if p.responseParams.RedactPII {
-		return -1
-	}
 	return p.responseParams.StreamingTextUnitChars
 }
 
@@ -2132,15 +2133,9 @@ func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
 func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry string) {
 	runes := []rune(text)
 
-	// Negative: assess what is in hand now. Redaction asks for this, because it
-	// rewrites the frames it is holding and cannot defer a finding past them.
-	if unit < 0 {
-		return text, ""
-	}
-
 	// Zero: assess the whole response, so nothing is assessed until the stream
 	// ends. streamingTextUnitChars: 0 asks for this.
-	if unit == 0 {
+	if unit <= 0 {
 		if endOfStream {
 			return text, ""
 		}

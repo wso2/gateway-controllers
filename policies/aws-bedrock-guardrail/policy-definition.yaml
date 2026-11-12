@@ -265,7 +265,10 @@ parameters:
             adding protection.
             Each batch is withheld from the client until it has been assessed, so
             no unassessed text is delivered; a batch that violates is discarded
-            and the client receives only the guardrail event. This is therefore
+            and the client receives only the guardrail event. The one exception is
+            passthroughOnError: with it set to true, a batch whose assessment
+            could not be completed is released without a verdict rather than the
+            stream being ended, so unassessed text can reach the client. This is therefore
             also the delivery step: the frames whose text falls inside the batch
             are released and the frame the trim point falls inside is held for the
             next one. A batch is trimmed back to the end of the last sentence or
@@ -280,8 +283,10 @@ parameters:
             text unit, since an oversized request is the case AWS's long-context
             guidance says to chunk, and a very long response is released in parts
             once the withheld buffer reaches its limit.
-            Ignored when redactPII is true: redaction rewrites the frames it is
-            holding, so it assesses every flush rather than batching.
+            Applies to redactPII as well. Redaction is written back frame by
+            frame, so a value the model emitted across two events cannot be
+            replaced in place; the stream is ended rather than the value
+            delivered.
           minimum: 0
           default: 1000
   anyOf:
