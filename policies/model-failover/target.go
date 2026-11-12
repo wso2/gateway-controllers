@@ -33,8 +33,12 @@ type Target struct {
 	// Model is the AI model name. Required, minLength 1.
 	Model string
 	// Provider optionally names the provider configuration this target is reached through.
-	// It matches an LlmProxy additionalProviders[].as value, or the provider id when `as` is
-	// absent. Empty means the primary provider.
+	// On an LlmProxy it matches a provider's alias in either shape — canonical
+	// `providers[].alias` or legacy `additionalProviders[].as` — falling back to the provider
+	// id when no alias is set; on a RestApi it names an upstreamDefinition. The policy never
+	// resolves this itself: the controller supplies the alias-to-cluster map, so whichever
+	// shape the publisher wrote reaches here already reduced to one name.
+	// Empty means the primary provider.
 	Provider string
 }
 
