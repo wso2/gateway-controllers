@@ -385,8 +385,9 @@ Feature: Azure Authentication policy
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
 
-  # A throttled (429, honouring Retry-After) or failing (500) token request is retried within the
-  # same client request, which then succeeds: one client request, two token requests.
+  # A throttled (429) or failing (500) token request is retried within the same client request,
+  # which then succeeds: one client request, two token requests. The unit tests check that the
+  # retry waits for Retry-After.
   Scenario Outline: Retry a throttled or failing token request (<case>)
     Given I generate a unique resource name from "az" and store it as "tenant"
     And I generate a unique value from "az-retry" and store it as "apiName"
