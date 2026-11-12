@@ -1,0 +1,22 @@
+# The shared TypeSafe Jev settings every Jev policy reads. The testbench jev service stands in
+# for TypeSafe's API: it accepts only this key, and the block partition and "ok" mode in the base
+# URL keep requests from scenarios that don't set their own baseURL in this block's partition.
+# The base URL is the HTTPS port because the tool filtering policy refuses plain HTTP to a
+# host that is not loopback; the gateway runtime trusts the mock's certificate.
+[policy_configurations.typesafe_jev_v0]
+api_key = "test-jev-key"
+base_url = "https://testbench:3020/${BLOCK}/ok"
+model = "jev-it-model"
+
+# mcp-auth, which a scenario places before the policy, validates tokens from the testbench jwks
+# service, as in the mcp-auth suite (policies/mcp-auth/it/overlays/gateway.toml).
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "mock-jwks"
+issuer = "http://testbench:3001/token"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"
+
+[policy_configurations.mcpauth_v1]
+gatewayhost = "mcp-e2e-gatewayhost.example.com:9443"
+gatewayurl = "https://mcp-e2e-gatewayurl.example.com:7777"

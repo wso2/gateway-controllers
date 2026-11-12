@@ -481,3 +481,88 @@ func feedWithShared(t *testing.T, p *TranslatorPolicy, shared *policy.SharedCont
 	}
 	return ""
 }
+
+// TestErrResponseDirectionAndCode covers what this translator refuses and how it labels it.
+//
+// Direction is the point: a payload the caller sent that will not convert is a
+// request-side refusal, while a provider reply that will not translate back is a
+// response-side one. They share a helper and nothing else, and only the caller knows which
+// it made — so it is passed in rather than inferred from the status.
+func TestErrResponseDirectionAndCode(t *testing.T) {
+	t.Run("request side", func(t *testing.T) {
+		resp := errResponse(400, "Request body is empty.",
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a refused request")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeInvalidRequestBody {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeInvalidRequestBody, resp.Fault.Code)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Type != policy.FaultTypeValidation {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeValidation, resp.Fault.Type)
+		}
+	})
+
+	t.Run("response side", func(t *testing.T) {
+		resp := errResponse(500, "failed to translate response",
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a failed translation")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeMediationFailed {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+		}
+		if resp.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, resp.Fault.Direction)
+		}
+	})
+}
+
+// TestOnRequestBody_RejectionsDeclareFault drives each request rejection through
+// OnRequestBody and checks the fault it declares, and that the client body is unchanged.
+func TestOnRequestBody_RejectionsDeclareFault(t *testing.T) {
+	cases := []struct {
+		name     string
+		body     *policy.Body
+		wantBody string
+	}{
+		{"missing body", nil, `{"error":"Request body is empty."}`},
+		{"empty body", &policy.Body{Present: true}, `{"error":"Request body is empty."}`},
+		{"invalid JSON", &policy.Body{Present: true, Content: []byte(`{"messages":`)}, `{"error":"Invalid JSON in request body: unexpected end of JSON input"}`},
+		{"unresolvable model", &policy.Body{Present: true, Content: []byte(`{"model":42,"messages":[]}`)}, `{"error":"request field 'model' must be a string"}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			p := &TranslatorPolicy{params: PolicyParams{AnthropicVersion: DefaultAnthropicVersion}}
+			action := p.OnRequestBody(context.Background(), &policy.RequestContext{
+				SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+				Body:          c.body,
+			}, nil)
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok || resp.StatusCode != 400 {
+				t.Fatalf("expected a 400 ImmediateResponse, got %#v", action)
+			}
+			if resp.Headers["Content-Type"] != "application/json" || string(resp.Body) != c.wantBody {
+				t.Fatalf("client response changed: headers %v, body %s", resp.Headers, resp.Body)
+			}
+			if !resp.IsFault || resp.Fault == nil {
+				t.Fatalf("expected IsFault=true and Fault set")
+			}
+			if resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+				resp.Fault.Type != policy.FaultTypeValidation ||
+				resp.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("unexpected fault code/type/direction: %q/%q/%q",
+					resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
+			}
+		})
+	}
+}

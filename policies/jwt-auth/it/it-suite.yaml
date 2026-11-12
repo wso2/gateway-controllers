@@ -16,11 +16,9 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the jwt-auth policy. The gateway under test is built from this policy and
-# the policies the gateway controller requires (tests/it/common/suite), staged as the policy tree
-# that addPoliciesFrom names. Feature paths are relative to this directory. Give a runner a tags
-# entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release newer than the
-# oldest one tested.
+# The integration suite of the jwt-auth policy. Feature paths are relative to this directory. Give a
+# runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release newer
+# than the oldest one tested.
 
 suite: jwt-auth
 
@@ -42,10 +40,34 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        addPoliciesFrom: policies
         overlay: overlays/gateway.toml
       - name: testbench
     runners:
       - name: jwt-auth
         features:
           - features/jwt_auth.feature
+      - name: jwt-auth-scope-claim-rules
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/jwt_auth_scope_claim_rules.feature
+
+  # The application identity jwt-auth sets, and the policies that read it. Redis backs
+  # semantic-cache.
+  - name: jwt-auth-application-identity
+    parallel: 2
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/application-identity.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      - name: jwt-auth-application-subscriptions
+        features:
+          - features/jwt_auth_application_subscriptions.feature
+      - name: jwt-auth-application-identity-policies
+        tags: "~@known-issue"
+        features:
+          - features/jwt_auth_application_identity_policies.feature

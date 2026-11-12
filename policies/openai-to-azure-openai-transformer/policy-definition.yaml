@@ -1,5 +1,5 @@
 name: openai-to-azure-openai-transformer
-version: v0.9.1
+version: v0.10.0
 description: |
   Routes OpenAI Chat Completions requests to an Azure OpenAI upstream by
   rewriting the request path with deployment and API version details. The body

@@ -536,3 +536,32 @@ Feature: PII masking regex policy
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
+
+  # The response must match the expected error response recorded from the policy before a
+  # change (resources/expected-error-responses), so a change a client could observe fails.
+  Scenario: pii-masking-regex rejects a request whose JSONPath does not resolve
+    Given I generate a unique value from "compat-pii-path" and store it as "apiName"
+    And I generate a unique API version from "compat-pii-path" and store it as "apiVersion"
+    And I generate a unique API context from "/compat-pii-path" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}        |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | ${CTX:captureUpstream}           |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"POST","path":"/validate","policies":[{"name":"pii-masking-regex","version":"v1","params":{"customPIIEntities":[{"piiEntity":"EMAIL","piiRegex":"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+[.][a-zA-Z]{2,}"}],"jsonPath":"$.nonexistent.field","redactPII":false}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+
+    # The policy rejects the request before it reaches the upstream.
+    When I set header "Content-Type" to "application/json"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message": "test@example.com"}
+      """
+    Then the response status code should be 500
+    And the response should match the expected error response "pii-masking-regex-request-jsonpath-missing"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful

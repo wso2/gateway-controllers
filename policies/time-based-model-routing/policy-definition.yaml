@@ -1,5 +1,5 @@
 name: time-based-model-routing
-version: v0.9.1
+version: v0.10.0
 displayName: Time-Based Model Routing
 description: |
   Routes an LLM request to a configured model and optional provider according

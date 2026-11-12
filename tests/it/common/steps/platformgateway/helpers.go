@@ -22,6 +22,8 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
@@ -80,4 +82,49 @@ func traverseJSON(doc any, path string) (any, bool) {
 		}
 	}
 	return current, true
+}
+
+// numericTolerance is the relative difference two numbers may have and still be equal. It
+// absorbs floating-point rounding in a computed value, and nothing larger.
+const numericTolerance = 1e-9
+
+// numericMatches reports whether value, a JSON number or a numeric string, is finite and either
+// equals want within numericTolerance ("equal to"; a want of zero needs an exact zero) or is at
+// least want ("at least"). want must be finite too: an infinite want would match any value.
+func numericMatches(field string, value any, op, want string) error {
+	expected, err := strconv.ParseFloat(strings.TrimSpace(want), 64)
+	if err != nil {
+		return fmt.Errorf("expected value %q for %q is not a number", want, field)
+	}
+	if math.IsNaN(expected) || math.IsInf(expected, 0) {
+		return fmt.Errorf("expected value %q for %q is not a finite number", want, field)
+	}
+	var got float64
+	switch v := value.(type) {
+	case float64:
+		got = v
+	case string:
+		if got, err = strconv.ParseFloat(strings.TrimSpace(v), 64); err != nil {
+			return fmt.Errorf("metadata field %q is %q, not a number", field, v)
+		}
+	default:
+		return fmt.Errorf("metadata field %q is %v (%T), not a number", field, value, value)
+	}
+	if math.IsNaN(got) || math.IsInf(got, 0) {
+		return fmt.Errorf("metadata field %q is %v, want %v", field, got, expected)
+	}
+	switch op {
+	case "equal to":
+		if got == expected || math.Abs(got-expected) <= numericTolerance*math.Max(math.Abs(got), math.Abs(expected)) {
+			return nil
+		}
+		return fmt.Errorf("metadata field %q is %v, want %v", field, got, expected)
+	case "at least":
+		if got >= expected {
+			return nil
+		}
+		return fmt.Errorf("metadata field %q is %v, want at least %v", field, got, expected)
+	default:
+		return fmt.Errorf("unsupported comparison %q for %q", op, field)
+	}
 }

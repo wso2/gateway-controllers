@@ -528,3 +528,193 @@ func TestOnRequestBodyAndOnResponseBody(t *testing.T) {
 		t.Fatalf("expected response no-op when response.enabled=false, got %T", respDisabled)
 	}
 }
+
+// TestJSONSchemaGuardrail_InterventionDeclaresFault covers the one funnel every rejection this policy
+// makes passes through, in both phases.
+func TestJSONSchemaGuardrail_InterventionDeclaresFault(t *testing.T) {
+	p := &JSONSchemaGuardrailPolicy{}
+	errs := schemaValidationErrors(t,
+		`{"type":"object","properties":{"n":{"type":"number"}},"required":["n"]}`,
+		`{"n":"not a number"}`)
+
+	t.Run("request phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, false, false, errs)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		assertGuardrailError(t, resp.Fault, policy.DirectionRequest)
+	})
+
+	t.Run("response phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, true, false, errs)
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side guardrail intervention")
+		}
+		// Direction is what separates a request-side hit from a response-side one; they
+		// share a status code and only the policy knows which it made.
+		assertGuardrailError(t, mods.Fault, policy.DirectionResponse)
+	})
+}
+
+// TestJSONSchemaGuardrail_AssessmentsGatedByShowAssessment covers the one field that must not leak:
+// Assessments frequently holds the very content the guardrail existed to stop, so it is
+// populated only where the operator opted in through showAssessment.
+func TestJSONSchemaGuardrail_AssessmentsGatedByShowAssessment(t *testing.T) {
+	p := &JSONSchemaGuardrailPolicy{}
+	errs := schemaValidationErrors(t,
+		`{"type":"object","properties":{"n":{"type":"number"}},"required":["n"]}`,
+		`{"n":"not a number"}`)
+
+	for _, show := range []bool{false, true} {
+		name := "showAssessment=false"
+		if show {
+			name = "showAssessment=true"
+		}
+		t.Run(name, func(t *testing.T) {
+			action := p.buildErrorResponse("blocked detail", nil, false, show, errs)
+			resp := action.(policy.ImmediateResponse)
+			if resp.Fault == nil || resp.Fault.Guardrail == nil {
+				t.Fatalf("expected the guardrail error to be populated")
+			}
+			got := resp.Fault.Guardrail.Assessments
+			if show && got == nil {
+				t.Fatalf("expected Assessments when showAssessment=true")
+			}
+			if !show && got != nil {
+				t.Fatalf("Assessments must stay empty when showAssessment=false, got %v", got)
+			}
+		})
+	}
+}
+
+// assertGuardrailError checks the parts of the description that are the same for every
+// intervention this policy makes.
+func assertGuardrailError(t *testing.T, err *policy.FaultDetails, wantDirection string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected Error to be populated")
+	}
+	if err.Code != codeGuardrailIntervened {
+		t.Fatalf("expected Error.Code=%q, got %q", codeGuardrailIntervened, err.Code)
+	}
+	if err.Type != policy.FaultTypeGuardrail {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, err.Type)
+	}
+	if err.Direction != wantDirection {
+		t.Fatalf("expected Error.Direction=%q, got %q", wantDirection, err.Direction)
+	}
+	if err.Description == "" {
+		t.Fatalf("expected Error.Description to carry the blocked detail")
+	}
+	if err.Guardrail == nil {
+		t.Fatalf("expected Guardrail detail to be populated")
+	}
+	if err.Guardrail.InterveningGuardrail != guardrailName {
+		t.Fatalf("expected InterveningGuardrail=%q, got %q", guardrailName, err.Guardrail.InterveningGuardrail)
+	}
+	if err.Guardrail.Action != policy.GuardrailActionIntervened {
+		t.Fatalf("expected Action=%q, got %q", policy.GuardrailActionIntervened, err.Guardrail.Action)
+	}
+	if err.Guardrail.ActionReason == "" {
+		t.Fatalf("expected ActionReason to be set")
+	}
+}
+
+// TestJSONSchemaGuardrail_ExtractionFailureDeclaresFault pins the JSONPath extraction failure: no check
+// ran, so it is not a guardrail verdict. An unreadable request body is the caller's; an
+// unreadable response body leaves the policy unable to do its job. The client response is
+// the one the policy returned before the fault was declared.
+func TestJSONSchemaGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &JSONSchemaGuardrailPolicy{}
+	params := JSONSchemaGuardrailPolicyParams{JsonPath: "$.text", Schema: `{"type":"string"}`}
+	for _, isResponse := range []bool{false, true} {
+		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		if isResponse {
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+		} else {
+			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+		}
+	}
+}
+
+// assertNoVerdictFault checks that a rejection made without a guardrail verdict declares
+// the given fault, carries no guardrail details, and leaves the client response unchanged:
+// status 422, a JSON Content-Type, and wantBody.
+func assertNoVerdictFault(t *testing.T, got interface{}, wantBody, wantCode, wantType, wantDirection string) {
+	t.Helper()
+	var fault *policy.FaultDetails
+	var isFault bool
+	var status int
+	var headers map[string]string
+	var body []byte
+	switch g := got.(type) {
+	case policy.ImmediateResponse:
+		status, headers, body = g.StatusCode, g.Headers, g.Body
+		fault, isFault = g.Fault, g.IsFault
+	case policy.DownstreamResponseModifications:
+		if g.StatusCode == nil {
+			t.Fatalf("expected a status code on the error response")
+		}
+		status, headers, body = *g.StatusCode, g.HeadersToSet, g.Body
+		fault, isFault = g.Fault, g.IsFault
+	default:
+		t.Fatalf("expected an error response, got %T", got)
+	}
+	if status != 422 || len(headers) != 1 || headers["Content-Type"] != "application/json" || string(body) != wantBody {
+		t.Fatalf("client response changed: got %d %v %s, want 422 map[Content-Type:application/json] %s", status, headers, body, wantBody)
+	}
+	if !isFault || fault == nil {
+		t.Fatalf("expected the rejection to declare a fault")
+	}
+	if fault.Code != wantCode || fault.Type != wantType || fault.Direction != wantDirection {
+		t.Fatalf("expected fault %s/%s/%s, got %s/%s/%s", wantCode, wantType, wantDirection, fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Guardrail != nil {
+		t.Fatalf("a rejection without a verdict must not carry guardrail details, got %+v", fault.Guardrail)
+	}
+	if fault.Message == "" || fault.Description == "" {
+		t.Fatalf("expected Message and Description to be set, got %+v", fault)
+	}
+}
+
+// TestJSONSchemaGuardrail_ValidateErrorDeclaresFault pins the two ways gojsonschema.Validate
+// can fail before reaching a verdict: a configured schema that cannot be loaded is the
+// operator's, and content that is not JSON is read like a failed extraction.
+func TestJSONSchemaGuardrail_ValidateErrorDeclaresFault(t *testing.T) {
+	p := &JSONSchemaGuardrailPolicy{}
+
+	t.Run("unusable schema", func(t *testing.T) {
+		params := JSONSchemaGuardrailPolicyParams{Schema: `{"type":"not-a-type"}`}
+		for _, isResponse := range []bool{false, true} {
+			got := p.validatePayload([]byte(`{"a":1}`), params, isResponse)
+			wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"REQUEST","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+			if isResponse {
+				wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"RESPONSE","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+			}
+			wantDirection := policy.DirectionRequest
+			if isResponse {
+				wantDirection = policy.DirectionResponse
+			}
+			assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, wantDirection)
+		}
+	})
+
+	t.Run("content is not JSON", func(t *testing.T) {
+		params := JSONSchemaGuardrailPolicyParams{Schema: `{"type":"object"}`}
+		got := p.validatePayload([]byte(`not-json`), params, false)
+		wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"REQUEST","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, policy.DirectionRequest)
+
+		got = p.validatePayload([]byte(`not-json`), params, true)
+		wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error validating schema","direction":"RESPONSE","interveningGuardrail":"json-schema-guardrail"},"type":"JSON_SCHEMA_GUARDRAIL"}`
+		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
+	})
+}

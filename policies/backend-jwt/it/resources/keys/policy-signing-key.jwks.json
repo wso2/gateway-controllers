@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "kid": "it-policy-signing-key",
+      "use": "sig",
+      "alg": "RS256",
+      "n": "nllu7W79FOL0AqNs7Saxh-5_7QebinyUMaK105GjfDRAvstpe74xLAkx8ljUOSwvqyOQYRytyo8yLUZJZGRIZGYKe7ciFDDKlPolu559HmHVhejlJ5GIxAd7kDqI62vY3mzCpcDdQeSQePxe51Bm-KQXuSFX6caxpVMRbDTcwoFiN1J1QRQeMjkcPzFJ-EdLyzy8asi-HfYrKMlJXrbt9EUgtO6rDMazwc1XjKitw2F6wKpQXzStR3jIFKoF3vEZLsQUMTJ4KscrtkQNoDdx3MgYKhh1naDOC04vUluJJ_6a3ZXCM4nqt52j0egNNXtj64UJPP6oNBUzlenWGoCzbQ",
+      "e": "AQAB"
+    }
+  ]
+}

@@ -114,7 +114,7 @@ func TestJWTAuthPolicy_RequiredScopes_OR_MatchesNone(t *testing.T) {
 	params["requiredScopes"] = []interface{}{"write", "admin"}
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
-	assertAuthFailure(t, ctx, action, 401)
+	assertAuthFailure(t, ctx, action, 403)
 }
 
 func TestJWTAuthPolicy_HappyPath_CustomHeaderName_AndPrefix(t *testing.T) {
@@ -910,7 +910,7 @@ func TestJWTAuthPolicy_Regression_RequiredClaimsTypeMismatch(t *testing.T) {
 	}
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
-	assertAuthFailure(t, ctx, action, 401)
+	assertAuthFailure(t, ctx, action, 403)
 }
 
 func TestJWTAuthPolicy_Regression_extractTokenVariants(t *testing.T) {
@@ -1790,7 +1790,7 @@ func TestJWTAuthPolicy_Scopes_AllOf_PassAndFail(t *testing.T) {
 	params2 := newRemoteParams(jwksServer.URL + "/jwks.json")
 	setScopes(params2, []string{"api:read", "api:deploy"}, nil)
 	ctx2, action2 := executeOnRequestHeaders(t, params2, authHeader("Authorization", "Bearer", makeToken("api:read")))
-	assertAuthFailure(t, ctx2, action2, 401)
+	assertAuthFailure(t, ctx2, action2, 403)
 }
 
 func TestJWTAuthPolicy_Scopes_Combined_Example(t *testing.T) {
@@ -1817,7 +1817,7 @@ func TestJWTAuthPolicy_Scopes_Combined_Example(t *testing.T) {
 
 	// allOf satisfied but no anyOf present → deny.
 	ctx2, action2 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", tok("api:read api:deploy")))
-	assertAuthFailure(t, ctx2, action2, 401)
+	assertAuthFailure(t, ctx2, action2, 403)
 }
 
 func TestJWTAuthPolicy_Claims_Example(t *testing.T) {
@@ -1850,7 +1850,7 @@ func TestJWTAuthPolicy_Claims_Example(t *testing.T) {
 		"department": "platform", "status": "suspended", "role": "external",
 	})
 	ctx2, action2 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", badToken))
-	assertAuthFailure(t, ctx2, action2, 401)
+	assertAuthFailure(t, ctx2, action2, 403)
 
 	// anyOf fails (department not in set) → deny.
 	badDept := createTestToken(t, privateKey, map[string]interface{}{
@@ -1858,7 +1858,7 @@ func TestJWTAuthPolicy_Claims_Example(t *testing.T) {
 		"department": "sales", "status": "suspended", "role": "internal",
 	})
 	ctx3, action3 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", badDept))
-	assertAuthFailure(t, ctx3, action3, 401)
+	assertAuthFailure(t, ctx3, action3, 403)
 }
 
 func TestJWTAuthPolicy_Precedence_ScopesOverRequiredScopes(t *testing.T) {
@@ -1877,7 +1877,7 @@ func TestJWTAuthPolicy_Precedence_ScopesOverRequiredScopes(t *testing.T) {
 	setScopes(params, []string{"api:deploy"}, nil)
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
-	assertAuthFailure(t, ctx, action, 401)
+	assertAuthFailure(t, ctx, action, 403)
 }
 
 func TestJWTAuthPolicy_Precedence_ClaimsOverRequiredClaims(t *testing.T) {
@@ -1896,7 +1896,7 @@ func TestJWTAuthPolicy_Precedence_ClaimsOverRequiredClaims(t *testing.T) {
 	setClaims(params, []map[string]interface{}{claimMatcherParam("role", "superadmin")}, nil)
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
-	assertAuthFailure(t, ctx, action, 401)
+	assertAuthFailure(t, ctx, action, 403)
 }
 
 func TestJWTAuthPolicy_Mixed_NewScopes_OldClaims(t *testing.T) {
@@ -1916,7 +1916,7 @@ func TestJWTAuthPolicy_Mixed_NewScopes_OldClaims(t *testing.T) {
 	params["requiredClaims"] = map[string]interface{}{"role": "admin"}
 
 	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
-	assertAuthFailure(t, ctx, action, 401)
+	assertAuthFailure(t, ctx, action, 403)
 }
 
 func TestJWTAuthPolicy_MalformedScopes_Denies(t *testing.T) {
@@ -1981,14 +1981,14 @@ func TestJWTAuthPolicy_NewScopes_And_NewClaims(t *testing.T) {
 		"sub": "u", "iss": "https://issuer.example.com", "scope": "api:read", "role": "external",
 	})
 	ctx2, action2 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", badClaim))
-	assertAuthFailure(t, ctx2, action2, 401)
+	assertAuthFailure(t, ctx2, action2, 403)
 
 	// Claim ok but scope fails → deny.
 	badScope := createTestToken(t, privateKey, map[string]interface{}{
 		"sub": "u", "iss": "https://issuer.example.com", "scope": "api:other", "role": "internal",
 	})
 	ctx3, action3 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", badScope))
-	assertAuthFailure(t, ctx3, action3, 401)
+	assertAuthFailure(t, ctx3, action3, 403)
 }
 
 // TestJWTAuthPolicy_Mixed_OldScopes_NewClaims is the reverse mix of
@@ -2019,14 +2019,14 @@ func TestJWTAuthPolicy_Mixed_OldScopes_NewClaims(t *testing.T) {
 		"sub": "u", "iss": "https://issuer.example.com", "scope": "api:read", "role": "external",
 	})
 	ctx2, action2 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", badClaim))
-	assertAuthFailure(t, ctx2, action2, 401)
+	assertAuthFailure(t, ctx2, action2, 403)
 
 	// Old scope dimension fails (new claim dimension passes) → deny.
 	badScope := createTestToken(t, privateKey, map[string]interface{}{
 		"sub": "u", "iss": "https://issuer.example.com", "scope": "api:other", "role": "internal",
 	})
 	ctx3, action3 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", badScope))
-	assertAuthFailure(t, ctx3, action3, 401)
+	assertAuthFailure(t, ctx3, action3, 403)
 }
 
 // TestJWTAuthPolicy_BothFormats_NewWinsBothDimensions defines all four params (deprecated and new
@@ -2058,5 +2058,183 @@ func TestJWTAuthPolicy_BothFormats_NewWinsBothDimensions(t *testing.T) {
 		"sub": "u", "iss": "https://issuer.example.com", "scope": "api:legacy", "role": "legacy",
 	})
 	ctx2, action2 := executeOnRequestHeaders(t, newParams(), authHeader("Authorization", "Bearer", oldOnly))
-	assertAuthFailure(t, ctx2, action2, 401)
+	assertAuthFailure(t, ctx2, action2, 403)
+}
+
+// RFC 6750 section 3.1: a valid token that lacks the required scope is forbidden (403,
+// insufficient_scope); a request with no token or a bad token is unauthorized (401).
+func TestJWTAuthPolicy_StatusAndChallenge_PerFailureKind(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["scopes"] = map[string]interface{}{"anyOf": []interface{}{"write"}}
+
+	readOnly := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "scope": "read",
+	})
+
+	cases := []struct {
+		name      string
+		headers   map[string][]string
+		status    int
+		challenge string
+		errorWord string
+	}{
+		{"valid token, missing scope", authHeader("Authorization", "Bearer", readOnly), 403, `Bearer error="insufficient_scope"`, "Forbidden"},
+		{"no token", map[string][]string{}, 401, "Bearer", "Unauthorized"},
+		{"malformed token", authHeader("Authorization", "Bearer", "not.a.jwt"), 401, `Bearer error="invalid_token"`, "Unauthorized"},
+		{"scheme without a token", map[string][]string{"authorization": {"Bearer "}}, 401, "Bearer", "Unauthorized"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, action := executeOnRequestHeaders(t, params, tc.headers)
+			assertAuthFailure(t, ctx, action, tc.status)
+			resp := action.(policy.ImmediateResponse)
+			if got := resp.Headers["www-authenticate"]; got != tc.challenge {
+				t.Fatalf("www-authenticate = %q, want %q", got, tc.challenge)
+			}
+			var body map[string]interface{}
+			if err := json.Unmarshal(resp.Body, &body); err != nil {
+				t.Fatalf("body is not JSON: %v", err)
+			}
+			if body["error"] != tc.errorWord {
+				t.Fatalf("body error = %v, want %q", body["error"], tc.errorWord)
+			}
+		})
+	}
+}
+
+// A claims rejection is forbidden too, and names no RFC 6750 error code.
+func TestJWTAuthPolicy_ClaimsRejection_Forbidden(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["claims"] = map[string]interface{}{"anyOf": []interface{}{
+		map[string]interface{}{"claim": "client_id", "values": []interface{}{"allowed-client"}},
+	}}
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "client_id": "other-client",
+	})
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthFailure(t, ctx, action, 403)
+	if got := action.(policy.ImmediateResponse).Headers["www-authenticate"]; got != "Bearer" {
+		t.Fatalf("www-authenticate = %q, want %q", got, "Bearer")
+	}
+}
+
+// onAuthorizationFailureStatusCode restores the pre-v1.6 status for deployments whose
+// clients expect 401 on a scope rejection; authentication failures are unaffected.
+func TestJWTAuthPolicy_OnAuthorizationFailureStatusCode_Override(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["scopes"] = map[string]interface{}{"anyOf": []interface{}{"write"}}
+	params["onAuthorizationFailureStatusCode"] = 401
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "scope": "read",
+	})
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+	assertAuthFailure(t, ctx, action, 401)
+	ctx, action = executeOnRequestHeaders(t, params, map[string][]string{})
+	assertAuthFailure(t, ctx, action, 401)
+}
+
+// The override reaches the claims rejection and a verdict served from the token cache.
+func TestJWTAuthPolicy_OnAuthorizationFailureStatusCode_ClaimsAndCachedVerdict(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["claims"] = map[string]interface{}{"anyOf": []interface{}{
+		map[string]interface{}{"claim": "client_id", "values": []interface{}{"allowed-client"}},
+	}}
+	params["onAuthorizationFailureStatusCode"] = 404
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "client_id": "other-client",
+	})
+
+	for i := 0; i < 2; i++ { // the second request is served from the verdict cache
+		ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+		assertAuthFailure(t, ctx, action, 404)
+	}
+	ctx, action := executeOnRequestHeaders(t, params, map[string][]string{})
+	assertAuthFailure(t, ctx, action, 401)
+}
+
+// An override outside 400-499 (as another policy could forward) never turns a rejection into
+// a success or a server error: the default 403 is used.
+func TestJWTAuthPolicy_OnAuthorizationFailureStatusCode_OutOfRange(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["scopes"] = map[string]interface{}{"anyOf": []interface{}{"write"}}
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "scope": "read",
+	})
+	for _, status := range []int{200, 302, 500} {
+		params["onAuthorizationFailureStatusCode"] = status
+		ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", token))
+		assertAuthFailure(t, ctx, action, 403)
+	}
+}
+
+// The challenge names the configured scheme, so a client retries with the credential the
+// route accepts; with no scheme there is nothing to challenge with.
+func TestJWTAuthPolicy_Challenge_FollowsConfiguredScheme(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["authHeaderPrefix"] = "JWT"
+	params["scopes"] = map[string]interface{}{"anyOf": []interface{}{"write"}}
+	token := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "scope": "read",
+	})
+
+	_, action := executeOnRequestHeaders(t, params, map[string][]string{})
+	if got := action.(policy.ImmediateResponse).Headers["www-authenticate"]; got != "JWT" {
+		t.Fatalf("no credentials: www-authenticate = %q, want %q", got, "JWT")
+	}
+	_, action = executeOnRequestHeaders(t, params, authHeader("Authorization", "JWT", token))
+	if got := action.(policy.ImmediateResponse).Headers["www-authenticate"]; got != `JWT error="insufficient_scope"` {
+		t.Fatalf("missing scope: www-authenticate = %q", got)
+	}
+	if got := wwwAuthenticate("", policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization, ""); got != "" {
+		t.Fatalf("no scheme: challenge = %q, want none", got)
+	}
+	for _, bad := range []string{`Bea"rer`, "Bear er", "Bea\trer", "Bé"} {
+		if got := wwwAuthenticate(bad, policy.FaultCodeInvalidScope, policy.FaultTypeAuthorization, ""); got != "" {
+			t.Fatalf("scheme %q is not an HTTP token: challenge = %q, want none", bad, got)
+		}
+	}
 }

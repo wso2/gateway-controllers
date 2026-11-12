@@ -10,9 +10,9 @@ github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/r
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
 github.com/redis/go-redis/v9 v9.17.3 h1:fN29NdNrE17KttK5Ndf20buqfDZwGNgoUr9qjl1DQx4=
 github.com/redis/go-redis/v9 v9.17.3/go.mod h1:u410H11HMLoB+TP67dz8rL9s6QW2j76l0//kSOd3370=
-github.com/wso2/api-platform/sdk/core v0.3.4 h1:0QkrwZeeFppOiaU79swRa+5kRZ4cBqmF4absQ+rs4Z8=
-github.com/wso2/api-platform/sdk/core v0.3.4/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
-github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.1.2 h1:IVqkX4qj9RRviCC+6tKkwc91IOgTCaiD5ubw7Pf3/8k=
-github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.1.2/go.mod h1:rGlm3MwH3j49M0MWWfYftqT92+a9K6lZuoXcpLUpD6Q=
+github.com/wso2/api-platform/sdk/core v0.5.1 h1:rDZrUfz3UPSTjkaCYKYGOxBOnyeL8g5hSZH7MuNpQTA=
+github.com/wso2/api-platform/sdk/core v0.5.1/go.mod h1:VdqErJgvFo/VRtN2U6+fWbrSVqCmLdw+jvE4C9Hy3hg=
+github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0 h1:KQaiKOQTdVCpP9oBTj/Yz/1xfzzNe4Si/IZw16JzWAw=
+github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.4.0/go.mod h1:Em5a6+MXXOwGsg1+hSTIoiK4AiDYwPu4MzDI0JfNCBY=
 github.com/yuin/gopher-lua v1.1.1 h1:kYKnWBjvbNP4XLT3+bPEwAXJx262OhaHDWDVOPjL46M=
 github.com/yuin/gopher-lua v1.1.1/go.mod h1:GBR0iDaNXjAgGg9zfCvksxSRnQx76gclCIb7kdAd1Pw=

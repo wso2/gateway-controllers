@@ -292,21 +292,21 @@ func (p *PromptDecoratorPolicy) processRequestBody(reqCtx *policy.RequestContext
 
 	// Check for empty or nil content before unmarshaling
 	if reqCtx.Body == nil || len(content) == 0 {
-		return p.buildErrorResponse("Empty request body", nil)
+		return p.buildInvalidBodyResponse("Empty request body", nil)
 	}
 
 	// Parse JSON payload
 	var payloadData map[string]interface{}
 	if err := json.Unmarshal(content, &payloadData); err != nil {
 		slog.Debug("PromptDecorator: Error parsing JSON payload", "error", err)
-		return p.buildErrorResponse("Error parsing JSON payload", err)
+		return p.buildInvalidBodyResponse("Error parsing JSON payload", err)
 	}
 
 	// Extract value using JSONPath
 	extractedValue, err := utils.ExtractValueFromJsonpath(payloadData, p.params.JsonPath)
 	if err != nil {
 		slog.Debug("PromptDecorator: Error extracting value from JSONPath", "jsonPath", p.params.JsonPath, "error", err)
-		return p.buildErrorResponse("Error extracting value from JSONPath", err)
+		return p.buildInvalidBodyResponse("Error extracting value from JSONPath", err)
 	}
 
 	// Check if we're decorating a string content field or an array of messages
@@ -418,6 +418,19 @@ func (p *PromptDecoratorPolicy) processRequestBody(reqCtx *policy.RequestContext
 }
 
 func (p *PromptDecoratorPolicy) buildErrorResponse(reason string, validationError error) policy.RequestAction {
+	return p.buildFaultResponse(reason, validationError,
+		policy.FaultCodeMediationFailed, policy.FaultTypeMediation, "Prompt decoration failed")
+}
+
+// buildInvalidBodyResponse refuses a request payload the policy could not read, or one
+// without the jsonPath target. That is the caller's failure rather than the policy's, so
+// it is declared as one; the client response is the same as buildErrorResponse's.
+func (p *PromptDecoratorPolicy) buildInvalidBodyResponse(reason string, validationError error) policy.RequestAction {
+	return p.buildFaultResponse(reason, validationError,
+		policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation, "Invalid request body")
+}
+
+func (p *PromptDecoratorPolicy) buildFaultResponse(reason string, validationError error, code, faultType, message string) policy.RequestAction {
 	errorMessage := reason
 	if validationError != nil {
 		errorMessage = fmt.Sprintf("%s: %v", reason, validationError)
@@ -438,7 +451,17 @@ func (p *PromptDecoratorPolicy) buildErrorResponse(reason string, validationErro
 		Headers: map[string]string{
 			"Content-Type": "application/json",
 		},
-		Body: bodyBytes,
+		Body:    bodyBytes,
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      faultType,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+			// The body already returns errorMessage to the client; Description
+			// repeats it for fault policies and analytics.
+			Description: errorMessage,
+		},
 	}
 }
 

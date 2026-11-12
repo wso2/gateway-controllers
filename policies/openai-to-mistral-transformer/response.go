@@ -112,7 +112,8 @@ func translateErrorResponse(respBody []byte, status int) policy.ResponseAction {
 
 	newBody, err := json.Marshal(openaiErr)
 	if err != nil {
-		return errResponse(500, "failed to translate Mistral error: "+err.Error())
+		return errResponse(500, "failed to translate Mistral error: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
 	}
 
 	return policy.DownstreamResponseModifications{
@@ -147,7 +148,49 @@ func mapStatusToOpenAIErrorType(status int) string {
 	}
 }
 
+// looksLikeSSE reports whether the body opens as a Server-Sent Events stream.
+//
+// It accepts every line type the SSE grammar allows at the start of a stream,
+// not only "event:" and "data:". A provider may open with a comment line
+// (": ping", commonly used as a keep-alive) or with an "id:" or "retry:", and
+// reading one of those as a JSON document would route a live stream into the
+// buffered translator — which holds it until the upstream closes and so undoes
+// the incremental delivery this policy exists to preserve. No JSON document can
+// begin with any of these, so widening the test costs nothing.
 func looksLikeSSE(body []byte) bool {
-	trimmed := strings.TrimLeft(string(body), " \r\n\t")
-	return strings.HasPrefix(trimmed, "event:") || strings.HasPrefix(trimmed, "data:")
+	trimmed := strings.TrimLeft(string(body), " \r\n\t\uFEFF")
+	if trimmed == "" {
+		return false
+	}
+	if strings.HasPrefix(trimmed, ":") {
+		return true
+	}
+	for _, field := range []string{"event:", "data:", "id:", "retry:"} {
+		if strings.HasPrefix(trimmed, field) {
+			return true
+		}
+	}
+	return false
+}
+
+// openAIErrorBody renders an OpenAI error envelope. The streaming path uses it
+// where the buffered path would return an ImmediateResponse: once the status and
+// headers are committed, the body is the only part of the reply still open, so
+// the envelope has to carry the failure on its own.
+func openAIErrorBody(errType, message, code string) []byte {
+	body, err := json.Marshal(map[string]interface{}{
+		"error": map[string]interface{}{
+			"type":    errType,
+			"message": message,
+			"code":    code,
+		},
+	})
+	if err != nil {
+		// Unreachable for a map of plain strings, but a nil body here would be
+		// read as "no change" and let the untranslated bytes through.
+		return []byte(`{"error":{"type":"server_error",` +
+			`"message":"The upstream response could not be translated.",` +
+			`"code":"response_translation_failed"}}`)
+	}
+	return body
 }

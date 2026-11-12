@@ -1,0 +1,28 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# The system parameters the v1.0.x line of aws-bedrock-guardrail requires.
+awsbedrock_guardrail_region = "us-east-1"
+awsbedrock_guardrail_id = "test-guardrail-id"
+awsbedrock_guardrail_version = "DRAFT"
+awsbedrock_access_key_id = "test-access-key"
+awsbedrock_secret_access_key = "test-secret-key"
+awsbedrock_session_token = ""
+awsbedrock_role_arn = ""
+awsbedrock_role_region = ""
+awsbedrock_role_external_id = ""

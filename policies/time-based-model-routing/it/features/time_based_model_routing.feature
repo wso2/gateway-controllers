@@ -58,3 +58,50 @@ Feature: Time-based model routing
     Then the response should be successful
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+
+  # The response must match the expected error response recorded from the policy before a
+  # change (resources/expected-error-responses), so a change a client could observe fails.
+  Scenario: time-based-model-routing rejects an empty request body
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "compat-tbr-empty-provider" and store it as "providerName"
+    And I generate a unique value from "compat-tbr-empty-provider" and store it as "providerDisplayName"
+    And I generate a unique API version from "compat-tbr-empty-provider" and store it as "providerVersion"
+    And I generate a unique API context from "/compat-tbr-empty-provider" and store it as "providerContext"
+    And I generate a unique resource name from "compat-tbr-empty-proxy" and store it as "proxyName"
+    And I generate a unique value from "compat-tbr-empty-proxy" and store it as "proxyDisplayName"
+    And I generate a unique API version from "compat-tbr-empty-proxy" and store it as "proxyVersion"
+    And I generate a unique API context from "/compat-tbr-empty-proxy" and store it as "proxyContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion} |
+      | name               | ${CTX:providerName} |
+      | displayName        | ${CTX:providerDisplayName} |
+      | version            | ${CTX:providerVersion} |
+      | template           | openai |
+      | spec.context       | ${CTX:providerContext} |
+      | spec.upstream.url  | http://testbench:3008/openai/v1 |
+      | accessControl.mode | allow_all |
+    Then the response status code should be 201
+    When I create LLM proxy from "resources/templates/llm-proxy.yaml" with values:
+      | apiVersion    | ${CTX:gatewaySpecVersion} |
+      | name          | ${CTX:proxyName} |
+      | displayName   | ${CTX:proxyDisplayName} |
+      | version       | ${CTX:proxyVersion} |
+      | context       | ${CTX:proxyContext} |
+      | provider.id   | ${CTX:providerName} |
+      | spec.policies | [{"name":"time-based-model-routing","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"timezone":"UTC","schedules":[{"name":"all-day","from":"00:00","to":"23:59","model":{"modelName":"compat-routed-model"}}],"fallback":{"modelName":"compat-routed-model"}}}]}] |
+    Then the response status code should be 201
+    And I send a "POST" request to "${CTX:proxyContext}/chat/completions" until status 200 with body:
+      """
+      {"model":"original-model","messages":[{"role":"user","content":"Hello"}]}
+      """
+
+    When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
+      """
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "time-based-model-routing-empty-body"
+
+    When I delete the LLM proxy "${CTX:proxyName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:providerName}"
+    Then the response should be successful

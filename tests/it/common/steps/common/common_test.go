@@ -511,3 +511,36 @@ func TestResourceTemplatePathFallsBackToTheSharedTemplate(t *testing.T) {
 		require.Equal(t, filepath.Join(root, filepath.FromSlash(name)), path, "only a shared template falls back")
 	}
 }
+
+func TestRepeated(t *testing.T) {
+	value, err := Repeated(2, "AB")
+	require.NoError(t, err)
+	require.Len(t, value, 2048)
+	require.True(t, strings.HasPrefix(value, "ABAB"))
+
+	value, err = Repeated(1, "xyz")
+	require.NoError(t, err)
+	require.Len(t, value, 1024, "the value is cut to exactly the size asked for")
+
+	for _, kib := range []int{0, -1, MaxRepeatedKiB + 1} {
+		_, err := Repeated(kib, "A")
+		require.ErrorContains(t, err, "must be between")
+	}
+	_, err = Repeated(1, "")
+	require.ErrorContains(t, err, "must not be empty")
+}
+
+func TestGenerateRepeatedAndStore(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, GenerateRepeatedAndStore(ctx, 1, "A", "big"))
+	value, err := StoredValue(ctx, "big")
+	require.NoError(t, err)
+	require.Equal(t, strings.Repeat("A", 1024), value)
+
+	expanded, err := Expand(ctx, "Basic ${CTX:big}")
+	require.NoError(t, err)
+	require.Len(t, expanded, len("Basic ")+1024)
+
+	require.Error(t, GenerateRepeatedAndStore(ctx, 0, "A", "bad"))
+	require.Error(t, GenerateRepeatedAndStore(context.Background(), 1, "A", "nolocal"))
+}

@@ -27,7 +27,8 @@ import (
 	"github.com/wso2/gateway-controllers/policies/backend-jwt/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// jwt-auth authenticates the caller whose identity backend-jwt forwards.
+var config = suite.Config{Register: steps.Register, Companions: []string{"jwt-auth"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

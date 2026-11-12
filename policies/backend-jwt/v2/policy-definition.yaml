@@ -1,0 +1,169 @@
+name: backend-jwt
+version: v2.0.0
+description: |
+  Generates a signed JWT and injects it into the upstream request header. Can be used
+  standalone or after an authentication policy (e.g. jwt-auth, basic-auth, api-key-auth).
+
+  When an auth policy has run, the generated JWT includes the subject, authentication type,
+  issuer, audience, and any custom or mapped claims. When no auth policy is present, only
+  system claims (iss, iat, exp) and non-auth custom claims are included. Backend services
+  can verify the JWT using the corresponding public key without needing access to the
+  original client credential.
+
+  Signing key: when gateway signing keys are configured ([signing] in the gateway
+  configuration), the token is signed with the gateway's active key and carries its kid, so
+  backends can verify it from the gateway JWKS (/.well-known/jwks). In that case the
+  policy-level signingKey and algorithm are ignored and a warning is logged per deployment.
+  Without gateway signing keys, the policy-level signingKey and algorithm sign the token
+  exactly as before, with no kid.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    header:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: Header name to inject the generated JWT into.
+      default: x-jwt-assertion
+      minLength: 1
+      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+
+    claimMappings:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: >-
+        Maps upstream JWT claim names to backend JWT claim names. Key is the backend
+        JWT claim to set; value is the property key from the authenticated context
+        (populated by jwt-auth from the upstream JWT's custom claims). Claims mapped
+        to reserved names (iss, sub, aud, exp, iat, nbf, jti) are skipped with a warning.
+        Missing source properties are silently skipped. Values keep the type they
+        had in the caller's token (array, object, number, boolean) when the authentication policy
+        records it, and are strings otherwise.
+        customClaims take precedence if the same destination key appears in both.
+      default: {}
+      additionalProperties:
+        type: string
+
+    customClaims:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: >-
+        Claim name→value pairs added to every generated token. String values prefixed
+        with "$ctx:" are resolved from the request context at runtime — for example,
+        "$ctx:auth.credential_id" injects the authenticated credential ID, and
+        "$ctx:request.header.x-tenant-id" injects a request header value. See
+        documentation for the full list of supported context variables. Non-resolvable
+        context references are silently skipped. "$ctx:auth.property.<key>" resolves to the property's
+        original type (see claimMappings), or a string when no typed value was recorded. Non-string values (numbers, booleans)
+        are included as-is. Claims targeting reserved names (iss, sub, aud, exp, iat, nbf, jti)
+        are skipped with a warning. Runs after claimMappings and takes precedence.
+      default: {}
+      additionalProperties: {}
+
+    tokenExpiry:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Token validity as a Go duration string (e.g. "5m", "1h"). When set, overrides
+        the system-level tokenExpiry for this API. If omitted, the system default applies.
+      pattern: "^[0-9]+(ns|us|µs|ms|s|m|h)$"
+
+    dialect:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Namespace prefix applied to all user-configured and auto-forwarded claims. When
+        set, auto-forwarded original-JWT claims, claimMappings destinations, and
+        customClaims keys are all emitted as "<dialect><claimName>" (e.g.
+        "http://wso2.org/claims/" turns "email" into "http://wso2.org/claims/email").
+        Does not affect standard claims set by the policy itself (sub, iss, aud, scope,
+        etc.). Default "" leaves claim names unchanged.
+      default: ""
+
+    excludedClaims:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        List of original-JWT claim names (matched by their original name, before any
+        dialect prefix is applied) that must not be forwarded into the backend JWT.
+        Applies only to auto-forwarded original-JWT claims (the Properties loop); it does
+        not affect standard registered claims, claimMappings, or customClaims. Default []
+        forwards all non-restricted claims.
+      default: []
+      items:
+        type: string
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    signingKey:
+      type: object
+      description: >-
+        Private key used to sign the generated JWT when no gateway signing keys are
+        configured. Specify exactly one of 'inline' (PEM-encoded key string) or 'path'
+        (path to a PEM key file). Ignored, and not required, when gateway signing keys
+        ([signing]) are configured.
+      additionalProperties: false
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v2.signingkey}"
+      oneOf:
+        - required: ["inline"]
+          not:
+            required: ["path"]
+        - required: ["path"]
+          not:
+            required: ["inline"]
+      properties:
+        inline:
+          type: string
+          description: PEM-encoded RSA or ECDSA private key string.
+        path:
+          type: string
+          description: Path to a PEM-encoded RSA or ECDSA private key file (e.g. /etc/certs/backend-jwt.key).
+
+    algorithm:
+      type: string
+      description: >-
+        JWT signing algorithm for the policy-level signingKey. Must match the type of the
+        configured private key: SHA256withRSA for RSA keys, ES256 for ECDSA keys, or NONE for
+        unsigned tokens. Ignored when gateway signing keys ([signing]) are configured: the
+        gateway's active key decides the algorithm.
+      default: SHA256withRSA
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v2.algorithm}"
+      enum: ["SHA256withRSA", "ES256", "NONE"]
+
+    issuer:
+      type: string
+      description: Value for the 'iss' claim in generated tokens. Identifies the gateway as the token issuer.
+      default: ""
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v2.issuer}"
+
+    tokenExpiry:
+      type: string
+      description: Validity duration of the generated token as a Go duration string (e.g. "15m", "1h").
+      default: "15m"
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v2.tokenexpiry}"
+
+    tokenCaching:
+      type: boolean
+      description: >-
+        Whether to cache generated tokens. When true (default), tokens are cached for half
+        their expiry duration to avoid repeated signing on every request. Set to false to
+        disable caching — useful for debugging or when dynamic claims must reflect every
+        request without a cache window.
+      default: true
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v2.tokencaching}"
+
+    cacheMaxSize:
+      type: integer
+      description: >-
+        Maximum total number of tokens to hold in the cache across all APIs combined (a single
+        global bound, not per-API). When the limit is reached, the cache evicts the
+        least-recently-used existing entries to make room for new tokens. Changing this value rebuilds the shared cache, which flushes all
+        currently cached tokens.
+      default: 100000
+      minimum: 1
+      "wso2/defaultValue": "${config.policy_configurations.backendjwt_v2.cachemaxsize}"
+
+  required: []
