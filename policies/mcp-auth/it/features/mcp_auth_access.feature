@@ -102,3 +102,63 @@ Feature: mcp-auth access decisions by group and exceptions
       | case                    | params                                           | passes | refused                                                                               |
       # MAN #24: tools disabled with add as the exception; ADD passes without a token while add is refused.
       | case variant fails open | {"tools":{"enabled":false,"exceptions":["add"]}} | ADD    | {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{}}} |
+
+  # The other three groups follow the same rule as tools, each with its own match: resources by
+  # the full params.uri, prompts by params.name, and methods by the full JSON-RPC method name.
+  # The mock's log records only the method of these requests, so the log check names the method.
+  Scenario Outline: A request is decided by its own group and its exceptions (<case>)
+    Given I generate a unique resource name from "mcp-auth-access" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-access" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-access" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-access" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-access" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":<params>}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <passes>
+      """
+    Then the response status code should be 200
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <refused>
+      """
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-access-denied"
+
+    When I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+    And the JSON response array "requests" should contain an item with "method" equal to "<method>"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: resources group
+      | case                      | params                                                                              | method         | passes                                                                                        | refused                                                                                      |
+      # MAN #17: resource exceptions match the full params.uri. readme's URI is an exception, so it passes; guide.txt is listed only as a bare file name, which never matches a URI, so guide's read is refused.
+      | exception is the full URI | {"resources":{"enabled":true,"exceptions":["file:///docs/readme.txt","guide.txt"]}} | resources/read | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}} | {"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///docs/guide.txt"}} |
+
+    Examples: prompts group
+      | case                         | params                                                 | method      | passes                                                                       | refused                                                                      |
+      # MAN #18: prompts enabled with greeting as the exception; greeting passes without a token, farewell is refused.
+      | exception is the prompt name | {"prompts":{"enabled":true,"exceptions":["greeting"]}} | prompts/get | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting"}} | {"jsonrpc":"2.0","id":2,"method":"prompts/get","params":{"name":"farewell"}} |
+
+    Examples: methods group
+      | case                         | params                                                   | method     | passes                                         | refused                                  |
+      # MAN #20: methods enabled with tools/list as the exception, matched by the full method name; tools/list passes, ping is refused.
+      | exception is the method name | {"methods":{"enabled":true,"exceptions":["tools/list"]}} | tools/list | {"jsonrpc":"2.0","id":1,"method":"tools/list"} | {"jsonrpc":"2.0","id":2,"method":"ping"} |
