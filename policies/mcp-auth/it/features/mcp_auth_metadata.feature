@@ -103,6 +103,59 @@ Feature: mcp-auth protected-resource metadata
       # MAN #3: issuers given as an empty list; an empty list also means every key manager.
       | issuers is an empty list      | {"issuers":[]}            | ["http://testbench:3001/token","http://expected-issuer.com","https://testbench:3015/oauth2/token"] |
 
+  # MAN #2: issuers also limits which tokens the proxy accepts, not only what the metadata lists.
+  # With issuers naming only mock-jwks, a token from wrong-issuer-km, which the gateway has
+  # configured but the proxy did not select, is refused. The same kind of token gets in under
+  # empty params (MAN #30), so the refusal comes from issuers alone. A mock-jwks token is the
+  # control, and the scripted mock's log holds only its call.
+  Scenario: A token from a configured key manager that issuers leaves out is refused
+    Given I generate a unique resource name from "mcp-auth-unselected-km" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-unselected-km" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-unselected-km" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-unselected-km" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-unselected-km" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I get a JWT token from the mock JWKS server with issuer "http://expected-issuer.com" and store it as "otherToken"
+    And I set header "Authorization" to "Bearer ${CTX:otherToken}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 401
+    And the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+
+    When I clear all headers
+    And I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "result.content[0].text" should be "ok"
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
   # MAN #4: issuers names only a key manager the gateway does not have, so the proxy trusts no
   # issuer at all. The metadata then fails with the failure status (401 by default) instead of
   # listing an empty authorization_servers. That answer is built by mcp-auth itself and carries no

@@ -327,15 +327,17 @@ Feature: mcp-auth authentication of MCP requests
     Then the response should be successful
 
     Examples: wrong shapes
-      | case          | header        | value               |
+      | case         | header        | value               |
       # MAN #9: the token without the Bearer prefix is rejected.
-      | no scheme     | Authorization | ${CTX:token}        |
+      | no scheme    | Authorization | ${CTX:token}        |
       # MAN #9: the token under a different scheme is rejected.
-      | Basic scheme  | Authorization | Basic ${CTX:token}  |
+      | Basic scheme | Authorization | Basic ${CTX:token}  |
       # MAN #9: the Authorization header present but empty is rejected.
-      | empty header  | Authorization |                     |
+      | empty header | Authorization |                     |
+      # MAN #9: a valid token in a header other than the configured Authorization is rejected.
+      | other header | X-MCP-Token   | Bearer ${CTX:token} |
       # MAN #8: a structurally malformed token is rejected.
-      | malformed     | Authorization | Bearer not-a-jwt    |
+      | malformed    | Authorization | Bearer not-a-jwt    |
 
   # MAN #8: a token that cannot be validated is rejected. Each row first sends a control token
   # minted by the same testbench OIDC provider (200), so the refusal comes from the one claim the
