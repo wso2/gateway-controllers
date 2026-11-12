@@ -65,6 +65,9 @@ blocks:
       - name: mcp-auth-access
         features:
           - features/mcp_auth_access.feature
+      - name: mcp-auth-validation
+        features:
+          - features/mcp_auth_validation.feature
 
   - name: mcp-auth-gateway-host
     parallel: 1
