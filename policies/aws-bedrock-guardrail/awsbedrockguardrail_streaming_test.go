@@ -552,6 +552,27 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 		}
 	})
 
+	t.Run("boundary matches the schema constraint", func(t *testing.T) {
+		// policy-definition.yaml allows 0 or >= 100 via
+		// oneOf: [enum: [0], minimum: 100]. The two must agree, or a value the
+		// schema accepts fails later at policy construction instead of at
+		// configuration time.
+		for _, accepted := range []float64{0, 100, 1000} {
+			if _, err := parseRequestResponseParams(map[string]interface{}{
+				"enabled": true, "streamingTextUnitChars": accepted,
+			}, true); err != nil {
+				t.Errorf("%v must be accepted: %v", accepted, err)
+			}
+		}
+		for _, rejected := range []float64{1, 50, 99, -1} {
+			if _, err := parseRequestResponseParams(map[string]interface{}{
+				"enabled": true, "streamingTextUnitChars": rejected,
+			}, true); err == nil {
+				t.Errorf("%v must be rejected", rejected)
+			}
+		}
+	})
+
 	t.Run("zero means assess the whole response", func(t *testing.T) {
 		// Distinct from a window: nothing is assessed until the stream ends, so
 		// nothing is delivered until then either. Documented as such rather than

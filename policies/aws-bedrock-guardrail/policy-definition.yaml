@@ -291,7 +291,9 @@ parameters:
             frame, so a value the model emitted across two events cannot be
             replaced in place; the stream is ended rather than the value
             delivered.
-          minimum: 0
+          oneOf:
+            - enum: [ 0 ]
+            - minimum: 100
           default: 1000
   anyOf:
     - required: [ request ]
