@@ -501,8 +501,9 @@ Feature: Azure Authentication policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  # A failed token request is not cached: once Entra ID accepts the identity again, the next request
-  # gets a token and succeeds, with no restart and no change to the API.
+  # A rejected token request is remembered for about two seconds, so requests in that window get the
+  # same 502 without a new token request. Once Entra ID accepts the identity again, a later request
+  # gets a token and succeeds, with no restart and no change to the API: two token requests in all.
   Scenario: Restore authentication after Entra ID rejected the identity
     Given I generate a unique resource name from "az" and store it as "tenant"
     And I generate a unique value from "az-recover" and store it as "apiName"
@@ -522,9 +523,8 @@ Feature: Azure Authentication policy
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
     Then the response status code should be 502
     And the response should match the expected error response "azure-authentication-upstream-auth-failed"
-    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
-    Then the response status code should be 200
-    And the response header "X-Testbench-Entra-Tid" should be "reject-once-${CTX:tenant}"
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    Then the response header "X-Testbench-Entra-Tid" should be "reject-once-${CTX:tenant}"
     When I send a "GET" request to the "entra" service at "/reject-once-${CTX:tenant}/test/requests"
     Then the response status code should be 200
     And the JSON response field "count" should be 2
