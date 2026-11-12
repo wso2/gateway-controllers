@@ -1891,9 +1891,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 ) policy.StreamingResponseAction {
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
 	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
-	// Bytes accumulate in metaKeyHeldBytes here, so only the text split matters:
-	// prepareFlush's emit portion is ignored and the raw flush is held whole.
-	_, newText := p.prepareFlush(chunkStr, chunk.EndOfStream, respCtx, rp)
+	newText := p.flushText(chunkStr, chunk.EndOfStream, respCtx, rp)
 	unit := p.effectiveTextUnit()
 
 	// Assess and release everything once the stream ends; there is no later
@@ -2338,47 +2336,48 @@ func splitTrailingPartialLine(s string) (complete, partial string) {
 	return "", s
 }
 
-// prepareFlush joins this flush to any incomplete line retained from the
-// previous one and divides the result into the bytes that may be emitted now and
-// the assistant text they carry.
+// flushText returns the assistant text of this flush, joined to any incomplete
+// line retained from the previous one, and retains this flush's own incomplete
+// tail for the next.
 //
 // An SSE line cut in half is the problem being solved. A truncated "data:"
-// payload is unparseable JSON, so its text is extracted from neither flush, and
-// a placeholder or a value needing redaction inside it is rewritten in neither.
-// Retaining the fragment fixes both, but only if the *bytes* are retained too:
-// forwarding them and merely remembering the text would leave the client holding
-// the half-frame this policy never got to rewrite.
+// payload is unparseable JSON, so without this its text is extracted from
+// neither flush and never assessed. Reached when the engine force-flushes at its
+// accumulator ceiling, or whenever an upstream's writes do not align with event
+// boundaries.
 //
-// So the trailing fragment is withheld and re-emitted at the head of the next
-// flush. Byte order is preserved and nothing is dropped; end of stream emits
-// whatever is left, since no further flush is coming.
+// Only the text needs carrying: every byte of the flush is withheld until the
+// batch covering it has been assessed, so a half-frame can never be delivered
+// before the line completes. The retained fragment is what makes its text
+// assessable, and the frame is whole again by the time the bytes are released.
 //
-// Over maxPartialLineBytes the fragment is emitted rather than held: a stream
-// carrying no line terminator would otherwise grow it without limit, and
-// delivering an unrewritten fragment is better than withholding the response.
-func (p *AWSBedrockGuardrailPolicy) prepareFlush(
+// Over maxPartialLineBytes the fragment stops being retained as a fragment: a
+// stream carrying no line terminator would otherwise grow it without limit. Its
+// bytes are still withheld with the rest, so nothing is lost — only the chance
+// to read text out of it.
+func (p *AWSBedrockGuardrailPolicy) flushText(
 	chunkStr string,
 	endOfStream bool,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
-) (emit, text string) {
+) string {
 	carried, _ := respCtx.Metadata[metaKeyPartialLine].(string)
 	joined := carried + chunkStr
 
 	if endOfStream {
 		delete(respCtx.Metadata, metaKeyPartialLine)
-		return joined, extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
 	}
 
 	complete, partial := splitTrailingPartialLine(joined)
 	if len(partial) > maxPartialLineBytes {
-		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, emitting it unrewritten",
+		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, no longer retaining it",
 			"partial_bytes", len(partial), "limit", maxPartialLineBytes)
 		delete(respCtx.Metadata, metaKeyPartialLine)
-		return joined, extractSSEDeltaContent(complete, rp.StreamingJsonPath)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
 	}
 	respCtx.Metadata[metaKeyPartialLine] = partial
-	return complete, extractSSEDeltaContent(complete, rp.StreamingJsonPath)
+	return extractSSEDeltaContent(complete, rp.StreamingJsonPath)
 }
 
 // isSSEChunk reports whether s looks like SSE framing.
