@@ -1,9 +1,9 @@
 module github.com/wso2/gateway-controllers/policies/json-schema-guardrail
 
-go 1.26.1
+go 1.26.2
 
 require (
-	github.com/wso2/api-platform/sdk/core v0.2.4
+	github.com/wso2/api-platform/sdk/core v0.4.2
 	github.com/xeipuuv/gojsonschema v1.2.0
 )
 

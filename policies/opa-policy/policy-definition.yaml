@@ -1,0 +1,81 @@
+name: opa-policy
+version: v0.2.0
+description: |
+  Validates requests against an Open Policy Agent (OPA) policy engine. The
+  gateway extracts a predefined set of request metadata (method, path, headers,
+  origin IP, matched resource and authentication details), sends it to OPA over
+  HTTP/HTTPS, and allows or blocks the request based on the policy decision.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    serverUrl:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: >-
+        OPA server's base data API URL. Sample URL: https://opa-server-host:8181/v1/data.
+        Can be an HTTP or HTTPS endpoint. For HTTPS, the OPA server certificate must be
+        trusted by the gateway.
+      minLength: 1
+      pattern: '^https?://[^\s]+$'
+    accessKey:
+      type: string
+      format: password
+      x-wso2-policy-advanced-param: false
+      description: >-
+        Access key for the validation request. Required only if token authentication is
+        enabled at the OPA server. Sent as a Bearer token in the Authorization header 
+        of the OPA request. Can be a plain string or a secret reference
+        such as '{{ secret "my-secret-id" }}'.
+    policy:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: >-
+        Policy (package path) to be evaluated, appended to the server URL
+        (e.g. `authz/policy` evaluates `{serverUrl}/authz/policy`).
+      minLength: 1
+    rule:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: Rule of the policy that yields the boolean decision (e.g. `allow`).
+      minLength: 1
+      default: allow
+    sendAccessToken:
+      type: boolean
+      x-wso2-policy-advanced-param: true
+      description: Include the access token from the Authorization header in the OPA input payload.
+      default: false
+    additionalProperties:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Additional request-context (shared metadata) keys to include in the OPA input.
+        The values are read from the request context at runtime and added to the input
+        payload; keys with no value are skipped.
+      default: []
+      items:
+        type: string
+        pattern: '^[a-zA-Z0-9_][a-zA-Z0-9_\-.:]*$'
+    maxOpenConnections:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: Maximum number of open HTTP connections between the gateway and the OPA server.
+      minimum: 1
+      maximum: 999
+      default: 500
+    connectionTimeout:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: Timeout in seconds for requests from the gateway to the OPA server.
+      minimum: 1
+      maximum: 999
+      default: 30
+  required:
+    - serverUrl
+    - policy
+    - rule
+
+systemParameters:
+  type: object
+  properties: {}

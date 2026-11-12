@@ -19,9 +19,11 @@
 package openaitobedrock
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -91,17 +93,25 @@ func TestOnRequestBody_FallsBackToRequestModel(t *testing.T) {
 
 func TestOnRequestBody_RejectsMissingFallbackModel(t *testing.T) {
 	p := &TranslatorPolicy{params: PolicyParams{}}
-	for _, body := range []string{
-		`{"messages":[]}`,
-		`{"model":"","messages":[]}`,
-		`{"model":42,"messages":[]}`,
+	const missingModel = `{"error":{"message":"a Bedrock model must be provided in either the policy configuration or request body","type":"invalid_request_error"}}`
+	const nonStringModel = `{"error":{"message":"request field 'model' must be a string","type":"invalid_request_error"}}`
+	for _, tc := range []struct{ body, want string }{
+		{`{"messages":[]}`, missingModel},
+		{`{"model":"","messages":[]}`, missingModel},
+		{`{"model":42,"messages":[]}`, nonStringModel},
 	} {
 		action := p.OnRequestBody(context.Background(), &policy.RequestContext{
 			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
-			Body:          &policy.Body{Present: true, Content: []byte(body)},
+			Body:          &policy.Body{Present: true, Content: []byte(tc.body)},
 		}, nil)
-		if response, ok := action.(policy.ImmediateResponse); !ok || response.StatusCode != 400 {
-			t.Errorf("expected a 400 response for body %s, got %#v", body, action)
+		response, ok := action.(policy.ImmediateResponse)
+		if !ok || response.StatusCode != 400 {
+			t.Errorf("expected a 400 response for body %s, got %#v", tc.body, action)
+			continue
+		}
+		assertRequestValidationFault(t, response)
+		if string(response.Body) != tc.want {
+			t.Errorf("client body changed for %s: got %s, want %s", tc.body, response.Body, tc.want)
 		}
 	}
 }
@@ -142,19 +152,45 @@ func TestOnRequestBody_RewritesAndRoutes(t *testing.T) {
 
 func TestOnRequestBody_RejectsBadBodies(t *testing.T) {
 	p := &TranslatorPolicy{params: PolicyParams{Model: "nova"}}
-	for _, body := range []*policy.Body{
-		nil,
-		{Present: true},
-		{Present: true, Content: []byte(`{"messages":`)},
+	for _, c := range []struct {
+		body       *policy.Body
+		bodyPrefix string
+	}{
+		{nil, `{"error":{"message":"Request body is empty.","type":"invalid_request_error"}}`},
+		{&policy.Body{Present: true}, `{"error":{"message":"Request body is empty.","type":"invalid_request_error"}}`},
+		{&policy.Body{Present: true, Content: []byte(`{"messages":`)}, `{"error":{"message":"Invalid JSON in request body: `},
 	} {
 		action := p.OnRequestBody(context.Background(), &policy.RequestContext{
 			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
-			Body:          body,
+			Body:          c.body,
 		}, nil)
 		resp, ok := action.(policy.ImmediateResponse)
 		if !ok || resp.StatusCode != 400 {
 			t.Errorf("expected a 400 ImmediateResponse, got %#v", action)
+			continue
 		}
+		if !strings.HasPrefix(string(resp.Body), c.bodyPrefix) {
+			t.Errorf("client body changed: got %s, want prefix %s", resp.Body, c.bodyPrefix)
+		}
+		assertRequestValidationFault(t, resp)
+	}
+}
+
+// assertRequestValidationFault checks that a refused request is declared as the caller's
+// unreadable payload, with the client-facing content type unchanged.
+func assertRequestValidationFault(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if resp.Headers["Content-Type"] != "application/json" {
+		t.Errorf("unexpected headers: %v", resp.Headers)
+	}
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected IsFault=true and Fault set, got %#v", resp)
+	}
+	if resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+		resp.Fault.Type != policy.FaultTypeValidation ||
+		resp.Fault.Direction != policy.DirectionRequest {
+		t.Errorf("unexpected fault code/type/direction: %q/%q/%q",
+			resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
 	}
 }
 
@@ -338,6 +374,96 @@ func TestNeedsMoreResponseData_Boundaries(t *testing.T) {
 	if p.NeedsMoreResponseData(nil) {
 		t.Error("empty accumulator should not request more data")
 	}
+	if !p.NeedsMoreResponseData([]byte(`{"output":{"message":{}}}`)) {
+		t.Error("a body that is not event-stream framed must accumulate until the upstream closes")
+	}
+}
+
+// TestStream_ConverseJSONBodyIsTranslated covers the framing the gateway cannot
+// tell apart from a stream: a Converse JSON reply sent without content-length is
+// routed through the chunk path, and must still be translated rather than
+// forwarded as raw Bedrock JSON with a [DONE] appended to it.
+func TestStream_ConverseJSONBodyIsTranslated(t *testing.T) {
+	p := &TranslatorPolicy{params: PolicyParams{Model: "claude"}}
+	converse := `{"output":{"message":{"role":"assistant","content":[{"text":"Hi there"}]}},` +
+		`"stopReason":"end_turn","usage":{"inputTokens":5,"outputTokens":3,"totalTokens":8}}`
+	respCtx := &policy.ResponseStreamContext{
+		SharedContext:   &policy.SharedContext{RequestID: "req-json", Metadata: map[string]interface{}{}},
+		ResponseHeaders: policy.NewHeaders(map[string][]string{"content-type": {"application/json"}}),
+		ResponseStatus:  200,
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx,
+		&policy.StreamBody{Chunk: []byte(converse), EndOfStream: true}, nil)
+	forward, ok := action.(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("expected ForwardResponseChunk, got %T", action)
+	}
+	if forward.Body == nil {
+		t.Fatal("a Converse JSON body must be translated, not forwarded untouched")
+	}
+	if bytes.Contains(forward.Body, []byte("[DONE]")) {
+		t.Errorf("a JSON reply must not be terminated like an SSE stream: %q", forward.Body)
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(forward.Body, &out); err != nil {
+		t.Fatalf("translated body is not JSON: %v", err)
+	}
+	if out["object"] != "chat.completion" {
+		t.Errorf("object = %v, want chat.completion", out["object"])
+	}
+	choices, _ := out["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("choices = %v, want one entry", out["choices"])
+	}
+	msg, _ := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "Hi there" {
+		t.Errorf("content = %v, want \"Hi there\"", msg["content"])
+	}
+}
+
+// TestStream_ConverseJSONTruncatedByAccumulatorCap covers the one case where a
+// non-stream body reaches the chunk path incomplete: the policy engine's stream
+// accumulator cap forces a flush before the upstream closes. The document is cut
+// mid-body, so the stream is closed rather than a fragment emitted.
+func TestStream_ConverseJSONTruncatedByAccumulatorCap(t *testing.T) {
+	p := &TranslatorPolicy{params: PolicyParams{Model: "claude"}}
+	respCtx := &policy.ResponseStreamContext{
+		SharedContext:   &policy.SharedContext{RequestID: "req-trunc", Metadata: map[string]interface{}{}},
+		ResponseHeaders: policy.NewHeaders(map[string][]string{"content-type": {"application/json"}}),
+		ResponseStatus:  200,
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx,
+		&policy.StreamBody{Chunk: []byte(`{"output":{"message":{"role":"ass`), EndOfStream: false}, nil)
+	term, ok := action.(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("expected TerminateResponseChunk for a truncated body, got %T", action)
+	}
+	if term.Body == nil {
+		t.Error("Body must be an empty slice, not nil: a nil body leaves the chain " +
+			"carrying the truncated document and delivers it to the client")
+	}
+	if len(term.Body) != 0 {
+		t.Errorf("a truncated body must not be forwarded, got %q", term.Body)
+	}
+	// The status went out with the headers and is almost always 200, so IsFault
+	// is the only thing that tells the fault flow this response failed.
+	if !term.IsFault {
+		t.Error("a truncated body is a failure and must be declared to the fault flow")
+	}
+	if term.Fault == nil {
+		t.Fatal("expected Fault to be populated")
+	}
+	if term.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Errorf("Fault.Code = %q, want %q", term.Fault.Code, policy.FaultCodeMediationFailed)
+	}
+	if term.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("Fault.Type = %q, want %q", term.Fault.Type, policy.FaultTypeMediation)
+	}
+	if term.Fault.Direction != policy.DirectionResponse {
+		t.Errorf("Fault.Direction = %q, want %q", term.Fault.Direction, policy.DirectionResponse)
+	}
 }
 
 func TestTranslateRequest_ConverseShape(t *testing.T) {
@@ -350,7 +476,10 @@ func TestTranslateRequest_ConverseShape(t *testing.T) {
 		"max_tokens":  100,
 		"temperature": 0.5,
 	}
-	mods := translateRequest(payload)
+	mods, err := translateRequest(payload)
+	if err != nil {
+		t.Fatalf("translateRequest failed: %v", err)
+	}
 
 	var body map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &body); err != nil {
@@ -378,7 +507,10 @@ func TestTranslateRequest_OmitsMaxTokensWhenNotSupplied(t *testing.T) {
 			map[string]interface{}{"role": "user", "content": "hi"},
 		},
 	}
-	mods := translateRequest(payload)
+	mods, err := translateRequest(payload)
+	if err != nil {
+		t.Fatalf("translateRequest failed: %v", err)
+	}
 
 	var body map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &body); err != nil {
@@ -415,7 +547,10 @@ func TestTranslateRequest_ToolsImagesAndResults(t *testing.T) {
 			"type": "function", "function": map[string]interface{}{"name": "weather"},
 		},
 	}
-	mods := translateRequest(payload)
+	mods, err := translateRequest(payload)
+	if err != nil {
+		t.Fatalf("translateRequest failed: %v", err)
+	}
 	var body map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &body); err != nil {
 		t.Fatalf("translated body is invalid: %v", err)
@@ -430,6 +565,231 @@ func TestTranslateRequest_ToolsImagesAndResults(t *testing.T) {
 	}
 }
 
+func filePart(file map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{"type": "file", "file": file}
+}
+
+func userMessageContent(t *testing.T, parts ...interface{}) []interface{} {
+	t.Helper()
+	parts = append([]interface{}{map[string]interface{}{"type": "text", "text": "read this"}}, parts...)
+	mods, err := translateRequest(map[string]interface{}{
+		"messages": []interface{}{map[string]interface{}{"role": "user", "content": parts}},
+	})
+	if err != nil {
+		t.Fatalf("translateRequest failed: %v", err)
+	}
+	var body map[string]interface{}
+	if err := json.Unmarshal(mods.Body, &body); err != nil {
+		t.Fatalf("translated body is invalid: %v", err)
+	}
+	messages, _ := body["messages"].([]interface{})
+	if len(messages) != 1 {
+		t.Fatalf("expected one user message, got %v", body["messages"])
+	}
+	content, _ := messages[0].(map[string]interface{})["content"].([]interface{})
+	if len(content) == 0 || content[0].(map[string]interface{})["text"] != "read this" {
+		t.Fatalf("expected the leading text block, got %v", content)
+	}
+	return content[1:]
+}
+
+func documentBlock(t *testing.T, block interface{}) map[string]interface{} {
+	t.Helper()
+	document, _ := block.(map[string]interface{})["document"].(map[string]interface{})
+	if document == nil {
+		t.Fatalf("expected a document block, got %v", block)
+	}
+	return document
+}
+
+func TestTranslateRequest_FilePartsBecomeDocuments(t *testing.T) {
+	tests := []struct {
+		name       string
+		file       map[string]interface{}
+		wantFormat string
+		wantName   string
+	}{
+		{"pdf", map[string]interface{}{"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}, "pdf", "report"},
+		{"docx", map[string]interface{}{"filename": "notes.docx", "file_data": "data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,UEsDBA=="}, "docx", "notes"},
+		{"media type parameters and case", map[string]interface{}{"filename": "a.txt", "file_data": "data:Text/Plain;charset=utf-8;base64,aGk="}, "txt", "a"},
+		{"extension fallback", map[string]interface{}{"filename": "data.CSV", "file_data": "data:application/octet-stream;base64,YSxi"}, "csv", "data"},
+		{"name sanitised", map[string]interface{}{"filename": "Q3_report  (final)!.v2.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}, "pdf", "Q3 report (final) v2"},
+		{"no filename", map[string]interface{}{"file_data": "data:application/pdf;base64,JVBERi0="}, "pdf", "document"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			content := userMessageContent(t, filePart(tt.file))
+			if len(content) != 1 {
+				t.Fatalf("expected one content block, got %v", content)
+			}
+			document := documentBlock(t, content[0])
+			if document["format"] != tt.wantFormat || document["name"] != tt.wantName {
+				t.Errorf("got format %v name %v, want %s %s", document["format"], document["name"], tt.wantFormat, tt.wantName)
+			}
+			source, _ := document["source"].(map[string]interface{})
+			wantBytes := strings.SplitN(tt.file["file_data"].(string), ",", 2)[1]
+			if source["bytes"] != wantBytes {
+				t.Errorf("got bytes %v, want %s", source["bytes"], wantBytes)
+			}
+		})
+	}
+}
+
+func TestTranslateRequest_FilePartsKeepOrderAndUniqueNames(t *testing.T) {
+	pdf := map[string]interface{}{"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}
+	content := userMessageContent(t,
+		map[string]interface{}{"type": "text", "text": "compare these"},
+		filePart(pdf),
+		map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": "data:image/png;base64,aGVsbG8="}},
+		filePart(pdf),
+	)
+	if len(content) != 4 {
+		t.Fatalf("expected text, document, image, document blocks, got %v", content)
+	}
+	if content[0].(map[string]interface{})["text"] != "compare these" {
+		t.Errorf("expected the text block first, got %v", content[0])
+	}
+	if content[2].(map[string]interface{})["image"] == nil {
+		t.Errorf("expected the image block third, got %v", content[2])
+	}
+	if first, second := documentBlock(t, content[1])["name"], documentBlock(t, content[3])["name"]; first != "report" || second != "report-2" {
+		t.Errorf("expected unique names report and report-2, got %v and %v", first, second)
+	}
+}
+
+func TestTranslateRequest_DocumentNamesUniqueAcrossMessages(t *testing.T) {
+	text := map[string]interface{}{"type": "text", "text": "read this"}
+	pdf := map[string]interface{}{"type": "file", "file": map[string]interface{}{"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}}
+	mods, err := translateRequest(map[string]interface{}{"messages": []interface{}{
+		map[string]interface{}{"role": "user", "content": []interface{}{text, pdf}},
+		map[string]interface{}{"role": "assistant", "content": "ok"},
+		map[string]interface{}{"role": "user", "content": []interface{}{text, pdf}},
+	}})
+	if err != nil {
+		t.Fatalf("translateRequest failed: %v", err)
+	}
+	if !strings.Contains(string(mods.Body), `"name":"report-2"`) {
+		t.Errorf("expected the second document to be renamed report-2, got %s", mods.Body)
+	}
+}
+
+func TestTranslateRequest_RejectsUnsupportedFiles(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    interface{}
+		wantErr string
+	}{
+		{"file_id", map[string]interface{}{"file_id": "file-abc123"}, "file_id is not supported"},
+		{"no file object", "report.pdf", "missing its file object"},
+		{"no file_data", map[string]interface{}{"filename": "report.pdf"}, "requires file_data"},
+		{"not a data uri", map[string]interface{}{"file_data": "JVBERi0="}, "base64 data URI"},
+		{"remote url", map[string]interface{}{"file_data": "https://example.com/report.pdf"}, "base64 data URI"},
+		{"not base64", map[string]interface{}{"file_data": "data:text/plain,hello"}, "base64 encoded"},
+		{"empty data", map[string]interface{}{"file_data": "data:application/pdf;base64,"}, "contains no data"},
+		{"invalid base64 characters", map[string]interface{}{"file_data": "data:application/pdf;base64,JVBER!0="}, "not valid base64"},
+		{"truncated base64", map[string]interface{}{"file_data": "data:application/pdf;base64,JVBERi0"}, "not valid base64"},
+		{"url-safe base64", map[string]interface{}{"file_data": "data:application/pdf;base64,__8="}, "not valid base64"},
+		{"line breaks", map[string]interface{}{"file_data": "data:application/pdf;base64,JVBE\nRi0="}, "without whitespace"},
+		{"unsupported type", map[string]interface{}{"filename": "a.zip", "file_data": "data:application/zip;base64,UEsDBA=="}, `unsupported file type "application/zip"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := translateRequest(map[string]interface{}{"messages": []interface{}{
+				map[string]interface{}{"role": "user", "content": []interface{}{
+					map[string]interface{}{"type": "text", "text": "read this"},
+					map[string]interface{}{"type": "file", "file": tt.file},
+				}},
+			}})
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("expected an error containing %q, got %v", tt.wantErr, err)
+			}
+		})
+	}
+}
+
+func TestTranslateRequest_RequiresTextWithDocuments(t *testing.T) {
+	pdf := map[string]interface{}{"type": "file", "file": map[string]interface{}{"filename": "report.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}}
+	for name, content := range map[string][]interface{}{
+		"file only":       {pdf},
+		"empty text":      {map[string]interface{}{"type": "text", "text": ""}, pdf},
+		"whitespace text": {map[string]interface{}{"type": "text", "text": " \n\t"}, pdf},
+		"text elsewhere":  {pdf},
+	} {
+		t.Run(name, func(t *testing.T) {
+			messages := []interface{}{map[string]interface{}{"role": "user", "content": content}}
+			if name == "text elsewhere" {
+				// Text in another message does not satisfy the requirement.
+				messages = append([]interface{}{map[string]interface{}{"role": "user", "content": "hello"}}, messages...)
+			}
+			_, err := translateRequest(map[string]interface{}{"messages": messages})
+			if err == nil || !strings.Contains(err.Error(), "non-empty text part") {
+				t.Errorf("expected a missing-text error, got %v", err)
+			}
+		})
+	}
+
+	// Text after the file in the same message is enough.
+	if _, err := translateRequest(map[string]interface{}{"messages": []interface{}{
+		map[string]interface{}{"role": "user", "content": []interface{}{pdf, map[string]interface{}{"type": "text", "text": "summarise"}}},
+	}}); err != nil {
+		t.Errorf("expected text after the file to be accepted, got %v", err)
+	}
+}
+
+func TestDocumentNames_LengthLimits(t *testing.T) {
+	long := strings.Repeat("a", 250)
+	names := documentNames{}
+	first, second, third := names.unique(long), names.unique(long), names.unique(long)
+	if len(first) != maxDocumentNameLength || first != strings.Repeat("a", 200) {
+		t.Errorf("expected the first name truncated to 200 characters, got %d", len(first))
+	}
+	if len(second) != maxDocumentNameLength || !strings.HasSuffix(second, "-2") {
+		t.Errorf("expected a 200-character name ending -2, got %q (%d)", second, len(second))
+	}
+	if len(third) != maxDocumentNameLength || !strings.HasSuffix(third, "-3") || third == second {
+		t.Errorf("expected a distinct 200-character name ending -3, got %q (%d)", third, len(third))
+	}
+
+	// Truncating must not leave a trailing space before the suffix.
+	spaced := strings.Repeat("a", 197) + " bcd"
+	names = documentNames{}
+	names.unique(spaced)
+	if got := names.unique(spaced); got != strings.Repeat("a", 197)+"-2" {
+		t.Errorf("expected the trailing space trimmed before the suffix, got %q", got)
+	}
+
+	// A name that truncates to only spaces, or is empty, falls back safely.
+	if got := (documentNames{}).unique(""); got != "document" {
+		t.Errorf("expected document for an empty name, got %q", got)
+	}
+	if got := truncateDocumentName("   x", 2); got != "document" {
+		t.Errorf("expected document when truncation leaves only spaces, got %q", got)
+	}
+
+	// Long filenames are sanitised and truncated end to end.
+	content := userMessageContent(t, filePart(map[string]interface{}{
+		"filename": strings.Repeat("r_", 150) + ".pdf", "file_data": "data:application/pdf;base64,JVBERi0=",
+	}))
+	if name, _ := documentBlock(t, content[0])["name"].(string); len(name) < 1 || len(name) > maxDocumentNameLength || strings.HasSuffix(name, " ") {
+		t.Errorf("expected a 1-200 character name without a trailing space, got %q (%d)", name, len(name))
+	}
+}
+
+func TestOnRequestBody_RejectsFileIDWith400(t *testing.T) {
+	p := &TranslatorPolicy{params: PolicyParams{Model: "nova"}}
+	action := p.OnRequestBody(context.Background(), &policy.RequestContext{
+		SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+		Body: &policy.Body{Present: true, Content: []byte(`{"messages":[{"role":"user","content":[` +
+			`{"type":"text","text":"read this"},{"type":"file","file":{"file_id":"file-abc123"}}]}]}`)},
+	}, nil)
+	resp, ok := action.(policy.ImmediateResponse)
+	want := `{"error":{"message":"file_id is not supported for Bedrock; send the file inline as a base64 data URI in file_data","type":"invalid_request_error"}}`
+	if !ok || resp.StatusCode != 400 || string(resp.Body) != want {
+		t.Fatalf("expected a 400 naming file_id, got %#v", action)
+	}
+	assertRequestValidationFault(t, resp)
+}
+
 func TestTranslateRequest_ToolChoiceNoneDropsTools(t *testing.T) {
 	payload := map[string]interface{}{
 		"tools": []interface{}{map[string]interface{}{
@@ -437,7 +797,10 @@ func TestTranslateRequest_ToolChoiceNoneDropsTools(t *testing.T) {
 		}},
 		"tool_choice": "none",
 	}
-	mods := translateRequest(payload)
+	mods, err := translateRequest(payload)
+	if err != nil {
+		t.Fatalf("translateRequest failed: %v", err)
+	}
 	var body map[string]interface{}
 	if err := json.Unmarshal(mods.Body, &body); err != nil {
 		t.Fatal(err)
@@ -645,5 +1008,142 @@ func TestResolveModel(t *testing.T) {
 				t.Errorf("resolved model = %q, want %q", got, tc.wantModel)
 			}
 		})
+	}
+}
+
+// TestErrResponseDirectionAndCode covers what this translator refuses and how it labels it.
+//
+// Direction is the point: a payload the caller sent that will not convert is a
+// request-side refusal, while a provider reply that will not translate back is a
+// response-side one. They share a helper and nothing else, and only the caller knows which
+// it made — so it is passed in rather than inferred from the status.
+func TestErrResponseDirectionAndCode(t *testing.T) {
+	t.Run("request side", func(t *testing.T) {
+		resp := errResponse(400, "Request body is empty.",
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a refused request")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeInvalidRequestBody {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeInvalidRequestBody, resp.Fault.Code)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Type != policy.FaultTypeValidation {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeValidation, resp.Fault.Type)
+		}
+	})
+
+	t.Run("response side", func(t *testing.T) {
+		resp := errResponse(500, "failed to translate response",
+			policy.FaultCodeMediationFailed, policy.DirectionResponse, policy.FaultTypeMediation)
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a failed translation")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeMediationFailed {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeMediationFailed, resp.Fault.Code)
+		}
+		if resp.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, resp.Fault.Direction)
+		}
+	})
+}
+
+// encodeExceptionFrame builds an event-stream exception frame, the way Bedrock ends a
+// Converse stream it cannot complete.
+func encodeExceptionFrame(exceptionType, payload string) []byte {
+	headers := encodeStringHeader(":exception-type", exceptionType)
+	headers = append(headers, encodeStringHeader(":message-type", "exception")...)
+
+	totalLen := 16 + len(headers) + len(payload)
+	frame := make([]byte, 0, totalLen)
+	frame = binary.BigEndian.AppendUint32(frame, uint32(totalLen))
+	frame = binary.BigEndian.AppendUint32(frame, uint32(len(headers)))
+	frame = binary.BigEndian.AppendUint32(frame, 0)
+	frame = append(frame, headers...)
+	frame = append(frame, payload...)
+	frame = binary.BigEndian.AppendUint32(frame, 0)
+	return frame
+}
+
+var createdField = regexp.MustCompile(`"created":\d+`)
+
+// TestStreamExceptionDeclaresFault pins the fault for a Converse stream Bedrock ends with an
+// exception on the buffered path, and that the streaming path forwards the translated events
+// exactly as before, without terminating the stream or declaring a fault.
+func TestStreamExceptionDeclaresFault(t *testing.T) {
+	stream := append(append([]byte{}, encodeFrame("messageStart", `{"role":"assistant"}`)...),
+		encodeExceptionFrame("throttlingException", `{"message":"Too many requests"}`)...)
+	p := &TranslatorPolicy{params: PolicyParams{Model: "nova"}}
+	shared := func() *policy.SharedContext {
+		return &policy.SharedContext{RequestID: "req-exc", Metadata: map[string]interface{}{}}
+	}
+	// What the client receives: every event of the stream, then [DONE] on the final chunk.
+	want := createdField.ReplaceAllString(string(eventStreamToSSE(stream, true, p.completionID("req-exc"), "nova")), "")
+	if !strings.Contains(want, `"type":"server_error"`) {
+		t.Fatalf("expected the translated error event in the body, got %q", want)
+	}
+
+	for _, endOfStream := range []bool{false, true} {
+		action := p.OnResponseBodyChunk(context.Background(),
+			&policy.ResponseStreamContext{SharedContext: shared(), ResponseStatus: 200},
+			&policy.StreamBody{Chunk: stream, EndOfStream: endOfStream}, nil)
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok {
+			t.Fatalf("endOfStream=%v: expected ForwardResponseChunk, got %T", endOfStream, action)
+		}
+		wantChunk := createdField.ReplaceAllString(string(eventStreamToSSE(stream, endOfStream, p.completionID("req-exc"), "nova")), "")
+		if got := createdField.ReplaceAllString(string(forward.Body), ""); got != wantChunk {
+			t.Errorf("endOfStream=%v: body = %q, want %q", endOfStream, got, wantChunk)
+		}
+	}
+
+	buffered := p.OnResponseBody(context.Background(), &policy.ResponseContext{
+		SharedContext: shared(), ResponseStatus: 200,
+		ResponseBody: &policy.Body{Present: true, Content: stream},
+	}, nil)
+	mods, ok := buffered.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", buffered)
+	}
+	assertExceptionFault(t, mods.IsFault, mods.Fault)
+	if got := createdField.ReplaceAllString(string(mods.Body), ""); got != want {
+		t.Errorf("buffered body = %q, want %q", got, want)
+	}
+
+	// A stream without an exception is forwarded with no fault.
+	clean := p.OnResponseBodyChunk(context.Background(),
+		&policy.ResponseStreamContext{SharedContext: shared(), ResponseStatus: 200},
+		&policy.StreamBody{Chunk: bedrockStream(), EndOfStream: true}, nil)
+	if _, ok := clean.(policy.ForwardResponseChunk); !ok {
+		t.Errorf("a clean stream must be forwarded, got %T", clean)
+	}
+	cleanBuffered := p.OnResponseBody(context.Background(), &policy.ResponseContext{
+		SharedContext: shared(), ResponseStatus: 200,
+		ResponseBody: &policy.Body{Present: true, Content: bedrockStream()},
+	}, nil).(policy.DownstreamResponseModifications)
+	if cleanBuffered.IsFault || cleanBuffered.Fault != nil {
+		t.Errorf("a clean buffered stream must not declare a fault, got %+v", cleanBuffered.Fault)
+	}
+}
+
+func assertExceptionFault(t *testing.T, isFault bool, fault *policy.FaultDetails) {
+	t.Helper()
+	if !isFault || fault == nil {
+		t.Fatalf("expected a fault, got IsFault=%v Fault=%v", isFault, fault)
+	}
+	if fault.Code != policy.FaultCodeProviderStreamFailed || fault.Type != policy.FaultTypeMediation ||
+		fault.Direction != policy.DirectionResponse {
+		t.Errorf("fault = %s/%s/%s", fault.Code, fault.Type, fault.Direction)
+	}
+	if fault.Description != "Bedrock stream exception: throttlingException" {
+		t.Errorf("Description = %q", fault.Description)
 	}
 }

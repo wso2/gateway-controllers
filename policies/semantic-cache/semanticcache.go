@@ -796,5 +796,15 @@ func (p *SemanticCachePolicy) buildErrorResponse(message string, err error) poli
 			"Content-Type": "application/json",
 		},
 		Body: bodyBytes,
+		// The body is unchanged — clients have parsed this shape since before the fault
+		// contract existed. Only the description is new, so a gateway that reads it can
+		// classify the rejection and run the fault policies over it.
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+		},
 	}
 }

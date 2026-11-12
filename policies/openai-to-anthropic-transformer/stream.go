@@ -57,6 +57,10 @@ type streamState struct {
 	// SSE frame. It is prepended to the next chunk.
 	residual []byte
 
+	// failure records why translation terminated the stream, so the caller can describe
+	// the fault: the provider reporting an error, or a frame this translator could not read.
+	failure streamFailure
+
 	roleSent   bool
 	finishSent bool
 	usageSent  bool
@@ -173,6 +177,17 @@ type anthropicStreamEvent struct {
 	} `json:"error"`
 }
 
+// streamFailure is why a translated stream was terminated.
+type streamFailure int
+
+const (
+	streamNoFailure streamFailure = iota
+	// streamProviderError is the provider sending an error mid-stream.
+	streamProviderError
+	// streamMalformedFrame is a provider frame this translator could not parse.
+	streamMalformedFrame
+)
+
 // translateSSEChunk converts the Anthropic SSE bytes delivered in one callback
 // into OpenAI chat.completion.chunk events. Bytes forming only a partial
 // trailing frame are held in state until that frame completes, so this is safe
@@ -224,6 +239,7 @@ func (s *streamState) translateFrame(frame []byte) ([]byte, bool) {
 		// Never forward provider bytes we could not parse as if they were OpenAI
 		// chunks; surface a typed error and stop the stream instead.
 		slog.Warn(PolicyName+": malformed Anthropic stream event", "error", err)
+		s.failure = streamMalformedFrame
 		return s.errorEvent("", "malformed Anthropic stream event: "+err.Error()), true
 	}
 
@@ -239,6 +255,7 @@ func (s *streamState) translateFrame(frame []byte) ([]byte, bool) {
 	case "message_stop":
 		return s.finalize(), false
 	case "error":
+		s.failure = streamProviderError
 		return s.errorEvent(event.Error.Type, event.Error.Message), true
 	}
 

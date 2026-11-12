@@ -1995,3 +1995,103 @@ func TestJWTAuthPolicy_UserIdClaim_WithClaimMappings(t *testing.T) {
 		t.Errorf("Expected X-User-Role='admin', got '%v'", modifications.HeadersToSet["X-User-Role"])
 	}
 }
+
+// TestJWTAuthPolicy_RejectionDeclaresFault pins the fault declaration and the error code
+func TestJWTAuthPolicy_RejectionDeclaresFault(t *testing.T) {
+	baseParams := func() map[string]interface{} {
+		return map[string]interface{}{
+			"headerName":          "Authorization",
+			"authHeaderScheme":    "Bearer",
+			"onFailureStatusCode": 401,
+			"errorMessageFormat":  "json",
+			"leeway":              "30s",
+			"allowedAlgorithms":   []interface{}{"RS256"},
+			"keyManagers": []interface{}{
+				map[string]interface{}{
+					"name":   "test-issuer",
+					"issuer": "https://issuer.example.com",
+					"jwks": map[string]interface{}{
+						"remote": map[string]interface{}{
+							"uri": "http://127.0.0.1:1/jwks.json",
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		headers  map[string][]string
+		mutate   func(map[string]interface{})
+		wantCode string
+		wantType string
+	}{
+		{
+			name:     "no authorization header",
+			headers:  map[string][]string{},
+			wantCode: policy.FaultCodeAuthMissingCredentials,
+			wantType: policy.FaultTypeAuthentication,
+		},
+		{
+			name:     "authorization header not Bearer",
+			headers:  map[string][]string{"Authorization": {"Basic abc"}},
+			wantCode: policy.FaultCodeAuthInvalidCredentials,
+			wantType: policy.FaultTypeAuthentication,
+		},
+		{
+			name:     "token is not a JWT",
+			headers:  map[string][]string{"Authorization": {"Bearer not-a-jwt"}},
+			wantCode: policy.FaultCodeAuthInvalidCredentials,
+			wantType: policy.FaultTypeAuthentication,
+		},
+		{
+			name:    "no key managers configured",
+			headers: map[string][]string{"Authorization": {"Bearer not-a-jwt"}},
+			mutate: func(m map[string]interface{}) {
+				delete(m, "keyManagers")
+			},
+			wantCode: policy.FaultCodeAuthGeneral,
+			wantType: policy.FaultTypeAuthentication,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			params := baseParams()
+			if tt.mutate != nil {
+				tt.mutate(params)
+			}
+			ctx := createMockRequestHeaderContext(tt.headers)
+
+			p, err := GetPolicy(policy.PolicyMetadata{}, params)
+			if err != nil {
+				t.Fatalf("Failed to create policy: %v", err)
+			}
+			action := p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params)
+
+			resp, ok := action.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse, got %T", action)
+			}
+			if !resp.IsFault {
+				t.Fatalf("expected IsFault=true on an auth rejection")
+			}
+			if resp.Fault == nil {
+				t.Fatalf("expected Error to be populated on an auth rejection")
+			}
+			if resp.Fault.Code != tt.wantCode {
+				t.Fatalf("expected Error.Code=%q, got %q", tt.wantCode, resp.Fault.Code)
+			}
+			if resp.Fault.Type != tt.wantType {
+				t.Fatalf("expected Error.Type=%q, got %q", tt.wantType, resp.Fault.Type)
+			}
+			if resp.Fault.Direction != policy.DirectionRequest {
+				t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+			}
+			if resp.Fault.Description == "" {
+				t.Fatalf("expected Error.Description to carry the internal reason")
+			}
+		})
+	}
+}

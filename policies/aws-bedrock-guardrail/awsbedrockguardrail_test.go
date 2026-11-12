@@ -710,6 +710,194 @@ func TestOnRequest_WithMockedBedrockErrorPassthrough(t *testing.T) {
 	}
 }
 
+const (
+	upstreamErrorBody    = `{"message":"The provided model identifier is invalid."}`
+	generatedContentBody = `{"output":{"message":{"content":[{"text":"blocked content"}]}}}`
+)
+
+func newMockedResponsePolicy(t *testing.T, mockClient *mockBedrockClient, applicableStatusCodes string) *AWSBedrockGuardrailPolicy {
+	t.Helper()
+	responseParams := AWSBedrockGuardrailPolicyParams{
+		Enabled:  true,
+		JsonPath: "$.output.message.content[0].text",
+	}
+	if applicableStatusCodes != "" {
+		ranges, err := parseStatusCodes(applicableStatusCodes)
+		if err != nil {
+			t.Fatalf("parseStatusCodes(%q) returned an unexpected error: %v", applicableStatusCodes, err)
+		}
+		responseParams.ApplicableStatusCodes = ranges
+	}
+	return &AWSBedrockGuardrailPolicy{
+		region:            "us-east-1",
+		guardrailID:       "gr-123",
+		guardrailVersion:  "DRAFT",
+		hasResponseParams: true,
+		responseParams:    responseParams,
+		loadAWSConfigFunc: func(_ context.Context, _ string) (aws.Config, error) {
+			return aws.Config{}, nil
+		},
+		newBedrockClientFunc: func(_ aws.Config) bedrockGuardrailClient {
+			return mockClient
+		},
+	}
+}
+
+func newIntervenedMockClient() *mockBedrockClient {
+	return &mockBedrockClient{
+		output: &bedrockruntime.ApplyGuardrailOutput{
+			Action: types.GuardrailActionGuardrailIntervened,
+		},
+	}
+}
+
+func respondWith(p *AWSBedrockGuardrailPolicy, status int, body string) policy.ResponseAction {
+	return p.OnResponseBody(context.Background(), &policy.ResponseContext{
+		SharedContext:  &policy.SharedContext{Metadata: map[string]interface{}{}},
+		ResponseStatus: status,
+		ResponseBody:   &policy.Body{Content: []byte(body)},
+	}, map[string]interface{}{})
+}
+
+func expectGuardrailBlock(t *testing.T, status int, result policy.ResponseAction) {
+	t.Helper()
+	mod, ok := result.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("status %d: expected DownstreamResponseModifications, got %T", status, result)
+	}
+	if mod.StatusCode == nil || *mod.StatusCode != GuardrailErrorCode {
+		t.Fatalf("status %d: expected response status %d, got %#v", status, GuardrailErrorCode, mod.StatusCode)
+	}
+}
+
+func TestOnResponse_EveryStatusValidatedWhenApplicableStatusCodesNotConfigured(t *testing.T) {
+	mockClient := newIntervenedMockClient()
+	p := newMockedResponsePolicy(t, mockClient, "")
+
+	for _, status := range []int{400, 403, 500} {
+		expectGuardrailBlock(t, status, respondWith(p, status, upstreamErrorBody))
+	}
+	expectGuardrailBlock(t, 200, respondWith(p, 200, generatedContentBody))
+	if mockClient.lastInput == nil {
+		t.Fatalf("expected ApplyGuardrail to be called for a successful response")
+	}
+}
+
+func TestOnResponse_StatusOutsideConfiguredCodesPassesThrough(t *testing.T) {
+	mockClient := newIntervenedMockClient()
+	p := newMockedResponsePolicy(t, mockClient, "200-299")
+
+	for _, status := range []int{400, 401, 403, 429, 500, 503} {
+		result := respondWith(p, status, upstreamErrorBody)
+		mod, ok := result.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("status %d: expected DownstreamResponseModifications, got %T", status, result)
+		}
+		if mod.StatusCode != nil || mod.Body != nil {
+			t.Fatalf("status %d: expected the response to pass through unchanged, got status %v body %q", status, mod.StatusCode, string(mod.Body))
+		}
+	}
+	if mockClient.lastInput != nil {
+		t.Fatalf("expected ApplyGuardrail not to be called for statuses outside the configured codes")
+	}
+}
+
+func TestOnResponse_StatusWithinConfiguredCodesIsValidated(t *testing.T) {
+	for _, status := range []int{200, 204, 422} {
+		mockClient := newIntervenedMockClient()
+		p := newMockedResponsePolicy(t, mockClient, "200-299, 422")
+
+		expectGuardrailBlock(t, status, respondWith(p, status, generatedContentBody))
+		if mockClient.lastInput == nil {
+			t.Fatalf("status %d: expected ApplyGuardrail to be called", status)
+		}
+	}
+}
+
+func TestOnResponse_UnknownStatusIsValidatedWhenApplicableStatusCodesConfigured(t *testing.T) {
+	mockClient := newIntervenedMockClient()
+	p := newMockedResponsePolicy(t, mockClient, "200-299")
+
+	expectGuardrailBlock(t, 0, respondWith(p, 0, generatedContentBody))
+	if mockClient.lastInput == nil {
+		t.Fatalf("expected ApplyGuardrail to be called when the upstream status is unknown")
+	}
+}
+
+func TestParseStatusCodes_Valid(t *testing.T) {
+	tests := []struct {
+		value string
+		want  []statusCodeRange
+	}{
+		{"200-299", []statusCodeRange{{min: 200, max: 299}}},
+		{"422", []statusCodeRange{{min: 422, max: 422}}},
+		{"200-299,401,403", []statusCodeRange{{min: 200, max: 299}, {min: 401, max: 401}, {min: 403, max: 403}}},
+		{" 200 - 204 , 418 ", []statusCodeRange{{min: 200, max: 204}, {min: 418, max: 418}}},
+		{"100-599", []statusCodeRange{{min: 100, max: 599}}},
+	}
+	for _, tt := range tests {
+		got, err := parseStatusCodes(tt.value)
+		if err != nil {
+			t.Fatalf("parseStatusCodes(%q) returned an unexpected error: %v", tt.value, err)
+		}
+		if len(got) != len(tt.want) {
+			t.Fatalf("parseStatusCodes(%q) = %v, want %v", tt.value, got, tt.want)
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Fatalf("parseStatusCodes(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		}
+	}
+}
+
+func TestParseStatusCodes_Invalid(t *testing.T) {
+	for _, value := range []string{"abc", "200-", "-200", "299-200", "99", "600", "200,,401", "200,", "200-299-300", "2OO"} {
+		if _, err := parseStatusCodes(value); err == nil {
+			t.Fatalf("parseStatusCodes(%q) expected an error, got none", value)
+		}
+	}
+}
+
+func TestParseRequestResponseParams_ApplicableStatusCodes(t *testing.T) {
+	params, err := parseRequestResponseParams(map[string]interface{}{"applicableStatusCodes": "200-299,422"}, true)
+	if err != nil {
+		t.Fatalf("expected applicableStatusCodes to parse, got: %v", err)
+	}
+	want := []statusCodeRange{{min: 200, max: 299}, {min: 422, max: 422}}
+	if len(params.ApplicableStatusCodes) != len(want) || params.ApplicableStatusCodes[0] != want[0] || params.ApplicableStatusCodes[1] != want[1] {
+		t.Fatalf("expected status codes %v, got %v", want, params.ApplicableStatusCodes)
+	}
+
+	params, err = parseRequestResponseParams(map[string]interface{}{}, true)
+	if err != nil {
+		t.Fatalf("expected no error without applicableStatusCodes, got: %v", err)
+	}
+	if params.ApplicableStatusCodes != nil {
+		t.Fatalf("expected no status codes when applicableStatusCodes is not set, got %v", params.ApplicableStatusCodes)
+	}
+
+	_, err = parseRequestResponseParams(map[string]interface{}{"applicableStatusCodes": 200}, true)
+	if err == nil || !strings.Contains(err.Error(), "'applicableStatusCodes' must be a string") {
+		t.Fatalf("expected applicableStatusCodes type error, got: %v", err)
+	}
+
+	_, err = parseRequestResponseParams(map[string]interface{}{"applicableStatusCodes": "299-200"}, true)
+	if err == nil || !strings.Contains(err.Error(), "applicableStatusCodes") {
+		t.Fatalf("expected applicableStatusCodes validation error, got: %v", err)
+	}
+}
+
+func TestGetPolicy_RejectsInvalidResponseApplicableStatusCodes(t *testing.T) {
+	params := baseParams()
+	params["response"] = map[string]interface{}{"enabled": true, "applicableStatusCodes": "200-299,abc"}
+
+	_, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err == nil || !strings.Contains(err.Error(), "invalid response parameters") {
+		t.Fatalf("expected invalid response parameters error, got: %v", err)
+	}
+}
+
 func TestOnResponse_WithMockedBedrockPIIRedaction(t *testing.T) {
 	mockClient := &mockBedrockClient{
 		output: makePIIIntervenedOutput("john@example.com"),
@@ -752,5 +940,183 @@ func TestOnResponse_WithMockedBedrockPIIRedaction(t *testing.T) {
 	}
 	if mockClient.lastInput == nil {
 		t.Fatalf("expected mocked ApplyGuardrail to be called")
+	}
+}
+
+// TestAWSBedrockGuardrail_InterventionDeclaresFault covers the funnel every intervention
+func TestAWSBedrockGuardrail_InterventionDeclaresFault(t *testing.T) {
+	p := &AWSBedrockGuardrailPolicy{}
+
+	t.Run("request phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, false, false, nil)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a guardrail intervention")
+		}
+		if resp.Fault == nil || resp.Fault.Code != policy.GuardrailCodeUnsafeContent {
+			t.Fatalf("expected Error.Code=%q, got %+v", policy.GuardrailCodeUnsafeContent, resp.Fault)
+		}
+		if resp.Fault.Type != policy.FaultTypeGuardrail {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeGuardrail, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.Guardrail == nil || resp.Fault.Guardrail.InterveningGuardrail != guardrailName {
+			t.Fatalf("expected the guardrail envelope to name %q, got %+v", guardrailName, resp.Fault.Guardrail)
+		}
+	})
+
+	t.Run("response phase", func(t *testing.T) {
+		action := p.buildErrorResponse("blocked detail", nil, true, false, nil)
+		mods, ok := action.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", action)
+		}
+		if !mods.IsFault {
+			t.Fatalf("expected IsFault=true on a response-side intervention")
+		}
+		if mods.Fault == nil || mods.Fault.Direction != policy.DirectionResponse {
+			t.Fatalf("expected Error.Direction=%q, got %+v", policy.DirectionResponse, mods.Fault)
+		}
+	})
+}
+
+// TestAWSBedrockGuardrail_FailClosedDeclaresFault pins the path that runs when Bedrock
+// cannot be used at all: the policy fails closed and refuses the call. That is a genuine
+// refusal, so it must reach the fault policies, but no guardrail produced a verdict, so it
+// is declared as the policy failing its own job rather than as an intervention. The client
+// still receives the same envelope as before.
+func TestAWSBedrockGuardrail_FailClosedDeclaresFault(t *testing.T) {
+	p := &AWSBedrockGuardrailPolicy{
+		loadAWSConfigFunc: func(_ context.Context, _ string) (aws.Config, error) {
+			return aws.Config{}, nil
+		},
+		newBedrockClientFunc: func(_ aws.Config) bedrockGuardrailClient {
+			return &mockBedrockClient{err: errors.New("bedrock unavailable")}
+		},
+	}
+	params := AWSBedrockGuardrailPolicyParams{RedactPII: false, JsonPath: "$.text"}
+
+	result := p.validatePayload([]byte(`{"text":"hello"}`), params, true, map[string]interface{}{})
+	mods, ok := result.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", result)
+	}
+	if !mods.IsFault {
+		t.Fatalf("expected IsFault=true when the guardrail fails closed")
+	}
+	if mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected Error.Code=%q, got %+v", policy.FaultCodeMediationFailed, mods.Fault)
+	}
+	if mods.Fault.Type != policy.FaultTypeMediation {
+		t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeMediation, mods.Fault.Type)
+	}
+	if mods.Fault.Direction != policy.DirectionResponse {
+		t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionResponse, mods.Fault.Direction)
+	}
+	if mods.Fault.Guardrail != nil {
+		t.Fatalf("a failure to run the check is not an intervention, got Guardrail=%+v", mods.Fault.Guardrail)
+	}
+	wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling AWS Bedrock Guardrail","direction":"RESPONSE","interveningGuardrail":"AWS Bedrock Guardrail"},"type":"AWS_BEDROCK_GUARDRAIL"}`
+	if mods.StatusCode == nil || *mods.StatusCode != 422 || string(mods.Body) != wantBody || len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Content-Type"] != "application/json" {
+		t.Fatalf("expected the unchanged 422 guardrail envelope, got %v %v %s", mods.StatusCode, mods.HeadersToSet, mods.Body)
+	}
+}
+
+// TestAWSBedrockGuardrail_ExtractionFailureDeclaresFault pins the JSONPath extraction
+// failure: an unreadable request body is the caller's, an unreadable response body leaves
+// the policy unable to do its job. Neither is a guardrail verdict, and the client response
+// is the same one the policy returned before the fault was declared.
+func TestAWSBedrockGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
+	p := &AWSBedrockGuardrailPolicy{}
+	params := AWSBedrockGuardrailPolicyParams{JsonPath: "$.text"}
+	payload := []byte(`not-json`)
+
+	reqAction := p.validatePayload(payload, params, false, map[string]interface{}{})
+	resp, ok := reqAction.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", reqAction)
+	}
+	wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"AWS Bedrock Guardrail"},"type":"AWS_BEDROCK_GUARDRAIL"}`
+	if resp.StatusCode != 422 || string(resp.Body) != wantBody || len(resp.Headers) != 1 || resp.Headers["Content-Type"] != "application/json" {
+		t.Fatalf("client response changed: got %d %v %s, want 422 %s", resp.StatusCode, resp.Headers, resp.Body, wantBody)
+	}
+	if !resp.IsFault || resp.Fault == nil || resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+		resp.Fault.Type != policy.FaultTypeValidation || resp.Fault.Direction != policy.DirectionRequest || resp.Fault.Guardrail != nil {
+		t.Fatalf("expected an invalid-request-body fault, got %+v", resp.Fault)
+	}
+
+	respAction := p.validatePayload(payload, params, true, map[string]interface{}{})
+	mods, ok := respAction.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", respAction)
+	}
+	wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"AWS Bedrock Guardrail"},"type":"AWS_BEDROCK_GUARDRAIL"}`
+	if mods.StatusCode == nil || *mods.StatusCode != 422 || string(mods.Body) != wantBody || len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Content-Type"] != "application/json" {
+		t.Fatalf("client response changed: got %v %v %s, want 422 %s", mods.StatusCode, mods.HeadersToSet, mods.Body, wantBody)
+	}
+	if !mods.IsFault || mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed ||
+		mods.Fault.Type != policy.FaultTypeMediation || mods.Fault.Direction != policy.DirectionResponse || mods.Fault.Guardrail != nil {
+		t.Fatalf("expected a mediation fault, got %+v", mods.Fault)
+	}
+}
+
+// guardrailCodeFor is the whole point of the specific codes, so its mapping and — more
+// importantly — its PRECEDENCE are pinned. Bedrock can trip several policies on one call
+// and a single code names one, so a change in iteration order would silently relabel
+// rejections without failing anything else.
+func TestAWSBedrockGuardrail_CodeNamesWhatBedrockReported(t *testing.T) {
+	filter := func(t types.GuardrailContentFilterType) types.GuardrailAssessment {
+		return types.GuardrailAssessment{
+			ContentPolicy: &types.GuardrailContentPolicyAssessment{
+				Filters: []types.GuardrailContentFilter{{Type: t}},
+			},
+		}
+	}
+	pii := types.GuardrailAssessment{
+		SensitiveInformationPolicy: &types.GuardrailSensitiveInformationPolicyAssessment{
+			PiiEntities: []types.GuardrailPiiEntityFilter{{}},
+		},
+	}
+	topic := types.GuardrailAssessment{
+		TopicPolicy: &types.GuardrailTopicPolicyAssessment{
+			Topics: []types.GuardrailTopic{{}},
+		},
+	}
+
+	for _, tc := range []struct {
+		name        string
+		assessments []types.GuardrailAssessment
+		want        string
+	}{
+		{"hate", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypeHate)}, policy.GuardrailCodeHate},
+		{"sexual", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypeSexual)}, policy.GuardrailCodeSexual},
+		{"violence", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypeViolence)}, policy.GuardrailCodeViolence},
+		{"insults map to harassment", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypeInsults)}, policy.GuardrailCodeHarassment},
+		{"misconduct maps to dangerous activity", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypeMisconduct)}, policy.GuardrailCodeDangerousActivity},
+		{"prompt attack", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypePromptAttack)}, policy.GuardrailCodePromptInjection},
+		{"pii", []types.GuardrailAssessment{pii}, policy.GuardrailCodePII},
+		{"a denied topic is intent, not content safety", []types.GuardrailAssessment{topic}, policy.GuardrailCodeSemanticMatch},
+		// Precedence: PII wins over a content verdict on the same call.
+		{"pii outranks a content filter", []types.GuardrailAssessment{filter(types.GuardrailContentFilterTypeHate), pii}, policy.GuardrailCodePII},
+		// And a content verdict outranks a merely-configured topic.
+		{"a content filter outranks a topic", []types.GuardrailAssessment{topic, filter(types.GuardrailContentFilterTypeHate)}, policy.GuardrailCodeHate},
+		{"nothing recognised falls back to the group generic", nil, policy.GuardrailCodeUnsafeContent},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := guardrailCodeFor(&bedrockruntime.ApplyGuardrailOutput{Assessments: tc.assessments})
+			if got != tc.want {
+				t.Fatalf("expected %q, got %q", tc.want, got)
+			}
+		})
+	}
+
+	// A non-Bedrock output must not panic; it reaches the same fallback.
+	if got := guardrailCodeFor(nil); got != policy.GuardrailCodeUnsafeContent {
+		t.Fatalf("nil output: expected %q, got %q", policy.GuardrailCodeUnsafeContent, got)
 	}
 }

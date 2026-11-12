@@ -458,6 +458,11 @@ func TestOnResponse_RewritesAndFiltersConfiguredListItems(t *testing.T) {
 	if !ok {
 		t.Fatalf("Expected UpstreamResponseModifications, got %T", action)
 	}
+	// Rewriting a successful response is a transformation, not a failure: a fault here would
+	// notify on every successful listing.
+	if mods.IsFault || mods.Fault != nil {
+		t.Fatalf("a successful response rewrite must not be a fault")
+	}
 
 	updated := mustJSONMap(t, mods.Body)
 	result := updated["result"].(map[string]any)
@@ -1155,4 +1160,182 @@ func TestMirroredMethodMismatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestRejectionsDeclareFault pins the code chosen per rejection condition.
+//
+// The split is the point: blocking a capability by policy is an authorization decision and
+// a malformed request is a validation failure, so the two carry different codes.
+func TestRejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action policy.RequestAction, wantRPC int, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated on a rejection")
+		}
+		if resp.Fault.Code != wantCode {
+			t.Fatalf("expected Error.Code=%q, got %q", wantCode, resp.Fault.Code)
+		}
+		if resp.Fault.Type != wantType {
+			t.Fatalf("expected Error.Type=%q, got %q", wantType, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+		if resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil || *resp.Fault.JSONRPC.Code != wantRPC {
+			t.Fatalf("expected JSON-RPC code %d, got %+v", wantRPC, resp.Fault.JSONRPC)
+		}
+		assertFallbackBodyAgrees(t, resp)
+	}
+
+	modern := map[string][]string{
+		"mcp-protocol-version": {"2026-07-28"},
+		"mcp-method":           {"tools/call"},
+	}
+	tests := []struct {
+		name     string
+		headers  map[string][]string
+		body     []byte
+		unusable string
+		wantRPC  int
+		wantCode string
+		wantType string
+		// wantBody, when set, pins the status, headers and body the client receives.
+		wantBody string
+	}{
+		{name: "broken JSON", body: []byte(`{"jsonrpc":"2.0","method":`), wantRPC: -32700,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "body the resolver could not read", unusable: "not-an-object", wantRPC: -32600,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "mirrored method disagrees with the body",
+			headers:  map[string][]string{"mcp-protocol-version": {"2026-07-28"}, "mcp-method": {"tools/list"}},
+			wantRPC:  -32020,
+			wantCode: policy.FaultCodeInvalidRequestHeader, wantType: policy.FaultTypeValidation,
+			wantBody: `{"error":{"code":-32020,"message":"Mcp-Method does not match the method in the request body"},"id":"1","jsonrpc":"2.0"}`},
+		{name: "mirrored name disagrees with the body",
+			headers:  map[string][]string{"mcp-protocol-version": {"2026-07-28"}, "mcp-method": {"tools/call"}, "mcp-name": {"other"}},
+			wantRPC:  -32020,
+			wantCode: policy.FaultCodeInvalidRequestHeader, wantType: policy.FaultTypeValidation,
+			wantBody: `{"error":{"code":-32020,"message":"Mcp-Name does not match the capability in the request body"},"id":"1","jsonrpc":"2.0"}`},
+		{name: "params is not an object",
+			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":"toolA"}`),
+			wantRPC:  -32602,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "missing capability name", headers: modern,
+			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{}}`),
+			wantRPC:  -32602,
+			wantCode: policy.FaultCodeInvalidRequestBody, wantType: policy.FaultTypeValidation},
+		{name: "capability blocked by policy",
+			body:     []byte(`{"jsonrpc":"2.0","id":"1","method":"tools/call","params":{"name":"other"}}`),
+			wantRPC:  -32602,
+			wantCode: policy.FaultCodeAuthForbidden, wantType: policy.FaultTypeAuthorization},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, params := rewriteToolA(t)
+			ctx := toolCallContext(t, tc.headers)
+			if tc.body != nil {
+				ctx.Body = &policy.Body{Content: tc.body, Present: true}
+			}
+			if tc.unusable != "" {
+				ctx.SharedContext.ResolutionAttributes = policy.NewResolutionAttributes(map[string]string{
+					"mcp.body.present":  "true",
+					"mcp.body.unusable": tc.unusable,
+				})
+			}
+			action := p.(*McpRewritePolicy).OnRequestBody(context.Background(), ctx, params)
+			assertFault(t, action, tc.wantRPC, tc.wantCode, tc.wantType)
+			if tc.wantBody == "" {
+				return
+			}
+			resp := action.(policy.ImmediateResponse)
+			if resp.StatusCode != 400 || len(resp.Headers) != 1 || resp.Headers["Content-Type"] != "application/json" {
+				t.Fatalf("status/headers = %d %v, want 400 with only Content-Type: application/json", resp.StatusCode, resp.Headers)
+			}
+			if string(resp.Body) != tc.wantBody {
+				t.Fatalf("body = %s, want %s", resp.Body, tc.wantBody)
+			}
+		})
+	}
+
+	// Re-marshalling a payload that json.Unmarshal produced cannot fail, so this branch is not
+	// reachable through OnRequestBody; the builder is called with the arguments that branch passes.
+	t.Run("rewrite failed", func(t *testing.T) {
+		p := &McpRewritePolicy{}
+		assertFault(t, p.buildRequestErrorResponse(policy.NewHeaders(map[string][]string{}), 500, -32603,
+			"Failed to update MCP request", "1", policy.FaultCodeMediationFailed, policy.FaultTypeMediation),
+			-32603, policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	})
+}
+
+// assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels alongside the
+// description.
+//
+// Both are always sent. The description is what a gateway with an error renderer uses; the
+// body is what a gateway without one sends, so a policy upgraded on its own still answers a
+// rejection the way it always has. Asserting they AGREE — rather than restating the literals
+// a second time — is what catches the failure that matters: one of the two drifting, so the
+// answer a caller gets depends on which gateway happens to be running.
+func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if len(resp.Body) == 0 {
+		t.Fatal("Expected a fallback body alongside the description, got none")
+	}
+
+	raw := resp.Body
+	wantType := "application/json"
+	if after, found := strings.CutPrefix(string(raw), "data: "); found {
+		// SSE framing: the envelope is the event's data member.
+		raw = []byte(strings.TrimSuffix(after, "\n\n"))
+		wantType = "text/event-stream"
+	}
+	if got := resp.Headers["Content-Type"] + resp.Headers["content-type"]; got != wantType {
+		t.Fatalf("Expected Content-Type %q for the fallback body, got %q", wantType, got)
+	}
+
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("Fallback body is not a JSON-RPC envelope: %v (%q)", err, raw)
+	}
+	if envelope.JSONRPC != "2.0" {
+		t.Fatalf("Expected jsonrpc 2.0 in the fallback body, got %q", envelope.JSONRPC)
+	}
+	if resp.Fault == nil || resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil {
+		t.Fatalf("Expected a described JSON-RPC error to compare against, got %+v", resp.Fault)
+	}
+	if envelope.Error.Code != *resp.Fault.JSONRPC.Code {
+		t.Fatalf("Fallback body code %d disagrees with the described code %d",
+			envelope.Error.Code, *resp.Fault.JSONRPC.Code)
+	}
+	if envelope.Error.Message != resp.Fault.Message {
+		t.Fatalf("Fallback body message %q disagrees with the described message %q",
+			envelope.Error.Message, resp.Fault.Message)
+	}
+	if !sameJSONRPCID(envelope.ID, resp.Fault.JSONRPC.ID) {
+		t.Fatalf("Fallback body id %v disagrees with the described id %v",
+			envelope.ID, resp.Fault.JSONRPC.ID)
+	}
+}
+
+// sameJSONRPCID compares two decoded JSON-RPC ids. A number survives json.Unmarshal as
+// float64 but reaches the description as whatever the policy parsed, so compare through the
+// JSON encoding rather than with ==.
+func sameJSONRPCID(fromBody, described any) bool {
+	a, errA := json.Marshal(fromBody)
+	b, errB := json.Marshal(described)
+	return errA == nil && errB == nil && string(a) == string(b)
 }

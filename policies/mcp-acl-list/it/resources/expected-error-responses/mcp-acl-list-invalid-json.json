@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": -32700,
+      "message": "Invalid JSON"
+    },
+    "id": null,
+    "jsonrpc": "2.0"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}

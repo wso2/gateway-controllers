@@ -437,7 +437,15 @@ func buildInvalidConfigResponse(message string) policy.RequestAction {
 		Headers: map[string]string{
 			"content-type": "application/json",
 		},
-		Body: body,
+		Body:    body,
+		IsFault: true,
+		Fault: &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeConfiguration,
+			Direction:   policy.DirectionRequest,
+			Message:     "Authentication could not be performed",
+			Description: message,
+		},
 	}
 }
 
@@ -463,8 +471,9 @@ func (p *McpAuthPolicy) Mode() policy.ProcessingMode {
 
 func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, params map[string]interface{}) policy.RequestHeaderAction {
 	if err := validateAuthFailureConfig(p.OnFailureStatusCode, p.ErrorMessageFormat); err != nil {
-		v1r := buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
-		return policy.ImmediateResponse{StatusCode: v1r.StatusCode, Headers: v1r.Headers, Body: v1r.Body}
+		// Returned whole rather than field-by-field: a partial copy silently drops
+		// IsFault and Fault, and the rejection would never reach the fault flow.
+		return buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
 	}
 	ds := reqCtx.DownstreamRequest()
 	// Check for GET /.well-known/oauth-protected-resource
@@ -479,17 +488,16 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		keyManagersRaw, ok := params["keyManagers"]
 		if !ok {
 			slog.Debug("MCP Auth Policy: Key managers not configured in params")
-			return p.handleAuthFailure(reqCtx.SharedContext, p.OnFailureStatusCode, p.ErrorMessageFormat, "key managers not configured")
+			return p.handleKeyManagerConfigFailure(reqCtx.SharedContext, "key managers not configured")
 		}
 
 		slog.Debug("MCP Auth Policy: Starting to parse key managers configuration")
 		issuers, kms, err := parseKeyManagers(keyManagersRaw)
 		if err != nil {
-			v1r := buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
-			return policy.ImmediateResponse{StatusCode: v1r.StatusCode, Headers: v1r.Headers, Body: v1r.Body}
+			return buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
 		}
 		if len(issuers) == 0 {
-			return p.handleAuthFailure(reqCtx.SharedContext, p.OnFailureStatusCode, p.ErrorMessageFormat, "no valid key managers found")
+			return p.handleKeyManagerConfigFailure(reqCtx.SharedContext, "no valid key managers found")
 		}
 
 		if len(p.Issuers) > 0 {
@@ -504,7 +512,7 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 		}
 
 		if len(issuers) == 0 {
-			return p.handleAuthFailure(reqCtx.SharedContext, p.OnFailureStatusCode, p.ErrorMessageFormat, "no matching issuers found")
+			return p.handleKeyManagerConfigFailure(reqCtx.SharedContext, "no matching issuers found")
 		}
 
 		prm := ProtectedResourceMetadata{
@@ -558,8 +566,9 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 // so the body is the source here.
 func (p *McpAuthPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContext, params map[string]any) policy.RequestAction {
 	if err := validateAuthFailureConfig(p.OnFailureStatusCode, p.ErrorMessageFormat); err != nil {
-		v1r := buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
-		return policy.ImmediateResponse{StatusCode: v1r.StatusCode, Headers: v1r.Headers, Body: v1r.Body}
+		// Returned whole rather than field-by-field: a partial copy silently drops
+		// IsFault and Fault, and the rejection would never reach the fault flow.
+		return buildInvalidConfigResponse(err.Error()).(policy.ImmediateResponse)
 	}
 
 	if p.GatewayHost != "" || p.GatewayURL != "" {
@@ -755,16 +764,20 @@ func (p *McpAuthPolicy) handleUnusableBody(reason string) policy.ImmediateRespon
 		data = "Ambiguous MCP request: body names a member more than once"
 	}
 
-	return jsonRPCBadRequest(code, message, data)
+	return jsonRPCBadRequest(code, message, data, policy.FaultCodeInvalidRequestBody)
 }
 
-// handleMissingMirroredHeader rejects a modern request that left out a required mirrored header.
+// handleMissingMirroredHeader rejects a modern request that left out a required mirrored header,
+// or sent one that could not be decoded.
 func (p *McpAuthPolicy) handleMissingMirroredHeader(detail string) policy.ImmediateResponse {
-	return jsonRPCBadRequest(JSONRPCHeaderMismatch, "Invalid Request", detail)
+	return jsonRPCBadRequest(JSONRPCHeaderMismatch, "Invalid Request", detail, policy.FaultCodeInvalidRequestHeader)
 }
 
-// jsonRPCBadRequest renders a JSON-RPC error as a 400, with a null id.
-func jsonRPCBadRequest(code int, message, data string) policy.ImmediateResponse {
+// jsonRPCBadRequest renders a JSON-RPC error as a 400, with a null id. Both callers reject a
+// malformed request, so it is declared as handleBadRequest declares a local parse failure; the
+// caller names the part at fault: FaultCodeInvalidRequestBody for a body that cannot be read,
+// FaultCodeInvalidRequestHeader for a required mirrored header left out.
+func jsonRPCBadRequest(code int, message, data, faultCode string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]any{
 		"jsonrpc": JSONRPCVersion,
 		"id":      nil,
@@ -778,6 +791,16 @@ func jsonRPCBadRequest(code int, message, data string) policy.ImmediateResponse 
 		StatusCode: 400,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      faultCode,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+			// data describes the caller's own request and is already in the body.
+			Description: data,
+			JSONRPC:     &policy.JSONRPCError{Code: &code},
+		},
 	}
 }
 
@@ -804,8 +827,18 @@ func ensureSharedMetadata(shared *policy.SharedContext) bool {
 	return true
 }
 
+// handleKeyManagerConfigFailure answers exactly as handleAuthFailure does, but describes the
+// fault as the policy's own key manager configuration being unusable, not as the caller
+// failing to authenticate.
+func (p *McpAuthPolicy) handleKeyManagerConfigFailure(shared *policy.SharedContext, reason string) policy.ImmediateResponse {
+	resp := p.handleAuthFailure(shared, p.OnFailureStatusCode, p.ErrorMessageFormat, reason, policy.FaultCodeMediationFailed)
+	resp.Fault.Type = policy.FaultTypeConfiguration
+	resp.Fault.Message = "Authentication could not be performed"
+	return resp
+}
+
 // handleAuthFailure constructs an authentication failure response.
-func (p *McpAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusCode int, format string, reason any) policy.ImmediateResponse {
+func (p *McpAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusCode int, format string, reason any, code string) policy.ImmediateResponse {
 	shared.AuthContext = &policy.AuthContext{
 		Authenticated: false,
 		AuthType:      AuthType,
@@ -837,16 +870,38 @@ func (p *McpAuthPolicy) handleAuthFailure(shared *policy.SharedContext, statusCo
 		StatusCode: statusCode,
 		Headers:    headers,
 		Body:       []byte(body),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:        code,
+			Type:        policy.FaultTypeAuthentication,
+			Direction:   policy.DirectionRequest,
+			Message:     "MCP authentication failed",
+			Description: fmt.Sprint(reason),
+		},
 	}
 }
 
-// handleBadRequest constructs an HTTP 400 response carrying a JSON-RPC 2.0 error
-// object, as MCP requires for protocol-level errors (unlike authentication
-// failures, which are signalled at the HTTP/OAuth layer with WWW-Authenticate).
-// A body with invalid JSON syntax is reported as -32700 (Parse error); a body
-// that is valid JSON but not a valid request object as -32600 (Invalid Request).
-// The id is null because it cannot be recovered from an unparseable request. This
-// response is not subject to errorMessageFormat, which governs auth failures only.
+// handleBadRequest describes an HTTP 400 as a JSON-RPC 2.0 protocol error, as MCP requires
+// for protocol-level failures (unlike authentication failures, which are signalled at the
+// HTTP/OAuth layer with WWW-Authenticate).
+//
+// A body with invalid JSON syntax is reported as -32700 (Parse error); a body that is valid
+// JSON but not a valid request object as -32600 (Invalid Request). Both are 400s, so the
+// gateway's status-derived code cannot tell them apart — stating the code here is the only
+// way -32700 survives. The id stays absent, and renders as null, because it cannot be
+// recovered from a request that would not parse.
+//
+// The object is both written and described. A gateway with an error renderer builds it from
+// the description and overwrites the body below; a gateway without one sends that body, so
+// a policy upgraded on its own still answers an unparseable request the way it always has.
+//
+// The parse detail appears in both, but not identically: the legacy body carries it as the
+// JSON-RPC `data` member, where this policy has always put it, while the description carries
+// it as Description, which reaches fault policies and is withheld from a rendered body — the
+// same rule every other renderer follows. So enabling the renderer narrows what the client
+// learns about its own malformed request; it never widens it.
+//
+// This response is not subject to errorMessageFormat, which governs auth failures only.
 func (p *McpAuthPolicy) handleBadRequest(parseErr error) policy.ImmediateResponse {
 	code, message, data := JSONRPCInvalidRequest, "Invalid Request", "Invalid MCP request format"
 	var syntaxErr *json.SyntaxError
@@ -858,7 +913,7 @@ func (p *McpAuthPolicy) handleBadRequest(parseErr error) policy.ImmediateRespons
 		data = fmt.Sprintf("Ambiguous MCP request: %s", ambiguousErr)
 	}
 
-	body, _ := json.Marshal(map[string]any{
+	body, err := json.Marshal(map[string]any{
 		"jsonrpc": JSONRPCVersion,
 		"id":      nil,
 		"error": map[string]any{
@@ -867,11 +922,27 @@ func (p *McpAuthPolicy) handleBadRequest(parseErr error) policy.ImmediateRespons
 			"data":    data,
 		},
 	})
+	if err != nil {
+		// Every member is a plain string or int, so this cannot fail in practice; the
+		// literal keeps the fallback body valid JSON-RPC rather than empty.
+		body = fmt.Appendf(nil, `{"jsonrpc":"2.0","id":null,"error":{"code":%d,"message":%q}}`, code, message)
+	}
 
 	return policy.ImmediateResponse{
 		StatusCode: 400,
 		Headers:    map[string]string{"content-type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeInvalidRequestBody,
+			Type:      policy.FaultTypeValidation,
+			Direction: policy.DirectionRequest,
+			Message:   message,
+			// The parse detail names what was wrong with the caller's own body, so it
+			// is safe to record; it is withheld from the response body by the renderer.
+			Description: data,
+			JSONRPC:     &policy.JSONRPCError{Code: &code},
+		},
 	}
 }
 
@@ -917,11 +988,11 @@ func (p *McpAuthPolicy) authenticate(ctx context.Context, headerCtx *policy.Requ
 	slog.Debug("MCP Auth Policy: Delegating authentication to JWT Auth Policy")
 	jwtPolicy, err := jwtauth.GetPolicy(policy.PolicyMetadata{}, jwtParams)
 	if err != nil {
-		return p.handleAuthFailure(headerCtx.SharedContext, 500, "json", fmt.Sprintf("jwtauth.GetPolicy unavailable: %s", err))
+		return p.handleAuthFailure(headerCtx.SharedContext, 500, "json", fmt.Sprintf("jwtauth.GetPolicy unavailable: %s", err), policy.FaultCodeAuthGeneral)
 	}
 	hrp, ok := jwtPolicy.(requestHeaderPolicer)
 	if !ok {
-		return p.handleAuthFailure(headerCtx.SharedContext, 500, "json", "jwtPolicy does not implement OnRequestHeaders")
+		return p.handleAuthFailure(headerCtx.SharedContext, 500, "json", "jwtPolicy does not implement OnRequestHeaders", policy.FaultCodeAuthGeneral)
 	}
 
 	headerAction := hrp.OnRequestHeaders(ctx, headerCtx, jwtParams)
@@ -943,12 +1014,17 @@ func (p *McpAuthPolicy) authenticate(ctx context.Context, headerCtx *policy.Requ
 			}
 		}
 		wwwAuthHeader := generateWwwAuthenticateHeaderFromFields(ds.Scheme, ds.Authority, headerCtx.Vhost, headerCtx.APIContext, params, scopes, escapedDesc)
-		headers[WWWAuthenticateHeader] = wwwAuthHeader
+		setChallenge(headers, wwwAuthHeader)
 		echoSessionID(headers, sessionId)
 		return policy.ImmediateResponse{
 			StatusCode: ir.StatusCode,
+			IsFault:    ir.IsFault,
 			Headers:    headers,
 			Body:       ir.Body,
+			// The delegated policy's own description carries through rather than being
+			// restated. Its status carries through too, one field up, which is what makes
+			// the rejection a fault — so there is nothing else to forward.
+			Fault: ir.Fault,
 		}
 	}
 	// Override AuthType to mcp/oauth: mcp-auth is the effective policy that ran
@@ -1047,4 +1123,18 @@ func generateWwwAuthenticateHeaderFromFields(scheme, authority, vhost, apiContex
 		headerValue += ", error=\"invalid_token\", error_description=\"" + errorDesc + "\""
 	}
 	return headerValue
+}
+
+// setChallenge makes value the response's only WWW-Authenticate challenge. The delegated
+// JWT Auth policy sets its own (from jwt-auth v1.6, under the lowercase key), and a header map
+// keyed by case-variant names would carry both: a client could then read the bare jwt-auth
+// challenge and never see this policy's resource_metadata, which is how an MCP client finds
+// the authorization server.
+func setChallenge(headers map[string]string, value string) {
+	for name := range headers {
+		if strings.EqualFold(name, WWWAuthenticateHeader) {
+			delete(headers, name)
+		}
+	}
+	headers[WWWAuthenticateHeader] = value
 }

@@ -1,0 +1,39 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+embedding_provider = "OPENAI"
+embedding_provider_endpoint = "http://testbench:3004/v1/embeddings"
+embedding_provider_model = "text-embedding-ada-002"
+embedding_provider_dimension = 1536
+embedding_provider_api_key = "test-api-key"
+
+# Gateway 1.1.0's semantic-cache policy also reads these legacy Redis keys.
+# They are harmless to newer Gateway releases, which use the vector DB keys
+# below. Password values are supplied through the Redis dependency so every
+# topology retains an isolated per-run credential.
+redis_host = "redis"
+redis_port = 6379
+redis_db = 0
+
+vector_db_provider = "REDIS"
+vector_db_provider_host = "redis"
+vector_db_provider_port = 6379
+vector_db_provider_username = "default"
+vector_db_provider_password = '{{ env "REDIS_PASSWORD" }}'
+vector_db_provider_database = "0"
+vector_db_provider_ttl = 3600

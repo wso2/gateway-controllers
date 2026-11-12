@@ -1094,6 +1094,17 @@ func (p *Policy) authFailure(shared *policy.SharedContext, reason string, cause 
 		StatusCode: http.StatusBadGateway,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      policy.FaultCodeMediationFailed,
+			Type:      policy.FaultTypeMediation,
+			Direction: policy.DirectionRequest,
+			Message:   "failed to authenticate request to upstream service",
+			// reason names the gateway's own credential problem, so it is withheld from the
+			// client body and reaches fault policies only. cause is left out: it can carry
+			// token-endpoint detail that belongs in the redacted log line above, not here.
+			Description: reason,
+		},
 	}
 }
 

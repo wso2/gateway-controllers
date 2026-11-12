@@ -1,0 +1,37 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "mock-jwks"
+issuer = "http://testbench:3001/token"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"
+
+# A second keymanager with a DIFFERENT expected issuer, same JWKS URI - used to prove a token
+# minted for "mock-jwks" is rejected when a policy is scoped to this keymanager instead.
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "wrong-issuer-km"
+issuer = "http://expected-issuer.com"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"
+
+[policy_configurations.mcpauth_v1]
+gatewayhost = "mcp-e2e-gatewayhost.example.com:9443"
+gatewayurl = "https://mcp-e2e-gatewayurl.example.com:7777"

@@ -1,0 +1,10 @@
+{
+  "name": "opa-policy",
+  "displayName": "Validate Request with OPA",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Security"
+  ],
+  "description": "Validates requests against an Open Policy Agent (OPA) policy engine. The gateway sends request metadata (method, path, headers, origin IP, matched resource and authentication details) to OPA over HTTP/HTTPS and allows or blocks the request based on the policy decision."
+}

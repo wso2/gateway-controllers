@@ -593,3 +593,42 @@ func TestGetPolicy_AcceptsLegacyLimitShape_ForDocsCompatibility(t *testing.T) {
 		t.Fatalf("expected *BasicRateLimitPolicy, got %T", p)
 	}
 }
+
+// TestDelegateFaultDeclarationIsPassedThrough covers what this policy contributes to the
+// fault contract: nothing, deliberately. It returns the advanced-ratelimit delegate's
+// action unchanged, so the delegate's IsFault and Fault reach the gateway untouched.
+//
+// The test exists because the alternative — rebuilding the response field-by-field to add
+// or reshape something — is the mistake that silently drops both fields, and it is not
+// visible from reading this policy alone.
+func TestDelegateFaultDeclarationIsPassedThrough(t *testing.T) {
+	throttled := policy.ImmediateResponse{
+		StatusCode: 429,
+		Body:       []byte("Message throttled out"),
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      "900800", // API_THROTTLE_OUT_ERROR_CODE
+			Type:      "throttling",
+			Direction: policy.DirectionRequest,
+			Message:   "Message throttled out",
+		},
+	}
+	stub := &stubDelegatePolicy{onRequestHeadersAction: throttled}
+	p := &BasicRateLimitPolicy{delegate: stub}
+
+	action := p.OnRequestHeaders(context.Background(), &policy.RequestHeaderContext{
+		SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+		Headers:       policy.NewHeaders(map[string][]string{}),
+	}, map[string]interface{}{})
+
+	resp, ok := action.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", action)
+	}
+	if !resp.IsFault {
+		t.Fatalf("the delegate's IsFault must reach the gateway unchanged")
+	}
+	if resp.Fault == nil || resp.Fault.Code != "900800" {
+		t.Fatalf("the delegate's Fault must reach the gateway unchanged, got %+v", resp.Fault)
+	}
+}

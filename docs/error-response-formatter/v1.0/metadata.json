@@ -1,0 +1,10 @@
+{
+  "name": "error-response-formatter",
+  "displayName": "Error Response Formatter",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "Transformation"
+  ],
+  "description": "Renders a gateway-generated error into an operator-defined shape, and sets the headers that go with it.\nUsable only as a fault policy: it covers the envelopes protocol conformance cannot decide — a client library's expected shape, a protocol the gateway does not render itself, or an organisation-wide house style."
+}

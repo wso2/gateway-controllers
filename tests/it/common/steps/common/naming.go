@@ -103,6 +103,29 @@ func generateAndStore(ctx context.Context, key string, generate func() (string, 
 	return nil
 }
 
+// MaxRepeatedKiB is the largest value GenerateRepeatedAndStore builds.
+const MaxRepeatedKiB = 1024
+
+// GenerateRepeatedAndStore stores exactly kib KiB of fill, repeated, under key, so a scenario can
+// use an oversized value without writing it out.
+func GenerateRepeatedAndStore(ctx context.Context, kib int, fill, key string) error {
+	return generateAndStore(ctx, key, func() (string, error) {
+		return Repeated(kib, fill)
+	})
+}
+
+// Repeated returns exactly kib KiB of fill, repeated and cut to size.
+func Repeated(kib int, fill string) (string, error) {
+	if kib <= 0 || kib > MaxRepeatedKiB {
+		return "", fmt.Errorf("the generated value must be between 1 and %d KiB, got %d", MaxRepeatedKiB, kib)
+	}
+	if fill == "" {
+		return "", fmt.Errorf("the generated value's fill must not be empty")
+	}
+	size := kib * 1024
+	return strings.Repeat(fill, size/len(fill)+1)[:size], nil
+}
+
 // StoredValue returns a generated or otherwise runner-scoped string value.
 func StoredValue(ctx context.Context, key string) (string, error) {
 	return tcontext.ResolveString(ctx, key)

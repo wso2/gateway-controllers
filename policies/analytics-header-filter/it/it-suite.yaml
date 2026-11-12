@@ -1,0 +1,107 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# The integration suite of the analytics-header-filter policy. The scenarios chain remove-headers
+# and basic-ratelimit with it. Feature and overlay paths are relative to this directory.
+
+suite: analytics-header-filter
+
+defaults:
+  # Blocks that run at once. Each block variant boots its own gateway, testbench and database,
+  # so they are isolated from each other; runners stay one at a time inside a block (block
+  # parallel: 1) because they reset and count the block's shared analytics collector.
+  parallel: 3
+  components:
+    platform-gateway:
+      db: sqlite
+      dbCompatibility:
+        sqlserver: "gateway-version>=1.2.0"
+  timeouts:
+    boot: 5m
+    propagation: 60s
+
+blocks:
+  # Runners on the default gateway configuration, which publishes analytics. The restart runners stay
+  # in this block because parallel: 1 runs its runners one at a time, so a restart never interrupts
+  # another runner.
+  - name: analytics-header-filter
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: analytics-header-filter-validation
+        features:
+          - features/analytics_header_filter_validation.feature
+      - name: analytics-header-filter
+        features:
+          - features/analytics_header_filter.feature
+      # Gateway 1.2.0 publishes the raw response headers instead of the filter's result when
+      # the gateway's collector capture of response headers is on, as it is in the test
+      # gateway (wso2/api-platform#3513). The next two runners together run every release
+      # except 1.2.0.
+      - name: analytics-header-filter-response-filtering
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/analytics_header_filter_response_headers.feature
+      - name: analytics-header-filter-response-filtering-pre-1-2-0
+        tags: "gateway-version<1.2.0"
+        features:
+          - features/analytics_header_filter_response_headers.feature
+      # Gateway releases before 1.2.0 publish real headers only for a request or response
+      # side that has an analytics-header-filter configured.
+      - name: analytics-header-filter-unfiltered-side-capture
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/analytics_header_filter_capture_without_filter.feature
+      - name: analytics-header-filter-response-filtering-unfiltered-side-capture
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/analytics_header_filter_capture_without_filter_response_headers.feature
+      - name: analytics-header-filter-restart
+        features:
+          - features/analytics_header_filter_restart.feature
+      # Gateway 1.2.0 publishes the raw response headers instead of the filter's result when
+      # the gateway's collector capture of response headers is on, as it is in the test
+      # gateway (wso2/api-platform#3513). The next two runners together run every release
+      # except 1.2.0.
+      - name: analytics-header-filter-restart-response-filtering
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/analytics_header_filter_restart_response_headers.feature
+      - name: analytics-header-filter-restart-response-filtering-pre-1-2-0
+        tags: "gateway-version<1.2.0"
+        features:
+          - features/analytics_header_filter_restart_response_headers.feature
+
+  # The analytics-disabled overlay turns gateway analytics off, which applies to every runner in a
+  # block, so this runner gets a block of its own.
+  - name: analytics-header-filter-analytics-disabled
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/analytics-disabled.toml
+      - name: testbench
+    runners:
+      - name: analytics-header-filter-analytics-disabled
+        features:
+          - features/analytics_header_filter_analytics_disabled.feature

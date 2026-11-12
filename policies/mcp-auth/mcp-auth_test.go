@@ -1593,3 +1593,290 @@ func TestGetMcpAuthPolicy_WithIssuersAndScopes(t *testing.T) {
 		t.Error("Expected AuthConfig.Tools.Enabled to be true")
 	}
 }
+
+// assertFallbackBodyAgrees checks the legacy JSON-RPC body that travels with the description.
+//
+// Both are always sent: the description is what a gateway with an error renderer uses, and
+// the body is what a gateway without one sends, so a policy upgraded on its own still answers
+// an unparseable request the way it always has. Asserting they AGREE — rather than restating
+// the literals — is what catches one of the two drifting.
+//
+// The `data` member is the one field that deliberately differs in reach, not in content: the
+// body carries it, and the description carries the same string as Description, which a
+// renderer withholds from the client. So this asserts they hold the same value, and that
+// enabling the renderer only ever narrows what a malformed request reveals.
+func assertFallbackBodyAgrees(t *testing.T, resp policy.ImmediateResponse) {
+	t.Helper()
+	if len(resp.Body) == 0 {
+		t.Fatal("Expected a fallback body alongside the description, got none")
+	}
+	if got := resp.Headers["content-type"]; got != "application/json" {
+		t.Errorf("Expected content-type application/json for the fallback body, got %q", got)
+	}
+
+	var envelope struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      any    `json:"id"`
+		Error   struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+			Data    string `json:"data"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp.Body, &envelope); err != nil {
+		t.Fatalf("Fallback body is not a JSON-RPC envelope: %v (%q)", err, resp.Body)
+	}
+	if envelope.JSONRPC != JSONRPCVersion {
+		t.Errorf("Expected jsonrpc %q in the fallback body, got %q", JSONRPCVersion, envelope.JSONRPC)
+	}
+	if envelope.ID != nil {
+		t.Errorf("Expected a null id for an unparseable request, got %v", envelope.ID)
+	}
+	if resp.Fault.JSONRPC == nil || resp.Fault.JSONRPC.Code == nil {
+		t.Fatalf("Expected a described JSON-RPC code to compare against, got %+v", resp.Fault)
+	}
+	if envelope.Error.Code != *resp.Fault.JSONRPC.Code {
+		t.Errorf("Fallback body code %d disagrees with the described code %d",
+			envelope.Error.Code, *resp.Fault.JSONRPC.Code)
+	}
+	if envelope.Error.Message != resp.Fault.Message {
+		t.Errorf("Fallback body message %q disagrees with the described message %q",
+			envelope.Error.Message, resp.Fault.Message)
+	}
+	if envelope.Error.Data != resp.Fault.Description {
+		t.Errorf("Fallback body data %q disagrees with the described Description %q",
+			envelope.Error.Data, resp.Fault.Description)
+	}
+}
+
+// TestMcpAuth_RejectionsDeclareFault covers the three shapes of rejection this policy
+// makes, and the one short-circuit that is deliberately NOT a fault. The code, not the
+// status, is what tells one rejection from another.
+func TestMcpAuth_RejectionsDeclareFault(t *testing.T) {
+	t.Run("auth failure", func(t *testing.T) {
+		p := &McpAuthPolicy{}
+		shared := &policy.SharedContext{Metadata: map[string]any{}}
+		resp := p.handleAuthFailure(shared, 401, "json", "key managers not configured", policy.FaultCodeAuthGeneral)
+
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on an auth rejection")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeAuthGeneral {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeAuthGeneral, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeAuthentication {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeAuthentication, resp.Fault.Type)
+		}
+		if resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("expected Error.Direction=%q, got %q", policy.DirectionRequest, resp.Fault.Direction)
+		}
+	})
+
+	t.Run("malformed MCP request", func(t *testing.T) {
+		p := &McpAuthPolicy{}
+		resp := p.handleBadRequest(&json.SyntaxError{})
+
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a malformed request")
+		}
+		if resp.Fault == nil {
+			t.Fatalf("expected Error to be populated")
+		}
+		if resp.Fault.Code != policy.FaultCodeInvalidRequestBody {
+			t.Fatalf("expected Error.Code=%q, got %q", policy.FaultCodeInvalidRequestBody, resp.Fault.Code)
+		}
+		if resp.Fault.Type != policy.FaultTypeValidation {
+			t.Fatalf("expected Error.Type=%q, got %q", policy.FaultTypeValidation, resp.Fault.Type)
+		}
+	})
+
+	t.Run("invalid configuration", func(t *testing.T) {
+		resp := buildInvalidConfigResponse("bad config").(policy.ImmediateResponse)
+		if !resp.IsFault {
+			t.Fatalf("expected IsFault=true on a misconfigured auth policy")
+		}
+		if resp.Fault == nil || resp.Fault.Code != policy.FaultCodeMediationFailed ||
+			resp.Fault.Type != policy.FaultTypeConfiguration {
+			t.Fatalf("expected fault %s/%s, got %+v", policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, resp.Fault)
+		}
+		want := `{"error":"Internal Server Error","message":"bad config"}`
+		if resp.StatusCode != 500 || string(resp.Body) != want {
+			t.Fatalf("client response changed: %d %s", resp.StatusCode, resp.Body)
+		}
+		if ct := resp.Headers["content-type"]; ct != "application/json" {
+			t.Fatalf("client response header changed: content-type=%q", ct)
+		}
+	})
+
+	t.Run("well-known metadata response is not a fault", func(t *testing.T) {
+		// A protected-resource-metadata discovery response is a successful 200. Marking
+		// it a fault would notify on every MCP client that reads the metadata.
+		p := &McpAuthPolicy{
+			OnFailureStatusCode: 401,
+			ErrorMessageFormat:  "json",
+		}
+		ctx := createMockRequestHeaderContext(map[string][]string{})
+		ctx.Path = WellKnownEndpointPath
+		ctx.OperationPath = WellKnownEndpointPath
+		ctx.Method = "GET"
+		params := map[string]interface{}{
+			"keyManagers": []interface{}{
+				map[string]interface{}{
+					"name":   "km",
+					"issuer": "https://issuer.example.com",
+					"jwks": map[string]interface{}{
+						"remote": map[string]interface{}{"uri": "http://127.0.0.1:1/jwks.json"},
+					},
+				},
+			},
+		}
+		action := p.OnRequestHeaders(context.Background(), ctx, params)
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("expected the metadata response, got status %d", resp.StatusCode)
+		}
+		if resp.IsFault {
+			t.Fatalf("the metadata discovery response must not be a fault")
+		}
+	})
+
+	// No usable key manager or issuer for the metadata document is the operator's
+	// configuration, not the caller failing to authenticate. The client still gets the 401.
+	t.Run("key manager configuration unusable", func(t *testing.T) {
+		km := []interface{}{map[string]interface{}{"name": "km", "issuer": "https://issuer.example.com"}}
+		cases := []struct {
+			name    string
+			issuers []string
+			params  map[string]interface{}
+			reason  string
+		}{
+			{"missing", nil, map[string]interface{}{}, "key managers not configured"},
+			{"empty", nil, map[string]interface{}{"keyManagers": []interface{}{}}, "no valid key managers found"},
+			{"no matching issuer", []string{"other"}, map[string]interface{}{"keyManagers": km}, "no matching issuers found"},
+		}
+		for _, c := range cases {
+			p := &McpAuthPolicy{OnFailureStatusCode: 401, ErrorMessageFormat: "json", Issuers: c.issuers}
+			ctx := createMockRequestHeaderContext(map[string][]string{})
+			ctx.Path = WellKnownEndpointPath
+			ctx.OperationPath = WellKnownEndpointPath
+			ctx.Method = "GET"
+			resp, ok := p.OnRequestHeaders(context.Background(), ctx, c.params).(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("%s: expected ImmediateResponse", c.name)
+			}
+			if !resp.IsFault || resp.Fault == nil || resp.Fault.Code != policy.FaultCodeMediationFailed ||
+				resp.Fault.Type != policy.FaultTypeConfiguration || resp.Fault.Description != c.reason {
+				t.Fatalf("%s: expected fault %s/%s, got %+v", c.name, policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration, resp.Fault)
+			}
+			want := `{"error":"Unauthorized","message":"MCP authentication failed: ` + c.reason + `"}`
+			if resp.StatusCode != 401 || string(resp.Body) != want || resp.Headers["content-type"] != "application/json" {
+				t.Fatalf("%s: client response changed: %d %v %s", c.name, resp.StatusCode, resp.Headers, resp.Body)
+			}
+		}
+	})
+
+	// A body the resolver could not read is the caller's malformed request, declared with the
+	// JSON-RPC code the body carries.
+	t.Run("unreadable body", func(t *testing.T) {
+		for reason, wantCode := range map[string]int{
+			"syntax-error": JSONRPCParseError,
+			"ambiguous":    JSONRPCInvalidRequest,
+		} {
+			ctx := resolvedHeaderPost(nil, map[string]string{attrBodyUnusable: reason})
+			resp, ok := exemptPolicy("ping").OnRequestHeaders(context.Background(), ctx, map[string]any{}).(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("%s: expected an immediate rejection", reason)
+			}
+			assertMalformedRequestFault(t, resp, policy.FaultCodeInvalidRequestBody, wantCode)
+			assertFallbackBodyAgrees(t, resp)
+		}
+	})
+
+	// A modern request that left out a required mirrored header is malformed too, in a header
+	// rather than the body.
+	t.Run("missing mirrored header", func(t *testing.T) {
+		headers := map[string][]string{headerProtocolVersion: {"2026-07-28"}}
+		attrs := map[string]string{attrBodyMethod: "tools/call", attrBodyCapabilityName: "x"}
+		resp, ok := exemptPolicy("ping").OnRequestHeaders(context.Background(),
+			resolvedHeaderPost(headers, attrs), map[string]any{}).(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected an immediate rejection")
+		}
+		assertMalformedRequestFault(t, resp, policy.FaultCodeInvalidRequestHeader, JSONRPCHeaderMismatch)
+		assertFallbackBodyAgrees(t, resp)
+		// Declaring the fault leaves the body the client receives as it was.
+		want := `{"error":{"code":-32020,"data":"` + headerMcpMethod + ` header is required","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}`
+		if string(resp.Body) != want || resp.Headers["content-type"] != "application/json" {
+			t.Fatalf("client response changed: %v %s, want body %s", resp.Headers, resp.Body, want)
+		}
+	})
+
+	// The same for a capability method that mirrored no Mcp-Name.
+	t.Run("missing mirrored name", func(t *testing.T) {
+		headers := map[string][]string{headerProtocolVersion: {"2026-07-28"}, headerMcpMethod: {"tools/call"}}
+		attrs := map[string]string{attrBodyMethod: "tools/call", attrBodyCapabilityName: "x"}
+		resp, ok := exemptPolicy("ping").OnRequestHeaders(context.Background(),
+			resolvedHeaderPost(headers, attrs), map[string]any{}).(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected an immediate rejection")
+		}
+		assertMalformedRequestFault(t, resp, policy.FaultCodeInvalidRequestHeader, JSONRPCHeaderMismatch)
+		assertFallbackBodyAgrees(t, resp)
+		want := `{"error":{"code":-32020,"data":"` + headerMcpName + ` header is required for tools/call","message":"Invalid Request"},"id":null,"jsonrpc":"2.0"}`
+		if string(resp.Body) != want || resp.Headers["content-type"] != "application/json" {
+			t.Fatalf("client response changed: %v %s, want body %s", resp.Headers, resp.Body, want)
+		}
+	})
+}
+
+// assertMalformedRequestFault checks a 400 for a malformed request declares a validation fault
+// with the given code, carrying its JSON-RPC code.
+func assertMalformedRequestFault(t *testing.T, resp policy.ImmediateResponse, wantFaultCode string, wantCode int) {
+	t.Helper()
+	if resp.StatusCode != 400 || !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("status %d IsFault %v Fault %+v", resp.StatusCode, resp.IsFault, resp.Fault)
+	}
+	f := resp.Fault
+	if f.Code != wantFaultCode || f.Type != policy.FaultTypeValidation || f.Direction != policy.DirectionRequest {
+		t.Fatalf("fault = %s/%s/%s", f.Code, f.Type, f.Direction)
+	}
+	if f.Description == "" {
+		t.Errorf("expected the reason in Description")
+	}
+	if f.JSONRPC == nil || f.JSONRPC.Code == nil || *f.JSONRPC.Code != wantCode {
+		t.Fatalf("JSON-RPC code = %+v, want %d", f.JSONRPC, wantCode)
+	}
+}
+
+// The delegated JWT Auth policy's own challenge (any casing) is replaced, so the response
+// carries exactly one WWW-Authenticate: this policy's, with resource_metadata.
+func TestSetChallenge_ReplacesDelegatedChallengeInAnyCase(t *testing.T) {
+	headers := map[string]string{
+		"content-type":     "application/json",
+		"www-authenticate": `Bearer error="invalid_token"`,
+		"Www-Authenticate": "Bearer",
+	}
+	setChallenge(headers, `Bearer resource_metadata="https://gw/.well-known/oauth-protected-resource"`)
+
+	n := 0
+	for name := range headers {
+		if strings.EqualFold(name, WWWAuthenticateHeader) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("challenge headers = %d, want 1: %v", n, headers)
+	}
+	if got := headers[WWWAuthenticateHeader]; !strings.Contains(got, "resource_metadata=") {
+		t.Fatalf("WWW-Authenticate = %q, want this policy's resource_metadata challenge", got)
+	}
+	if headers["content-type"] != "application/json" {
+		t.Fatalf("other headers must be kept: %v", headers)
+	}
+}

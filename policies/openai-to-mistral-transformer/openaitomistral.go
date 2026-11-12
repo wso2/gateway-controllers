@@ -35,6 +35,10 @@ const (
 	MistralChatCompletionsPath  = "/v1/chat/completions"
 	MetadataKeySelectedProvider = "selected_provider"
 	MetadataKeyEffectiveModel   = "openai_to_mistral_effective_model"
+	// MetadataKeyResponseIsEventStream caches the one-time verdict on whether
+	// the upstream response is an event stream, so every chunk after the first
+	// is routed the same way as the first. See responseIsEventStream.
+	MetadataKeyResponseIsEventStream = "openai_to_mistral_response_is_event_stream"
 )
 
 // unsupportedRequestFields lists OpenAI fields Mistral's API rejects. Keep in
@@ -73,12 +77,30 @@ func GetPolicy(_ policy.PolicyMetadata, rawParams map[string]interface{}) (polic
 	return &TranslatorPolicy{params: parsed}, nil
 }
 
+// Mode declares the response body as STREAM rather than BUFFER even though
+// Mistral speaks OpenAI already and needs no event translation.
+//
+// The declaration is not about this policy's own needs. The kernel computes one
+// streaming capability for the whole chain: a single policy declaring
+// BodyModeBuffer sets SupportsResponseStreaming=false for every policy on the
+// route (BuildPolicyChain in the engine's body_mode.go), which makes the engine
+// ask Envoy for a BUFFERED response body. On a multi-provider proxy that pairs
+// Mistral with a translator that does stream — Anthropic, Gemini, Bedrock — a
+// BUFFER declaration here therefore switched off incremental delivery for all
+// of them, and the client saw nothing until the upstream closed. That flag is
+// computed once at chain-build time from Mode() alone, so the per-provider
+// "selected_provider" condition cannot undo it: a Mistral translator that never
+// runs still silenced the stream.
+//
+// Declaring STREAM keeps the route streaming and moves the choice to where it
+// can be made per response: OnResponseBodyChunk forwards event streams
+// untouched and reassembles anything else for the buffered translator.
 func (p *TranslatorPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
 		RequestBodyMode:    policy.BodyModeBuffer,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   policy.BodyModeStream,
 	}
 }
 
@@ -92,17 +114,20 @@ func (p *TranslatorPolicy) OnRequestBody(
 	}
 
 	if reqCtx.Body == nil || !reqCtx.Body.Present || len(reqCtx.Body.Content) == 0 {
-		return errResponse(400, "Request body is empty.")
+		return errResponse(400, "Request body is empty.",
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(reqCtx.Body.Content, &payload); err != nil {
-		return errResponse(400, fmt.Sprintf("Invalid JSON in request body: %s", err.Error()))
+		return errResponse(400, fmt.Sprintf("Invalid JSON in request body: %s", err.Error()),
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 
 	model, err := p.resolveModel(payload)
 	if err != nil {
-		return errResponse(400, err.Error())
+		return errResponse(400, err.Error(),
+			policy.FaultCodeInvalidRequestBody, policy.DirectionRequest, policy.FaultTypeValidation)
 	}
 	storeEffectiveModel(reqCtx.SharedContext, model)
 
@@ -113,7 +138,8 @@ func (p *TranslatorPolicy) OnRequestBody(
 
 	newBody, err := json.Marshal(payload)
 	if err != nil {
-		return errResponse(500, "failed to marshal Mistral body: "+err.Error())
+		return errResponse(500, "failed to marshal Mistral body: "+err.Error(),
+			policy.FaultCodeMediationFailed, policy.DirectionRequest, policy.FaultTypeMediation)
 	}
 
 	newPath := MistralChatCompletionsPath
@@ -283,11 +309,26 @@ func optionalString(params map[string]interface{}, key string) (string, error) {
 	return strings.TrimSpace(v), nil
 }
 
-func errResponse(statusCode int, message string) policy.ImmediateResponse {
+// errResponse refuses the exchange and describes why.
+//
+// direction states which side was refused: DirectionRequest when the caller's payload could
+// not be read or converted, DirectionResponse when the provider's could not be translated
+// back. Those are operationally different events that share nothing but this function, and
+// only the caller knows which it is — which is why it is a parameter rather than inferred
+// from the status.
+func errResponse(statusCode int, message, code, direction, errorType string) policy.ImmediateResponse {
 	body, _ := json.Marshal(map[string]string{"error": message})
 	return policy.ImmediateResponse{
 		StatusCode: statusCode,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
+		IsFault:    true,
+		Fault: &policy.FaultDetails{
+			Code:      code,
+			Type:      errorType,
+			Direction: direction,
+			// message already goes to the client as the body's error text.
+			Message: message,
+		},
 	}
 }

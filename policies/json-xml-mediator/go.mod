@@ -1,5 +1,5 @@
 module github.com/wso2/gateway-controllers/policies/json-xml-mediator
 
-go 1.26.2
+go 1.26.10
 
-require github.com/wso2/api-platform/sdk/core v0.3.4
+require github.com/wso2/api-platform/sdk/core v0.5.1

@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.32.29
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.28
 	github.com/aws/aws-sdk-go-v2/service/sts v1.44.0
-	github.com/wso2/api-platform/sdk/core v0.2.18
+	github.com/wso2/api-platform/sdk/core v0.4.2
 )
 
 require (

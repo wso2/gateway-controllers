@@ -652,8 +652,8 @@ func TestNeedsMoreResponseData_SSEBoundaries(t *testing.T) {
 	if p.NeedsMoreResponseData(nil) {
 		t.Error("an empty accumulator should not request more data")
 	}
-	if p.NeedsMoreResponseData([]byte(`{"error":{"message":"boom"}}`)) {
-		t.Error("non-SSE data must not stall the stream")
+	if !p.NeedsMoreResponseData([]byte(`{"error":{"message":"boom"}}`)) {
+		t.Error("a body that is not an event stream must accumulate until the upstream closes")
 	}
 	if !p.NeedsMoreResponseData([]byte(strings.ReplaceAll(frame, "\n", "\r\n")[:len(frame)])) {
 		t.Error("a partial CRLF frame should request more data")
@@ -687,9 +687,11 @@ func TestOnResponseHeaders_RewritesStreamingHeaders(t *testing.T) {
 	}
 }
 
-// TestStream_NonSSEChunksPassThrough guards the buffered-fallback boundary: a
-// non-stream body must not be mangled by the chunk path.
-func TestStream_NonSSEChunksPassThrough(t *testing.T) {
+// TestStream_NonSSEBodyIsTranslated covers the framing the gateway cannot tell
+// apart from a stream: an ordinary JSON reply sent without content-length is
+// routed through the chunk path, and must still be translated rather than
+// forwarded in the provider's own format.
+func TestStream_NonSSEBodyIsTranslated(t *testing.T) {
 	p := testPolicy()
 	respCtx := &policy.ResponseStreamContext{
 		SharedContext:   &policy.SharedContext{RequestID: "req-json", Metadata: map[string]interface{}{}},
@@ -698,13 +700,72 @@ func TestStream_NonSSEChunksPassThrough(t *testing.T) {
 	}
 
 	action := p.OnResponseBodyChunk(context.Background(), respCtx,
-		&policy.StreamBody{Chunk: []byte(`{"id":"msg_1"}`), EndOfStream: true}, nil)
+		&policy.StreamBody{Chunk: []byte(anthropicBufferedBody), EndOfStream: true}, nil)
 	forward, ok := action.(policy.ForwardResponseChunk)
 	if !ok {
 		t.Fatalf("expected ForwardResponseChunk, got %T", action)
 	}
-	if forward.Body != nil {
-		t.Errorf("non-SSE chunks must pass through untouched, got %q", forward.Body)
+	if forward.Body == nil {
+		t.Fatal("a non-stream JSON body must be translated, not forwarded untouched")
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(forward.Body, &out); err != nil {
+		t.Fatalf("translated body is not JSON: %v", err)
+	}
+	if out["object"] != "chat.completion" {
+		t.Errorf("object = %v, want chat.completion", out["object"])
+	}
+	choices, _ := out["choices"].([]interface{})
+	if len(choices) != 1 {
+		t.Fatalf("choices = %v, want one entry", out["choices"])
+	}
+	msg, _ := choices[0].(map[string]interface{})["message"].(map[string]interface{})
+	if msg["content"] != "hi" {
+		t.Errorf("content = %v, want hi", msg["content"])
+	}
+}
+
+// TestStream_NonSSEBodyTruncatedByAccumulatorCap covers the one case where a
+// non-stream body reaches the chunk path incomplete: the policy engine's stream
+// accumulator cap forces a flush before the upstream closes. The document is cut
+// mid-body, so the stream is closed rather than a fragment emitted.
+func TestStream_NonSSEBodyTruncatedByAccumulatorCap(t *testing.T) {
+	p := testPolicy()
+	respCtx := &policy.ResponseStreamContext{
+		SharedContext:   &policy.SharedContext{RequestID: "req-trunc", Metadata: map[string]interface{}{}},
+		ResponseHeaders: policy.NewHeaders(map[string][]string{"content-type": {"application/json"}}),
+		ResponseStatus:  200,
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx,
+		&policy.StreamBody{Chunk: []byte(anthropicBufferedBody[:20]), EndOfStream: false}, nil)
+	term, ok := action.(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("expected TerminateResponseChunk for a truncated body, got %T", action)
+	}
+	if term.Body == nil {
+		t.Error("Body must be an empty slice, not nil: a nil body leaves the chain " +
+			"carrying the truncated document and delivers it to the client")
+	}
+	if len(term.Body) != 0 {
+		t.Errorf("a truncated body must not be forwarded, got %q", term.Body)
+	}
+	// The status went out with the headers and is almost always 200, so IsFault
+	// is the only thing that tells the fault flow this response failed.
+	if !term.IsFault {
+		t.Error("a truncated body is a failure and must be declared to the fault flow")
+	}
+	if term.Fault == nil {
+		t.Fatal("expected Fault to be populated")
+	}
+	if term.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Errorf("Fault.Code = %q, want %q", term.Fault.Code, policy.FaultCodeMediationFailed)
+	}
+	if term.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("Fault.Type = %q, want %q", term.Fault.Type, policy.FaultTypeMediation)
+	}
+	if term.Fault.Direction != policy.DirectionResponse {
+		t.Errorf("Fault.Direction = %q, want %q", term.Fault.Direction, policy.DirectionResponse)
 	}
 }
 
@@ -983,5 +1044,77 @@ func TestStream_NilSharedContextForwardsUnchanged(t *testing.T) {
 	}
 	if n := strings.Count(out.String(), "data: [DONE]"); n != 0 {
 		t.Errorf("passthrough must not synthesise [DONE], got %d", n)
+	}
+}
+
+// TestStreamFailureFaults pins the fault a terminated stream declares, on both the streaming
+// and the buffered path. A provider error event is FaultCodeProviderStreamFailed; a frame the
+// translator cannot parse is its own failure, FaultCodeMediationFailed. The buffered path sends
+// the same bytes as the streaming one, and a stream that ends cleanly declares no fault.
+func TestStreamFailureFaults(t *testing.T) {
+	cases := []struct {
+		name     string
+		stream   string
+		wantCode string
+	}{
+		{"provider error event", sseFrame("error", `{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`), policy.FaultCodeProviderStreamFailed},
+		{"malformed frame", sseFrame("content_block_delta", `{"type":"content_block_delta"`), policy.FaultCodeMediationFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stream := sseFrame("message_start", `{"type":"message_start","message":{"id":"msg_f","usage":{"input_tokens":3}}}`) + tc.stream
+			action := testPolicy().OnResponseBodyChunk(context.Background(), &policy.ResponseStreamContext{
+				SharedContext:   &policy.SharedContext{RequestID: "req-fault", Metadata: map[string]interface{}{}},
+				ResponseHeaders: sseHeaders(),
+				ResponseStatus:  200,
+			}, &policy.StreamBody{Chunk: []byte(stream), EndOfStream: true}, nil)
+			terminate, ok := action.(policy.TerminateResponseChunk)
+			if !ok {
+				t.Fatalf("expected TerminateResponseChunk, got %T", action)
+			}
+			assertStreamFault(t, terminate.IsFault, terminate.Fault, tc.wantCode)
+
+			buffered := testPolicy().OnResponseBody(context.Background(), &policy.ResponseContext{
+				SharedContext:   &policy.SharedContext{RequestID: "req-fault", Metadata: map[string]interface{}{}},
+				ResponseHeaders: sseHeaders(),
+				ResponseBody:    &policy.Body{Content: []byte(stream), Present: true},
+				ResponseStatus:  200,
+			}, nil)
+			mods, ok := buffered.(policy.DownstreamResponseModifications)
+			if !ok {
+				t.Fatalf("expected DownstreamResponseModifications, got %T", buffered)
+			}
+			assertStreamFault(t, mods.IsFault, mods.Fault, tc.wantCode)
+			if normalizeCreated(string(mods.Body)) != normalizeCreated(string(terminate.Body)) {
+				t.Errorf("buffered body differs from the streamed one:\n%s\nvs\n%s", mods.Body, terminate.Body)
+			}
+			if mods.StatusCode != nil {
+				t.Errorf("the buffered path must not change the status, got %d", *mods.StatusCode)
+			}
+		})
+	}
+
+	t.Run("clean stream", func(t *testing.T) {
+		buffered := testPolicy().OnResponseBody(context.Background(), &policy.ResponseContext{
+			SharedContext:   &policy.SharedContext{RequestID: "req-clean", Metadata: map[string]interface{}{}},
+			ResponseHeaders: sseHeaders(),
+			ResponseBody:    &policy.Body{Content: []byte(anthropicTextStream()), Present: true},
+			ResponseStatus:  200,
+		}, nil)
+		mods := buffered.(policy.DownstreamResponseModifications)
+		if mods.IsFault || mods.Fault != nil {
+			t.Errorf("a clean stream must not declare a fault, got %+v", mods.Fault)
+		}
+	})
+}
+
+func assertStreamFault(t *testing.T, isFault bool, fault *policy.FaultDetails, wantCode string) {
+	t.Helper()
+	if !isFault || fault == nil {
+		t.Fatalf("expected a fault, got IsFault=%v Fault=%v", isFault, fault)
+	}
+	if fault.Code != wantCode || fault.Type != policy.FaultTypeMediation || fault.Direction != policy.DirectionResponse {
+		t.Errorf("fault = %s/%s/%s, want %s/%s/%s", fault.Code, fault.Type, fault.Direction,
+			wantCode, policy.FaultTypeMediation, policy.DirectionResponse)
 	}
 }

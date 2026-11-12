@@ -28,6 +28,23 @@ import (
 	"github.com/xeipuuv/gojsonschema"
 )
 
+// codeGuardrailIntervened is the specific code for what this guardrail checks —
+// whether the content matched a SCHEMA — so a caller can tell this rejection from another
+// guardrail's without parsing a message. The name is unchanged so every call site reads the
+// same; only the value moved.
+//
+// The tradeoff, stated because it is real: 906xxx sits OUTSIDE carbon's guardrail range
+// [900514, 900515), which is exactly one code wide. Carbon-compatible analytics assigns a
+// fault category by range membership, so this classifies as "other" rather than
+// "guardrail" there. Accepted deliberately: the code identifies the rejection, and the
+// class is already carried by FaultDetails.Type ("guardrail") and by
+// GuardrailDetails.InterveningGuardrail. See policy.GuardrailCodeIntervened for the full
+// reasoning, and use that generic code for a guardrail with nothing specific to say.
+const codeGuardrailIntervened = policy.GuardrailCodeSchema
+
+// guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
+const guardrailName = "json-schema-guardrail"
+
 const (
 	GuardrailErrorCode           = 422
 	DefaultRequestJSONPath       = "$.messages[-1].content"
@@ -198,6 +215,103 @@ func extractValueFromJSONPathForSchema(payload []byte, jsonPath string) ([]byte,
 	return valueBytes, nil
 }
 
+// buildGuardrailErrorResponse describes the intervention for the gateway: the code and
+// class that decide its analytics category, which side was refused, and the guardrail
+// envelope this policy already publishes in its response body.
+//
+// Direction is per phase, not per policy: a request-side hit and a response-side hit are
+// operationally different events that share a status code, and only this policy knows
+// which it made.
+func (p *JSONSchemaGuardrailPolicy) buildGuardrailErrorResponse(reason string, validationError error, isResponse, showAssessment bool, errors []gojsonschema.ResultError) *policy.FaultDetails {
+	assessment := p.buildAssessmentObject(reason, validationError, isResponse, showAssessment, errors)
+
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+
+	actionReason, _ := assessment["actionReason"].(string)
+
+	guardrail := &policy.GuardrailDetails{
+		InterveningGuardrail: guardrailName,
+		Action:               policy.GuardrailActionIntervened,
+		ActionReason:         actionReason,
+	}
+	// Assessments carries the content the guardrail existed to stop, so it is populated
+	// only where the operator already opted in through showAssessment — the same gate the
+	// published response envelope uses.
+	if raw, ok := assessment["assessments"]; ok {
+		guardrail.Assessments = map[string]any{"assessments": raw}
+	}
+
+	return &policy.FaultDetails{
+		Code:      codeGuardrailIntervened,
+		Type:      policy.FaultTypeGuardrail,
+		Direction: direction,
+		Message:   "Violation of the configured JSON schema detected",
+		// reason is the detail of what was blocked. Description is withheld from the
+		// response body by every renderer and reaches fault policies only, which is why
+		// the detail belongs here rather than in Message.
+		Description: reason,
+		Guardrail:   guardrail,
+	}
+}
+
+// extractionFault describes a rejection made because the value at jsonPath could not be
+// read, so no check ran and there is no guardrail verdict to report. On a request the
+// payload is the caller's, so it is an invalid request body; on a response it is the
+// upstream's, and the policy could not do its job.
+func extractionFault(reason string, err error, isResponse bool) *policy.FaultDetails {
+	if isResponse {
+		return &policy.FaultDetails{
+			Code:        policy.FaultCodeMediationFailed,
+			Type:        policy.FaultTypeMediation,
+			Direction:   policy.DirectionResponse,
+			Message:     "The response body could not be read for the guardrail check",
+			Description: reason + ": " + err.Error(),
+		}
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeInvalidRequestBody,
+		Type:        policy.FaultTypeValidation,
+		Direction:   policy.DirectionRequest,
+		Message:     "The request body could not be read for the guardrail check",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// checkFailureFault describes a rejection made because the policy could not run its check
+// at all, so there is no guardrail verdict to report: the policy failed its own job.
+// faultType is policy.FaultTypeConfiguration when the policy's own parameters are what
+// cannot be used, otherwise policy.FaultTypeMediation.
+func checkFailureFault(faultType, reason string, err error, isResponse bool) *policy.FaultDetails {
+	direction := policy.DirectionRequest
+	if isResponse {
+		direction = policy.DirectionResponse
+	}
+	return &policy.FaultDetails{
+		Code:        policy.FaultCodeMediationFailed,
+		Type:        faultType,
+		Direction:   direction,
+		Message:     "The guardrail check could not be completed",
+		Description: reason + ": " + err.Error(),
+	}
+}
+
+// withFault replaces the fault an error response declares, leaving its status, headers
+// and body exactly as they are.
+func withFault(action interface{}, fault *policy.FaultDetails) interface{} {
+	switch a := action.(type) {
+	case policy.ImmediateResponse:
+		a.Fault = fault
+		return a
+	case policy.DownstreamResponseModifications:
+		a.Fault = fault
+		return a
+	}
+	return action
+}
+
 // buildAssessmentObject builds the assessment object
 func (p *JSONSchemaGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, errors []gojsonschema.ResultError) map[string]interface{} {
 	assessment := map[string]interface{}{
@@ -271,17 +385,24 @@ func (p *JSONSchemaGuardrailPolicy) validatePayload(payload []byte, params JSONS
 		extractedValue, err := extractValueFromJSONPathForSchema(payload, params.JsonPath)
 		if err != nil {
 			slog.Debug("JSONSchemaGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-			return p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil)
+			return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil), extractionFault("Error extracting value from JSONPath", err, isResponse))
 		}
 		documentLoader = gojsonschema.NewBytesLoader(extractedValue)
 	} else {
 		documentLoader = gojsonschema.NewBytesLoader(payload)
 	}
 
-	result, err := gojsonschema.Validate(schemaLoader, documentLoader)
+	// Compile the schema once, so a schema that cannot be loaded (the operator's
+	// parameter) is told apart from content that is not JSON.
+	schema, err := gojsonschema.NewSchema(schemaLoader)
 	if err != nil {
 		slog.Debug("JSONSchemaGuardrail: Error validating schema", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil)
+		return withFault(p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil), checkFailureFault(policy.FaultTypeConfiguration, "Error validating schema", err, isResponse))
+	}
+	result, err := schema.Validate(documentLoader)
+	if err != nil {
+		slog.Debug("JSONSchemaGuardrail: Error validating schema", "error", err, "isResponse", isResponse)
+		return withFault(p.buildErrorResponse("Error validating schema", err, isResponse, params.ShowAssessment, nil), extractionFault("Error validating schema", err, isResponse))
 	}
 
 	var validationPassed bool
@@ -327,6 +448,8 @@ func (p *JSONSchemaGuardrailPolicy) buildErrorResponse(reason string, validation
 		bodyBytes = []byte(`{"type":"JSON_SCHEMA_GUARDRAIL","message":"Internal error"}`)
 	}
 
+	errorResponse := p.buildGuardrailErrorResponse(reason, validationError, isResponse, showAssessment, errors)
+
 	if isResponse {
 		statusCode := GuardrailErrorCode
 		return policy.DownstreamResponseModifications{
@@ -334,6 +457,8 @@ func (p *JSONSchemaGuardrailPolicy) buildErrorResponse(reason string, validation
 			Body:              bodyBytes,
 			AnalyticsMetadata: analyticsMetadata,
 			HeadersToSet:      map[string]string{"Content-Type": "application/json"},
+			IsFault:           true,
+			Fault:             errorResponse,
 		}
 	}
 
@@ -342,5 +467,7 @@ func (p *JSONSchemaGuardrailPolicy) buildErrorResponse(reason string, validation
 		AnalyticsMetadata: analyticsMetadata,
 		Headers:           map[string]string{"Content-Type": "application/json"},
 		Body:              bodyBytes,
+		IsFault:           true,
+		Fault:             errorResponse,
 	}
 }

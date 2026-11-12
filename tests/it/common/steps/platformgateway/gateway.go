@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/url"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -152,6 +153,89 @@ func gatewayVersion(topo *frameworkruntime.Topology) string {
 		return ""
 	}
 	return version
+}
+
+// requireGatewayVersion skips the scenario when the gateway under test does not satisfy the
+// constraint, so one feature file can hold a scenario that needs a newer gateway than the
+// rest of its runner. A runner tag gates a whole runner; this gates one scenario.
+func (g *Gateway) requireGatewayVersion(_ context.Context, operator, version string) error {
+	ok, err := gatewaySatisfies(g.topo, operator, version)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return godog.ErrSkip
+	}
+	return nil
+}
+
+// gatewaySatisfies reports whether the gateway in topo satisfies "<operator><version>", with
+// the same rules as a runner's gateway-version tag: a release compares on major.minor.patch,
+// and the latest or a source-built gateway is newer than every release, so it satisfies only
+// ">" and ">=".
+func gatewaySatisfies(topo *frameworkruntime.Topology, operator, version string) (bool, error) {
+	want, err := parseReleaseVersion(version)
+	if err != nil {
+		return false, err
+	}
+	if topo == nil || topo.Block == nil {
+		return false, errors.New("gateway version: the topology has no block")
+	}
+	for _, component := range topo.Block.Components {
+		if component.Def == nil || component.Def.Name != "platform-gateway" {
+			continue
+		}
+		if component.BuildFromSource || strings.EqualFold(strings.TrimSpace(component.Version), "latest") {
+			return operator == ">" || operator == ">=", nil
+		}
+		have, err := parseReleaseVersion(component.Version)
+		if err != nil {
+			return false, fmt.Errorf("gateway version: %w", err)
+		}
+		cmp := 0
+		for i := range have {
+			if have[i] != want[i] {
+				cmp = 1
+				if have[i] < want[i] {
+					cmp = -1
+				}
+				break
+			}
+		}
+		switch operator {
+		case ">":
+			return cmp > 0, nil
+		case ">=":
+			return cmp >= 0, nil
+		case "<":
+			return cmp < 0, nil
+		case "<=":
+			return cmp <= 0, nil
+		case "=", "==":
+			return cmp == 0, nil
+		default:
+			return false, fmt.Errorf("gateway version: unsupported operator %q", operator)
+		}
+	}
+	return false, errors.New("gateway version: the block declares no platform-gateway")
+}
+
+// parseReleaseVersion parses major.minor.patch, or a four-part released tag such as 1.2.0.6,
+// which compares on its first three parts.
+func parseReleaseVersion(raw string) ([3]uint64, error) {
+	var out [3]uint64
+	parts := strings.Split(strings.TrimPrefix(strings.TrimSpace(raw), "v"), ".")
+	if len(parts) != 3 && len(parts) != 4 {
+		return out, fmt.Errorf("%q is not a release version (major.minor.patch)", raw)
+	}
+	for i, part := range parts[:3] {
+		value, err := strconv.ParseUint(part, 10, 64)
+		if err != nil {
+			return out, fmt.Errorf("%q is not a release version (major.minor.patch)", raw)
+		}
+		out[i] = value
+	}
+	return out, nil
 }
 
 func gatewayAdminBasePath(topo *frameworkruntime.Topology) string {
@@ -298,23 +382,81 @@ type policyChain struct {
 }
 
 type policySpec struct {
-	Name string `json:"name"`
+	Name       string         `json:"name"`
+	Parameters map[string]any `json:"parameters"`
 }
 
-func (c policyChain) containsPolicy(name string) bool {
+// policyMatcher reports whether a policy instance in a chain satisfies an assertion.
+type policyMatcher func(policySpec) bool
+
+// policyNamed matches a policy instance by name.
+func policyNamed(name string) policyMatcher {
+	return func(policy policySpec) bool { return policy.Name == name }
+}
+
+// policyNamedWithParameter matches a policy instance by name whose parameter at the dotted
+// path has the scalar value want. An empty path matches by name alone.
+func policyNamedWithParameter(name, path, want string) policyMatcher {
+	return func(policy policySpec) bool {
+		if policy.Name != name {
+			return false
+		}
+		if path == "" {
+			return true
+		}
+		actual, found := policyParameterValue(policy.Parameters, path)
+		return found && actual == want
+	}
+}
+
+// policyParameterValue resolves a dotted path, such as "request.mode" or
+// "request.headers.0", against policy parameters. Numeric segments index arrays. It reports
+// false when the path is absent or does not end at a scalar value.
+func policyParameterValue(parameters map[string]any, path string) (string, bool) {
+	var current any = parameters
+	for _, segment := range strings.Split(path, ".") {
+		if segment == "" {
+			return "", false
+		}
+		switch node := current.(type) {
+		case map[string]any:
+			value, ok := node[segment]
+			if !ok {
+				return "", false
+			}
+			current = value
+		case []any:
+			index, err := strconv.Atoi(segment)
+			if err != nil || index < 0 || index >= len(node) {
+				return "", false
+			}
+			current = node[index]
+		default:
+			return "", false
+		}
+	}
+	switch current.(type) {
+	case nil, map[string]any, []any:
+		return "", false
+	default:
+		return fmt.Sprint(current), true
+	}
+}
+
+func (c policyChain) containsPolicy(match policyMatcher) bool {
 	for _, policy := range c.Policies {
-		if policy.Name == name {
+		if match(policy) {
 			return true
 		}
 	}
 	return false
 }
 
-func (d configDump) containsPolicy(schema configDumpSchema, routePath, policyName string) bool {
+func (d configDump) containsPolicy(schema configDumpSchema, routePath string, match policyMatcher) bool {
 	switch schema {
 	case configDumpLegacyRouteKey:
 		for _, chain := range d.PolicyChains.PolicyChains {
-			if routeKeyPath(chain.RouteKey) == routePath && chain.containsPolicy(policyName) {
+			if routeKeyPath(chain.RouteKey) == routePath && chain.containsPolicy(match) {
 				return true
 			}
 		}
@@ -330,7 +472,7 @@ func (d configDump) containsPolicy(schema configDumpSchema, routePath, policyNam
 			return false
 		}
 		for _, chain := range d.PolicyChains.PolicyChains {
-			if _, found := chainKeys[chain.ChainKey]; found && chain.containsPolicy(policyName) {
+			if _, found := chainKeys[chain.ChainKey]; found && chain.containsPolicy(match) {
 				return true
 			}
 		}
@@ -673,12 +815,26 @@ func (g *Gateway) configDumpRouteBasePath(ctx context.Context, basePath string, 
 }
 
 // configDumpPolicyForRoute waits until the policy engine's config dump shows policyName attached
-// to the operation whose full path is routePath. The route can become visible before its policy
-// chain is populated, so checking one already-published dump is not sufficient.
-func (g *Gateway) configDumpPolicyForRoute(ctx context.Context, policyName, routePath string) error {
+// to the operation whose full path is routePath and, when parameterPath is set, carrying the
+// scalar parameterValue at that dotted parameter path. The route can become visible before its
+// policy chain is populated, and an updated policy keeps its name, so checking one
+// already-published dump is not sufficient.
+func (g *Gateway) configDumpPolicyForRoute(
+	ctx context.Context, policyName, routePath, parameterPath, parameterValue string,
+) error {
 	resolvedPath, err := stepscommon.Expand(ctx, routePath)
 	if err != nil {
 		return err
+	}
+	resolvedValue, err := stepscommon.Expand(ctx, parameterValue)
+	if err != nil {
+		return err
+	}
+	match := policyNamedWithParameter(policyName, parameterPath, resolvedValue)
+	what := fmt.Sprintf("waiting for policy %q on route %q in the config dump", policyName, resolvedPath)
+	if parameterPath != "" {
+		what = fmt.Sprintf("waiting for policy %q on route %q with parameter %q set to %q in the config dump",
+			policyName, resolvedPath, parameterPath, resolvedValue)
 	}
 	version, err := g.topo.ComponentVersion("platform-gateway")
 	if err != nil {
@@ -693,7 +849,7 @@ func (g *Gateway) configDumpPolicyForRoute(ctx context.Context, policyName, rout
 		if err := json.Unmarshal(resp.Body, &dump); err != nil {
 			return false
 		}
-		return dump.containsPolicy(schema, resolvedPath, policyName)
+		return dump.containsPolicy(schema, resolvedPath, match)
 	}
 
 	// Preserve the response from the preceding config-dump request when it already satisfies
@@ -720,8 +876,7 @@ func (g *Gateway) configDumpPolicyForRoute(ctx context.Context, policyName, rout
 		}
 		return resp, nil
 	}, containsPolicy)
-	if err := awaited(last, err, containsPolicy,
-		fmt.Sprintf("waiting for policy %q on route %q in the config dump", policyName, resolvedPath)); err != nil {
+	if err := awaited(last, err, containsPolicy, what); err != nil {
 		return err
 	}
 	return g.funnel.Publish(ctx, last)
@@ -1108,7 +1263,17 @@ type resourceMetadata struct {
 
 // register wires gateway, health, and timeout steps.
 func (g *Gateway) register(sc *godog.ScenarioContext) {
+	sc.Step(`^the gateway version satisfies "(>=|>|<=|<|==|=)([0-9.]+)"$`, g.requireGatewayVersion)
 	g.registerRawHTTPSteps(sc)
+	g.registerMTLSSteps(sc)
+	g.registerMTLSPoolSteps(sc)
+	g.registerOutboundMTLSSteps(sc)
+	g.registerMTLSHostnameSteps(sc)
+	g.registerWaitSteps(sc)
+	g.registerMTLSListenerSteps(sc)
+	g.registerMTLSHeaderBypassSteps(sc)
+	g.registerMTLSRelaySteps(sc)
+	g.registerMTLSObservabilitySteps(sc)
 	g.registerA2AClientSteps(sc)
 	g.registerAgentSteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
@@ -1158,8 +1323,9 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	sc.Step(`^I register the "([^"]*)" "([^"]*)" for cleanup$`, g.registerAdminResourceForCleanup)
 	sc.Step(`^the "([^"]*)" service logs should contain "([^"]*)"$`, g.serviceLogsContain)
 	sc.Step(`^the "([^"]*)" service logs should not contain "([^"]*)"$`, g.serviceLogsNotContain)
-	sc.Step(`^the "([^"]*)" service log event containing "([^"]*)" should not contain "([^"]*)"$`,
-		g.serviceLogEventExcludes)
+	sc.Step(`^the "([^"]*)" service logs should have exactly (\d+) lines? containing:$`, g.serviceLogLinesCount)
+	sc.Step(`^the "([^"]*)" service log event containing "([^"]*)" should( not)? contain "([^"]*)"$`,
+		g.serviceLogEvent)
 	sc.Step(`^I send a "([^"]*)" request to the "([^"]*)" service at "([^"]*)" until lazy resource "([^"]*)" has display name "([^"]*)"$`,
 		g.serviceRequestUntilLazyDisplayName)
 	sc.Step(`^I send a "([^"]*)" request to the "([^"]*)" service at "([^"]*)" until provider template mapping "([^"]*)" maps to template "([^"]*)"$`,
@@ -1168,6 +1334,10 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 		g.serviceRequestUntilLazyResourceAbsent)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should (contain|not contain) (request|response) header "([^"]*)"(?: with value "([^"]*)")?$`,
 		g.analyticsHeader)
+	sc.Step(`^the latest analytics event for path "([^"]*)" should contain (request|response) header "([^"]*)" with values "([^"]*)"$`,
+		g.analyticsHeaderValues)
+	sc.Step(`^the analytics events for path "([^"]*)" should record (\d+) requests identified by request header "([^"]*)" with prefix "([^"]*)" and headers:$`,
+		g.analyticsPerRequestHeaders)
 	sc.Step(`^I reset the analytics collector$`, g.resetAnalyticsCollector)
 	sc.Step(`^I wait for the analytics collector to settle$`, g.waitForAnalyticsToSettle)
 	sc.Step(`^the analytics collector should have received at least (\d+) events?$`, g.analyticsEventCountAtLeast)
@@ -1178,6 +1348,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 		g.analyticsResponseStatus)
 	sc.Step(`^the latest analytics event for path "([^"]*)" should have metadata field "([^"]*)" with value "([^"]*)"$`,
 		g.analyticsMetadataField)
+	sc.Step(`^the latest analytics event for path "([^"]*)" should have numeric metadata field "([^"]*)" (equal to|at least) "([^"]*)"$`,
+		g.analyticsNumericMetadataField)
 	sc.Step(`^the response should be an oob-template list$`, g.oobTemplateList)
 	sc.Step(`^the lazy resources should contain template "([^"]*)" of type "([^"]*)"$`, g.lazyTemplatePresent)
 	sc.Step(`^the lazy resources should not contain template "([^"]*)"$`, g.lazyTemplateAbsent)
@@ -1195,7 +1367,7 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 		func(ctx context.Context, basePath string) error {
 			return g.configDumpRouteBasePath(ctx, basePath, false)
 		})
-	sc.Step(`^the config dump should contain policy "([^"]*)" for route "([^"]*)"$`,
+	sc.Step(`^the config dump should contain policy "([^"]*)" for route "([^"]*)"(?: with parameter "([^"]*)" set to "([^"]*)")?$`,
 		g.configDumpPolicyForRoute)
 	sc.Step(`^I wait for the config dump to stop containing a route with base path "([^"]*)"$`,
 		g.awaitConfigDumpRouteAbsent)
@@ -1502,6 +1674,9 @@ func (g *Gateway) createAPI(ctx context.Context, body *godog.DocString, contentT
 	if err != nil {
 		return err
 	}
+	if err := g.beforeAPIMutation(ctx); err != nil {
+		return err
+	}
 
 	resp, err := g.funnel.Post(ctx, url, g.headerWith(ctx, "Content-Type", contentType), []byte(definition))
 	if err != nil {
@@ -1586,6 +1761,9 @@ func (g *Gateway) deleteAPI(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	if err := g.beforeAPIMutation(ctx); err != nil {
+		return err
+	}
 	resp, err := g.funnel.Delete(ctx, url, g.scenarioHeaders(ctx))
 	if err != nil {
 		return err
@@ -1624,15 +1802,28 @@ var serviceEndpoints = map[string]struct {
 }{
 	"gateway-controller":       {component: "platform-gateway", endpoint: "rest", basePath: ManagementBasePath},
 	"gateway-controller-admin": {component: "platform-gateway", endpoint: "admin", basePath: adminBasePath},
-	"policy-engine":            {component: "platform-gateway", endpoint: "policy-admin"},
-	"analytics":                {component: "testbench", endpoint: "analytics", partitioned: true},
-	"capture":                  {component: "testbench", endpoint: "capture", partitioned: true},
-	"oauth2":                   {component: "testbench", endpoint: "oauth2", partitioned: true},
+	// The admin API of the controller that feeds the runtime over xDS, on a gateway that
+	// runs it apart from the management controller.
+	"gateway-controller-xds-admin": {component: "platform-gateway", endpoint: "xds-admin", basePath: adminBasePath},
+	"policy-engine":                {component: "platform-gateway", endpoint: "policy-admin"},
+	"analytics":                    {component: "testbench", endpoint: "analytics", partitioned: true},
+	"capture":                      {component: "testbench", endpoint: "capture", partitioned: true},
+	"oauth2":                       {component: "testbench", endpoint: "oauth2", partitioned: true},
+	// The TypeSafe Jev API. Not block-partitioned here: a scenario addresses its own partition
+	// as the first path segment, so request counts are scoped to the scenario.
+	"jev":     {component: "testbench", endpoint: "jev"},
+	"jev-tls": {component: "testbench", endpoint: "jev-tls"},
+	// The scripted MCP server, addressed like jev: a scenario names its own partition.
+	"mcp-scripted": {component: "testbench", endpoint: "mcp-scripted"},
+	// The stateless MCP server (port 3009), addressed directly so a scenario can compare what
+	// the gateway serves with what the server itself serves.
+	"mcp": {component: "testbench", endpoint: "mcp"},
 	// Metrics live on a DIFFERENT compose service from the one tests normally address —
 	// controller metrics on the controller, policy-engine metrics on the runtime — which the
 	// component contract resolves via Endpoint.Service. No base path: a scrape is not an API.
 	"controller-metrics":    {component: "platform-gateway", endpoint: "metrics"},
 	"policy-engine-metrics": {component: "platform-gateway", endpoint: "pe-metrics"},
+	"envoy-admin":           {component: "platform-gateway", endpoint: "envoy-admin"},
 	// The A2A agent behind every Agent, addressed directly so a scenario can compare what the
 	// gateway serves with what the agent itself serves.
 	"a2a-trip-planner": {component: "a2a-trip-planner", endpoint: "http"},
@@ -1700,7 +1891,7 @@ func (g *Gateway) serviceBasePath(service, defaultPath string) string {
 	switch service {
 	case "gateway-controller":
 		return gatewayManagementBasePath(g.topo)
-	case "gateway-controller-admin":
+	case "gateway-controller-admin", "gateway-controller-xds-admin":
 		return gatewayAdminBasePath(g.topo)
 	default:
 		return defaultPath
@@ -1800,7 +1991,7 @@ func (g *Gateway) serviceRequestWithBody(
 
 	// The config dump lags the deploy by one event-hub poll and nothing else exposes that, so
 	// the framework waits here rather than making every scenario encode the timing.
-	if method == http.MethodGet && strings.HasPrefix(strings.TrimPrefix(path, "/"), "config_dump") {
+	if method == http.MethodGet && service != "envoy-admin" && strings.HasPrefix(strings.TrimPrefix(path, "/"), "config_dump") {
 		if err := g.awaitDumpConsistent(ctx, url); err != nil {
 			return err
 		}
@@ -1978,81 +2169,199 @@ func (g *Gateway) serviceRequestUntilBodyNotContains(
 	return err
 }
 
-// serviceLogsContain waits until a service log contains the supplied marker.
-func (g *Gateway) serviceLogsContain(ctx context.Context, service, marker string) error {
-	return g.assertServiceLogs(ctx, service, marker, true)
-}
-
-// serviceLogsNotContain waits until a service log no longer contains the supplied marker.
-func (g *Gateway) serviceLogsNotContain(ctx context.Context, service, marker string) error {
-	stack, _, err := g.topo.ServiceControl(service)
+// serviceLogsContain waits until the service log contains text, and fails if it never does.
+func (g *Gateway) serviceLogsContain(ctx context.Context, service, text string) error {
+	text, err := expandLogText(ctx, text)
 	if err != nil {
 		return err
-	}
-	logs := stack.Logs(ctx)
-	if strings.Contains(logs, marker) {
-		return fmt.Errorf("service %q logs unexpectedly contain %q", service, marker)
-	}
-	return nil
-}
-
-// serviceLogEventExcludes waits for the event identified by marker and checks the
-// exclusion against that event rather than the complete historical log.
-func (g *Gateway) serviceLogEventExcludes(ctx context.Context, service, marker, excluded string) error {
-	if strings.TrimSpace(marker) == "" || strings.TrimSpace(excluded) == "" {
-		return fmt.Errorf("service log event marker and excluded text must not be empty")
-	}
-	stack, _, err := g.topo.ServiceControl(service)
-	if err != nil {
-		return err
-	}
-	last := ""
-	_, err = retry.Until(ctx, retry.Options{Interval: 200 * time.Millisecond}, func(ctx context.Context) (string, error) {
-		last = stack.Logs(ctx)
-		return last, nil
-	}, func(logs string) bool {
-		for _, line := range strings.Split(logs, "\n") {
-			if strings.Contains(line, marker) {
-				return !strings.Contains(line, excluded)
-			}
-		}
-		return false
-	})
-	if err != nil {
-		return fmt.Errorf("waiting for log event containing %q without %q: %w; last logs: %s",
-			marker, excluded, err, truncateLog(last))
-	}
-	return nil
-}
-
-func (g *Gateway) assertServiceLogs(ctx context.Context, service, marker string, wantPresent bool) error {
-	if strings.TrimSpace(marker) == "" {
-		return fmt.Errorf("service log marker must not be empty")
 	}
 	stack, resolved, err := g.topo.ServiceControl(service)
 	if err != nil {
 		return err
 	}
-	last := ""
-	_, err = retry.Until(ctx, retry.Options{Interval: 200 * time.Millisecond}, func(ctx context.Context) (string, error) {
-		last = stack.Logs(ctx)
-		return last, nil
-	}, func(logs string) bool {
-		present := strings.Contains(logs, marker)
-		if wantPresent {
-			return present
-		}
-		return !present
-	})
+	return awaitLogs(ctx, stack.Logs, func(logs string) bool { return strings.Contains(logs, text) },
+		fmt.Sprintf("%s logs for service %q to contain %q", resolved, service, text))
+}
+
+// serviceLogsNotContain checks the service log as it stands. A log only grows, so absence is
+// checked once rather than waited for.
+func (g *Gateway) serviceLogsNotContain(ctx context.Context, service, text string) error {
+	text, err := expandLogText(ctx, text)
 	if err != nil {
-		state := "present"
-		if !wantPresent {
-			state = "absent"
-		}
-		return fmt.Errorf("waiting for %s logs for service %q to become %s: %w; last logs: %s",
-			resolved, service, state, err, truncateLog(last))
+		return err
+	}
+	stack, _, err := g.topo.ServiceControl(service)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(stack.Logs(ctx), text) {
+		return fmt.Errorf("service %q logs unexpectedly contain %q", service, text)
 	}
 	return nil
+}
+
+// serviceLogEvent waits for a log line containing marker. "should contain" passes once any such
+// line also contains text; "should not contain" checks the first such line, the event the marker
+// identifies, so a line another logger writes later with the same marker does not count.
+func (g *Gateway) serviceLogEvent(ctx context.Context, service, marker, negation, text string) error {
+	marker, err := expandLogText(ctx, marker)
+	if err != nil {
+		return err
+	}
+	text, err = expandLogText(ctx, text)
+	if err != nil {
+		return err
+	}
+	stack, resolved, err := g.topo.ServiceControl(service)
+	if err != nil {
+		return err
+	}
+	return awaitLogEvent(ctx, stack.Logs, marker, text, negation == "",
+		fmt.Sprintf("%s logs for service %q", resolved, service))
+}
+
+// awaitLogEvent waits for a line of read's log containing marker. With want, it waits until one
+// such line also contains text; without, it fails if the first such line contains text.
+func awaitLogEvent(
+	ctx context.Context, read func(context.Context) string, marker, text string, want bool, where string,
+) error {
+	var events []string
+	accept := func(logs string) bool {
+		events = linesContainingAll(logs, []string{marker})
+		if !want {
+			return len(events) > 0
+		}
+		return slices.ContainsFunc(events, func(line string) bool { return strings.Contains(line, text) })
+	}
+	what := fmt.Sprintf("%s to hold an event containing %q", where, marker)
+	if want {
+		what = fmt.Sprintf("%s to hold an event containing %q and %q", where, marker, text)
+	}
+	if err := awaitLogs(ctx, read, accept, what); err != nil {
+		return err
+	}
+	if !want && strings.Contains(events[0], text) {
+		return fmt.Errorf("%s: the event containing %q also contains %q: %s",
+			where, marker, text, truncateLog(events[0]))
+	}
+	return nil
+}
+
+// awaitLogs polls read until accept holds. It fails when accept never held, which a bare
+// retry.Until does not report; the failure shows the end of the last log read.
+func awaitLogs(ctx context.Context, read func(context.Context) string, accept func(string) bool, what string) error {
+	return retry.Await(ctx, retry.Options{Interval: 200 * time.Millisecond, Fast: true},
+		func(ctx context.Context) (logSnapshot, error) { return logSnapshot(read(ctx)), nil },
+		func(logs logSnapshot) bool { return accept(string(logs)) },
+		"waiting for "+what)
+}
+
+// logSnapshot is one read of a service log. Describe keeps a failure message to the log's end,
+// where a missing line would have been written.
+type logSnapshot string
+
+// Describe returns the end of the log.
+func (l logSnapshot) Describe() string { return truncateLog(string(l)) }
+
+// expandLogText resolves ${CTX:...} and ${UNIQUE:...} placeholders in a log step's text, which
+// must not be blank once resolved.
+func expandLogText(ctx context.Context, text string) (string, error) {
+	resolved, err := stepscommon.Expand(ctx, text)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(resolved) == "" {
+		return "", fmt.Errorf("service log text %q must not be blank", text)
+	}
+	return resolved, nil
+}
+
+// logCountSettle is how long serviceLogLinesCount keeps reading after the count is reached, so a
+// duplicate logged a moment after the first line is still counted.
+const logCountSettle = 300 * time.Millisecond
+
+// serviceLogLinesCount asserts how many log lines of a service contain every fragment in the
+// table, one fragment per row. It waits until at least that many lines exist, reads the log again
+// after logCountSettle, then requires exactly that many, so a line logged once per key can be told
+// apart from one logged on every request. The log is shared by every scenario on the gateway, so
+// the fragments should include a value only this scenario produces. The count must be at least one:
+// a log that could not be read is returned as a note that matches no fragment, so a zero count
+// would pass without the log being read.
+func (g *Gateway) serviceLogLinesCount(ctx context.Context, service string, want int, table *godog.Table) error {
+	if want < 1 {
+		return fmt.Errorf("the log line count must be at least 1, got %d; use \"the %q service logs should not contain\" to check that a line is absent", want, service)
+	}
+	fragments, err := logFragments(ctx, table)
+	if err != nil {
+		return err
+	}
+	stack, resolved, err := g.topo.ServiceControl(service)
+	if err != nil {
+		return err
+	}
+	var matched []string
+	_, err = retry.Until(ctx, retry.Options{Interval: 200 * time.Millisecond}, func(ctx context.Context) ([]string, error) {
+		matched = linesContainingAll(stack.Logs(ctx), fragments)
+		return matched, nil
+	}, func(lines []string) bool { return len(lines) >= want })
+	if err != nil {
+		return fmt.Errorf("waiting for %d %s log line(s) of service %q containing %q: found %d: %w",
+			want, resolved, service, fragments, len(matched), err)
+	}
+	if len(matched) <= want {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(logCountSettle):
+		}
+		matched = linesContainingAll(stack.Logs(ctx), fragments)
+	}
+	if len(matched) != want {
+		return fmt.Errorf("service %q has %d log line(s) containing %q, want %d: %s",
+			service, len(matched), fragments, want, truncateLog(strings.Join(matched, "\n")))
+	}
+	return nil
+}
+
+// logFragments reads one non-empty fragment from each row of a single-column table, expanding any
+// ${CTX:...} reference.
+func logFragments(ctx context.Context, table *godog.Table) ([]string, error) {
+	if table == nil || len(table.Rows) == 0 {
+		return nil, fmt.Errorf("the log line step needs a table of fragments, one per row")
+	}
+	fragments := make([]string, 0, len(table.Rows))
+	for i, row := range table.Rows {
+		if len(row.Cells) != 1 {
+			return nil, fmt.Errorf("log fragment row %d must have one cell, has %d", i+1, len(row.Cells))
+		}
+		fragment, err := stepscommon.Expand(ctx, row.Cells[0].Value)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(fragment) == "" {
+			return nil, fmt.Errorf("log fragment row %d is empty", i+1)
+		}
+		fragments = append(fragments, fragment)
+	}
+	return fragments, nil
+}
+
+// linesContainingAll returns the lines of logs that contain every fragment.
+func linesContainingAll(logs string, fragments []string) []string {
+	var matched []string
+	for _, line := range strings.Split(logs, "\n") {
+		all := true
+		for _, fragment := range fragments {
+			if !strings.Contains(line, fragment) {
+				all = false
+				break
+			}
+		}
+		if all && len(fragments) > 0 {
+			matched = append(matched, line)
+		}
+	}
+	return matched
 }
 
 func truncateLog(logs string) string {
@@ -2131,6 +2440,7 @@ type analyticsEvent struct {
 		Headers map[string][]string `json:"headers"`
 	} `json:"response"`
 	Metadata map[string]any `json:"metadata"`
+	UserID   string         `json:"user_id"`
 	// A2A is the event's first-class A2A dimension block, a sibling of metadata. It is decoded
 	// as a map because the assertions are about the published document: a typed mirror would
 	// let a renamed or relocated field compile and pass.
@@ -2175,11 +2485,100 @@ func (g *Gateway) analyticsHeader(
 	return nil
 }
 
-func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analyticsEvent, error) {
+// analyticsHeaderValues asserts the complete, ordered value list recorded for a header.
+// want is a comma-separated list; each entry is trimmed of surrounding whitespace. The
+// expected representation follows the Gateway under test (analyticsJoinsRepeatedHeaderValues).
+func (g *Gateway) analyticsHeaderValues(ctx context.Context, path, plane, header, want string) error {
+	path, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	event, err := g.latestAnalyticsEvent(ctx, path)
+	if err != nil {
+		return err
+	}
+	headers := event.Response.Headers
+	if plane == "request" {
+		headers = event.Request.Headers
+	}
+	joined := analyticsJoinsRepeatedHeaderValues(gatewayVersion(g.topo))
+	if err := analyticsHeaderValuesMatch(headers, header, want, joined); err != nil {
+		return fmt.Errorf("analytics event for %q %s header: %w", path, plane, err)
+	}
+	return nil
+}
+
+// analyticsJoinsRepeatedHeaderValues reports whether the Gateway publishes the values of a
+// repeated header to the analytics collector as one value joined with ", " (RFC 9110 section
+// 5.3). Gateway 1.2.0 and older publish each value separately; later releases, source builds
+// and the latest images join them.
+func analyticsJoinsRepeatedHeaderValues(version string) bool {
+	version = strings.TrimPrefix(strings.TrimSpace(version), "v")
+	version, _, _ = strings.Cut(version, "-")
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return true
+	}
+	major, majorErr := strconv.Atoi(parts[0])
+	minor, minorErr := strconv.Atoi(parts[1])
+	patch, patchErr := strconv.Atoi(parts[2])
+	if majorErr != nil || minorErr != nil || patchErr != nil || major < 0 || minor < 0 || patch < 0 {
+		return true
+	}
+	return major > 1 || (major == 1 && (minor > 2 || (minor == 2 && patch > 0)))
+}
+
+// analyticsHeaderValuesMatch reports whether the header, matched case-insensitively, carries
+// exactly the comma-separated values in want, in order. When joined is set, the values are
+// expected as the single value the Gateway records for a repeated header.
+func analyticsHeaderValuesMatch(headers map[string][]string, header, want string, joined bool) error {
+	var expected []string
+	for _, value := range strings.Split(want, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			expected = append(expected, value)
+		}
+	}
+	if len(expected) == 0 {
+		return fmt.Errorf("no expected values given for header %q", header)
+	}
+	if joined {
+		expected = []string{strings.Join(expected, ", ")}
+	}
+	for name, actual := range headers {
+		if !strings.EqualFold(name, header) {
+			continue
+		}
+		if !slices.Equal(actual, expected) {
+			return fmt.Errorf("header %q has values %q, want %q", header, actual, expected)
+		}
+		return nil
+	}
+	return fmt.Errorf("header %q is absent", header)
+}
+
+// fetchAnalyticsEvents reads every event the collector has buffered for this block.
+func (g *Gateway) fetchAnalyticsEvents(ctx context.Context) ([]analyticsEvent, error) {
 	url, err := g.serviceURL(ctx, "analytics", "/test/events")
 	if err != nil {
 		return nil, err
 	}
+	response, err := g.funnel.Client().Do(ctx, httpx.Request{
+		Method: http.MethodGet, URL: url, Headers: g.scenarioHeaders(ctx),
+	}, 0, 0)
+	if err != nil {
+		return nil, retry.Transient(err)
+	}
+	if !response.Succeeded() {
+		return nil, retry.Transient(fmt.Errorf("analytics events returned %s", response.Describe()))
+	}
+	var events []analyticsEvent
+	if err := json.Unmarshal(response.Body, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analyticsEvent, error) {
 	var observed []string
 	accept := func(event *analyticsEvent) bool {
 		return event != nil && analyticsEventMatchesPath(event.Request.URI, path)
@@ -2188,18 +2587,9 @@ func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analy
 	defer cancel()
 	last, err := retry.Until(pollCtx, retry.Options{Interval: time.Second},
 		func(ctx context.Context) (*analyticsEvent, error) {
-			response, getErr := g.funnel.Client().Do(ctx, httpx.Request{
-				Method: http.MethodGet, URL: url, Headers: g.scenarioHeaders(ctx),
-			}, 0, 0)
-			if getErr != nil {
-				return nil, retry.Transient(getErr)
-			}
-			if !response.Succeeded() {
-				return nil, retry.Transient(fmt.Errorf("analytics events returned %s", response.Describe()))
-			}
-			var events []analyticsEvent
-			if decodeErr := json.Unmarshal(response.Body, &events); decodeErr != nil {
-				return nil, decodeErr
+			events, err := g.fetchAnalyticsEvents(ctx)
+			if err != nil {
+				return nil, err
 			}
 			for i := len(events) - 1; i >= 0; i-- {
 				if events[i].Request.URI != "" {
@@ -2219,6 +2609,138 @@ func (g *Gateway) latestAnalyticsEvent(ctx context.Context, path string) (*analy
 		return nil, fmt.Errorf("no analytics event found for request path %q (observed URIs: %v)", path, observed)
 	}
 	return last, nil
+}
+
+type perRequestAnalyticsHeader struct {
+	plane   string
+	header  string
+	present bool
+	prefix  string
+}
+
+// analyticsPerRequestHeaders asserts that the path has exactly n events, one for each
+// request "<keyPrefix>-<i>" identified by keyHeader, and that each event carries the table's
+// headers for its own request i: "contain" rows must equal "<prefix>-<i>".
+func (g *Gateway) analyticsPerRequestHeaders(
+	ctx context.Context, path string, n int, keyHeader, keyPrefix string, table *godog.Table,
+) error {
+	path, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	keyPrefix, err = stepscommon.Expand(ctx, keyPrefix)
+	if err != nil {
+		return err
+	}
+	expectations, err := perRequestAnalyticsHeaders(ctx, table)
+	if err != nil {
+		return err
+	}
+	accept := func(events []analyticsEvent) bool { return len(analyticsEventsForPath(events, path)) >= n }
+	events, err := retry.Until(ctx, retry.Options{Timeout: 30 * time.Second, Interval: time.Second},
+		g.fetchAnalyticsEvents, accept)
+	if err != nil {
+		return fmt.Errorf("reading analytics events for path %q: %w", path, err)
+	}
+	return verifyPerRequestAnalyticsEvents(analyticsEventsForPath(events, path), n, keyHeader, keyPrefix, expectations)
+}
+
+func perRequestAnalyticsHeaders(ctx context.Context, table *godog.Table) ([]perRequestAnalyticsHeader, error) {
+	if table == nil || len(table.Rows) == 0 {
+		return nil, fmt.Errorf("a per-request analytics headers table is required")
+	}
+	expectations := make([]perRequestAnalyticsHeader, 0, len(table.Rows))
+	for i, row := range table.Rows {
+		if row == nil || len(row.Cells) != 4 {
+			return nil, fmt.Errorf("per-request analytics headers row %d must contain plane, header, "+
+				"presence and value prefix cells", i+1)
+		}
+		cells := make([]string, 4)
+		for j, cell := range row.Cells {
+			value, err := stepscommon.Expand(ctx, strings.TrimSpace(cell.Value))
+			if err != nil {
+				return nil, err
+			}
+			cells[j] = value
+		}
+		expectation := perRequestAnalyticsHeader{plane: cells[0], header: cells[1], prefix: cells[3]}
+		if expectation.plane != "request" && expectation.plane != "response" {
+			return nil, fmt.Errorf("row %d: plane must be request or response, got %q", i+1, cells[0])
+		}
+		if expectation.header == "" {
+			return nil, fmt.Errorf("row %d: header name is empty", i+1)
+		}
+		switch cells[2] {
+		case "contain":
+			expectation.present = true
+			if expectation.prefix == "" {
+				return nil, fmt.Errorf("row %d: a contained header needs a value prefix", i+1)
+			}
+		case "not contain":
+			if expectation.prefix != "" {
+				return nil, fmt.Errorf("row %d: an absent header takes no value prefix", i+1)
+			}
+		default:
+			return nil, fmt.Errorf("row %d: presence must be contain or not contain, got %q", i+1, cells[2])
+		}
+		expectations = append(expectations, expectation)
+	}
+	return expectations, nil
+}
+
+func analyticsEventsForPath(events []analyticsEvent, path string) []analyticsEvent {
+	var matched []analyticsEvent
+	for _, event := range events {
+		if analyticsEventMatchesPath(event.Request.URI, path) {
+			matched = append(matched, event)
+		}
+	}
+	return matched
+}
+
+func verifyPerRequestAnalyticsEvents(
+	events []analyticsEvent, n int, keyHeader, keyPrefix string, expectations []perRequestAnalyticsHeader,
+) error {
+	if n <= 0 {
+		return fmt.Errorf("the expected request count must be positive, got %d", n)
+	}
+	if len(events) != n {
+		return fmt.Errorf("expected %d analytics events, got %d", n, len(events))
+	}
+	seen := make(map[int]bool, n)
+	for _, event := range events {
+		key, ok := analyticsHeaderValue(event.Request.Headers, keyHeader)
+		if !ok {
+			return fmt.Errorf("an analytics event has no request header %q", keyHeader)
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(key, keyPrefix+"-"))
+		if !strings.HasPrefix(key, keyPrefix+"-") || err != nil || index < 1 || index > n {
+			return fmt.Errorf("analytics event request header %q has unexpected value %q", keyHeader, key)
+		}
+		if seen[index] {
+			return fmt.Errorf("request %q was recorded in more than one analytics event", key)
+		}
+		seen[index] = true
+		for _, expectation := range expectations {
+			headers := event.Response.Headers
+			if expectation.plane == "request" {
+				headers = event.Request.Headers
+			}
+			actual, present := analyticsHeaderValue(headers, expectation.header)
+			switch {
+			case !expectation.present && present:
+				return fmt.Errorf("analytics event for request %q contains denied %s header %q with value %q",
+					key, expectation.plane, expectation.header, actual)
+			case expectation.present && !present:
+				return fmt.Errorf("analytics event for request %q does not contain %s header %q",
+					key, expectation.plane, expectation.header)
+			case expectation.present && actual != fmt.Sprintf("%s-%d", expectation.prefix, index):
+				return fmt.Errorf("analytics event for request %q has %s header %q value %q, want %q",
+					key, expectation.plane, expectation.header, actual, fmt.Sprintf("%s-%d", expectation.prefix, index))
+			}
+		}
+	}
+	return nil
 }
 
 // resetAnalyticsCollector clears every event the testbench analytics collector has buffered
@@ -2284,13 +2806,24 @@ func (g *Gateway) analyticsEventCountAtLeast(ctx context.Context, want int) erro
 	return nil
 }
 
+// analyticsQuietWindow is how long the collector's count must stay unchanged for the events
+// to count as settled.
+const analyticsQuietWindow = 3 * time.Second
+
+// mtlsAnalyticsQuietWindow is the quiet window for mutual TLS scenarios.
+const mtlsAnalyticsQuietWindow = 2 * time.Second
+
 // settleAnalyticsEventCount waits for the collector's count to stop changing for a quiet
 // period. A bare threshold poll would return the instant the count first reaches a target and
 // could miss a late-arriving duplicate event landing just after - this is what actually
 // verifies "no more are coming", used both to check an exact count and to drain a prior
 // request's own publish delay before a scenario resets the collector for its real assertion.
 func (g *Gateway) settleAnalyticsEventCount(ctx context.Context) (retry.Settled, error) {
-	settled, err := retry.SettledCount(ctx, retry.Options{Timeout: 12 * time.Second}, 3*time.Second,
+	quiet := analyticsQuietWindow
+	if isMTLSScenario(ctx) {
+		quiet = mtlsAnalyticsQuietWindow
+	}
+	settled, err := retry.SettledCount(ctx, retry.Options{Timeout: 12 * time.Second}, quiet,
 		func(ctx context.Context) (int, error) { return g.analyticsEventCount(ctx) })
 	if err != nil {
 		return settled, err
@@ -2377,6 +2910,25 @@ func (g *Gateway) analyticsMetadataField(ctx context.Context, path, field, want 
 	return nil
 }
 
+// analyticsNumericMetadataField compares a numeric metadata field with a number: equal within a
+// relative tolerance, since a cost computed in floating point rarely prints as the decimal a
+// scenario states, or at least that number.
+func (g *Gateway) analyticsNumericMetadataField(ctx context.Context, path, field, op, want string) error {
+	event, err := g.analyticsEventForPath(ctx, path)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	value, ok := traverseJSON(event.Metadata, field)
+	if !ok {
+		return fmt.Errorf("latest analytics event metadata has no field %q", field)
+	}
+	return numericMatches(field, value, op, resolved)
+}
+
 func analyticsHeaderValue(headers map[string][]string, wanted string) (string, bool) {
 	for name, value := range headers {
 		if strings.EqualFold(name, wanted) {
@@ -2389,9 +2941,13 @@ func analyticsHeaderValue(headers map[string][]string, wanted string) (string, b
 	return "", false
 }
 
+// analyticsEventMatchesPath reports whether an event's request URI is the requested path. Query
+// strings are ignored on both sides: some gateway versions record the URI with the query string and
+// others without it.
 func analyticsEventMatchesPath(eventURI, requestedPath string) bool {
-	eventURI = strings.TrimSpace(eventURI)
-	requestedPath = strings.TrimRight(strings.TrimSpace(requestedPath), "/")
+	eventURI, _, _ = strings.Cut(strings.TrimSpace(eventURI), "?")
+	requestedPath, _, _ = strings.Cut(strings.TrimSpace(requestedPath), "?")
+	requestedPath = strings.TrimRight(requestedPath, "/")
 	if eventURI == "" || requestedPath == "" {
 		return false
 	}
@@ -2414,6 +2970,9 @@ func (g *Gateway) updateAPI(ctx context.Context, name string, body *godog.DocStr
 	}
 	url, err := g.serviceURL(ctx, "gateway-controller", "/rest-apis/"+resolvedName)
 	if err != nil {
+		return err
+	}
+	if err := g.beforeAPIMutation(ctx); err != nil {
 		return err
 	}
 	headers := g.headerWith(ctx, "Content-Type", "application/yaml")
@@ -2450,6 +3009,7 @@ const (
 func (g *Gateway) mutateResource(
 	ctx context.Context, method, collection, id string, body *godog.DocString,
 ) error {
+	markGatewayChanged(ctx)
 	resolvedID, err := stepscommon.Expand(ctx, id)
 	if err != nil {
 		return err

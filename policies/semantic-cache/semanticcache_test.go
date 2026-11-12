@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
 	vectordbproviders "github.com/wso2/api-platform/sdk/ai/vectordb"
+	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
 type mockEmbeddingProvider struct {
@@ -314,6 +314,7 @@ func TestSemanticCachePolicy_OnRequest(t *testing.T) {
 		wantStatus       int
 		wantCacheStatus  string
 		wantMetadataSave bool
+		wantFault        bool
 	}{
 		{
 			name: "empty body passes through",
@@ -342,6 +343,7 @@ func TestSemanticCachePolicy_OnRequest(t *testing.T) {
 			},
 			wantImmediate: true,
 			wantStatus:    400,
+			wantFault:     true,
 		},
 		{
 			name: "embedding provider error passes through",
@@ -447,9 +449,39 @@ func TestSemanticCachePolicy_OnRequest(t *testing.T) {
 			if resp.StatusCode != tt.wantStatus {
 				t.Fatalf("unexpected status: got %d, want %d", resp.StatusCode, tt.wantStatus)
 			}
+			if tt.wantFault {
+				if !resp.IsFault || resp.Fault == nil {
+					t.Fatalf("expected IsFault=true and Fault set on a rejection")
+				}
+				if resp.Fault.Code != policy.FaultCodeInvalidRequestBody ||
+					resp.Fault.Type != policy.FaultTypeValidation ||
+					resp.Fault.Direction != policy.DirectionRequest {
+					t.Fatalf("unexpected fault code/type/direction: %q/%q/%q",
+						resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
+				}
+				// The client body is unchanged by the fault declaration.
+				var body map[string]interface{}
+				if err := json.Unmarshal(resp.Body, &body); err != nil {
+					t.Fatalf("invalid JSON body: %v", err)
+				}
+				message, _ := body["message"].(string)
+				if body["type"] != "SEMANTIC_CACHE" || !strings.HasPrefix(message, "Error extracting value from JSONPath") ||
+					resp.Headers["Content-Type"] != "application/json" {
+					t.Fatalf("client response changed: headers %v, body %s", resp.Headers, resp.Body)
+				}
+			}
 			if tt.wantCacheStatus != "" {
 				if resp.Headers["X-Cache-Status"] != tt.wantCacheStatus {
 					t.Fatalf("unexpected cache status: %q", resp.Headers["X-Cache-Status"])
+				}
+				// A cache hit ends the request successfully. It must never be a fault:
+				// doing so would page on-call for every hit, which is the exact mistake
+				// the zero value of IsFault exists to prevent.
+				if resp.IsFault {
+					t.Fatalf("a cache hit must not be a fault")
+				}
+				if resp.Fault != nil {
+					t.Fatalf("a cache hit must not describe an error")
 				}
 				var body map[string]interface{}
 				if err := json.Unmarshal(resp.Body, &body); err != nil {

@@ -717,3 +717,81 @@ func newRequestContextWithBody(body string) *policy.RequestContext {
 		},
 	}
 }
+
+// TestRejectionsDeclareFault covers how this policy labels what it refuses: a request
+// body it cannot parse, or one without the jsonPath target, is the caller's failure, and a
+// transformation it cannot apply is its own. The client response is the same for both.
+func TestRejectionsDeclareFault(t *testing.T) {
+	assertFault := func(t *testing.T, action policy.RequestAction, wantMessage, wantCode, wantType string) {
+		t.Helper()
+		resp, ok := action.(policy.ImmediateResponse)
+		if !ok {
+			t.Fatalf("expected ImmediateResponse, got %T", action)
+		}
+		wantBody, _ := json.Marshal(map[string]interface{}{"type": "PROMPT_DECORATOR_ERROR", "message": wantMessage})
+		if resp.StatusCode != 500 || resp.Headers["Content-Type"] != "application/json" || string(resp.Body) != string(wantBody) {
+			t.Fatalf("client response changed: status %d, headers %v, body %s", resp.StatusCode, resp.Headers, resp.Body)
+		}
+		if !resp.IsFault || resp.Fault == nil {
+			t.Fatalf("expected IsFault=true and Fault set")
+		}
+		if resp.Fault.Code != wantCode || resp.Fault.Type != wantType || resp.Fault.Direction != policy.DirectionRequest {
+			t.Fatalf("unexpected fault code/type/direction: %q/%q/%q", resp.Fault.Code, resp.Fault.Type, resp.Fault.Direction)
+		}
+		if resp.Fault.Description != wantMessage {
+			t.Fatalf("expected Description %q, got %q", wantMessage, resp.Fault.Description)
+		}
+	}
+
+	t.Run("request body is not JSON", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"text": "x",
+			},
+		})
+		body := `{"target":`
+		var parseErr error
+		var v map[string]interface{}
+		if parseErr = json.Unmarshal([]byte(body), &v); parseErr == nil {
+			t.Fatalf("expected the test body to be invalid JSON")
+		}
+		assertFault(t, p.OnRequestBody(context.Background(), newRequestContextWithBody(body), nil),
+			"Error parsing JSON payload: "+parseErr.Error(), policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("request body is empty", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"text": "x",
+			},
+		})
+		assertFault(t, p.OnRequestBody(context.Background(), newRequestContextWithBody(""), nil),
+			"Empty request body", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("jsonPath does not resolve in the request body", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"text": "x",
+			},
+			"jsonPath": "$.missing.path",
+		})
+		ctx := newRequestContextWithBody(`{"messages":[{"role":"user","content":"hello"}]}`)
+		assertFault(t, p.OnRequestBody(context.Background(), ctx, nil),
+			"Error extracting value from JSONPath: key not found: missing", policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	})
+
+	t.Run("decorated array cannot be written back", func(t *testing.T) {
+		p := mustGetPromptDecoratorPolicy(t, map[string]interface{}{
+			"promptDecoratorConfig": map[string]interface{}{
+				"messages": []interface{}{
+					map[string]interface{}{"role": "system", "content": "x"},
+				},
+			},
+			"jsonPath": "$.items.*",
+		})
+		ctx := newRequestContextWithBody(`{"items":[{"role":"user","content":"hi"}]}`)
+		assertFault(t, p.OnRequestBody(context.Background(), ctx, nil),
+			"Error updating JSONPath: invalid structure for key: *", policy.FaultCodeMediationFailed, policy.FaultTypeMediation)
+	})
+}

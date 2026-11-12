@@ -3,12 +3,15 @@
 Select the policies whose integration tests a pull request should run.
 
 Each policy owns an integration suite in policies/<name>/it, declared by
-policies/<name>/it/it-suite.yaml and built on the shared steps in tests/it/common. A pull request
-runs the suites of every policy it changes in one workflow run.
+policies/<name>/it/it-suite.yaml and built on the shared steps in tests/it/common. A major version
+of a policy released beside its v1 lives in policies/<name>/v<N> with its own module and suite
+(policies/<name>/v<N>/it/it-suite.yaml); it is selected and run as the policy id "<name>/v<N>". A pull
+request runs the suites of every policy it changes in one workflow run.
 
 Selection:
   * every policies/<name>/ directory touched by the diff against --base, whichever file in it
-    changed, including a policy that is new in the pull request;
+    changed, including a policy that is new in the pull request; a file under policies/<name>/v<N>/
+    selects only "<name>/v<N>", never the v1 beside it;
   * plus every policy that depends on one of them through a go.mod require line,
     directly or transitively;
   * limited to policies that have an it/it-suite.yaml.
@@ -37,13 +40,30 @@ INFRA_PATHS = (".github/workflows/it.yml", "scripts/it/", "tests/it/", "Makefile
 
 # An intra-repo policy dependency in a go.mod require line, e.g.
 #   github.com/wso2/gateway-controllers/policies/advanced-ratelimit v1.1.0
-DEP_RE = re.compile(r"github\.com/wso2/gateway-controllers/policies/([^/\s]+)(?:/v\d+)?\s+v\d")
+# or, for a major version released beside v1:
+#   github.com/wso2/gateway-controllers/policies/backend-jwt/v2 v2.0.0
+# The policy id is the name, with the /v<N> suffix for a major version directory.
+DEP_RE = re.compile(r"github\.com/wso2/gateway-controllers/policies/([^/\s]+(?:/v\d+)?)\s+v\d")
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+VERSION_DIR_RE = re.compile(r"^v\d+$")
 
 
 def policy_names(repo_root):
+    """Policy ids: every policies/<name>, plus <name>/v<N> for each major version directory."""
     root = repo_root / POLICIES_DIR
-    return sorted(p.name for p in root.iterdir() if p.is_dir() and NAME_RE.match(p.name))
+    names = []
+    for p in root.iterdir():
+        if not (p.is_dir() and NAME_RE.match(p.name)):
+            continue
+        names.append(p.name)
+        # A v<N> folder is a policy of its own only when it holds a policy-definition.yaml; any other
+        # v<N> folder is part of the policy around it.
+        names.extend(
+            f"{p.name}/{v.name}"
+            for v in p.iterdir()
+            if v.is_dir() and VERSION_DIR_RE.match(v.name) and (v / "policy-definition.yaml").is_file()
+        )
+    return sorted(names)
 
 
 def has_tests(repo_root, name):
@@ -72,7 +92,12 @@ def changed_policies(changed_files, existing):
     names = set()
     for path in changed_files:
         parts = Path(path).parts
-        if len(parts) >= 2 and parts[0] == POLICIES_DIR and parts[1] in existing:
+        if len(parts) < 2 or parts[0] != POLICIES_DIR:
+            continue
+        versioned = f"{parts[1]}/{parts[2]}" if len(parts) >= 3 else None
+        if versioned in existing:
+            names.add(versioned)
+        elif parts[1] in existing:
             names.add(parts[1])
     return names
 

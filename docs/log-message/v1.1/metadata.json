@@ -1,0 +1,14 @@
+{
+  "name": "log-message",
+  "displayName": "Log Message",
+  "version": "1.1",
+  "provider": "WSO2",
+  "categories": [
+    "Logging",
+    "Analytics & Monitoring",
+    "MCP",
+    "WebSub",
+    "WebBroker"
+  ],
+  "description": "This policy provides the capability to log the payload and headers of a request/response.\nIt supports separate configuration for request and response flows.\nSupports streaming (SSE) payloads by logging each chunk independently as it arrives."
+}
