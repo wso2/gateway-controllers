@@ -1575,30 +1575,33 @@ func TestSplitHeldAtTextBoundary_CutsAtFrameBoundaries(t *testing.T) {
 
 	t.Run("boundary inside a frame retains that frame whole", func(t *testing.T) {
 		// "one two " is 8 characters; 10 falls inside the third frame.
-		release, retain := splitHeldAtTextBoundary(held, path, 10)
+		release, retain, covered := splitHeldAtTextBoundary(held, path, 10)
 		if release != sseEvent("one ")+sseEvent("two ") {
 			t.Errorf("expected the two covered frames, got %q", release)
 		}
 		if retain != sseEvent("three") {
 			t.Errorf("expected the straddling frame retained, got %q", retain)
 		}
+		if covered != 8 {
+			t.Errorf("expected the released frames to report 8 covered characters, got %d", covered)
+		}
 	})
 
 	t.Run("nothing assessed releases nothing", func(t *testing.T) {
-		if release, retain := splitHeldAtTextBoundary(held, path, 0); release != "" || retain != held {
+		if release, retain, _ := splitHeldAtTextBoundary(held, path, 0); release != "" || retain != held {
 			t.Errorf("expected all retained, got release %q", release)
 		}
 	})
 
 	t.Run("everything assessed releases everything", func(t *testing.T) {
-		if release, retain := splitHeldAtTextBoundary(held, path, 100); release != held || retain != "" {
+		if release, retain, _ := splitHeldAtTextBoundary(held, path, 100); release != held || retain != "" {
 			t.Errorf("expected all released, got retain %q", retain)
 		}
 	})
 
 	t.Run("an introducer is retained with its data line", func(t *testing.T) {
 		withEvent := sseEvent("one ") + "event: message\n" + "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
-		release, retain := splitHeldAtTextBoundary(withEvent, path, 4)
+		release, retain, _ := splitHeldAtTextBoundary(withEvent, path, 4)
 		if strings.Contains(release, "event: message") {
 			t.Errorf("an event: line must not be released without its payload, got %q", release)
 		}
@@ -1657,4 +1660,85 @@ func tail(s string, n int) string {
 		return s
 	}
 	return "…" + s[len(s)-n:]
+}
+
+// TestSplitHeldAtTextBoundary_NeverReleasesAnUnterminatedFrame is the guarantee's
+// edge. A frame still arriving has a truncated payload, so its text cannot be
+// read — and reading zero characters out of it must not be mistaken for it
+// carrying none, which released it with its text never assessed.
+func TestSplitHeldAtTextBoundary_NeverReleasesAnUnterminatedFrame(t *testing.T) {
+	path := ResponseDefaultStreamingJSONPath
+	held := sseEvent("one ") + sseEvent("two ") +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"thr"
+
+	release, retain, covered := splitHeldAtTextBoundary(held, path, 8) // "one two "
+
+	if strings.Contains(release, "thr") {
+		t.Errorf("an unterminated frame must not be released: %q", release)
+	}
+	if release != sseEvent("one ")+sseEvent("two ") {
+		t.Errorf("expected only the complete frames released, got %q", release)
+	}
+	if !strings.HasPrefix(retain, "data: ") || !strings.Contains(retain, "thr") {
+		t.Errorf("the unterminated frame must be retained, got %q", retain)
+	}
+	if covered != 8 {
+		t.Errorf("expected 8 covered characters, got %d", covered)
+	}
+}
+
+// TestStreaming_CountsAssessedTextLeftInRetainedFrames covers the boundary
+// accounting. The trim point falls inside a frame, so that frame is retained
+// with part of its text already assessed. That prefix is deliberately not in
+// pending — it must not be billed twice — so it has to be counted toward the
+// next boundary instead.
+//
+// Frames here carry ~420 characters each, a large share of the 1,000-character
+// unit, which is what makes the deficit visible: with token-sized frames the
+// prefix is a few characters against a budget of a thousand and the lag
+// self-corrects every round. With large frames the uncounted prefix compounds,
+// the withheld buffer grows for as long as the stream runs, and delivery falls
+// further behind — measured at 1,864, 3,728 and 4,660 bytes after 20, 40 and 60
+// flushes before this was counted.
+func TestStreaming_CountsAssessedTextLeftInRetainedFrames(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil) // 1,000-character unit
+	respCtx := streamCtx()
+
+	frame := sseEvent(strings.Repeat("sentence here. ", 28)) // ~420 characters of text
+	const flushes = 60
+
+	var sizes []int
+	for i := 1; i <= flushes; i++ {
+		p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(frame), EndOfStream: false,
+		}, map[string]interface{}{})
+		if i%20 == 0 {
+			held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+			sizes = append(sizes, len(held))
+		}
+	}
+
+	if assessed, _ := respCtx.Metadata[metaKeyAssessedInHeld].(int); assessed < 0 {
+		t.Errorf("the carried count must never go negative, got %d", assessed)
+	}
+
+	// Bounded, not growing: the last sample must not exceed the first by more
+	// than one batch's worth of frames.
+	if sizes[len(sizes)-1] > sizes[0]+2*len(frame) {
+		t.Errorf("withheld bytes grew across the stream: %v after %d flushes", sizes, flushes)
+	}
+	if ceiling := 4 * len(frame); sizes[len(sizes)-1] > ceiling {
+		t.Errorf("withheld bytes %d exceed one batch plus a flush (%d)", sizes[len(sizes)-1], ceiling)
+	}
+
+	// And nothing is billed twice.
+	var billed int
+	for _, text := range client.texts {
+		billed += len([]rune(text))
+	}
+	if produced := flushes * 28 * len("sentence here. "); billed > produced {
+		t.Errorf("more characters were assessed than the stream produced: %d billed, %d produced",
+			billed, produced)
+	}
 }
