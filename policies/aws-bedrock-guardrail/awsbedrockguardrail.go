@@ -2248,6 +2248,19 @@ const maxBoundarySearchRunes = 200
 
 // lastSentenceEnd returns the index just past the last sentence terminator at or
 // before limit, or 0 if there is none within the search distance.
+//
+// A terminator only counts when whitespace follows it, or when it ends the text
+// available. Accepting any "." split the values this policy exists to catch:
+// with the batch boundary landing inside one, "john@example.com" was cut into
+// "john@example." and "com", and "192.168.1.1" into "192.168." and "1.1".
+// Neither half matches a PII rule, so neither assessment reported anything and
+// the value was released unchanged — the trimming meant to stop a phrase being
+// split was creating the split instead.
+//
+// A terminator followed by a closing quote or bracket is not accepted either.
+// That costs a little precision — the batch then ends at a word boundary rather
+// than a sentence — and a word boundary never cuts a value in half, which is
+// what matters here.
 func lastSentenceEnd(runes []rune, limit int) int {
 	floor := limit - maxBoundarySearchRunes
 	if floor < 0 {
@@ -2255,11 +2268,26 @@ func lastSentenceEnd(runes []rune, limit int) int {
 	}
 	for i := limit - 1; i >= floor; i-- {
 		switch runes[i] {
-		case '.', '!', '?', '\n':
+		case '.', '!', '?':
+			if i+1 >= len(runes) || isSpaceRune(runes[i+1]) {
+				return i + 1
+			}
+		case '\n':
 			return i + 1
 		}
 	}
 	return 0
+}
+
+// isSpaceRune reports whether r is one of the space characters that separate
+// words here. Kept explicit rather than unicode.IsSpace so the set is the same
+// one lastWordEnd splits on.
+func isSpaceRune(r rune) bool {
+	switch r {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	return false
 }
 
 // lastWordEnd returns the index just past the last whitespace at or before

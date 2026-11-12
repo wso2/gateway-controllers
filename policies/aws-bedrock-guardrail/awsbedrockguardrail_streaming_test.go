@@ -2171,3 +2171,121 @@ func TestStreaming_BoundsEveryCallToOneTextUnit(t *testing.T) {
 		}
 	}
 }
+
+// ─── Values that must not be cut by a batch boundary ─────────────────────────
+
+// realisticBedrockClient reports a PII finding only when the value appears whole
+// in the text it is given, which is how Bedrock behaves. The fixed-output mock
+// cannot show a split-value bug: it reports the match even for a half.
+type realisticBedrockClient struct {
+	value string
+	calls int
+	texts []string
+}
+
+func (c *realisticBedrockClient) ApplyGuardrail(_ context.Context, params *bedrockruntime.ApplyGuardrailInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error) {
+	c.calls++
+	var seen string
+	for _, content := range params.Content {
+		if text, ok := content.(*types.GuardrailContentBlockMemberText); ok {
+			seen += aws.ToString(text.Value.Text)
+		}
+	}
+	c.texts = append(c.texts, seen)
+	if strings.Contains(seen, c.value) {
+		return makePIIIntervenedOutput(c.value), nil
+	}
+	return makeNoInterventionOutput(), nil
+}
+
+// TestSplitAtTextUnit_DoesNotCutDottedValues pins the boundary rule. Accepting
+// any "." as a sentence end cut the values a PII guardrail exists to catch.
+func TestSplitAtTextUnit_DoesNotCutDottedValues(t *testing.T) {
+	cases := []struct{ name, value string }{
+		{"email", "john@example.com"},
+		{"ipv4", "192.168.1.1"},
+		{"decimal", "10.50"},
+		{"domain", "files.internal.example.org"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Sweep the padding so the boundary lands at every offset through
+			// the value, including just after one of its dots.
+			for pad := 70; pad <= 100; pad++ {
+				text := strings.Repeat("x", pad) + " " + c.value + " and more words follow"
+				batch, carry := splitAtTextUnit(text, 100, false)
+				if batch == "" {
+					continue
+				}
+				// The value must be wholly in one side or the other.
+				inBatch := strings.Contains(batch, c.value)
+				inCarry := strings.Contains(carry, c.value)
+				if !inBatch && !inCarry {
+					t.Fatalf("pad=%d split %q: batch tail %q, carry head %q",
+						pad, c.value, tail(batch, 24), carry[:minInt(20, len(carry))])
+				}
+			}
+		})
+	}
+}
+
+// TestStreaming_DoesNotReleaseAValueSplitByABatchBoundary is the end-to-end
+// form, verified on the reassembled assistant text a client's SSE parser would
+// produce rather than on the raw frames.
+//
+// It uses a mock that reports a finding only when it sees the whole value, as
+// Bedrock does: the fixed-output mock reports a match for either half and so
+// cannot show this bug at all.
+func TestStreaming_DoesNotReleaseAValueSplitByABatchBoundary(t *testing.T) {
+	const email = "john@example.com"
+
+	// Sweep the offset so the batch boundary lands at every position across the
+	// value, including immediately after "example.".
+	for pad := 70; pad <= 100; pad++ {
+		client := &realisticBedrockClient{value: email}
+		p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+			params.StreamingTextUnitChars = MinStreamingTextUnitChars
+			params.RedactPII = true
+		})
+		respCtx := streamCtx()
+
+		text := strings.Repeat("x", pad) + " mail " + email + " and more words follow here"
+		var delivered string
+		for _, word := range strings.SplitAfter(text, " ") {
+			if word == "" {
+				continue
+			}
+			action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+				Chunk: []byte(sseEvent(word)), EndOfStream: false,
+			}, map[string]interface{}{})
+			switch v := action.(type) {
+			case policy.ForwardResponseChunk:
+				delivered += string(v.Body)
+			case policy.TerminateResponseChunk:
+				delivered += string(v.Body)
+			}
+		}
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte("data: [DONE]\n\n"), EndOfStream: true,
+		}, map[string]interface{}{})
+		switch v := action.(type) {
+		case policy.ForwardResponseChunk:
+			delivered += string(v.Body)
+		case policy.TerminateResponseChunk:
+			delivered += string(v.Body)
+		}
+
+		seen := extractSSEDeltaContent(delivered, ResponseDefaultStreamingJSONPath)
+		if strings.Contains(seen, email) {
+			t.Fatalf("pad=%d: the value reached the client unredacted; assessed batches were %q",
+				pad, client.texts)
+		}
+	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
