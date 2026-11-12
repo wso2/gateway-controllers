@@ -77,7 +77,6 @@ func streamingPolicy(client bedrockGuardrailClient, mutate func(*AWSBedrockGuard
 	params := AWSBedrockGuardrailPolicyParams{
 		Enabled:                true,
 		JsonPath:               ResponseDefaultJSONPath,
-		Streaming:              true,
 		StreamingJsonPath:      ResponseDefaultStreamingJSONPath,
 		StreamingTextUnitChars: DefaultStreamingTextUnitChars,
 	}
@@ -151,7 +150,6 @@ func TestMode_FollowsConfiguration(t *testing.T) {
 		name                      string
 		hasRequest, hasResponse   bool
 		requestOn, responseOn     bool
-		streaming                 bool
 		wantRequest, wantResponse policy.BodyProcessingMode
 	}{
 		{
@@ -164,23 +162,18 @@ func TestMode_FollowsConfiguration(t *testing.T) {
 			wantRequest: policy.BodyModeBuffer, wantResponse: policy.BodyModeSkip,
 		},
 		{
-			// Backward compatibility: a response flow that has not opted into
-			// streaming keeps buffering, exactly as in v1.1.0.
-			name:       "response buffered by default",
+			// An enabled response flow declares STREAM. That is not a decision to
+			// stream: the engine upgrades a route only when the upstream response
+			// is actually chunked or SSE, and uses the buffered path otherwise.
+			name:       "response enabled",
 			hasRequest: true, requestOn: true,
 			hasResponse: true, responseOn: true,
-			wantRequest: policy.BodyModeBuffer, wantResponse: policy.BodyModeBuffer,
-		},
-		{
-			name:       "response streaming opted in",
-			hasRequest: true, requestOn: true,
-			hasResponse: true, responseOn: true, streaming: true,
 			wantRequest: policy.BodyModeBuffer, wantResponse: policy.BodyModeStream,
 		},
 		{
 			name:       "response only",
 			hasRequest: true, requestOn: false,
-			hasResponse: true, responseOn: true, streaming: true,
+			hasResponse: true, responseOn: true,
 			wantRequest: policy.BodyModeSkip, wantResponse: policy.BodyModeStream,
 		},
 	}
@@ -191,7 +184,7 @@ func TestMode_FollowsConfiguration(t *testing.T) {
 				hasRequestParams:  tc.hasRequest,
 				hasResponseParams: tc.hasResponse,
 				requestParams:     AWSBedrockGuardrailPolicyParams{Enabled: tc.requestOn},
-				responseParams:    AWSBedrockGuardrailPolicyParams{Enabled: tc.responseOn, Streaming: tc.streaming},
+				responseParams:    AWSBedrockGuardrailPolicyParams{Enabled: tc.responseOn},
 			}
 			got := p.Mode()
 			if got.RequestBodyMode != tc.wantRequest {
@@ -248,12 +241,14 @@ func TestNeedsMoreResponseData_WindowAndEventBoundary(t *testing.T) {
 		t.Errorf("a partial JSON document must keep accumulating past the window")
 	}
 
-	// A buffered instance must never ask the kernel to accumulate.
-	buffered := streamingPolicy(&countingBedrockClient{}, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.Streaming = false
+	// A disabled response flow must never ask the kernel to accumulate: other
+	// policies may have made the route streaming, and this instance assesses
+	// nothing.
+	disabled := streamingPolicy(&countingBedrockClient{}, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.Enabled = false
 	})
-	if buffered.NeedsMoreResponseData([]byte(short)) {
-		t.Errorf("a non-streaming instance must not accumulate")
+	if disabled.NeedsMoreResponseData([]byte(short)) {
+		t.Errorf("a disabled response flow must not accumulate")
 	}
 }
 
@@ -520,9 +515,6 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.Streaming {
-			t.Errorf("streaming must be off unless opted into")
-		}
 		if got.StreamingJsonPath != ResponseDefaultStreamingJSONPath {
 			t.Errorf("unexpected default streaming path: %q", got.StreamingJsonPath)
 		}
@@ -535,24 +527,22 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 		// A window arriving from YAML/JSON is a float64, not an int.
 		got, err := parseRequestResponseParams(map[string]interface{}{
 			"enabled":                true,
-			"streaming":              true,
 			"streamingJsonPath":      "$.delta.text",
 			"streamingTextUnitChars": float64(4096),
 		}, true)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if !got.Streaming || got.StreamingJsonPath != "$.delta.text" || got.StreamingTextUnitChars != 4096 {
+		if got.StreamingJsonPath != "$.delta.text" || got.StreamingTextUnitChars != 4096 {
 			t.Errorf("unexpected params: %+v", got)
 		}
 	})
 
 	t.Run("rejects invalid values", func(t *testing.T) {
 		cases := []map[string]interface{}{
-			{"streaming": "yes"},
 			{"streamingJsonPath": ""},
 			{"streamingJsonPath": 1},
-			{"streamingTextUnitChars": float64(16)},
+			{"streamingTextUnitChars": float64(16)}, // below the minimum, and not 0
 			{"streamingTextUnitChars": "big"},
 		}
 		for _, params := range cases {
@@ -562,8 +552,23 @@ func TestParseRequestResponseParams_StreamingParams(t *testing.T) {
 		}
 	})
 
+	t.Run("zero means assess the whole response", func(t *testing.T) {
+		// Distinct from a window: nothing is assessed until the stream ends, so
+		// nothing is delivered until then either. Documented as such rather than
+		// rejected by the minimum, which only bounds a window.
+		got, err := parseRequestResponseParams(map[string]interface{}{
+			"enabled": true, "streamingTextUnitChars": float64(0),
+		}, true)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.StreamingTextUnitChars != 0 {
+			t.Errorf("expected 0 to be accepted, got %d", got.StreamingTextUnitChars)
+		}
+	})
+
 	t.Run("rejects streaming params on the request flow", func(t *testing.T) {
-		for _, key := range []string{"streaming", "streamingJsonPath", "streamingTextUnitChars"} {
+		for _, key := range []string{"streamingJsonPath", "streamingTextUnitChars"} {
 			if _, err := parseRequestResponseParams(map[string]interface{}{key: true}, false); err == nil {
 				t.Errorf("expected %q to be rejected on the request flow", key)
 			}
@@ -1805,5 +1810,54 @@ func TestStreaming_DeliversByteExactAcrossMidLineSplits(t *testing.T) {
 				t.Errorf("bytes reordered: same length, different content")
 			}
 		})
+	}
+}
+
+// TestStreaming_WholeResponseAssessmentHoldsUntilEndOfStream covers
+// streamingTextUnitChars: 0. Nothing is assessed, and so nothing is delivered,
+// until the stream ends — the closest thing to the buffered path's semantics
+// while still being able to read a streamed body.
+//
+// Each AWS call stays bounded even so: an unbounded batch would send one
+// oversized request, which is the case the long-context half of AWS's guidance
+// says to chunk.
+func TestStreaming_WholeResponseAssessmentHoldsUntilEndOfStream(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingTextUnitChars = 0
+	})
+	respCtx := streamCtx()
+
+	flush := strings.Repeat(sseEvent("words here. "), 50) // 600 characters each
+	var delivered int
+	for i := 0; i < 5; i++ {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(flush), EndOfStream: false,
+		}, map[string]interface{}{})
+		delivered += len(action.(policy.ForwardResponseChunk).Body)
+	}
+
+	if client.calls != 0 {
+		t.Errorf("nothing may be assessed before the stream ends, got %d calls", client.calls)
+	}
+	if delivered != 0 {
+		t.Errorf("nothing may be delivered before the stream ends, got %d bytes", delivered)
+	}
+
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte("data: [DONE]\n\n"), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	if client.calls == 0 {
+		t.Fatalf("the whole response must be assessed at end of stream")
+	}
+	// Bounded per call despite the unbounded batch.
+	for i, text := range client.texts {
+		if n := len([]rune(text)); n > DefaultStreamingTextUnitChars+maxBoundarySearchRunes {
+			t.Errorf("call %d carried %d characters; each call must stay near a text unit", i, n)
+		}
+	}
+	if body := action.(policy.ForwardResponseChunk).Body; len(body) == 0 {
+		t.Errorf("the withheld response must be delivered at end of stream")
 	}
 }

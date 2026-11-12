@@ -56,11 +56,6 @@ const (
 	// the same response.
 	ResponseDefaultStreamingJSONPath = "$.choices[0].delta.content"
 
-	// StreamingEnabledByDefault keeps the response flow buffered unless an API
-	// author opts in. Buffered is what every release up to v1.3.0 did, and the
-	// opt-in is what makes this version a drop-in replacement for it.
-	StreamingEnabledByDefault = false
-
 	// DefaultStreamingTextUnitChars is how many characters of assistant text are
 	// batched before each ApplyGuardrail call.
 	//
@@ -252,10 +247,6 @@ type AWSBedrockGuardrailPolicyParams struct {
 	ShowAssessment        bool
 	ApplicableStatusCodes []statusCodeRange
 
-	// Streaming applies to the response flow only. When false the response is
-	// buffered and validated whole, exactly as in v1.3.0.
-	Streaming bool
-
 	// StreamingJsonPath addresses the assistant text inside one SSE data frame.
 	// Unused when Streaming is false.
 	StreamingJsonPath string
@@ -389,9 +380,11 @@ func GetPolicy(
 // BUFFER, one such attachment also demoted every other policy on the route to
 // buffered. Declaring SKIP for an unused flow removes both.
 //
-// The response flow declares STREAM only when streaming is explicitly enabled,
-// so an attachment carried over from v1.3.0 keeps buffering and keeps the
-// buffered path's behaviour exactly.
+// An enabled response flow declares STREAM. That is not a decision to stream:
+// the engine upgrades a route only when the upstream response is actually
+// chunked or text/event-stream, and falls back to the buffered OnResponseBody
+// for everything else. Declaring BUFFER instead is what made a streamed
+// response fail, since the buffered check cannot read SSE.
 func (p *AWSBedrockGuardrailPolicy) Mode() policy.ProcessingMode {
 	requestBodyMode := policy.BodyModeSkip
 	if p.hasRequestParams && p.requestParams.Enabled {
@@ -400,10 +393,7 @@ func (p *AWSBedrockGuardrailPolicy) Mode() policy.ProcessingMode {
 
 	responseBodyMode := policy.BodyModeSkip
 	if p.hasResponseParams && p.responseParams.Enabled {
-		responseBodyMode = policy.BodyModeBuffer
-		if p.responseParams.Streaming {
-			responseBodyMode = policy.BodyModeStream
-		}
+		responseBodyMode = policy.BodyModeStream
 	}
 
 	return policy.ProcessingMode{
@@ -419,7 +409,6 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 	result := AWSBedrockGuardrailPolicyParams{
 		JsonPath:               RequestDefaultJSONPath,
 		Enabled:                RequestFlowEnabledByDefault,
-		Streaming:              StreamingEnabledByDefault,
 		StreamingJsonPath:      ResponseDefaultStreamingJSONPath,
 		StreamingTextUnitChars: DefaultStreamingTextUnitChars,
 	}
@@ -493,21 +482,12 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 	// incrementally, which it cannot: a request must be validated whole before it
 	// reaches the upstream, or there is nothing left to block.
 	if !isResponse {
-		for _, key := range []string{"streaming", "streamingJsonPath", "streamingTextUnitChars"} {
+		for _, key := range []string{"streamingJsonPath", "streamingTextUnitChars"} {
 			if _, ok := params[key]; ok {
 				return result, fmt.Errorf("'%s' is only valid on the response flow", key)
 			}
 		}
 		return result, nil
-	}
-
-	// Extract optional streaming parameter
-	if streamingRaw, ok := params["streaming"]; ok {
-		if streaming, ok := streamingRaw.(bool); ok {
-			result.Streaming = streaming
-		} else {
-			return result, fmt.Errorf("'streaming' must be a boolean")
-		}
 	}
 
 	// Extract optional streamingJsonPath parameter
@@ -528,8 +508,9 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		if err != nil {
 			return result, fmt.Errorf("'streamingTextUnitChars' must be a number: %w", err)
 		}
-		if unit < MinStreamingTextUnitChars {
-			return result, fmt.Errorf("'streamingTextUnitChars' must be at least %d", MinStreamingTextUnitChars)
+		if unit != 0 && unit < MinStreamingTextUnitChars {
+			return result, fmt.Errorf("'streamingTextUnitChars' must be 0 (assess the whole response) or at least %d",
+				MinStreamingTextUnitChars)
 		}
 		result.StreamingTextUnitChars = unit
 	}
@@ -1666,7 +1647,7 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 // forwarded unvalidated until end of stream; that is logged by
 // handleNonSSEStreamFlush.
 func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bool {
-	if !p.hasResponseParams || !p.responseParams.Enabled || !p.responseParams.Streaming {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return false
 	}
 	if looksLikeJSONDocument(accumulated) {
@@ -1707,7 +1688,7 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 	chunk *policy.StreamBody,
 	_ map[string]interface{},
 ) policy.StreamingResponseAction {
-	if !p.hasResponseParams || !p.responseParams.Enabled || !p.responseParams.Streaming {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return policy.ForwardResponseChunk{}
 	}
 	if chunk == nil {
@@ -1907,9 +1888,10 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
 	}
 
-	// Redaction assesses every flush (unit 0), so a flush is never held past its
-	// own assessment.
-	if unit <= 0 {
+	// Redaction (unit < 0) assesses every flush, so a flush is never held past
+	// its own assessment. A zero unit is the opposite — assess the whole
+	// response — and falls through to accumulate.
+	if unit < 0 {
 		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
 	}
 
@@ -1978,7 +1960,13 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	respCtx.Metadata[metaKeyHeldBytes] = ""
 	respCtx.Metadata[metaKeyAssessedInHeld] = 0
 
-	unit := p.effectiveTextUnit()
+	// The batch plan decides when to assess; the size of each call is bounded
+	// regardless. A whole-response plan would otherwise send one oversized call,
+	// which is the case the long-context half of AWS's guidance says to chunk.
+	callUnit := p.effectiveTextUnit()
+	if callUnit <= 0 {
+		callUnit = DefaultStreamingTextUnitChars
+	}
 	remaining := batchText
 
 	var (
@@ -1988,7 +1976,7 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	)
 
 	for {
-		batch, carry := splitAtTextUnit(remaining, unit, true)
+		batch, carry := splitAtTextUnit(remaining, callUnit, true)
 		if batch == "" {
 			break
 		}
@@ -2119,7 +2107,7 @@ func (p *AWSBedrockGuardrailPolicy) releaseBytes(
 // redacting in a stream at all.
 func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
 	if p.responseParams.RedactPII {
-		return 0
+		return -1
 	}
 	return p.responseParams.StreamingTextUnitChars
 }
@@ -2143,9 +2131,22 @@ func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
 // bound.
 func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry string) {
 	runes := []rune(text)
-	if unit <= 0 {
+
+	// Negative: assess what is in hand now. Redaction asks for this, because it
+	// rewrites the frames it is holding and cannot defer a finding past them.
+	if unit < 0 {
 		return text, ""
 	}
+
+	// Zero: assess the whole response, so nothing is assessed until the stream
+	// ends. streamingTextUnitChars: 0 asks for this.
+	if unit == 0 {
+		if endOfStream {
+			return text, ""
+		}
+		return "", text
+	}
+
 	if len(runes) < unit {
 		// Below a unit: hold for more text, unless there will be none.
 		if endOfStream {

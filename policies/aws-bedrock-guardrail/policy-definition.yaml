@@ -240,63 +240,49 @@ parameters:
             Comma-separated upstream response status codes and inclusive ranges to validate (e.g., "200-299,422").
             Responses with any other status code are passed through without validation. If not set, every response is validated.
           pattern: "^\\s*[1-5][0-9]{2}\\s*(-\\s*[1-5][0-9]{2}\\s*)?(,\\s*[1-5][0-9]{2}\\s*(-\\s*[1-5][0-9]{2}\\s*)?)*$"
-        streaming:
-          type: boolean
-          x-wso2-policy-advanced-param: false
-          description: |
-            If true, validates a streamed response incrementally so tokens reach
-            the client as they arrive. If false (default), the whole response is
-            buffered and validated once.
-            Enable this only for an API whose responses are streamed
-            (stream: true / text/event-stream). Two consequences to weigh:
-            a violation found after the first tokens have been delivered cannot
-            be answered with a 422 — the stream ends with an error event and the
-            text already sent stays sent; and the guardrail is called once per
-            text unit of response text rather than once per response, so AWS
-            cost scales with response length. streamingTextUnitChars sets that
-            batch size and is the setting to tune for cost.
-            Each batch is withheld from the client until it has been assessed, so
-            no unassessed text is delivered; a batch that violates is discarded
-            and the client receives only the guardrail event. Delivery therefore
-            happens in batch-sized steps, so time to first token is roughly the
-            time to generate one batch.
-          default: false
         streamingJsonPath:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
             JSONPath expression locating the assistant text inside one streamed
-            event. Applies only when streaming is true, and is separate from
-            jsonPath because a streamed response carries text incrementally
-            under a different field than a buffered one. The default suits the
-            OpenAI streaming format, which is also what the
+            event, used when the upstream response is streamed
+            (text/event-stream or chunked). Separate from jsonPath because a
+            streamed response carries text incrementally under a different field
+            than a buffered one, and no single path addresses both. The default
+            suits the OpenAI streaming format, which is also what the
             openai-to-bedrock-transformer emits.
           default: "$.choices[0].delta.content"
         streamingTextUnitChars:
           type: integer
           x-wso2-policy-advanced-param: true
           description: |
-            How many characters of response text to batch before each AWS Bedrock
-            Guardrail call. Applies only when streaming is true.
-            The default of 1000 is Amazon's text unit, which AWS recommends as the
-            batch size for applying guardrails to streaming output, and which is
-            also the billing unit — a call carrying 40 characters is billed the
+            How many characters of response text to assess at a time when the
+            upstream response is streamed.
+            The default of 1000 is Amazon's text unit, which AWS recommends as
+            the batch size for applying guardrails to streaming output, and which
+            is also the billing unit — a call carrying 40 characters is billed the
             same as one carrying 1000, so batching below a unit adds cost without
             adding protection.
-            A batch is trimmed back to the end of the last sentence or word so a
-            phrase is never split across two calls, and the remainder is carried
-            into the next batch. The final batch is always assessed when the
-            stream ends.
-            Raising this lowers cost and lets more text reach the client before it
-            is assessed; lowering it assesses sooner for proportionally more calls.
+            Each batch is withheld from the client until it has been assessed, so
+            no unassessed text is delivered; a batch that violates is discarded
+            and the client receives only the guardrail event. This is therefore
+            also the delivery step: the frames whose text falls inside the batch
+            are released and the frame the trim point falls inside is held for the
+            next one. A batch is trimmed back to the end of the last sentence or
+            word so a phrase is never split across two calls, and the final batch
+            is assessed when the stream ends.
+            Raising it lowers cost and lengthens time to first token; lowering it
+            shortens that for proportionally more AWS calls. Minimum 100.
+            Set it to 0 to assess the whole response instead of a batch at a time.
+            Nothing is then assessed or delivered until the stream ends, which is
+            the closest behaviour to a buffered response — useful when partial
+            delivery is not wanted at all. Each AWS call is still bounded at one
+            text unit, since an oversized request is the case AWS's long-context
+            guidance says to chunk, and a very long response is released in parts
+            once the withheld buffer reaches its limit.
             Ignored when redactPII is true: redaction rewrites the frames it is
             holding, so it assesses every flush rather than batching.
-            This is also the delivery step, since a batch is released only once
-            it has been assessed: the frames whose text falls inside the batch are
-            released and the frame the trim point falls inside is held for the
-            next one. Lowering it shortens time to first token at proportionally
-            more AWS calls.
-          minimum: 100
+          minimum: 0
           default: 1000
   anyOf:
     - required: [ request ]
