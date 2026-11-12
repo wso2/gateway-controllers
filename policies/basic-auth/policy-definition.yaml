@@ -1,5 +1,5 @@
 name: basic-auth
-version: v1.1.0
+version: v1.1.1
 description: |
   Protects APIs using Basic Authentication by validating username and password credentials.
 
@@ -14,6 +14,7 @@ parameters:
       maxLength: 256
     password:
       type: string
+      writeOnly: true
       x-wso2-policy-advanced-param: false
       description: Expected password
       minLength: 1

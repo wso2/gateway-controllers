@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.4.0
+version: v1.4.1
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
@@ -119,6 +119,7 @@ parameters:
           pattern: "^[\\w+=,.@-]{2,64}$"
         awsAccessKeyID:
           type: string
+          writeOnly: true
           x-wso2-policy-advanced-param: false
           description: |
             AWS access key ID. Required when authenticationType is
@@ -127,6 +128,7 @@ parameters:
           minLength: 1
         awsSecretAccessKey:
           type: string
+          writeOnly: true
           x-wso2-policy-advanced-param: false
           description: |
             AWS secret access key paired with awsAccessKeyID. Required when
@@ -135,6 +137,7 @@ parameters:
           minLength: 1
         awsSessionToken:
           type: string
+          writeOnly: true
           x-wso2-policy-advanced-param: false
           description: |
             Optional AWS session token, only meaningful when awsAccessKeyID and
