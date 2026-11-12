@@ -1130,25 +1130,14 @@ func TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody(t *testing.T) {
 	}
 }
 
-// ─── validate-before-deliver ─────────────────────────────────────────────────
+// ─── Assess before delivering ────────────────────────────────────────────────
 
-// heldPolicy configures the opt-in mode: nothing reaches the client until the
-// batch carrying it has been assessed.
-func heldPolicy(client bedrockGuardrailClient, mutate func(*AWSBedrockGuardrailPolicyParams)) *AWSBedrockGuardrailPolicy {
-	return streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
-		params.ValidateBeforeDeliver = true
-		if mutate != nil {
-			mutate(params)
-		}
-	})
-}
-
-// TestValidateBeforeDeliver_WithholdsUntilAssessed is the guarantee: a flush
+// TestStreaming_WithholdsUntilAssessed is the guarantee: a flush
 // whose text has not been assessed is answered with an empty body, so the engine
 // forwards an empty chunk and the client receives nothing.
-func TestValidateBeforeDeliver_WithholdsUntilAssessed(t *testing.T) {
+func TestStreaming_WithholdsUntilAssessed(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
-	p := heldPolicy(client, nil)
+	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
 
 	for i := 0; i < 5; i++ {
@@ -1172,12 +1161,12 @@ func TestValidateBeforeDeliver_WithholdsUntilAssessed(t *testing.T) {
 	}
 }
 
-// TestValidateBeforeDeliver_ReleasesExactlyTheAssessedBytes covers the release:
+// TestStreaming_ReleasesExactlyTheAssessedBytes covers the release:
 // once the batch passes, the withheld bytes are delivered verbatim, and the
 // bytes of the flush that triggered the assessment are held for the next batch.
-func TestValidateBeforeDeliver_ReleasesExactlyTheAssessedBytes(t *testing.T) {
+func TestStreaming_ReleasesExactlyTheAssessedBytes(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
-	p := heldPolicy(client, nil) // 1000-character unit
+	p := streamingPolicy(client, nil) // 1000-character unit
 	respCtx := streamCtx()
 
 	// ~110 characters of text per flush, so a unit is reached after ~10 flushes.
@@ -1206,12 +1195,12 @@ func TestValidateBeforeDeliver_ReleasesExactlyTheAssessedBytes(t *testing.T) {
 	}
 }
 
-// TestValidateBeforeDeliver_DiscardsBytesOnViolation is the point of the mode:
+// TestStreaming_DiscardsBytesOnViolation is the point of the mode:
 // a failing batch is never delivered, so the client sees the guardrail event and
 // none of the text that violated.
-func TestValidateBeforeDeliver_DiscardsBytesOnViolation(t *testing.T) {
+func TestStreaming_DiscardsBytesOnViolation(t *testing.T) {
 	client := &countingBedrockClient{output: makeContentViolationOutput()}
-	p := heldPolicy(client, nil)
+	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
 
 	var delivered string
@@ -1238,12 +1227,12 @@ func TestValidateBeforeDeliver_DiscardsBytesOnViolation(t *testing.T) {
 	t.Fatalf("expected the stream to be terminated once the batch was assessed")
 }
 
-// TestValidateBeforeDeliver_ReleasesTheRemainderAtEndOfStream covers the tail:
+// TestStreaming_ReleasesTheRemainderAtEndOfStream covers the tail:
 // a batch below a unit is still assessed when the stream ends, and its bytes are
 // delivered rather than lost.
-func TestValidateBeforeDeliver_ReleasesTheRemainderAtEndOfStream(t *testing.T) {
+func TestStreaming_ReleasesTheRemainderAtEndOfStream(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
-	p := heldPolicy(client, nil)
+	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
 
 	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
@@ -1272,12 +1261,12 @@ func TestValidateBeforeDeliver_ReleasesTheRemainderAtEndOfStream(t *testing.T) {
 	}
 }
 
-// TestValidateBeforeDeliver_PassthroughOnErrorStillReleases keeps the stream from
+// TestStreaming_PassthroughOnErrorStillReleases keeps the stream from
 // stalling: if the guardrail cannot be reached and passthroughOnError is set, the
 // withheld bytes are delivered rather than held indefinitely.
-func TestValidateBeforeDeliver_PassthroughOnErrorStillReleases(t *testing.T) {
+func TestStreaming_PassthroughOnErrorStillReleases(t *testing.T) {
 	client := &countingBedrockClient{err: fmt.Errorf("bedrock unavailable")}
-	p := heldPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
 		params.PassthroughOnError = true
 	})
 	respCtx := streamCtx()
@@ -1298,12 +1287,12 @@ func TestValidateBeforeDeliver_PassthroughOnErrorStillReleases(t *testing.T) {
 	}
 }
 
-// TestValidateBeforeDeliver_RestoresMaskedPIIOnRelease pins that the released
+// TestStreaming_RestoresMaskedPIIOnRelease pins that the released
 // bytes go through the same placeholder restoration as the delivered-as-you-go
 // path, rather than bypassing it.
-func TestValidateBeforeDeliver_RestoresMaskedPIIOnRelease(t *testing.T) {
+func TestStreaming_RestoresMaskedPIIOnRelease(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
-	p := heldPolicy(client, nil)
+	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
 	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
 
@@ -1321,38 +1310,6 @@ func TestValidateBeforeDeliver_RestoresMaskedPIIOnRelease(t *testing.T) {
 	}
 	if strings.Contains(body, "EMAIL_0000") {
 		t.Errorf("the placeholder must not survive release, got %q", body)
-	}
-}
-
-// TestValidateBeforeDeliver_DefaultsOn pins the safe default: an attachment that
-// opts into streaming without saying more must not deliver model output the
-// guardrail has not seen. Opting out is explicit.
-func TestValidateBeforeDeliver_DefaultsOn(t *testing.T) {
-	got, err := parseRequestResponseParams(map[string]interface{}{"enabled": true}, true)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !got.ValidateBeforeDeliver {
-		t.Errorf("streamingValidateBeforeDeliver must default to true: a streaming guardrail " +
-			"that delivers unassessed text is not doing its job")
-	}
-
-	got, err = parseRequestResponseParams(map[string]interface{}{
-		"enabled": true, "streamingValidateBeforeDeliver": false,
-	}, true)
-	if err != nil || got.ValidateBeforeDeliver {
-		t.Errorf("expected the opt-out to be honoured, got %+v err %v", got, err)
-	}
-
-	if _, err := parseRequestResponseParams(map[string]interface{}{
-		"streamingValidateBeforeDeliver": "yes",
-	}, true); err == nil {
-		t.Errorf("expected a non-boolean to be rejected")
-	}
-	if _, err := parseRequestResponseParams(map[string]interface{}{
-		"streamingValidateBeforeDeliver": true,
-	}, false); err == nil {
-		t.Errorf("expected the parameter to be rejected on the request flow")
 	}
 }
 
@@ -1409,31 +1366,35 @@ func TestStreaming_RetainsADataLineSplitAcrossFlushes(t *testing.T) {
 	}
 }
 
-// TestStreaming_DropsAnOverlongPartialLine bounds the retention: a stream with no
-// line terminator must not grow the retained fragment without limit.
-func TestStreaming_DropsAnOverlongPartialLine(t *testing.T) {
+// TestStreaming_DoesNotLoseAnOverlongPartialLine bounds the retained fragment: a
+// stream carrying no line terminator must not grow it without limit. Past the
+// limit it stops being held *as a fragment* and joins the withheld bytes, so it
+// is still delivered once a batch is assessed — bounding memory must not lose
+// bytes the client is owed.
+func TestStreaming_DoesNotLoseAnOverlongPartialLine(t *testing.T) {
 	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
 	respCtx := streamCtx()
 	respCtx.Metadata[metaKeySSEStream] = true
 
 	oversized := "data: " + strings.Repeat("x", maxPartialLineBytes+100)
-	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+	a1 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
 		Chunk: []byte(oversized), EndOfStream: false,
 	}, map[string]interface{}{})
 
 	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got != "" {
-		t.Errorf("an over-limit fragment must not stay held, got %d bytes", len(got))
+		t.Errorf("an over-limit fragment must not stay held as a fragment, got %d bytes", len(got))
 	}
-	// It is emitted rather than discarded: withholding it would truncate the
-	// response, and dropping it would lose bytes the client is owed. Delivering
-	// it unrewritten is the lesser failure.
-	forward, ok := action.(policy.ForwardResponseChunk)
-	if !ok {
-		t.Fatalf("expected ForwardResponseChunk, got %T", action)
-	}
-	if string(forward.Body) != oversized {
-		t.Errorf("the over-limit fragment must still be delivered, got %d of %d bytes",
-			len(forward.Body), len(oversized))
+
+	// End of stream releases everything withheld.
+	a2 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte{}, EndOfStream: true,
+	}, map[string]interface{}{})
+
+	delivered := string(a1.(policy.ForwardResponseChunk).Body) +
+		string(a2.(policy.ForwardResponseChunk).Body)
+	if delivered != oversized {
+		t.Errorf("the fragment must be delivered in full, got %d of %d bytes",
+			len(delivered), len(oversized))
 	}
 }
 
@@ -1578,14 +1539,14 @@ func TestStreaming_RewritesAPlaceholderSplitAcrossFlushes(t *testing.T) {
 	}
 }
 
-// TestValidateBeforeDeliver_BoundsTheWithheldBuffer covers a stream whose events
+// TestStreaming_BoundsTheWithheldBuffer covers a stream whose events
 // carry no assessable text — SSE keep-alives, role deltas, usage frames. The
 // batch boundary is a character count, so such a stream never reaches it, and
 // without a byte limit the withheld buffer grows for as long as the stream runs
 // while the client receives nothing.
-func TestValidateBeforeDeliver_BoundsTheWithheldBuffer(t *testing.T) {
+func TestStreaming_BoundsTheWithheldBuffer(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
-	p := heldPolicy(client, nil)
+	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
 
 	keepAlive := strings.Repeat(": keep-alive\n\n", 100) // ~1.4 KB per flush
@@ -1647,13 +1608,13 @@ func TestSplitHeldAtTextBoundary_CutsAtFrameBoundaries(t *testing.T) {
 	})
 }
 
-// TestValidateBeforeDeliver_TrimsBatchesToSentenceBoundaries is the point of the
+// TestStreaming_TrimsBatchesToSentenceBoundaries is the point of the
 // mapping: a phrase assessed as two halves can pass where the whole would not,
 // so the safe mode must align batches the same way the immediate-delivery mode
 // does rather than cutting wherever a flush happened to end.
-func TestValidateBeforeDeliver_TrimsBatchesToSentenceBoundaries(t *testing.T) {
+func TestStreaming_TrimsBatchesToSentenceBoundaries(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
-	p := heldPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
 		params.StreamingTextUnitChars = MinStreamingTextUnitChars // 100
 	})
 	respCtx := streamCtx()

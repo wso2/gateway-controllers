@@ -255,6 +255,11 @@ parameters:
             text unit of response text rather than once per response, so AWS
             cost scales with response length. streamingTextUnitChars sets that
             batch size and is the setting to tune for cost.
+            Each batch is withheld from the client until it has been assessed, so
+            no unassessed text is delivered; a batch that violates is discarded
+            and the client receives only the guardrail event. Delivery therefore
+            happens in batch-sized steps, so time to first token is roughly the
+            time to generate one batch.
           default: false
         streamingJsonPath:
           type: string
@@ -267,25 +272,6 @@ parameters:
             OpenAI streaming format, which is also what the
             openai-to-bedrock-transformer emits.
           default: "$.choices[0].delta.content"
-        streamingValidateBeforeDeliver:
-          type: boolean
-          x-wso2-policy-advanced-param: false
-          description: |
-            If true (default), each batch is withheld from the client until its
-            text has been assessed, so no unassessed character is ever delivered.
-            A batch that violates is discarded and the client receives only the
-            guardrail event.
-            If false, text is delivered as it arrives and the stream is ended if a
-            later batch violates — the pattern AWS's own streaming guidance
-            describes, and the one that streams most smoothly. It also means up
-            to one streamingTextUnitChars batch of model output reaches the
-            client unassessed, so set it to false only where that is acceptable.
-            The cost of the default is delivery in batch-sized steps rather than
-            continuously: time to first byte becomes roughly the time to generate
-            one streamingTextUnitChars batch instead of one flush. Lower
-            streamingTextUnitChars to tighten that, at proportionally more AWS
-            calls. Applies only when streaming is true.
-          default: true
         streamingTextUnitChars:
           type: integer
           x-wso2-policy-advanced-param: true
@@ -299,16 +285,17 @@ parameters:
             adding protection.
             A batch is trimmed back to the end of the last sentence or word so a
             phrase is never split across two calls, and the remainder is carried
-            into the next batch — in both delivery modes. The final batch is
-            always assessed when the stream ends.
+            into the next batch. The final batch is always assessed when the
+            stream ends.
             Raising this lowers cost and lets more text reach the client before it
             is assessed; lowering it assesses sooner for proportionally more calls.
             Ignored when redactPII is true: redaction rewrites the frames it is
             holding, so it assesses every flush rather than batching.
-            With streamingValidateBeforeDeliver enabled this is also the delivery
-            step, since a batch is released only once it has been assessed: the
-            frames whose text falls inside the batch are released and the frame
-            the trim point falls inside is held for the next one.
+            This is also the delivery step, since a batch is released only once
+            it has been assessed: the frames whose text falls inside the batch are
+            released and the frame the trim point falls inside is held for the
+            next one. Lowering it shortens time to first token at proportionally
+            more AWS calls.
           minimum: 100
           default: 1000
   anyOf:
