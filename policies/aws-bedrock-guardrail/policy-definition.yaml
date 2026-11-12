@@ -218,6 +218,10 @@ parameters:
           x-wso2-policy-advanced-param: false
           description: |
             JSONPath expression to extract a specific value from JSON payload.
+            A streamed response reaching the buffered path — which happens when
+            another policy on the route requires the whole body — is read as
+            Server-Sent Events with streamingJsonPath instead, since this path
+            addresses a non-streamed shape and cannot match one.
           default: "$.choices[0].message.content"
         passthroughOnError:
           type: boolean

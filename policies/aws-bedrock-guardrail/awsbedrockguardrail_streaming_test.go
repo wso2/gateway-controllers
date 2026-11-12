@@ -1942,3 +1942,179 @@ func TestStreaming_NeverReleasesAPartialLineAtTheHeldLimit(t *testing.T) {
 		t.Errorf("the partial line must stay withheld, got %q", retained)
 	}
 }
+
+// ─── Verdict correctness ─────────────────────────────────────────────────────
+
+// blockedPIIOutput reports a PII entity the guardrail was configured to BLOCK,
+// not anonymise — AWS_ACCESS_KEY, say.
+func blockedPIIOutput(match string) *bedrockruntime.ApplyGuardrailOutput {
+	return &bedrockruntime.ApplyGuardrailOutput{
+		Action: types.GuardrailActionGuardrailIntervened,
+		Assessments: []types.GuardrailAssessment{{
+			SensitiveInformationPolicy: &types.GuardrailSensitiveInformationPolicyAssessment{
+				PiiEntities: []types.GuardrailPiiEntityFilter{{
+					Action: types.GuardrailSensitiveInformationPolicyActionBlocked,
+					Match:  aws.String(match),
+					Type:   types.GuardrailPiiEntityTypeAwsAccessKey,
+				}},
+			},
+		}},
+	}
+}
+
+// injectionWithPIIOutput is the assessment AWS returns for a prompt attack that
+// also contains an email: the content filter BLOCKED, the email ANONYMIZED.
+func injectionWithPIIOutput(email string) *bedrockruntime.ApplyGuardrailOutput {
+	return &bedrockruntime.ApplyGuardrailOutput{
+		Action: types.GuardrailActionGuardrailIntervened,
+		Assessments: []types.GuardrailAssessment{{
+			ContentPolicy: &types.GuardrailContentPolicyAssessment{
+				Filters: []types.GuardrailContentFilter{{
+					Type:       types.GuardrailContentFilterTypePromptAttack,
+					Confidence: types.GuardrailContentFilterConfidenceHigh,
+					Action:     types.GuardrailContentPolicyActionBlocked,
+				}},
+			},
+			SensitiveInformationPolicy: &types.GuardrailSensitiveInformationPolicyAssessment{
+				PiiEntities: []types.GuardrailPiiEntityFilter{{
+					Action: types.GuardrailSensitiveInformationPolicyActionAnonymized,
+					Match:  aws.String(email),
+					Type:   types.GuardrailPiiEntityTypeEmail,
+				}},
+			},
+		}},
+	}
+}
+
+// TestEvaluate_BlockedFindingsBlock covers the verdict bug. Any PII entity in
+// the assessment was treated as "masking was applied" and the content allowed
+// through, so a prompt attack reported alongside an email was let past, and a
+// PII type configured to BLOCK was masked and delivered instead of blocked.
+func TestEvaluate_BlockedFindingsBlock(t *testing.T) {
+	p := &AWSBedrockGuardrailPolicy{}
+
+	t.Run("prompt attack reported with an anonymisable email", func(t *testing.T) {
+		violation, _, err := p.evaluateGuardrailResponse(
+			injectionWithPIIOutput("john@example.com"), "attack text john@example.com",
+			false, true, map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !violation {
+			t.Errorf("a BLOCKED content filter must block even when PII in the same text is anonymisable")
+		}
+	})
+
+	t.Run("PII type configured to block", func(t *testing.T) {
+		violation, modified, err := p.evaluateGuardrailResponse(
+			blockedPIIOutput("AKIAIOSFODNN7EXAMPLE"), "key AKIAIOSFODNN7EXAMPLE",
+			false, true, map[string]interface{}{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !violation {
+			t.Errorf("a PII entity with action BLOCKED must block, not be masked")
+		}
+		if modified != "" {
+			t.Errorf("a blocked finding must not produce masked content, got %q", modified)
+		}
+	})
+
+	t.Run("anonymisable findings still mask", func(t *testing.T) {
+		metadata := map[string]interface{}{}
+		violation, modified, err := p.evaluateGuardrailResponse(
+			makePIIIntervenedOutput("john@example.com"), "mail john@example.com",
+			false, true, metadata)
+		if err != nil || violation {
+			t.Fatalf("an anonymisable finding must not block: violation=%v err=%v", violation, err)
+		}
+		if !strings.Contains(modified, "EMAIL_") {
+			t.Errorf("expected the value masked, got %q", modified)
+		}
+		if _, ok := metadata[MetadataKeyPIIEntities]; !ok {
+			t.Errorf("the placeholder map must be recorded for the response to restore")
+		}
+	})
+}
+
+// TestBufferedPath_AssessesARestoredResponse covers the response whose
+// placeholders were put back. It used to be returned at that point and never
+// assessed, so a response could carry anything past the guardrail as long as its
+// own request had masked something.
+func TestBufferedPath_AssessesARestoredResponse(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.JsonPath = "$.msg"
+	})
+
+	respCtx := &policy.ResponseContext{
+		SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{
+			MetadataKeyPIIEntities: map[string]string{"john@example.com": "EMAIL_0000"},
+		}},
+		ResponseBody: &policy.Body{Content: []byte(`{"msg":"write to EMAIL_0000"}`)},
+	}
+
+	result := p.OnResponseBody(context.Background(), respCtx, map[string]interface{}{})
+	mod, ok := result.(policy.DownstreamResponseModifications)
+	if !ok {
+		t.Fatalf("expected DownstreamResponseModifications, got %T", result)
+	}
+	if client.calls == 0 {
+		t.Fatalf("a restored response must still be assessed")
+	}
+	if mod.StatusCode == nil || *mod.StatusCode != GuardrailErrorCode {
+		t.Errorf("a violation in a restored response must be blocked, got status %v", mod.StatusCode)
+	}
+	if strings.Contains(client.texts[0], "EMAIL_0000") {
+		t.Errorf("the assessment must see the restored text, not the placeholder: %q", client.texts[0])
+	}
+}
+
+// TestBufferedPath_ReadsAnSSEBody covers an SSE response arriving on the
+// buffered path, which happens whenever another policy on the route declares
+// BUFFER and the engine demotes the whole chain. jsonPath addresses a
+// non-streamed shape and cannot match it, which answered 422 for a response the
+// upstream had returned 200 for — the original defect, in the one configuration
+// the streaming path does not cover.
+func TestBufferedPath_ReadsAnSSEBody(t *testing.T) {
+	t.Run("clean SSE body is not rejected", func(t *testing.T) {
+		client := &countingBedrockClient{output: makeNoInterventionOutput()}
+		p := streamingPolicy(client, nil)
+
+		respCtx := &policy.ResponseContext{
+			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+			ResponseBody:  &policy.Body{Content: []byte(sseEvent("hello there") + "data: [DONE]\n\n")},
+		}
+
+		result := p.OnResponseBody(context.Background(), respCtx, map[string]interface{}{})
+		mod, ok := result.(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications, got %T", result)
+		}
+		if mod.StatusCode != nil {
+			t.Errorf("a clean SSE body must not be rejected, got status %d", *mod.StatusCode)
+		}
+		if client.calls != 1 || !strings.Contains(client.texts[0], "hello there") {
+			t.Errorf("expected the delta text assessed, got %d calls %q", client.calls, client.texts)
+		}
+	})
+
+	t.Run("violating SSE body blocks with a status", func(t *testing.T) {
+		client := &countingBedrockClient{output: makeContentViolationOutput()}
+		p := streamingPolicy(client, nil)
+
+		respCtx := &policy.ResponseContext{
+			SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{}},
+			ResponseBody:  &policy.Body{Content: []byte(sseEvent("blocked content"))},
+		}
+
+		mod, ok := p.OnResponseBody(context.Background(), respCtx, map[string]interface{}{}).(policy.DownstreamResponseModifications)
+		if !ok {
+			t.Fatalf("expected DownstreamResponseModifications")
+		}
+		// The buffered path can still answer a status, unlike the streaming one.
+		if mod.StatusCode == nil || *mod.StatusCode != GuardrailErrorCode {
+			t.Errorf("expected the violation answered with %d, got %v", GuardrailErrorCode, mod.StatusCode)
+		}
+	})
+}

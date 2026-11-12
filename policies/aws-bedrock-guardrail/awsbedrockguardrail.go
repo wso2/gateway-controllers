@@ -1156,43 +1156,41 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 		return true, "", fmt.Errorf("invalid output type")
 	}
 
-	// Check if guardrail intervened
 	if outputTyped.Action == types.GuardrailActionGuardrailIntervened {
-		// Check if there are PII entities or sensitive information that was masked
-		hasPIIMasking := false
-		if len(outputTyped.Assessments) > 0 {
-			for _, assessment := range outputTyped.Assessments {
-				if assessment.SensitiveInformationPolicy != nil {
-					if len(assessment.SensitiveInformationPolicy.PiiEntities) > 0 || len(assessment.SensitiveInformationPolicy.Regexes) > 0 {
-						hasPIIMasking = true
-						break
-					}
-				}
-			}
+		// A BLOCKED finding anywhere in the assessment blocks, whatever else the
+		// assessment also contains.
+		//
+		// This used to treat the mere presence of PII entities as "masking was
+		// applied" and allow the content through. Two ways that let past content
+		// AWS had said to block: a prompt attack accompanied by an email address
+		// reported the content filter as BLOCKED and the email as ANONYMIZED, and
+		// only the email was looked at; and a PII type configured to BLOCK —
+		// AWS_ACCESS_KEY, say — was masked and delivered rather than blocked,
+		// because its own Action was never read.
+		if hasBlockedFinding(outputTyped) {
+			return true, "", nil
 		}
 
-		// If PII masking was applied
-		if hasPIIMasking {
+		// Nothing is blocked, so anything reported is anonymisable.
+		if hasAnonymizedFinding(outputTyped) {
 			if redactPII {
-				// Redaction mode: extract redacted content
-				redactedContent := p.extractRedactedContent(outputTyped, originalContent)
-				return false, redactedContent, nil
-			} else if isRequest {
-				// Masking mode: process PII entities for masking
+				return false, p.extractRedactedContent(outputTyped, originalContent), nil
+			}
+			if isRequest {
 				maskedContent, maskedPII := p.processPIIEntitiesForMasking(outputTyped, originalContent)
 				if len(maskedPII) > 0 {
 					metadata[MetadataKeyPIIEntities] = maskedPII
 				}
 				return false, maskedContent, nil
-			} else {
-				// Response case: PII was already masked in request, allow through
-				// Restoration happens earlier in validatePayload
-				return false, "", nil
 			}
+			// Response: the value was masked on the way to the upstream, and
+			// restoration happens in validatePayload.
+			return false, "", nil
 		}
 
-		// Other intervention reasons - block by default (content policy, topic policy, word policy violations)
-		return true, "", nil // Violation detected, block content
+		// Intervened, nothing BLOCKED, nothing ANONYMIZED: an intervention this
+		// policy cannot account for. Block rather than guess.
+		return true, "", nil
 	}
 
 	// Check for no intervention
@@ -1202,6 +1200,86 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 
 	// Unexpected response
 	return true, "", fmt.Errorf("AWS Bedrock Guardrails returned unexpected response action: %s", string(outputTyped.Action))
+}
+
+// hasBlockedFinding reports whether any policy in the assessment blocked.
+//
+// Every policy type is checked, not only the sensitive-information one: a
+// content filter, a denied topic, a word filter and a contextual-grounding
+// filter each carry their own BLOCKED action, and any of them is a reason the
+// content must not be delivered.
+func hasBlockedFinding(output *bedrockruntime.ApplyGuardrailOutput) bool {
+	for _, assessment := range output.Assessments {
+		if cp := assessment.ContentPolicy; cp != nil {
+			for _, f := range cp.Filters {
+				if f.Action == types.GuardrailContentPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if tp := assessment.TopicPolicy; tp != nil {
+			for _, t := range tp.Topics {
+				if t.Action == types.GuardrailTopicPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if wp := assessment.WordPolicy; wp != nil {
+			for _, w := range wp.CustomWords {
+				if w.Action == types.GuardrailWordPolicyActionBlocked {
+					return true
+				}
+			}
+			for _, w := range wp.ManagedWordLists {
+				if w.Action == types.GuardrailWordPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if cg := assessment.ContextualGroundingPolicy; cg != nil {
+			for _, f := range cg.Filters {
+				if f.Action == types.GuardrailContextualGroundingPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if sip := assessment.SensitiveInformationPolicy; sip != nil {
+			for _, e := range sip.PiiEntities {
+				if e.Action == types.GuardrailSensitiveInformationPolicyActionBlocked {
+					return true
+				}
+			}
+			for _, r := range sip.Regexes {
+				if r.Action == types.GuardrailSensitiveInformationPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasAnonymizedFinding reports whether the assessment reported a value to mask
+// or redact. Only ANONYMIZED counts: a finding with any other action is not
+// something this policy can resolve by rewriting the text.
+func hasAnonymizedFinding(output *bedrockruntime.ApplyGuardrailOutput) bool {
+	for _, assessment := range output.Assessments {
+		sip := assessment.SensitiveInformationPolicy
+		if sip == nil {
+			continue
+		}
+		for _, e := range sip.PiiEntities {
+			if e.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
+				return true
+			}
+		}
+		for _, r := range sip.Regexes {
+			if r.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // processPIIEntitiesForMasking handles PII masking when redactPII is disabled
@@ -2556,14 +2634,19 @@ func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform
 
 // validatePayload validates payload against AWS Bedrock Guardrail, returning policy actions.
 func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}) interface{} {
+	// Putting a masked value back used to return here, so the restored response
+	// was delivered without ever being assessed — the guardrail saw nothing of a
+	// response whose own request had masked something. The restoration now
+	// happens in place and the assessment continues on the restored text, which
+	// is what the client will receive.
+	restored := false
 	if !params.RedactPII && isResponse {
 		if maskedPII, exists := metadata[MetadataKeyPIIEntities]; exists {
 			if maskedPIIMap, ok := maskedPII.(map[string]string); ok {
 				restoredContent := p.restorePIIInResponse(string(payload), maskedPIIMap)
 				if restoredContent != string(payload) {
-					return policy.DownstreamResponseModifications{
-						Body: []byte(restoredContent),
-					}
+					payload = []byte(restoredContent)
+					restored = true
 				}
 			}
 		}
@@ -2576,11 +2659,41 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		return policy.UpstreamRequestModifications{}
 	}
 
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	// A streamed body can reach this buffered path: the engine demotes the whole
+	// chain to buffered as soon as any policy declares BUFFER, and then an SSE
+	// body arrives here whole. jsonPath addresses a non-streamed shape and
+	// cannot match it, which answered 422 for a response the upstream had
+	// returned 200 for. Read it as SSE instead — the same extraction the
+	// streaming path uses, over the whole body.
+	sseBody := isResponse && isSSEChunk(string(payload))
+	extractionPath := params.JsonPath
+	if sseBody {
+		extractionPath = params.StreamingJsonPath
+	}
+
+	var (
+		extractedValue string
+		err            error
+	)
+	if sseBody {
+		extractedValue = extractSSEDeltaContent(string(payload), extractionPath)
+		if strings.TrimSpace(extractedValue) == "" {
+			// Framing only — nothing to assess. Deliver whatever restoration did.
+			if restored {
+				return policy.DownstreamResponseModifications{Body: payload}
+			}
+			return policy.DownstreamResponseModifications{}
+		}
+	} else {
+		extractedValue, err = utils.ExtractStringValueFromJsonpath(payload, extractionPath)
+	}
 	if err != nil {
 		if params.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: JSONPath extraction error, passthrough enabled", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
+			slog.Debug("AWSBedrockGuardrail: JSONPath extraction error, passthrough enabled", "jsonPath", extractionPath, "error", err, "isResponse", isResponse)
 			if isResponse {
+				if restored {
+					return policy.DownstreamResponseModifications{Body: payload}
+				}
 				return policy.DownstreamResponseModifications{}
 			}
 			return policy.UpstreamRequestModifications{}
@@ -2644,7 +2757,21 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 
 	if modifiedContent != "" && modifiedContent != extractedValue {
 		slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
-		modifiedPayload := p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, params.JsonPath)
+		var modifiedPayload []byte
+		if sseBody {
+			// One value spanning several events cannot be written back in place,
+			// so the frames are rewritten individually and a survivor is a
+			// failure rather than something to deliver.
+			rewritten, _, leaked := p.redactedFlush(string(payload), output, params)
+			if leaked {
+				slog.Debug("AWSBedrockGuardrail: redaction could not be applied across events", "isResponse", isResponse)
+				return p.buildErrorResponse("Sensitive content could not be redacted in a streamed response",
+					nil, isResponse, params.ShowAssessment, output)
+			}
+			modifiedPayload = []byte(rewritten)
+		} else {
+			modifiedPayload = p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, extractionPath)
+		}
 		if isResponse {
 			return policy.DownstreamResponseModifications{Body: modifiedPayload}
 		}
@@ -2653,6 +2780,9 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 
 	slog.Debug("AWSBedrockGuardrail: Validation passed", "isResponse", isResponse)
 	if isResponse {
+		if restored {
+			return policy.DownstreamResponseModifications{Body: payload}
+		}
 		return policy.DownstreamResponseModifications{}
 	}
 	return policy.UpstreamRequestModifications{}

@@ -310,14 +310,30 @@ func TestUpdatePayloadWithMaskedContent(t *testing.T) {
 func TestValidatePayload_EarlyAndErrorPaths(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 
-	// Response restoration path should return before any AWS call.
+	// A restored response is assessed and then delivered. It used to return here
+	// without being assessed at all, so the guardrail never saw a response whose
+	// request had masked something.
+	assessed := &AWSBedrockGuardrailPolicy{
+		region:           "us-east-1",
+		guardrailID:      "gr-123",
+		guardrailVersion: "DRAFT",
+		loadAWSConfigFunc: func(_ context.Context, _ string) (aws.Config, error) {
+			return aws.Config{}, nil
+		},
+		newBedrockClientFunc: func(_ aws.Config) bedrockGuardrailClient {
+			return &mockBedrockClient{output: &bedrockruntime.ApplyGuardrailOutput{
+				Action: types.GuardrailActionNone,
+			}}
+		},
+	}
 	metadata := map[string]interface{}{
 		MetadataKeyPIIEntities: map[string]string{
 			"alice@example.com": "EMAIL_0000",
 		},
 	}
-	restored := p.validatePayload([]byte(`{"msg":"EMAIL_0000"}`), AWSBedrockGuardrailPolicyParams{
+	restored := assessed.validatePayload([]byte(`{"msg":"EMAIL_0000"}`), AWSBedrockGuardrailPolicyParams{
 		RedactPII: false,
+		JsonPath:  "$.msg",
 	}, true, metadata)
 	respMod, ok := restored.(policy.DownstreamResponseModifications)
 	if !ok {
@@ -526,10 +542,24 @@ func TestOnResponse_DisabledResponseFlow_ReturnsNoOp(t *testing.T) {
 
 func TestOnResponse_RestoreAndBlockPaths(t *testing.T) {
 	restorePolicy := &AWSBedrockGuardrailPolicy{
+		region:            "us-east-1",
+		guardrailID:       "gr-123",
+		guardrailVersion:  "DRAFT",
 		hasResponseParams: true,
 		responseParams: AWSBedrockGuardrailPolicyParams{
 			Enabled:   true,
 			RedactPII: false,
+			JsonPath:  "$.msg",
+		},
+		loadAWSConfigFunc: func(_ context.Context, _ string) (aws.Config, error) {
+			return aws.Config{}, nil
+		},
+		// The restored response is assessed now, so the assessment has to be
+		// mocked; it used to be returned before any AWS call.
+		newBedrockClientFunc: func(_ aws.Config) bedrockGuardrailClient {
+			return &mockBedrockClient{output: &bedrockruntime.ApplyGuardrailOutput{
+				Action: types.GuardrailActionNone,
+			}}
 		},
 	}
 
