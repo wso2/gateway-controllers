@@ -161,10 +161,11 @@ Feature: Azure Authentication policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  # The policy refreshes a token in the background once it is due (Entra ID's refresh_in), while
-  # requests keep using the cached one: the first token is due after 2 seconds, and a later request
-  # carries a new token without any request failing.
-  Scenario: A token due for refresh is replaced in the background
+  # A token is replaced once it is due for refresh (Entra ID's refresh_in): the first token is due
+  # after 2 seconds, a later request carries a new one, and Entra ID gets exactly two token requests.
+  # The unit tests cover that the refresh runs in the background. The policy-free /health operation
+  # shows the route is live before the first token is stored.
+  Scenario: A token due for refresh is replaced
     Given I generate a unique resource name from "az" and store it as "tenant"
     And I generate a unique value from "az-refresh" and store it as "apiName"
     And I generate a unique API version from "az-refresh" and store it as "apiVersion"
@@ -176,13 +177,14 @@ Feature: Azure Authentication policy
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
       | spec.upstream.main.url | http://testbench:3027/refresh-soon-${CTX:tenant}/foundry |
-      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"refresh-soon-${CTX:tenant}"}}] |
-      | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"refresh-soon-${CTX:tenant}"}}]}] |
     Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
 
-    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions"
+    Then the response status code should be 200
     And I store the response header "X-Testbench-Entra-Token" as "firstToken"
-    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until header "X-Testbench-Entra-Token" is not "${CTX:firstToken}"
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until header "X-Testbench-Entra-Token" is not "${CTX:firstToken}"
     Then the response status code should be 200
     And the response header "X-Testbench-Entra-Token" should contain "testbench-entra."
     When I send a "GET" request to the "entra" service at "/refresh-soon-${CTX:tenant}/test/requests"
@@ -191,7 +193,7 @@ Feature: Azure Authentication policy
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
-    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
   # Attached at API level, the policy authenticates every operation of the API.
   Scenario: Apply Azure Authentication at API level and operation level (API level)
