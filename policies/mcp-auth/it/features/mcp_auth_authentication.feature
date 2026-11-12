@@ -404,3 +404,64 @@ Feature: mcp-auth authentication of MCP requests
       | unpublished key     | 3600      | {"iss":"http://testbench:3001/token"}    |
       # MAN #8: issued by an issuer no key manager is configured for.
       | unconfigured issuer | 3600      | {"iss":"https://nobody.example.com"}     |
+
+  # MAN #28 and #29: after validating a token, mcp-auth removes the inbound Authorization header,
+  # and forwards the token to the backend only when forwardToken is on: under
+  # x-forwarded-authorization with the scheme by default, or under a custom header without the
+  # scheme when forwardTokenStripScheme is on. The backend is the stateless MCP mock, whose
+  # headers tool answers "<name>: <value>" with the value it received, empty when it got none.
+  # Each row asks for all three headers, so it shows both where the token went and where it did
+  # not. The first row is the control: with forwarding off the backend gets no token at all.
+  Scenario Outline: A validated token reaches the backend only as configured (<case>)
+    Given I generate a unique resource name from "mcp-auth-forward" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-forward" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-forward" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-forward" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":<params>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"headers","arguments":{"name":"authorization"}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "result.content[0].text" should be "authorization: "
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"headers","arguments":{"name":"x-forwarded-authorization"}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "result.content[0].text" should be "x-forwarded-authorization: <forwarded>"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"headers","arguments":{"name":"x-upstream-token"}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "result.content[0].text" should be "x-upstream-token: <custom>"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: forwarding settings
+      | case              | params                                                                                         | forwarded           | custom       |
+      # Control: forwardToken off (the default), so the backend receives no token.
+      | forwarding off    | {}                                                                                             |                     |              |
+      # MAN #28: the default header gets the full value with the scheme; Authorization is still stripped.
+      | default header    | {"forwardToken":true}                                                                          | Bearer ${CTX:token} |              |
+      # MAN #29: the custom header gets the bare token, without the scheme, and the default header gets nothing.
+      | custom, no scheme | {"forwardToken":true,"forwardedTokenHeader":"X-Upstream-Token","forwardTokenStripScheme":true} |                     | ${CTX:token} |
