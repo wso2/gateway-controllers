@@ -162,3 +162,259 @@ Feature: mcp-auth access decisions by group and exceptions
       | case                         | params                                                   | method     | passes                                         | refused                                  |
       # MAN #20: methods enabled with tools/list as the exception, matched by the full method name; tools/list passes, ping is refused.
       | exception is the method name | {"methods":{"enabled":true,"exceptions":["tools/list"]}} | tools/list | {"jsonrpc":"2.0","id":1,"method":"tools/list"} | {"jsonrpc":"2.0","id":2,"method":"ping"} |
+
+  # MAN #19: with the methods group disabled, the handshake and the other method-level requests
+  # are public, while tools/call stays protected by the tools group (enabled by default). This is
+  # the "handshake open, capabilities protected" pattern. The mock's log then holds exactly the
+  # three method-level requests and no tools/call.
+  Scenario: With methods disabled the handshake is public and tool calls still need a token
+    Given I generate a unique resource name from "mcp-auth-open-handshake" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-open-handshake" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-open-handshake" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-access" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-open-handshake" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"methods":{"enabled":false}}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"it","version":"1.0"}}}
+      """
+    Then the response status code should be 200
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","method":"notifications/initialized"}
+      """
+    Then the response status code should be 202
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"ping"}
+      """
+    Then the response status code should be 200
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-access-denied"
+
+    When I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 3 items
+    And the JSON response array "requests" should contain an item with "method" equal to "initialize"
+    And the JSON response array "requests" should contain an item with "method" equal to "notifications/initialized"
+    And the JSON response array "requests" should contain an item with "method" equal to "ping"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+  # MAN #22: the four groups set differently in one policy: tools enabled, resources disabled,
+  # prompts enabled with greeting as the exception, methods disabled. Each request follows only
+  # its own group: the tool call and the non-exception prompt need a token, while the resource
+  # read, the excepted prompt and ping pass. The mock's log holds exactly those three, so the
+  # refused prompt never reached it although the excepted one did.
+  Scenario: Each group decides only its own requests when the four groups are set differently
+    Given I generate a unique resource name from "mcp-auth-mixed-groups" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-mixed-groups" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-mixed-groups" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-access" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-mixed-groups" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"tools":{"enabled":true},"resources":{"enabled":false},"prompts":{"enabled":true,"exceptions":["greeting"]},"methods":{"enabled":false}}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-access-denied"
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}
+      """
+    Then the response status code should be 200
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"prompts/get","params":{"name":"greeting"}}
+      """
+    Then the response status code should be 200
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/get","params":{"name":"farewell"}}
+      """
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-access-denied"
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":5,"method":"ping"}
+      """
+    Then the response status code should be 200
+
+    When I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 3 items
+    And the JSON response array "requests" should contain an item with "method" equal to "resources/read"
+    And the JSON response array "requests" should contain an item with "method" equal to "prompts/get"
+    And the JSON response array "requests" should contain an item with "method" equal to "ping"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+  # MAN #25: an exception that names a tool the backend does not have is accepted, never matches a
+  # real tool, and changes no real verdict. The stateless MCP mock (port 3009) has only add, echo
+  # and headers. The excepted name itself does pass mcp-auth without a token, and the backend then
+  # answers it with its own "unknown tool" error, so nothing real is exposed.
+  Scenario: An exception for a tool the backend does not have changes no real verdict
+    Given I generate a unique resource name from "mcp-auth-missing-tool" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-missing-tool" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-missing-tool" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-missing-tool" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"tools":{"enabled":true,"exceptions":["no_such_tool"]}}}] |
+    Then the resource creation response should indicate successful deployment
+
+    # Polling an empty POST until 401 waits until the routes are live.
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-missing-tool-denied"
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"no_such_tool","arguments":{}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "error.code" should be "-32602"
+    And the response body should contain "unknown tool"
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+  # MAN #33: a policy change takes effect on the deployed proxy without redeploying it. Version 1
+  # protects everything (empty params), version 2 disables the tools group, and version 3 removes
+  # mcp-auth. Each step polls until the new behaviour shows: a tool call passes without a token
+  # from version 2 on, tools/list (methods group) passes only once the policy is gone, and the
+  # metadata endpoint, which mcp-auth serves, disappears with it.
+  Scenario: Updating the proxy changes its protection without a redeploy
+    Given I generate a unique resource name from "mcp-auth-update" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-update" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-update" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-update" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401 with body:
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":60}}}
+      """
+
+    # Version 2: tools disabled. A tool call passes without a token; tools/list still needs one.
+    When I authenticate using basic auth as "admin"
+    And I update MCP proxy "${CTX:mcpName}" from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"tools":{"enabled":false}}}] |
+    Then the response should be successful
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":60}}}
+      """
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+      """
+    Then the response status code should be 401
+
+    # Version 3: no policy. The endpoint is fully open and the metadata endpoint is gone.
+    When I authenticate using basic auth as "admin"
+    And I update MCP proxy "${CTX:mcpName}" from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [] |
+    Then the response should be successful
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/list"}
+      """
+    When I clear all headers
+    And I send a "GET" request to "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+    Then the response status code should be 404
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
