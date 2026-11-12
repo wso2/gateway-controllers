@@ -43,31 +43,44 @@ func (p *Policy) isFailoverWorthy(status int) bool {
 	return false
 }
 
-// ACCEPTED LIMIT: transport failures fail over, but never suspend on their own.
+// ACCEPTED LIMIT: a transport failure is graded only through some reply that does reach the
+// response phase.
 //
-// There is deliberately no isTransportFailure here. Envoy does not invoke ext_proc for the
-// replies it generates itself, and a connection failure, reset, or per-attempt timeout is
-// exactly that — a locally generated reply. The policy is never called for one, so it cannot
-// classify or record it. A predicate that looked like it handled this would be dead code that
-// reads as coverage.
+// There is deliberately no isTransportFailure here. Envoy makes no PER-ATTEMPT ext_proc call for
+// a refused connection, reset or per-try timeout — there is no response to process, and the
+// upstream position is request-only — so nothing ever asks this file to classify one. A
+// predicate that looked like it handled this would be dead code that reads as coverage.
 //
-// What still works, and why this limit is acceptable:
+// What that does NOT mean is that such failures go unrecorded. Grading happens once, downstream,
+// on whatever reply finally travels back, and the attempt count attributes it across the chain:
 //
 //   - Failover itself is unaffected. Envoy's retry policy lists connect-failure, reset and
 //     refused-stream unconditionally, so a transport-dead member is retried away from without
 //     the policy being involved at all.
-//   - A transport-dead member IS recorded as failed whenever a LATER attempt returns a real
-//     response, because the response phase then runs and the attempt count attributes attempts
-//     1..N-1 as failures (see attemptCount in failover.go). So the common case — a dead member
-//     followed by a healthy one — still drives that member to suspension.
+//   - A transport-dead member IS charged whenever any later attempt produces a reply, because
+//     the response phase then runs and attempts 1..N-1 are recorded as failures WITHOUT
+//     consulting the status — being retried is itself the evidence they failed (see
+//     attemptCount in failover.go).
+//   - That includes a chain where EVERY member is transport-dead. Envoy's own terminal 503
+//     travels back through the downstream chain like any other response, so the phase runs and
+//     all N members are charged. Measured 2026-10-28 (poc-results.md, "What the policy can and
+//     cannot see"): three dead members produced three suspensions. An earlier version of this
+//     comment claimed the opposite — it was reasoned, never measured. Pinned now by
+//     TestOnResponseHeaders_ExhaustedChainChargesEveryMember.
 //
-// What is genuinely uncovered is a chain where EVERY member fails at transport level: no real
-// response exists, the policy is never invoked, and nothing is recorded. Suspension would save
-// a dial there but has nowhere healthier to send the traffic.
+// The one asymmetry worth knowing: only the FINAL attempt is judged on its status, and Envoy's
+// retry_on is wider than this policy's statusCodes — it carries `5xx` unconditionally. Narrow
+// statusCodes to exclude 503 and attempts 1..N-1 are still charged while the last one reads as
+// having answered. Reachable only by deliberately narrowing the list, since the default covers
+// everything `5xx` retries; pinned by TestOnResponseHeaders_NarrowedStatusCodesSpareTheFinalTarget.
 //
-// Probe F (specs/001-model-failover-policy/poc-results.md) ruled out closing this with Envoy
-// outlier detection: ejection is cosmetic under the default panic threshold, and disabling
-// panic mode makes the ejected cluster return a non-retryable "no healthy upstream" that breaks
+// What is genuinely uncovered is a host that does not RESOLVE. That produces a local reply with
+// nothing to retry FROM, so the request never fails over at all, let alone gets graded. A member
+// that resolves and refuses behaves normally.
+//
+// Probe F (specs/001-model-failover-policy/poc-results.md) ruled out avoiding the dial with Envoy
+// outlier detection: ejection is cosmetic under the default panic threshold, and disabling panic
+// mode makes the ejected cluster return a non-retryable "no healthy upstream" that breaks
 // failover outright.
 
 // isProvisionalStatus reports whether the response status cannot be taken as the final

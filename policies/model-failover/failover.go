@@ -56,7 +56,11 @@ const (
 	// Request-time facts the response phase cannot recompute: by then the published
 	// ranking has served its purpose and the health store has moved on, so which targets
 	// were skipped and where the order came from would both be lost.
-	metadataKeySkipped        = "model_failover.skipped"
+	metadataKeySkipped = "model_failover.skipped"
+	// Members dropped for having no resolvable cluster. Distinct from skipped, which is a
+	// HEALTH decision: a drop means the published ranking could not name this target at all,
+	// which is a configuration or version-skew problem rather than a runtime one (FR-056a).
+	metadataKeyDropped        = "model_failover.dropped"
 	metadataKeyRankingSource  = "model_failover.ranking_source"
 	metadataKeyRequestedModel = "model_failover.requested_model"
 
@@ -220,7 +224,23 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		return p.rejectAllSuspended(requestedModel, published, skipped)
 	}
 
-	metadata := buildFailoverMetadata(resolved, p.params.ProviderClusters)
+	metadata, dropped := buildFailoverMetadata(resolved, p.params.ProviderClusters)
+	// Said out loud, because a drop is otherwise undetectable: the request still succeeds
+	// against whatever remains, and the operator's ranking is quietly shorter than the one
+	// they wrote. Warned rather than failed - a shortened chain is still a usable chain, and
+	// refusing the request would turn a naming mistake into an outage (FR-056a).
+	if len(dropped) > 0 {
+		if len(metadata) == 0 {
+			slog.Warn("ModelFailover: no chain member resolved to a cluster, so this request "+
+				"will not fail over; the controller supplied no provider-to-cluster map, or "+
+				"none of the ranked providers exist on this API",
+				"dropped", targetLabels(dropped))
+		} else {
+			slog.Warn("ModelFailover: chain members dropped from the published ranking, having "+
+				"no cluster on this API; the ranking is shorter than configured",
+				"dropped", targetLabels(dropped), "published", len(resolved)-len(dropped))
+		}
+	}
 	if metadata == nil {
 		// Nothing to fail over between. The policy is inert: no metadata, no telemetry, no
 		// behavioural difference from not being attached at all (FR-030b, FR-030e).
@@ -248,6 +268,9 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		reqCtx.Metadata[metadataKeyRankingSource] = rankingSourceOf(published)
 		if len(skipped) > 0 {
 			reqCtx.Metadata[metadataKeySkipped] = skipped
+		}
+		if len(dropped) > 0 {
+			reqCtx.Metadata[metadataKeyDropped] = dropped
 		}
 	}
 
@@ -377,6 +400,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 		RankingSource:  stringFromMetadata(respCtx.Metadata, metadataKeyRankingSource),
 		FailedTargets:  failed,
 		SkippedTargets: targetsFromMetadata(respCtx.Metadata, metadataKeySkipped),
+		DroppedTargets: targetsFromMetadata(respCtx.Metadata, metadataKeyDropped),
 	}
 	record.log()
 

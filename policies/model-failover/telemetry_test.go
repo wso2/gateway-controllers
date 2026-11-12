@@ -247,3 +247,50 @@ func TestTelemetry_TargetLabelNamesTheDefaultProvider(t *testing.T) {
 		t.Fatalf("label = %q, want anthropic:claude", got)
 	}
 }
+
+// FR-056a. A member dropped for having no resolvable cluster is reported, and reported
+// SEPARATELY from one skipped on health.
+//
+// The two look identical in the published ranking — both are simply absent — but they need
+// different responses. A skip is health withholding a usable target for a while and resolves
+// itself; a drop means the target cannot be named at all on this API, which is a configuration
+// or version-skew problem and needs an operator. Collapsing them into one field would hide the
+// second behind the first.
+func TestTelemetry_ReportsTargetsDroppedForHavingNoCluster(t *testing.T) {
+	record := attemptRecord{
+		RequestedModel: "gpt-4o",
+		Attempts:       1,
+		ChainLength:    1,
+		Outcome:        outcomeServed,
+		ServingTarget:  Target{Model: "gpt-4o", Provider: "openai"},
+		SkippedTargets: []Target{{Model: "gpt-4o", Provider: "azure-eu"}},
+		DroppedTargets: []Target{{Model: "claude-sonnet-4", Provider: "typo-provider"}},
+	}
+
+	got := record.analytics()
+
+	dropped := fmt.Sprint(field(t, got, analyticsKeyDroppedTargets))
+	if !strings.Contains(dropped, "typo-provider") {
+		t.Fatalf("dropped targets = %q, want the unresolvable provider named", dropped)
+	}
+	// Not folded into the skipped field, which is the whole point of a separate key.
+	if skipped := fmt.Sprint(field(t, got, analyticsKeySkippedTargets)); strings.Contains(skipped, "typo-provider") {
+		t.Fatalf("skipped targets = %q, must not absorb a dropped member", skipped)
+	}
+}
+
+// A record with nothing dropped carries no dropped field at all, so the common case adds no
+// weight to every analytics event.
+func TestTelemetry_OmitsDroppedWhenNothingWasDropped(t *testing.T) {
+	record := attemptRecord{
+		RequestedModel: "gpt-4o",
+		Attempts:       1,
+		ChainLength:    1,
+		Outcome:        outcomeServed,
+		ServingTarget:  Target{Model: "gpt-4o", Provider: "openai"},
+	}
+
+	if _, present := record.analytics()[analyticsKeyDroppedTargets]; present {
+		t.Fatal("dropped field present with nothing dropped")
+	}
+}

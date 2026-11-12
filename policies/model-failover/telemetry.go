@@ -34,6 +34,7 @@ const (
 	analyticsKeyChainLength    = "failover:chain_length"
 	analyticsKeyFailedTargets  = "failover:failed_targets"
 	analyticsKeySkippedTargets = "failover:skipped_targets"
+	analyticsKeyDroppedTargets = "failover:dropped_targets"
 )
 
 // Outcomes. One request produces exactly one of these, so they can be counted without
@@ -88,6 +89,11 @@ type attemptRecord struct {
 	// attempted. Reported because their absence is otherwise invisible: a short chain reads
 	// the same whether it was configured short or whittled down by health.
 	SkippedTargets []Target
+	// DroppedTargets could not be named in the published ranking at all, having no cluster on
+	// this API. Distinct from skipped: a skip is health withholding a usable target for a
+	// while, a drop is the target being unreachable by configuration. One resolves itself,
+	// the other needs an operator (FR-056a).
+	DroppedTargets []Target
 }
 
 // targetLabel renders a target for telemetry as "provider:model", with the primary provider's
@@ -139,6 +145,9 @@ func (r attemptRecord) analytics() map[string]interface{} {
 	if labels := targetLabels(r.SkippedTargets); labels != "" {
 		out[analyticsKeySkippedTargets] = labels
 	}
+	if labels := targetLabels(r.DroppedTargets); labels != "" {
+		out[analyticsKeyDroppedTargets] = labels
+	}
 	return out
 }
 
@@ -162,6 +171,9 @@ func (r attemptRecord) log() {
 	}
 	if labels := targetLabels(r.SkippedTargets); labels != "" {
 		attrs = append(attrs, "skipped_targets", labels)
+	}
+	if labels := targetLabels(r.DroppedTargets); labels != "" {
+		attrs = append(attrs, "dropped_targets", labels)
 	}
 
 	switch r.Outcome {

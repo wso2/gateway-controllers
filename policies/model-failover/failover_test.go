@@ -199,3 +199,77 @@ func TestOnResponseHeaders_NoChainIsANoOp(t *testing.T) {
 		t.Fatal("expected a passthrough action")
 	}
 }
+
+// A chain where EVERY member fails charges EVERY member, including the last.
+//
+// This pins the behaviour a comment in classify.go used to deny. The claim was that a chain of
+// transport-dead members goes unrecorded because the policy is never invoked; measured, and
+// asserted here, the terminal reply reaches the response phase like any other and the attempt
+// count attributes all N members (poc-results.md, "What the policy can and cannot see").
+//
+// The asymmetry is the point: attempts 1..N-1 are charged WITHOUT consulting the status, because
+// being retried is itself the evidence they failed. Only the final attempt is judged on what it
+// returned.
+func TestOnResponseHeaders_ExhaustedChainChargesEveryMember(t *testing.T) {
+	clock := time.Now()
+	p := NewPolicy(map[string]interface{}{})
+	p.now = func() time.Time { return clock }
+
+	chain := testTargets()
+	// 503 is in the default statusCodes, so the last attempt is failover-worthy too.
+	respond(p, chain, 503, len(chain))
+
+	for i, target := range chain {
+		if got := consecutiveFailuresFor(p.health, target); got != 1 {
+			t.Fatalf("chain[%d] (%s) consecutiveFailures = %d, want 1 — every attempted "+
+				"member of an exhausted chain is charged", i, targetLabel(target), got)
+		}
+	}
+}
+
+// Repeating an exhausted chain drives every member to suspension, not just the leading ones.
+func TestOnResponseHeaders_ExhaustedChainSuspendsEveryMember(t *testing.T) {
+	clock := time.Now()
+	p := NewPolicy(map[string]interface{}{"suspendAfterFailures": 2, "suspendDuration": 60})
+	p.now = func() time.Time { return clock }
+
+	chain := testTargets()
+	respond(p, chain, 503, len(chain))
+	respond(p, chain, 503, len(chain))
+
+	for i, target := range chain {
+		if p.health.Healthy(target, clock) {
+			t.Fatalf("chain[%d] (%s) is still healthy after two exhausted runs; every member "+
+				"should be suspended", i, targetLabel(target))
+		}
+	}
+}
+
+// THE CAVEAT, pinned so it cannot be forgotten: the last attempt is charged only when its status
+// is failover-worthy, and Envoy's retry_on is WIDER than the policy's statusCodes.
+//
+// retry_on carries `5xx` unconditionally, so Envoy walks the whole chain on 503s whatever the
+// policy is configured to count. Narrow statusCodes to exclude 503 and attempts 1..N-1 are still
+// charged — that loop never looks at the status — while the final attempt falls to the success
+// branch, because from the policy's point of view that target answered.
+//
+// Not a bug to fix here: the default list covers everything `5xx` retries, so this is reachable
+// only by deliberately narrowing it. Asserted so the asymmetry is a known property rather than a
+// surprise, and so any change to either list has to come past this test.
+func TestOnResponseHeaders_NarrowedStatusCodesSpareTheFinalTarget(t *testing.T) {
+	clock := time.Now()
+	p := NewPolicy(map[string]interface{}{"statusCodes": []interface{}{429}})
+	p.now = func() time.Time { return clock }
+
+	chain := testTargets()
+	respond(p, chain, 503, len(chain))
+
+	if got := consecutiveFailuresFor(p.health, chain[0]); got != 1 {
+		t.Fatalf("chain[0] consecutiveFailures = %d, want 1: the retried member is charged "+
+			"regardless of the configured statusCodes", got)
+	}
+	if got := consecutiveFailuresFor(p.health, chain[1]); got != 0 {
+		t.Fatalf("chain[1] consecutiveFailures = %d, want 0: 503 is outside the configured "+
+			"statusCodes, so the final target reads as having answered", got)
+	}
+}

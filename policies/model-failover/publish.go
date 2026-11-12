@@ -83,11 +83,17 @@ func groupName(target Target) string {
 // The specifier parses weight from a number value and rejects anything below 1, so integral
 // values are required — a weight expressed as a string would be dropped silently, leaving a
 // group with no clusters.
-func buildPriorityGroups(chain []Target, providerClusters map[string]string) []any {
+// It also returns the members it DROPPED for having no resolvable cluster. A drop is invisible
+// in the published result -- the ranking is simply shorter than the one the chain described -- so
+// returning it is what lets the caller say so. Same reasoning as resolveChain returning its
+// health-skipped targets: a short chain reads identically whether it was configured short,
+// whittled down by health, or silently truncated here (FR-056a).
+func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]any, []Target) {
 	if len(chain) == 0 {
-		return nil
+		return nil, nil
 	}
 
+	var dropped []Target
 	groups := make([]any, 0, len(chain))
 	for _, target := range chain {
 		group := map[string]any{"name": groupName(target)}
@@ -118,7 +124,10 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) []a
 			//
 			// Defence in depth. Since the controller supplies a provider-to-cluster map,
 			// every member it enumerated resolves here, so this is reachable only when the
-			// map is absent -- an older controller paired with a newer policy.
+			// map is absent -- an older controller paired with a newer policy -- or when
+			// a ranking names a provider this API has no upstream for, which a routing
+			// policy can do because the controller never saw its target list.
+			dropped = append(dropped, target)
 			continue
 		}
 		group["clusters"] = []any{
@@ -135,9 +144,9 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) []a
 		// would be a malformed ranking, where writing nothing leaves Envoy on the route's
 		// configured order, which is exactly how the policy behaves when unattached
 		// (FR-030b, FR-030e).
-		return nil
+		return nil, dropped
 	}
-	return groups
+	return groups, dropped
 }
 
 // buildFailoverMetadata returns the dynamic-metadata payload for one request, or nil when
@@ -147,16 +156,16 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) []a
 // configured group order and the operation behaves exactly as if the policy were not
 // attached. Nothing is logged or counted about being inert — an inert policy is
 // indistinguishable from an absent one (FR-030b, FR-030e).
-func buildFailoverMetadata(chain []Target, providerClusters map[string]string) map[string]map[string]any {
-	groups := buildPriorityGroups(chain, providerClusters)
+func buildFailoverMetadata(chain []Target, providerClusters map[string]string) (map[string]map[string]any, []Target) {
+	groups, dropped := buildPriorityGroups(chain, providerClusters)
 	if groups == nil {
-		return nil
+		return nil, dropped
 	}
 	payload := map[string]any{priorityGroupsKey: groups}
 	if models := buildAttemptModels(chain, providerClusters); len(models) > 0 {
 		payload[attemptModelsKey] = models
 	}
-	return map[string]map[string]any{FailoverMetadataNamespace: payload}
+	return map[string]map[string]any{FailoverMetadataNamespace: payload}, dropped
 }
 
 // buildAttemptModels maps each member's target cluster to the model that member asks for.

@@ -50,38 +50,77 @@ func TestGroupName_CrossRepoContract(t *testing.T) {
 	}
 }
 
-// With no controller-supplied map, a group is a bare name and resolves only against a
-// pre-configured group. This is the degraded path — an older controller paired with a newer
-// policy — not the intended one; see TestBuildPriorityGroups_CarriesClusters.
-func TestBuildPriorityGroups_NamesOnlyWithoutTheMap(t *testing.T) {
-	groups := buildPriorityGroups([]Target{
+// Without the controller's map nothing can be named, so nothing is published and the policy
+// goes inert for the request. Probe G is why: Envoy does not SKIP an unresolvable group, it
+// substitutes the configured group at that POSITION, so a bare name sends the attempt to a
+// target the ranking never nominated and spends the whole budget there. A shorter list is safe
+// where a wrong one is not (FR-056, FR-056a).
+//
+// This is the degraded path -- an older controller paired with a newer policy, or a ranking
+// naming a provider this API has no upstream for -- not the intended one; see
+// TestBuildPriorityGroups_CarriesClusters.
+func TestBuildPriorityGroups_DropsMembersWithNoCluster(t *testing.T) {
+	chain := []Target{
 		{Model: "gpt-4o", Provider: "openai"},
 		{Model: "claude-sonnet-4", Provider: "anthropic"},
-	}, nil)
+	}
 
-	if len(groups) != 2 {
-		t.Fatalf("groups = %d, want 2", len(groups))
+	groups, dropped := buildPriorityGroups(chain, nil)
+
+	if groups != nil {
+		t.Fatalf("groups = %v, want nil: an unresolvable member must not be published", groups)
 	}
-	first, ok := groups[0].(map[string]any)
-	if !ok {
-		t.Fatalf("group is %T, want map[string]any", groups[0])
+	// Reported, not merely omitted. A drop is invisible in the result -- the ranking is just
+	// shorter -- so the caller can only say so if this hands it back.
+	if len(dropped) != 2 {
+		t.Fatalf("dropped = %d, want 2", len(dropped))
 	}
-	if first["name"] != "t:openai:gpt-4o" {
-		t.Fatalf("first group name = %v", first["name"])
-	}
-	if _, present := first["clusters"]; present {
-		t.Fatal("a published group must carry no cluster list; the controller owns cluster naming")
+	for i, target := range chain {
+		if !dropped[i].Equal(target) {
+			t.Fatalf("dropped[%d] = %v, want %v", i, dropped[i], target)
+		}
 	}
 }
 
-// Order is the whole contract: attempt N takes group N.
+// A member the map CAN name is published while its unnameable sibling is dropped, so one bad
+// reference shortens the ranking instead of voiding it.
+func TestBuildPriorityGroups_DropsOnlyTheUnresolvableMember(t *testing.T) {
+	chain := []Target{
+		{Model: "gpt-4o", Provider: "openai"},
+		{Model: "claude-sonnet-4", Provider: "typo-provider"},
+	}
+
+	groups, dropped := buildPriorityGroups(chain, map[string]string{"openai": "cluster_openai"})
+
+	if len(groups) != 1 {
+		t.Fatalf("groups = %d, want 1", len(groups))
+	}
+	if name := groups[0].(map[string]any)["name"]; name != "t:openai:gpt-4o" {
+		t.Fatalf("published group = %v, want the resolvable member", name)
+	}
+	if len(dropped) != 1 || dropped[0].Provider != "typo-provider" {
+		t.Fatalf("dropped = %v, want the unresolvable member only", dropped)
+	}
+}
+
+// Order is the whole contract: attempt N takes group N. Asserted with every member resolvable,
+// since an unresolvable one is dropped rather than held in place (FR-056).
 func TestBuildPriorityGroups_PreservesChainOrder(t *testing.T) {
 	chain := []Target{
 		{Model: "a", Provider: "p1"},
 		{Model: "b", Provider: "p2"},
 		{Model: "c", Provider: "p3"},
 	}
-	groups := buildPriorityGroups(chain, nil)
+	clusters := map[string]string{"p1": "c1", "p2": "c2", "p3": "c3"}
+
+	groups, dropped := buildPriorityGroups(chain, clusters)
+
+	if len(dropped) != 0 {
+		t.Fatalf("dropped = %v, want none: every member resolves here", dropped)
+	}
+	if len(groups) != len(chain) {
+		t.Fatalf("groups = %d, want %d", len(groups), len(chain))
+	}
 	for i, target := range chain {
 		got := groups[i].(map[string]any)["name"]
 		if got != groupName(target) {
@@ -93,16 +132,20 @@ func TestBuildPriorityGroups_PreservesChainOrder(t *testing.T) {
 // An empty chain publishes nothing at all, so Envoy uses the route's configured order and the
 // operation behaves exactly as if the policy were not attached (FR-030b, FR-030e).
 func TestBuildFailoverMetadata_EmptyChainIsInert(t *testing.T) {
-	if metadata := buildFailoverMetadata(nil, nil); metadata != nil {
+	if metadata, _ := buildFailoverMetadata(nil, nil); metadata != nil {
 		t.Fatalf("expected nil metadata for an empty chain, got %v", metadata)
 	}
-	if groups := buildPriorityGroups(nil, nil); groups != nil {
+	if groups, _ := buildPriorityGroups(nil, nil); groups != nil {
 		t.Fatalf("expected nil groups for an empty chain, got %v", groups)
 	}
 }
 
 func TestBuildFailoverMetadata_NestsUnderTheNamespace(t *testing.T) {
-	metadata := buildFailoverMetadata([]Target{{Model: "gpt-4o", Provider: "openai"}}, nil)
+	// A resolvable member, since an unresolvable one is dropped and publishes nothing at all
+	// (TestBuildPriorityGroups_DropsMembersWithNoCluster).
+	metadata, _ := buildFailoverMetadata(
+		[]Target{{Model: "gpt-4o", Provider: "openai"}},
+		map[string]string{"openai": "upstream_LlmProxy_abc_openai"})
 	namespace, ok := metadata[FailoverMetadataNamespace]
 	if !ok {
 		t.Fatalf("metadata has no %q namespace: %v", FailoverMetadataNamespace, metadata)
@@ -120,7 +163,7 @@ func TestBuildPriorityGroups_CarriesClusters(t *testing.T) {
 		"":          "upstream_main_host_8080",
 		"anthropic": "upstream_LlmProxy_abc_anthropic",
 	}
-	groups := buildPriorityGroups([]Target{
+	groups, _ := buildPriorityGroups([]Target{
 		{Model: "gpt-4o"},
 		{Model: "claude-sonnet-4", Provider: "anthropic"},
 	}, clusters)
@@ -167,7 +210,7 @@ func TestBuildPriorityGroups_WildcardMemberStillResolves(t *testing.T) {
 		t.Fatal("the catch-all chain must match")
 	}
 	members := chain.Members("a-model-nobody-configured")
-	groups := buildPriorityGroups(members, map[string]string{
+	groups, _ := buildPriorityGroups(members, map[string]string{
 		"":      "upstream_main_host_8080",
 		"azure": "upstream_LlmProxy_abc_azure",
 	})
