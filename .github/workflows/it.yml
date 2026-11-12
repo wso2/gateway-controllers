@@ -133,6 +133,7 @@ jobs:
       # Pulling a private GHCR image needs credentials; docker pull sends none unless logged in.
       - name: Login to GitHub Container Registry
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        continue-on-error: true
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
