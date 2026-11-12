@@ -65,7 +65,7 @@ Feature: Azure Authentication policy configuration validation
     Examples:
       | case                                 | version | params                                                                                   | error                                                      | field                      |
       | missing authentication type          | v0      | "scope":"https://ai.azure.com/.default"                                                  | authenticationType is required                             | authenticationType         |
-      | unsupported authentication type      | v0      | "authenticationType":"managed-identity"                                                  | authenticationType must be one of the following            | params.authenticationType  |
+      | unsupported authentication type      | v0      | "authenticationType":"client-secret"                                                     | authenticationType must be one of the following            | params.authenticationType  |
       | scope as an array                    | v0      | "authenticationType":"workload-identity","scope":["https://ai.azure.com/.default"]       | Invalid type. Expected: string, given: array               | params.scope               |
       | scope without /.default              | v0      | "authenticationType":"workload-identity","scope":"https://ai.azure.com"                  | Does not match pattern                                     | params.scope               |
       | client ID that is not a GUID         | v0      | "authenticationType":"workload-identity","clientId":"not-a-guid"                         | Does not match pattern                                     | params.clientId            |
