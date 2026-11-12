@@ -24,9 +24,11 @@ Feature: Azure Authentication policy with a managed identity
 
   # authenticationType managed-identity gets the token from the Azure Instance Metadata Service
   # (IMDS) of the host. The gateway runtime's AZURE_IMDS_TOKEN_ENDPOINT points at the testbench
-  # entra service's IMDS endpoint, https://testbench:3028/imds/metadata/identity/oauth2/token, which
-  # checks the request as IMDS does and records it under mi-<client_id>, or mi-system-assigned for a
-  # request without client_id, read back at /<key>/test/requests. Its tokens carry the resource as
+  # entra service's IMDS endpoint under this block's partition,
+  # https://testbench:3028/${CTX:testbenchPartition}/metadata/identity/oauth2/token, which checks the
+  # request as IMDS does and records it for the block and the identity, read back at
+  # /${CTX:testbenchPartition}/test/managed-identity/<client_id> (or system-assigned for a request
+  # without client_id). Its tokens carry the resource as
   # their audience, "managed-identity" as their tenant and the client_id (or "system-assigned") as
   # their appid, which the protected resources report in the X-Testbench-Entra-Aud, -Tid and -Appid
   # headers.
@@ -60,7 +62,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/mi-${CTX:clientId}/foundry |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"managed-identity","clientId":"${CTX:clientId}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -70,7 +72,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:secondApiName} |
       | spec.version           | ${CTX:secondApiVersion} |
       | spec.context           | ${CTX:secondApiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/mi-${CTX:clientId}/foundry |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"managed-identity","clientId":"${CTX:clientId}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -82,7 +84,7 @@ Feature: Azure Authentication policy with a managed identity
     And the response should contain echoed header "Authorization" containing "Bearer testbench-entra."
     When I send a "POST" request to "${CTX:secondApiContext}/${CTX:secondApiVersion}/chat/completions" until status 200
     Then the response header "X-Testbench-Entra-Appid" should be "${CTX:clientId}"
-    When I send a "GET" request to the "entra" service at "/mi-${CTX:clientId}/test/requests"
+    When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/${CTX:clientId}"
     Then the response status code should be 200
     And the JSON response field "count" should be 1
     And the JSON response field "requests[0].clientId" should be "${CTX:clientId}"
@@ -98,7 +100,8 @@ Feature: Azure Authentication policy with a managed identity
     And I send a "POST" request to "${CTX:secondApiContext}/${CTX:secondApiVersion}/chat/completions" until status 404
 
   # Without clientId the request names no identity, so IMDS uses the host's system-assigned
-  # identity. This is the only scenario that uses it, so its request log is its own.
+  # identity. This is the block's only scenario that uses it, so the block's system-assigned log is
+  # its own.
   Scenario: Without clientId the system-assigned identity is used
     Given I generate a unique value from "az-mi-system" and store it as "apiName"
     And I generate a unique API version from "az-mi-system" and store it as "apiVersion"
@@ -118,7 +121,7 @@ Feature: Azure Authentication policy with a managed identity
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 200
     Then the response header "X-Testbench-Entra-Appid" should be "system-assigned"
     And the response header "X-Testbench-Entra-Tid" should be "managed-identity"
-    When I send a "GET" request to the "entra" service at "/mi-system-assigned/test/requests"
+    When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/system-assigned"
     Then the response status code should be 200
     And the JSON response field "requests[0].clientId" should be ""
     And the JSON response field "requests[0].resource" should be "https://ai.azure.com"
@@ -149,7 +152,7 @@ Feature: Azure Authentication policy with a managed identity
 
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
     Then the response should contain echoed header "Authorization" containing "Bearer testbench-entra."
-    When I send a "GET" request to the "entra" service at "/mi-${CTX:clientId}/test/requests"
+    When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/${CTX:clientId}"
     Then the response status code should be 200
     And the JSON response field "count" should be 2
 
@@ -178,7 +181,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/mi-${CTX:clientId}/foundry |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"managed-identity","clientId":"${CTX:clientId}","scope":"api://identity-not-found/.default"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -187,7 +190,7 @@ Feature: Azure Authentication policy with a managed identity
     Then the response status code should be 502
     And the response should match the expected error response "azure-authentication-upstream-auth-failed"
     And the response body should not contain "testbench-entra."
-    When I send a "GET" request to the "entra" service at "/mi-${CTX:clientId}/test/requests"
+    When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/${CTX:clientId}"
     Then the response status code should be 200
     And the JSON response field "count" should be 1
     And the "gateway-runtime" service logs should contain "${CTX:clientId}"
@@ -212,7 +215,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/mi-${CTX:clientId}/foundry |
+      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"managed-identity","clientId":"${CTX:clientId}","tenantId":"contoso.onmicrosoft.com"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -221,7 +224,7 @@ Feature: Azure Authentication policy with a managed identity
     Then the response status code should be 500
     And the JSON response field "error" should be "Internal Server Error"
     And the "gateway-runtime" service logs should contain "'tenantId' is not used with authenticationType"
-    When I send a "GET" request to the "entra" service at "/mi-${CTX:clientId}/test/requests"
+    When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/${CTX:clientId}"
     Then the response status code should be 200
     And the JSON response field "count" should be 0
 
@@ -245,7 +248,7 @@ Feature: Azure Authentication policy with a managed identity
       | version            | ${CTX:providerVersion} |
       | template           | azureai-foundry |
       | spec.context       | ${CTX:providerContext} |
-      | spec.upstream.url  | http://testbench:3027/mi-${CTX:clientId}/foundry |
+      | spec.upstream.url  | http://testbench:3027/${CTX:testbenchPartition}/foundry |
       | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"managed-identity","clientId":"${CTX:clientId}"}} |
       | accessControl.mode | allow_all |
     Then the response status code should be 201
