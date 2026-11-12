@@ -2139,3 +2139,35 @@ func TestBufferedPath_ReadsAnSSEBody(t *testing.T) {
 		}
 	})
 }
+
+// TestStreaming_BoundsEveryCallToOneTextUnit covers a configured batch far
+// larger than a text unit. The batch decides when to assess and deliver; it must
+// not decide how much goes into one request. Before this, the withheld-bytes
+// limit bounded the buffer but not the call, and a very large batch sent 55,199
+// characters in a single request — the long-context case AWS's guidance says to
+// chunk. Splitting costs nothing: input is billed per text unit either way.
+func TestStreaming_BoundsEveryCallToOneTextUnit(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingTextUnitChars = 1000000
+	})
+	respCtx := streamCtx()
+
+	flush := strings.Repeat(sseEvent("words here. "), 100)
+	for i := 0; i < 400; i++ {
+		p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(flush), EndOfStream: false,
+		}, map[string]interface{}{})
+	}
+
+	if client.calls == 0 {
+		t.Fatalf("expected the withheld-bytes limit to force assessment")
+	}
+	ceiling := DefaultStreamingTextUnitChars + maxBoundarySearchRunes
+	for i, text := range client.texts {
+		if n := len([]rune(text)); n > ceiling {
+			t.Errorf("call %d carried %d characters; every call must stay within one text unit (%d)",
+				i, n, ceiling)
+		}
+	}
+}

@@ -2041,13 +2041,16 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	respCtx.Metadata[metaKeyHeldBytes] = retain
 	respCtx.Metadata[metaKeyAssessedInHeld] = 0
 
-	// The batch plan decides when to assess; the size of each call is bounded
-	// regardless. A whole-response plan would otherwise send one oversized call,
-	// which is the case the long-context half of AWS's guidance says to chunk.
-	callUnit := p.effectiveTextUnit()
-	if callUnit <= 0 {
-		callUnit = DefaultStreamingTextUnitChars
-	}
+	// The configured batch decides when to assess and deliver; it does not decide
+	// how much goes into one request. Every call carries at most one text unit,
+	// which is the size AWS recommends and which costs exactly the same as
+	// sending the batch whole — input is billed per text unit either way, so
+	// splitting is free. Letting the batch size through instead sent one
+	// oversized request: measured at 55,199 characters for a very large
+	// configured batch, because the withheld-bytes limit bounds the buffer and
+	// not the request. That is the long-context case AWS's guidance says to
+	// chunk.
+	callUnit := DefaultStreamingTextUnitChars
 	remaining := batchText
 
 	var (

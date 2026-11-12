@@ -278,15 +278,16 @@ parameters:
             next one. A batch is trimmed back to the end of the last sentence or
             word so a phrase is never split across two calls, and the final batch
             is assessed when the stream ends.
-            Raising it lowers cost and lengthens time to first token; lowering it
-            shortens that for proportionally more AWS calls. Minimum 100.
+            Raising it lengthens time to first token; lowering it shortens that.
+            It does not change cost: input is billed per text unit, and every AWS
+            call carries at most one unit whatever this is set to, so a larger
+            batch is sent as several calls rather than one oversized request.
+            Minimum 100.
             Set it to 0 to assess the whole response instead of a batch at a time.
             Nothing is then assessed or delivered until the stream ends, which is
             the closest behaviour to a buffered response — useful when partial
-            delivery is not wanted at all. Each AWS call is still bounded at one
-            text unit, since an oversized request is the case AWS's long-context
-            guidance says to chunk, and a very long response is released in parts
-            once the withheld buffer reaches its limit.
+            delivery is not wanted at all. A very long response is released in
+            parts once the withheld buffer reaches its limit.
             Applies to redactPII as well. Redaction is written back frame by
             frame, so a value the model emitted across two events cannot be
             replaced in place; the stream is ended rather than the value
