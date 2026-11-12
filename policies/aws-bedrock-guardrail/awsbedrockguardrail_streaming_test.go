@@ -1742,3 +1742,68 @@ func TestStreaming_CountsAssessedTextLeftInRetainedFrames(t *testing.T) {
 			billed, produced)
 	}
 }
+
+// TestStreaming_DeliversByteExactAcrossMidLineSplits is the invariant that makes
+// the withheld bytes safe to reason about, whichever side it is enforced from.
+//
+// Two implementations satisfy it: accumulate only complete lines into the
+// withheld buffer and carry the trailing fragment separately, or accumulate the
+// raw flush and refuse to release past the last complete line. This policy does
+// the latter, so the property needs asserting rather than assuming — the risk of
+// holding raw bytes is that the fragment is counted twice or dropped at the
+// seam.
+//
+// Chunk sizes are chosen so most cuts land mid-line, including inside a JSON
+// payload, and the whole delivered stream is compared to the input: in order,
+// nothing duplicated, nothing lost.
+func TestStreaming_DeliversByteExactAcrossMidLineSplits(t *testing.T) {
+	var input string
+	for i := 0; i < 40; i++ {
+		input += sseEvent("some words here. ")
+	}
+
+	for _, size := range []int{7, 13, 29, 64, 157, 400} {
+		t.Run(fmt.Sprintf("chunk=%d", size), func(t *testing.T) {
+			p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()},
+				func(params *AWSBedrockGuardrailPolicyParams) {
+					params.StreamingTextUnitChars = MinStreamingTextUnitChars
+				})
+			respCtx := streamCtx()
+			respCtx.Metadata[metaKeySSEStream] = true
+
+			var delivered string
+			for off := 0; off < len(input); off += size {
+				end := off + size
+				if end > len(input) {
+					end = len(input)
+				}
+				action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+					Chunk:       []byte(input[off:end]),
+					EndOfStream: end == len(input),
+				}, map[string]interface{}{})
+
+				forward, ok := action.(policy.ForwardResponseChunk)
+				if !ok {
+					t.Fatalf("offset %d: unexpected %T", off, action)
+				}
+				if forward.Body == nil {
+					delivered += input[off:end]
+					continue
+				}
+				delivered += string(forward.Body)
+			}
+
+			if delivered == input {
+				return
+			}
+			switch {
+			case len(delivered) > len(input):
+				t.Errorf("bytes duplicated at the seam: delivered %d, input %d", len(delivered), len(input))
+			case len(delivered) < len(input):
+				t.Errorf("bytes lost at the seam: delivered %d, input %d", len(delivered), len(input))
+			default:
+				t.Errorf("bytes reordered: same length, different content")
+			}
+		})
+	}
+}
