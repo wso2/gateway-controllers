@@ -68,13 +68,13 @@ Place the limit policies after `subscription-validation` v2 in the same chain. E
 
 | Policy | Plan condition |
 |--------|----------------|
-| [`subscription-request-ratelimit`](../../../subscription-request-ratelimit/v1.0/docs/subscription-request-ratelimit.md) | `request-count` (one per request); `event-count` on an event API (one per event) |
+| [`subscription-request-ratelimit`](../../../subscription-request-ratelimit/v1.0/docs/subscription-request-ratelimit.md) | `request-count` (one per request) |
 | [`subscription-tool-ratelimit`](../../../subscription-tool-ratelimit/v1.0/docs/subscription-tool-ratelimit.md) | `tool-call-count` (one per MCP `tools/call`) |
 | [`subscription-token-ratelimit`](../../../subscription-token-ratelimit/v1.0/docs/subscription-token-ratelimit.md) | `token-count` (LLM tokens of each response) |
 
 ### Migrating from v1
 
-v2.0 is a major version because it no longer enforces the plan's limits. v1.x rate-limited each subscription by the plan's throttle limit itself; v2 lets every request with an active subscription through. To keep enforcing the plan, add `subscription-request-ratelimit` v1 after `subscription-validation` v2. It enforces the plan's request limits, a legacy throttle limit included, and on an event API (WebSub or WebSocket) the plan's event limits. Add `subscription-tool-ratelimit` (MCP APIs) and `subscription-token-ratelimit` (LLM APIs) when plans carry tool-call or token conditions.
+v2.0 is a major version because it no longer enforces the plan's limits. v1.x rate-limited each subscription by the plan's throttle limit itself; v2 lets every request with an active subscription through. To keep enforcing the plan, add `subscription-request-ratelimit` v1 after `subscription-validation` v2. It enforces the plan's request limits, a legacy throttle limit included. Add `subscription-tool-ratelimit` (MCP APIs) and `subscription-token-ratelimit` (LLM APIs) when plans carry tool-call or token conditions.
 
 Other behavior is unchanged: the parameters, the token sources, the `403` responses and their fault codes are the same as v1.1, and the `429` that `subscription-request-ratelimit` returns has the same body shape, rate-limit headers and fault code (`900804`) that v1 returned. Two differences remain: the limit policies count per subscription id rather than per token, and they count across all gateway replicas when configured with a Redis backend. v1.x is unchanged.
 

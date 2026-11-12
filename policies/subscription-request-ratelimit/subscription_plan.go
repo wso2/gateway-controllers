@@ -49,7 +49,6 @@ const (
 // Plan condition types.
 const (
 	conditionTypeRequestCount  = "request-count"
-	conditionTypeEventCount    = "event-count"
 	conditionTypeToolCallCount = "tool-call-count"
 	conditionTypeTokenCount    = "token-count"
 )

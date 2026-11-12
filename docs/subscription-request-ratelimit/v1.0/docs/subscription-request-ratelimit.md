@@ -5,14 +5,13 @@ title: "Overview"
 
 ## Overview
 
-The Subscription Request Rate Limit policy enforces the `request-count` condition of the caller's subscription plan: each request counts one against the plan's limits, with a counter per subscription. On an event API it enforces the plan's `event-count` condition instead, counting one per event.
+The Subscription Request Rate Limit policy enforces the `request-count` condition of the caller's subscription plan: each request counts one against the plan's limits, with a counter per subscription.
 
 It reads the subscription and the plan's conditions that [`subscription-validation` v2](../../../subscription-validation/v2.0/docs/subscription-validation.md) records, so it must come **after** `subscription-validation` v2 in the policy chain. When no subscription was recorded (v2 is not in the chain, or comes later) the policy lets the request through without limiting and logs at debug level.
 
 ## Features
 
 - Enforces the plan's request limits per subscription, a legacy plan throttle limit included.
-- Enforces the plan's event limits on WebSub and WebSocket APIs in the event gateway, one count per event.
 - Several windows per condition (minute, hour, day, month); the strictest wins.
 - `onExceed: reject` returns `429`; `onExceed: allow` logs and lets the request through.
 - New plan limits apply as soon as the plan changes.
@@ -48,21 +47,15 @@ Counters are kept per subscription (`x-wso2-subscription-id`) and per condition,
 
 A plan with no condition of this policy's type, an unlimited plan (no conditions) and `custom` conditions are not limited by this policy.
 
-## Requests and Events
+## Event APIs
 
-In the event gateway the policy engine runs the policy chain once per message: once per subscribe request, inbound webhook event and delivery for a WebSub API, and once per connection upgrade and produced or consumed message for a WebSocket API. There each run is an event, and the policy enforces the plan's `event-count` condition (id `events`). Everywhere else each run is a request, and it enforces `request-count` (id `requests`).
-
-The policy tells them apart by the request context: the event gateway runs the chain with the `event` scheme and the `WebSubApi` API kind. The `countAs` parameter overrides this.
-
-Each message is a separate run with its own metadata, so on an event API put `subscription-validation` v2 in the same chain (the same enforcement point) as this policy, before it. Attach the pair at the enforcement points whose messages should count; attached to the subscribe point too, the subscribe request counts as one event.
+In the event gateway the policy engine runs the policy chain once per message (a WebSub subscribe request, inbound event or delivery; a WebSocket connection upgrade or message). Each run counts as one request against the plan's `request-count` condition. To count connections or subscriptions rather than messages, attach `subscription-validation` v2 and this policy only at the enforcement point where those pass.
 
 ## Configuration
 
 ### User Parameters (API Definition)
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `countAs` | string | No | `auto` | `auto` counts events in the event gateway and requests elsewhere. `request` always enforces `request-count`; `event` always enforces `event-count`. |
+None.
 
 ### System Parameters (From config.toml)
 
@@ -113,8 +106,6 @@ When a window with `onExceed: reject` is used up, the request is rejected with t
   ```
 - **Headers:** the violated window's `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (Unix time), `X-RateLimit-Full-Quota-Reset`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (seconds), `RateLimit-Full-Quota-Reset`, `RateLimit-Policy` (`<limit>;w=<window seconds>`) and `Retry-After`.
 
-On an event API the message reads `events` instead of `requests`.
-
 ## Reference Scenarios
 
 ### Example 1: REST API
@@ -143,23 +134,9 @@ spec:
 
 With a plan of 100 requests a minute and 5000 a day, each subscription can make 100 requests in a minute and 5000 in a day across all the API's operations; the 101st request in a minute gets `429`.
 
-### Example 2: WebSocket API in the Event Gateway
-
-```yaml
-spec:
-  policies:
-    on_produce:
-      - name: subscription-validation
-        version: v2
-      - name: subscription-request-ratelimit
-        version: v1
-```
-
-Each message a client produces counts one event against the plan's `event-count` condition.
-
 ## Limitations
 
-- **A WebSub subscribe request counts as one event** when this policy (with `subscription-validation` v2) is attached at the subscribe enforcement point, because the event gateway runs the chain once for it as well. Attach the pair only where the messages that should count pass.
+- In the event gateway every run of the chain counts as one request (see [Event APIs](#event-apis)).
 - `MONTH` windows are 30 days.
 
 ## Fault reporting
@@ -168,6 +145,6 @@ Every rejection this policy makes is also reported to the gateway as a **fault**
 
 | When | Status | Code | Type |
 |------|--------|------|------|
-| A plan request or event limit is exceeded | `429` | `900804` | `throttling` |
+| A plan request limit is exceeded | `429` | `900804` | `throttling` |
 
-The fault's `Message` is `Subscription plan request limit exceeded`, or `Subscription plan event limit exceeded` on an event API.
+The fault's `Message` is `Subscription plan request limit exceeded`.

@@ -256,65 +256,30 @@ func TestTwoPlansOnOneRoute(t *testing.T) {
 	}
 }
 
-const eventAndRequestConditions = `[
-	{"id":"requests","type":"request-count","params":{"limits":[{"count":100,"timeUnit":"MINUTE"}]}},
+// An event-count condition (no longer a plan condition type) is not enforced; only
+// request-count is, also when the chain runs in the event gateway.
+func TestOnlyRequestCountIsEnforced(t *testing.T) {
+	const conditions = `[
 	{"id":"events","type":"event-count","params":{"limits":[{"count":1,"timeUnit":"MINUTE"}]}}
 ]`
-
-func TestEventGatewayCountsEvents(t *testing.T) {
 	p := newPolicy(t, "r1", nil)
+	for i := 1; i <= 3; i++ {
+		c := reqCtx(t, "sub-1", "plan-1", conditions)
+		c.Scheme = "event"
+		c.APIKind = policy.APIKindWebSubApi
+		assertAllowed(t, send(p, c), i)
+	}
+
 	event := func() *policy.RequestHeaderContext {
-		c := reqCtx(t, "sub-1", "plan-1", eventAndRequestConditions)
+		c := reqCtx(t, "sub-2", "plan-2", cond(1, "reject"))
 		c.Scheme = "event"
 		c.APIKind = policy.APIKindWebSubApi
 		return c
 	}
 	assertAllowed(t, send(p, event()), 1)
 	resp := assertThrottled(t, send(p, event()))
-	if resp.Fault.Message != "Subscription plan event limit exceeded" {
+	if resp.Fault.Message != "Subscription plan request limit exceeded" {
 		t.Fatalf("fault message = %q", resp.Fault.Message)
-	}
-	if want := `{"error":"rate_limit_exceeded","message":"Subscription quota exceeded: 1 events per 1 minute"}`; string(resp.Body) != want {
-		t.Fatalf("body = %s", resp.Body)
-	}
-	// A plain HTTP request is counted against request-count.
-	assertAllowed(t, send(p, reqCtx(t, "sub-1", "plan-1", eventAndRequestConditions)), 1)
-}
-
-func TestWebSubApiKindCountsEvents(t *testing.T) {
-	p := newPolicy(t, "r1", nil)
-	c := func() *policy.RequestHeaderContext {
-		c := reqCtx(t, "sub-1", "plan-1", eventAndRequestConditions)
-		c.APIKind = policy.APIKindWebSubApi
-		return c
-	}
-	assertAllowed(t, send(p, c()), 1)
-	assertThrottled(t, send(p, c()))
-}
-
-func TestEventApiWithoutEventConditionPassesThrough(t *testing.T) {
-	p := newPolicy(t, "r1", nil)
-	for i := 1; i <= 3; i++ {
-		c := reqCtx(t, "sub-1", "plan-1", cond(1, "reject"))
-		c.Scheme = "event"
-		assertAllowed(t, send(p, c), i)
-	}
-}
-
-func TestCountAsOverride(t *testing.T) {
-	asRequest := newPolicy(t, "r1", map[string]interface{}{"countAs": "request"})
-	for i := 1; i <= 3; i++ {
-		c := reqCtx(t, "sub-1", "plan-1", eventAndRequestConditions)
-		c.Scheme = "event"
-		assertAllowed(t, send(asRequest, c), i)
-	}
-
-	asEvent := newPolicy(t, "r2", map[string]interface{}{"countAs": "event"})
-	assertAllowed(t, send(asEvent, reqCtx(t, "sub-9", "plan-1", eventAndRequestConditions)), 1)
-	assertThrottled(t, send(asEvent, reqCtx(t, "sub-9", "plan-1", eventAndRequestConditions)))
-
-	if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"countAs": "message"}); err == nil {
-		t.Fatalf("expected an invalid countAs to be rejected")
 	}
 }
 

@@ -2,9 +2,7 @@ name: subscription-request-ratelimit
 version: v1.0.0
 description: |
   Enforces the request-count condition of the caller's subscription plan,
-  counting one per request and keeping a counter per subscription. On an
-  event API (WebSub or WebSocket in the event gateway) it enforces the
-  plan's event-count condition instead, counting one per event.
+  counting one per request and keeping a counter per subscription.
 
   Reads the subscription and plan that subscription-validation v2 records,
   so place it after subscription-validation v2 in the policy chain. A
@@ -14,16 +12,7 @@ description: |
 parameters:
   type: object
   additionalProperties: false
-  properties:
-    countAs:
-      type: string
-      enum: ["auto", "request", "event"]
-      default: "auto"
-      x-wso2-policy-advanced-param: true
-      description: |
-        Which plan condition to enforce. auto counts events (event-count) when
-        the policy runs in the event gateway and requests (request-count)
-        otherwise. request and event force one or the other.
+  properties: {}
 
 systemParameters:
   type: object
