@@ -118,10 +118,15 @@ func TestMultiMemberRanking_SameModelUnderDifferentProvidersAreDistinct(t *testi
 
 // A producer that has not adopted the contract publishes one selection. It must behave exactly
 // like a one-element ranking (FR-023) — the compatibility guarantee the contract rests on.
+//
+// Both sides name a provider. An EMPTY selected_provider cannot stand in for "the primary"
+// here, because that is not what a producer writes: applyProviderRouting DELETES the key when
+// its selection is the primary, so an absent or empty value means "no steering happened" and
+// must leave the configured order untouched — asserted separately below.
 func TestMultiMemberRanking_SingleSelectionBehavesAsAOneElementRanking(t *testing.T) {
-	viaRanking := chainFrom(t, policyWithMultiChain(),
-		rankedRequestFor("gpt-4o", []map[string]string{{"model": "gpt-4o"}}))
-	viaSingleSelection := chainFrom(t, policyWithMultiChain(), requestFor("gpt-4o", "gpt-4o", ""))
+	viaRanking := chainFrom(t, policyWithMultiChain(), rankedRequestFor("gpt-4o",
+		[]map[string]string{{"model": "gpt-4o", "provider": "anthropic"}}))
+	viaSingleSelection := chainFrom(t, policyWithMultiChain(), requestFor("gpt-4o", "anthropic"))
 
 	if viaRanking != viaSingleSelection {
 		t.Fatalf("one-element ranking gave %q but the single-selection keys gave %q; a "+

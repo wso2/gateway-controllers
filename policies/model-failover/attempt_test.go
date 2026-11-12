@@ -158,9 +158,9 @@ func TestBuildAttemptModels_SkipsUnresolvableMembers(t *testing.T) {
 	clusters := map[string]string{"anthropic": "upstream_anthropic", "ghost": ""}
 	models := buildAttemptModels([]Target{
 		{Provider: "anthropic", Model: "claude"},
-		{Provider: "anthropic", Model: ""},      // wildcard — nothing to substitute
-		{Provider: "ghost", Model: "m"},         // no cluster resolved
-		{Provider: "unmapped", Model: "m"},      // not in the cluster map at all
+		{Provider: "anthropic", Model: ""}, // wildcard — nothing to substitute
+		{Provider: "ghost", Model: "m"},    // no cluster resolved
+		{Provider: "unmapped", Model: "m"}, // not in the cluster map at all
 	}, clusters)
 
 	if len(models) != 1 || models["upstream_anthropic"] != "claude" {

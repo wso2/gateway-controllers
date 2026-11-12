@@ -40,6 +40,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strconv"
+	"strings"
 	"time"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -82,6 +83,10 @@ const (
 type Policy struct {
 	params Params
 	health HealthStore
+	// correlation remembers which target each cluster served, per request, so a completion
+	// verdict naming only a cluster can still be graded against the right target. See
+	// attempt_correlation.go for why a cluster is not enough on its own.
+	correlation *attemptCorrelation
 	// now is injectable so tests can drive the suspension clock without sleeping.
 	now func() time.Time
 }
@@ -100,14 +105,16 @@ func GetPolicy(
 	params map[string]interface{},
 ) (policy.Policy, error) {
 	parsed := parseParams(params)
+	// Both stores shared with the other chain this operation attaches us to — see
+	// shared_health.go. The factory runs once per CHAIN entry, so the response chain and the
+	// fault chain each get their own *Policy; private stores here would mean the fault chain
+	// graded into a store nothing reads.
+	health, correlation := sharedStoresFor(metadata, parsed.Suspension)
 	return &Policy{
-		params: parsed,
-		// Shared with the other chain this operation attaches us to — see shared_health.go.
-		// The factory runs once per CHAIN entry, so the response chain and the fault chain
-		// each get their own *Policy; a private store here would mean the fault chain graded
-		// into a store nothing reads.
-		health: healthStoreFor(metadata, parsed.Suspension),
-		now:    time.Now,
+		params:      parsed,
+		health:      health,
+		correlation: correlation,
+		now:         time.Now,
 	}, nil
 }
 
@@ -119,9 +126,10 @@ func GetPolicy(
 func NewPolicy(params map[string]interface{}) *Policy {
 	parsed := parseParams(params)
 	return &Policy{
-		params: parsed,
-		health: NewHealthStore(parsed.Suspension),
-		now:    time.Now,
+		params:      parsed,
+		health:      NewHealthStore(parsed.Suspension),
+		correlation: newAttemptCorrelation(nil),
+		now:         time.Now,
 	}
 }
 
@@ -175,7 +183,7 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 
 	now := p.now()
 	requestedModel := requestedModelFrom(reqCtx.Body)
-	published := p.publishedRanking(reqCtx.Metadata)
+	published := p.publishedRanking(reqCtx.Metadata, requestedModel)
 
 	// The target this request will ACTUALLY be sent to first — a routing policy's choice when
 	// it made one, otherwise the model the client named, since that is where it goes by
@@ -218,6 +226,11 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		// behavioural difference from not being attached at all (FR-030b, FR-030e).
 		return policy.UpstreamRequestModifications{}
 	}
+
+	// Remember which cluster serves which member, so a completion verdict arriving long after
+	// this request finished can be graded against the right target. The verdict names only a
+	// cluster, and a cluster does not identify a target — see attempt_correlation.go.
+	p.correlation.Remember(requestIDFrom(reqCtx.Headers), resolved, p.params.ProviderClusters)
 
 	// Carry the WHOLE chain to the response phase, not just the first member.
 	//
@@ -432,10 +445,18 @@ func targetsFromMetadata(metadata map[string]interface{}, key string) []Target {
 // publishedRanking reads the ordered target preference list a routing policy published for
 // this request, if any.
 //
-// A routing policy that has not adopted the ordered-list contract publishes only a single
-// selection. That degrades gracefully: it becomes a one-element list, and the configured
-// chain continues after it (FR-023).
-func (p *Policy) publishedRanking(metadata map[string]interface{}) []Target {
+// Two tiers, both addressed generically — neither names a producer:
+//
+//  1. MetadataKeyPublishedRanking, the ordered-list contract introduced by this feature. A
+//     producer that has adopted it expresses order, model and provider.
+//  2. MetadataKeySelectedProvider, the single-selection convention that predates this feature
+//     and that every steering policy in the repo writes unmodified. It degrades gracefully:
+//     one element, and the configured chain continues after it (FR-023).
+//
+// requestedModel is passed in rather than re-read because tier 2 carries no model: see the
+// comment on MetadataKeySelectedProvider for why a provider-only selection means "the model
+// the client asked for, at this provider".
+func (p *Policy) publishedRanking(metadata map[string]interface{}, requestedModel string) []Target {
 	if metadata == nil {
 		return nil
 	}
@@ -446,14 +467,12 @@ func (p *Policy) publishedRanking(metadata map[string]interface{}) []Target {
 		}
 	}
 
-	// Single-selection fallback: the engine-level contract key that routing policies already
-	// set today.
-	model, _ := metadata[MetadataKeySelectedModel].(string)
 	provider, _ := metadata[MetadataKeySelectedProvider].(string)
-	if model != "" {
-		return []Target{{Model: model, Provider: provider}}
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return nil
 	}
-	return nil
+	return []Target{{Model: requestedModel, Provider: provider}}
 }
 
 // decodeRanking converts a published preference list into targets, per the pinned wire

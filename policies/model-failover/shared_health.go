@@ -51,6 +51,11 @@ type sharedHealthEntry struct {
 	// keep enforcing the old windows and thresholds — a redeploy that appeared to do nothing.
 	suspensionKey string
 	store         HealthStore
+	// correlation rides on the same entry so the two can never drift onto different keys: a
+	// verdict graded against a store that did not record the request would find nothing and
+	// silently do nothing. Replaced with the store when the configuration changes, which is
+	// correct — the chain a pre-change request was published with may no longer exist.
+	correlation *attemptCorrelation
 }
 
 // healthStoreFor returns the store for this attachment, creating it on first use and REPLACING
@@ -61,6 +66,17 @@ type sharedHealthEntry struct {
 // is later deleted does linger — the SDK gives a policy no teardown hook to notice — but it is
 // one small struct per distinct route ever deployed, not per request or per deployment.
 func healthStoreFor(metadata policy.PolicyMetadata, suspension Suspension) HealthStore {
+	store, _ := sharedStoresFor(metadata, suspension)
+	return store
+}
+
+// sharedStoresFor returns BOTH of this attachment's shared stores, in one lock acquisition.
+//
+// Returned together rather than through two calls so they cannot be taken from different
+// entries: a configuration change between two calls would hand back a health store and a
+// correlation store from different generations, and every verdict would then look up a request
+// the store never recorded — grading nothing, with no error anywhere.
+func sharedStoresFor(metadata policy.PolicyMetadata, suspension Suspension) (HealthStore, *attemptCorrelation) {
 	key := metadata.APIId + "\x00" + metadata.RouteName
 	fingerprint := fmt.Sprintf("%+v", suspension)
 
@@ -68,11 +84,15 @@ func healthStoreFor(metadata policy.PolicyMetadata, suspension Suspension) Healt
 	defer sharedHealth.mu.Unlock()
 
 	if entry, ok := sharedHealth.byRoute[key]; ok && entry.suspensionKey == fingerprint {
-		return entry.store
+		return entry.store, entry.correlation
 	}
-	entry := &sharedHealthEntry{suspensionKey: fingerprint, store: NewHealthStore(suspension)}
+	entry := &sharedHealthEntry{
+		suspensionKey: fingerprint,
+		store:         NewHealthStore(suspension),
+		correlation:   newAttemptCorrelation(nil),
+	}
 	sharedHealth.byRoute[key] = entry
-	return entry.store
+	return entry.store, entry.correlation
 }
 
 // sharedHealthTestKey builds the map key the way healthStoreFor does, for assertions.

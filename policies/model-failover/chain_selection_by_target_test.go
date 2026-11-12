@@ -38,26 +38,57 @@ func policyWithChain() *Policy {
 			},
 		}},
 		ProviderClustersParam: map[string]interface{}{
-			"":              "cluster_default",
-			"anthropic":     "cluster_anthropic",
-			"mistral":       "cluster_mistral",
+			"":          "cluster_default",
+			"anthropic": "cluster_anthropic",
+			"mistral":   "cluster_mistral",
 		},
 	})
 }
 
-// requestFor builds a downstream request body asking for `model`, with an optional routing
-// policy selection already published into shared metadata.
-func requestFor(model, selectedModel, selectedProvider string) *policy.RequestContext {
+// requestFor builds a downstream request body asking for `model`, with an optional
+// single-selection routing decision published into shared metadata.
+//
+// The single-selection channel carries a PROVIDER and nothing else — see the comment on
+// MetadataKeySelectedProvider. It cannot express "use a different model", so a case that needs
+// that must publish a ranking instead; requestForRanking below does that.
+func requestFor(model, selectedProvider string) *policy.RequestContext {
 	metadata := map[string]interface{}{}
-	if selectedModel != "" {
-		metadata[MetadataKeySelectedModel] = selectedModel
+	if selectedProvider != "" {
 		metadata[MetadataKeySelectedProvider] = selectedProvider
 	}
+	return requestWithMetadata(model, metadata)
+}
+
+// requestForRanking builds a request whose routing decision arrives through the ordered-list
+// contract, which is the only tier that can nominate a model other than the requested one.
+func requestForRanking(model string, ranking ...map[string]string) *policy.RequestContext {
+	return requestWithMetadata(model, map[string]interface{}{
+		MetadataKeyPublishedRanking: ranking,
+	})
+}
+
+func requestWithMetadata(model string, metadata map[string]interface{}) *policy.RequestContext {
 	body, _ := json.Marshal(map[string]interface{}{"model": model})
 	return &policy.RequestContext{
 		SharedContext: &policy.SharedContext{Metadata: metadata},
 		Body:          &policy.Body{Content: body, Present: true},
 	}
+}
+
+// targetsFrom is chainFrom without the lossy join: chainFrom reports models only, so it cannot
+// see a provider being overwritten, which is exactly the regression these tests exist for.
+func targetsFrom(t *testing.T, p *Policy, reqCtx *policy.RequestContext) []Target {
+	t.Helper()
+	p.OnRequestBody(context.Background(), reqCtx, nil)
+	raw, ok := reqCtx.Metadata[metadataKeyChain]
+	if !ok {
+		return nil
+	}
+	targets, ok := raw.([]Target)
+	if !ok {
+		t.Fatalf("published chain is %T, want []Target", raw)
+	}
+	return targets
 }
 
 func chainFrom(t *testing.T, p *Policy, reqCtx *policy.RequestContext) string {
@@ -81,7 +112,7 @@ func chainFrom(t *testing.T, p *Policy, reqCtx *policy.RequestContext) string {
 // No routing policy: the request goes to the model it asked for, so that target's configured
 // fallbacks apply.
 func TestChainSelection_NoRoutingPolicyUsesTheRequestedModelsChain(t *testing.T) {
-	got := chainFrom(t, policyWithChain(), requestFor("gpt-4o", "", ""))
+	got := chainFrom(t, policyWithChain(), requestFor("gpt-4o", ""))
 	if got != "gpt-4o,claude-sonnet-4-5" {
 		t.Fatalf("chain = %q, want gpt-4o,claude-sonnet-4-5", got)
 	}
@@ -92,7 +123,11 @@ func TestChainSelection_NoRoutingPolicyUsesTheRequestedModelsChain(t *testing.T)
 // said what should follow mistral-large, and inventing an answer from an unrelated chain would
 // send traffic to a target nobody nominated for it.
 func TestChainSelection_RoutedElsewhereDoesNotBorrowTheRequestedModelsFallbacks(t *testing.T) {
-	got := chainFrom(t, policyWithChain(), requestFor("gpt-4o", "mistral-large", "mistral"))
+	// Published as a RANKING, deliberately. Routing to a different MODEL is a tier-1 statement:
+	// the single-selection channel names only a provider, so it could not express this case and
+	// writing it there would assert nothing.
+	got := chainFrom(t, policyWithChain(), requestForRanking("gpt-4o",
+		map[string]string{"model": "mistral-large", "provider": "mistral"}))
 	if strings.Contains(got, "claude") {
 		t.Fatalf("chain = %q — gpt-4o's fallback was applied to a target it was never written for", got)
 	}
@@ -101,7 +136,7 @@ func TestChainSelection_RoutedElsewhereDoesNotBorrowTheRequestedModelsFallbacks(
 // Routed to the configured target: its own fallbacks apply, exactly as if no routing policy
 // had been involved.
 func TestChainSelection_RoutedToTheConfiguredTargetUsesItsFallbacks(t *testing.T) {
-	got := chainFrom(t, policyWithChain(), requestFor("gpt-4o", "gpt-4o", ""))
+	got := chainFrom(t, policyWithChain(), requestFor("gpt-4o", ""))
 	if got != "gpt-4o,claude-sonnet-4-5" {
 		t.Fatalf("chain = %q, want gpt-4o,claude-sonnet-4-5", got)
 	}
@@ -119,7 +154,7 @@ func TestChainSelection_WildcardChainMatchesAnyTarget(t *testing.T) {
 		}},
 		ProviderClustersParam: map[string]interface{}{"": "cluster_default", "anthropic": "cluster_anthropic"},
 	})
-	got := chainFrom(t, p, requestFor("gpt-4o", "mistral-large", ""))
+	got := chainFrom(t, p, requestFor("gpt-4o", ""))
 	if !strings.Contains(got, "claude") {
 		t.Fatalf("chain = %q, want the catch-all chain's fallback to apply", got)
 	}
@@ -128,7 +163,71 @@ func TestChainSelection_WildcardChainMatchesAnyTarget(t *testing.T) {
 // Nothing configured for the model and no routing policy: the policy is inert, exactly as
 // before — an unmatched model is not an error (FR-050).
 func TestChainSelection_UnmatchedModelWithNoRoutingPolicyIsInert(t *testing.T) {
-	if got := chainFrom(t, policyWithChain(), requestFor("something-else", "", "")); got != "" {
+	if got := chainFrom(t, policyWithChain(), requestFor("something-else", "")); got != "" {
 		t.Fatalf("chain = %q, want the policy to stay inert", got)
+	}
+}
+
+// A provider-only selection is the ONLY thing seven of the eight steering policies in this repo
+// can say, so these two tests are what make failover usable with any of them.
+//
+// Before this, the consumer read "model_roundrobin.selected_provider" — model-round-robin's own
+// private key. Every other steering policy writes the shared "selected_provider" convention
+// that predates this feature, so their decisions were read as absent and silently discarded
+// while failover published its configured order instead.
+
+// The steered provider leads the chain, and the configured chain still supplies what follows.
+//
+// chainFrom reports models only, which is why this reads targets directly: a provider being
+// wrong is invisible in a model list, and the whole point of a provider-only selection is the
+// provider.
+func TestSingleSelection_SteeredProviderLeadsTheChain(t *testing.T) {
+	targets := targetsFrom(t, policyWithChain(), requestFor("gpt-4o", "mistral"))
+	if len(targets) < 3 {
+		t.Fatalf("chain = %+v, want three members", targets)
+	}
+	// Attempt 1 is where the routing policy sent it.
+	if targets[0] != (Target{Model: "gpt-4o", Provider: "mistral"}) {
+		t.Fatalf("attempt 1 = %+v, want gpt-4o at mistral", targets[0])
+	}
+	// Then the requested model's configured fallback.
+	if targets[1] != (Target{Model: "claude-sonnet-4-5", Provider: "anthropic"}) {
+		t.Fatalf("attempt 2 = %+v, want the configured fallback", targets[1])
+	}
+	// Then the configured chain's own leading member as a last resort. The steering put
+	// mistral in FRONT of the publisher's chain rather than replacing it, so the primary is
+	// still reachable after the configured fallbacks are spent.
+	if targets[2] != (Target{Model: "gpt-4o", Provider: ""}) {
+		t.Fatalf("attempt 3 = %+v, want gpt-4o at the primary as the last resort", targets[2])
+	}
+}
+
+// And the requested model's fallbacks DO still apply, because the model did not change: only
+// the provider did. Withholding them would mean attaching any provider-steering policy
+// silently disables failover, which is the opposite of what layering is for.
+func TestSingleSelection_RequestedModelsFallbacksStillApply(t *testing.T) {
+	got := chainFrom(t, policyWithChain(), requestFor("gpt-4o", "mistral"))
+	if !strings.Contains(got, "claude") {
+		t.Fatalf("chain = %q, want gpt-4o's configured fallback to follow — a provider-only "+
+			"selection changes where the model goes, not which model was asked for", got)
+	}
+}
+
+// An absent or empty selection is not a selection. applyProviderRouting deletes the key when it
+// picks the primary, so an empty value means no steering happened and the configured order must
+// stand — treating it as a target would publish a ranking nobody asked for.
+func TestSingleSelection_EmptyProviderIsNotASelection(t *testing.T) {
+	p := &Policy{}
+	for name, metadata := range map[string]map[string]interface{}{
+		"absent":       {},
+		"empty":        {MetadataKeySelectedProvider: ""},
+		"whitespace":   {MetadataKeySelectedProvider: "   "},
+		"not a string": {MetadataKeySelectedProvider: 42},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := p.publishedRanking(metadata, "gpt-4o"); got != nil {
+				t.Fatalf("publishedRanking = %+v, want nil", got)
+			}
+		})
 	}
 }

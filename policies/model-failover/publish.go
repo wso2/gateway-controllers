@@ -102,15 +102,40 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) []a
 		// Envoy does NOT skip the entry, it substitutes the configured group at that
 		// position, which can route the request to a target the ranking never nominated and
 		// burn the whole attempt budget there.
-		if cluster, ok := providerClusters[target.Provider]; ok {
-			group["clusters"] = []any{
-				// Weight must be an integer: the specifier reads it as a number and
-				// rejects anything below 1, so a group with a malformed weight ends up
-				// with no clusters at all.
-				map[string]any{"cluster_name": cluster, "weight": 1},
-			}
+		cluster, ok := providerClusters[target.Provider]
+		if !ok {
+			// DROPPED, not published as a bare name (FR-056). A name-only group resolves
+			// only against a pre-configured group of the same name, and Probe G measured
+			// what Envoy does when it does not resolve: it substitutes the configured
+			// group at that POSITION. So publishing an unresolvable entry is worse than
+			// omitting it -- the attempt lands on whatever target happens to sit at that
+			// index, which the ranking never nominated and health may have suspended,
+			// and the whole per-attempt budget is spent there.
+			//
+			// Omitting shortens the list instead, and a shorter list is safe by
+			// construction: once attempts exceed the group count Envoy stays on the LAST
+			// group rather than reaching for an unranked cluster.
+			//
+			// Defence in depth. Since the controller supplies a provider-to-cluster map,
+			// every member it enumerated resolves here, so this is reachable only when the
+			// map is absent -- an older controller paired with a newer policy.
+			continue
+		}
+		group["clusters"] = []any{
+			// Weight must be an integer: the specifier reads it as a number and
+			// rejects anything below 1, so a group with a malformed weight ends up
+			// with no clusters at all.
+			map[string]any{"cluster_name": cluster, "weight": 1},
 		}
 		groups = append(groups, group)
+	}
+	if len(groups) == 0 {
+		// Nothing resolved. Return nil rather than an empty list so the caller takes the
+		// inert path and writes no metadata at all: publishing an empty priority_groups
+		// would be a malformed ranking, where writing nothing leaves Envoy on the route's
+		// configured order, which is exactly how the policy behaves when unattached
+		// (FR-030b, FR-030e).
+		return nil
 	}
 	return groups
 }
@@ -161,9 +186,20 @@ const (
 	// preference list contract publishes its ranking for this request.
 	MetadataKeyPublishedRanking = "model_routing.published_ranking"
 
-	// MetadataKeySelectedModel and MetadataKeySelectedProvider are the single-selection keys
-	// routing policies already set today. A policy that has not adopted the ordered list is
-	// read through these, yielding a one-element ranking (FR-023).
-	MetadataKeySelectedModel    = "model_roundrobin.selected_model"
-	MetadataKeySelectedProvider = "model_roundrobin.selected_provider"
+	// MetadataKeySelectedProvider is the single-selection key every steering policy in the
+	// repo already writes, and every openai-to-* transformer already reads, since
+	// 77dcac0 (2026-07-09) — three months before this feature. A policy that has not
+	// adopted the ordered list is read through it, yielding a one-element ranking (FR-023).
+	//
+	// It carries a PROVIDER and nothing else, deliberately. No transformer derives a model
+	// from it: each resolves the model from the request body, falling back to its own
+	// configured override. So a selection here means "the model the client asked for, at
+	// this provider", and that is exactly the Target this consumer builds from it.
+	//
+	// This key is NOT namespaced by producer, and that is the point. This consumer
+	// previously read "model_roundrobin.selected_provider" — model-round-robin's own
+	// private key, which no other steering policy writes — so every other routing policy's
+	// decision was silently dropped whenever failover was attached. A consumer of a
+	// cross-policy channel must read the channel's shared address, never one producer's.
+	MetadataKeySelectedProvider = "selected_provider"
 )

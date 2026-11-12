@@ -16,7 +16,10 @@
 
 package modelfailover
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // producerTarget stands in for a target type declared in a PRODUCER's own module. It is
 // structurally identical to Target and deliberately a distinct named type — that distinction is
@@ -72,7 +75,7 @@ func TestDecodeRanking_FromAForeignProducerType(t *testing.T) {
 	p := &Policy{}
 	assertTargets(t, p.publishedRanking(map[string]interface{}{
 		MetadataKeyPublishedRanking: ranking,
-	}),
+	}, "gpt-4o"),
 		Target{Model: "gpt-4o"},
 		Target{Model: "claude-sonnet-4-5-20250929", Provider: "anthropic"},
 	)
@@ -88,10 +91,12 @@ func TestPublishedRanking_AcceptsTheContractRepresentation(t *testing.T) {
 			{"model": "mistral-large", "provider": "mistral"},
 		},
 		// Present and deliberately different: a ranking must win over the single-selection
-		// keys, or a producer that sets both silently loses its order.
-		MetadataKeySelectedModel: "something-else",
+		// key, or a producer that sets both silently loses its order. Every steering policy
+		// writes selected_provider, so a tier-1 producer sets both by definition, not by
+		// mistake — this precedence is load-bearing rather than defensive.
+		MetadataKeySelectedProvider: "something-else",
 	}
-	assertTargets(t, p.publishedRanking(metadata),
+	assertTargets(t, p.publishedRanking(metadata, "gpt-4o"),
 		Target{Model: "gpt-4o"},
 		Target{Model: "mistral-large", Provider: "mistral"},
 	)
@@ -152,10 +157,9 @@ func TestPublishedRanking_UnreadableValueDegradesToSingleSelection(t *testing.T)
 		t.Run(name, func(t *testing.T) {
 			metadata := map[string]interface{}{
 				MetadataKeyPublishedRanking: bad,
-				MetadataKeySelectedModel:    "gpt-4o",
 				MetadataKeySelectedProvider: "openai",
 			}
-			assertTargets(t, p.publishedRanking(metadata),
+			assertTargets(t, p.publishedRanking(metadata, "gpt-4o"),
 				Target{Model: "gpt-4o", Provider: "openai"})
 		})
 	}
@@ -171,5 +175,20 @@ func TestContractKeysArePinned(t *testing.T) {
 	if MetadataKeyPublishedRanking != "model_routing.published_ranking" {
 		t.Fatalf("ranking key = %q; the producer is a separate module and writes the literal",
 			MetadataKeyPublishedRanking)
+	}
+	// The single-selection key is pinned for a sharper reason than drift. Every other test in
+	// this package references the CONSTANT, so renaming its value changes producer and consumer
+	// together and nothing fails — which is how this consumer shipped reading
+	// "model_roundrobin.selected_provider", a key only one of the eight steering policies in
+	// this repo writes, silently discarding every other policy's routing decision. This literal
+	// assertion is the only thing in the suite that can catch that class of mistake.
+	if MetadataKeySelectedProvider != "selected_provider" {
+		t.Fatalf("single-selection key = %q, want the un-namespaced cross-policy convention; a "+
+			"producer-specific name here reads as absent for every other steering policy",
+			MetadataKeySelectedProvider)
+	}
+	if strings.Contains(MetadataKeySelectedProvider, ".") {
+		t.Fatalf("single-selection key %q is namespaced; this channel is shared across policies "+
+			"and must not be addressed by any one producer's name", MetadataKeySelectedProvider)
 	}
 }
