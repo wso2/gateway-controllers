@@ -23,17 +23,18 @@ Feature: Azure Authentication policy with an unreadable federated token
   So that a broken workload identity setup is visible and never sends an unauthenticated request
 
   # The gateway runtime's federated token file is empty, a setting that applies to every runner in
-  # the block, so this runner gets a block of its own. The identity is the runtime's own, shared by
-  # every block, so the scenario counts no token requests.
+  # the block, so this runner gets a block of its own.
 
   Background:
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
-  # The policy reads the token file for every token request, so an empty file fails the request with
-  # the policy's 502, and the gateway runtime log says why.
+  # The policy reads the token file before every token request, so an empty file fails the request
+  # with the policy's 502 and no token request reaches Entra ID. The scenario names its own tenant to
+  # count them, and the gateway runtime log says why.
   Scenario: An unreadable federated token fails the request with 502
-    Given I generate a unique value from "az-token-file" and store it as "apiName"
+    Given I generate a unique resource name from "az" and store it as "tenant"
+    And I generate a unique value from "az-token-file" and store it as "apiName"
     And I generate a unique API version from "az-token-file" and store it as "apiVersion"
     And I generate a unique API context from "/az-token-file" and store it as "apiContext"
     And I generate a unique resource name from "az-res" and store it as "resourcePartition"
@@ -44,13 +45,16 @@ Feature: Azure Authentication policy with an unreadable federated token
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
       | spec.upstream.main.url | http://testbench:3027/${CTX:resourcePartition}/foundry |
-      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity"}}] |
+      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 502
     Then the response should match the expected error response "azure-authentication-upstream-auth-failed"
     And the "gateway-runtime" service logs should contain "the federated service account token could not be read"
+    When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
+    Then the response status code should be 200
+    And the JSON response field "count" should be 0
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
