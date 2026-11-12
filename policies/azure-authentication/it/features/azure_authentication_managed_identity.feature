@@ -193,8 +193,9 @@ Feature: Azure Authentication policy with a managed identity
     When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/${CTX:clientId}"
     Then the response status code should be 200
     And the JSON response field "count" should be 1
-    And the "gateway-runtime" service logs should contain "${CTX:clientId}"
-    And the "gateway-runtime" service logs should contain "the Azure Instance Metadata Service rejected the token request (invalid_request)"
+    And the "gateway-runtime" service logs should have exactly 1 line containing:
+      | ${CTX:clientId}                                                                  |
+      | the Azure Instance Metadata Service rejected the token request (invalid_request) |
     And the "gateway-runtime" service logs should not contain "testbench-entra."
 
     When I delete the API "${CTX:apiName}"

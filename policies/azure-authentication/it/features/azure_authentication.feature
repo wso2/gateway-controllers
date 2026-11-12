@@ -437,8 +437,10 @@ Feature: Azure Authentication policy
     When I send a "GET" request to the "entra" service at "/invalid-client-${CTX:tenant}/test/requests"
     Then the response status code should be 200
     And the JSON response field "count" should be 1
-    And the "gateway-runtime" service logs should contain "invalid-client-${CTX:tenant}"
-    And the "gateway-runtime" service logs should contain "700213"
+    And the "gateway-runtime" service logs should have exactly 1 line containing:
+      | could not obtain an access token from Microsoft Entra ID |
+      | invalid-client-${CTX:tenant}                             |
+      | 700213                                                   |
     And the "gateway-runtime" service logs should not contain "testbench-federated-identity-token"
     And the "gateway-runtime" service logs should not contain "testbench-entra."
 
