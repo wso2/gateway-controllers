@@ -39,14 +39,6 @@ import (
 // managed identity endpoint a token request for every API request.
 const rejectionCacheFor = 2 * time.Second
 
-// Where tokens come from, as fault reasons and the failure log name it. A managed identity token
-// comes from IMDS on a VM or AKS node, or from the host's own endpoint on App Service, Container
-// Apps or Arc.
-const (
-	entraService           = "Microsoft Entra ID"
-	managedIdentityService = "the managed identity endpoint"
-)
-
 var (
 	// Retries that fit the default 10 s tokenRequestTimeout. Managed identity retries the codes the
 	// SDK lists for IMDS (404, 410, 429 and 5xx); Entra ID retries azcore's defaults.
@@ -81,21 +73,23 @@ type identity struct {
 	tenantID           string
 }
 
-// newCredential builds the SDK credential for id. The workload identity credential reads
-// AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE and AZURE_AUTHORITY_HOST, and the
-// clientId and tenantId params take precedence over the first two. The managed identity credential
-// never reads AZURE_CLIENT_ID: the Workload Identity webhook sets it for the federated identity,
-// which need not be assigned to the host.
-func newCredential(id identity) (azcore.TokenCredential, error) {
-	if id.authenticationType == AuthenticationTypeManagedIdentity {
-		opts := &azidentity.ManagedIdentityCredentialOptions{
-			ClientOptions: azcore.ClientOptions{Retry: managedRetry, Transport: transport},
-		}
-		if id.clientID != "" {
-			opts.ID = azidentity.ClientID(id.clientID)
-		}
-		return azidentity.NewManagedIdentityCredential(opts)
+// newManagedIdentityCredential builds the SDK credential for a host's managed identity. It never
+// reads AZURE_CLIENT_ID: the Workload Identity webhook sets it for the federated identity, which
+// need not be assigned to the host.
+func newManagedIdentityCredential(id identity) (azcore.TokenCredential, error) {
+	opts := &azidentity.ManagedIdentityCredentialOptions{
+		ClientOptions: azcore.ClientOptions{Retry: managedRetry, Transport: transport},
 	}
+	if id.clientID != "" {
+		opts.ID = azidentity.ClientID(id.clientID)
+	}
+	return azidentity.NewManagedIdentityCredential(opts)
+}
+
+// newWorkloadIdentityCredential builds the SDK credential for AKS Workload Identity. It reads
+// AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_FEDERATED_TOKEN_FILE and AZURE_AUTHORITY_HOST, and the
+// clientId and tenantId params take precedence over the first two.
+func newWorkloadIdentityCredential(id identity) (azcore.TokenCredential, error) {
 	return azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
 		ClientOptions: azcore.ClientOptions{Retry: entraRetry, Transport: transport},
 		ClientID:      id.clientID,
@@ -119,23 +113,24 @@ func newCredentialRegistry() *credentialRegistry {
 
 // get returns the credential for id, building it the first time.
 func (r *credentialRegistry) get(id identity) (*credential, error) {
+	kind := kindOf(id.authenticationType)
+	if kind == nil {
+		return nil, fmt.Errorf("unknown authentication type %q", id.authenticationType)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if c, ok := r.byIdentity[id]; ok {
 		return c, nil
 	}
-	sdkCredential, err := newCredential(id)
+	sdkCredential, err := kind.newCredential(id)
 	if err != nil {
 		return nil, err
 	}
 	c := &credential{
 		sdk:        sdkCredential,
-		service:    entraService,
+		kind:       kind,
 		slots:      make(map[string]chan struct{}),
 		rejections: make(map[string]rejection),
-	}
-	if id.authenticationType == AuthenticationTypeManagedIdentity {
-		c.service = managedIdentityService
 	}
 	r.byIdentity[id] = c
 	return c, nil
@@ -144,22 +139,22 @@ func (r *credentialRegistry) get(id identity) (*credential, error) {
 // credential is an identity's SDK credential, which caches and refreshes its tokens, and the token
 // requests it was refused recently, by scope.
 type credential struct {
-	sdk     azcore.TokenCredential
-	service string // entraService or managedIdentityService
+	sdk  azcore.TokenCredential
+	kind *authenticationKind
 
 	mu         sync.Mutex
 	slots      map[string]chan struct{} // see slot
 	rejections map[string]rejection
 }
 
-// slot returns the admission slot a GetToken for scope waits for, one caller at a time. The
-// workload identity SDK fetches one token at a time per credential, behind a lock that doesn't
-// watch the caller's context, so all its scopes share one slot and the wait honours the caller's
-// timeout. The managed identity SDK fetches each scope on its own, so each scope has its own slot
-// and a cached token never waits for another scope's fetch.
+// slot returns the admission slot a GetToken for scope waits for, one caller at a time. An SDK
+// that fetches one token at a time per credential (oneFetchAtATime) does so behind a lock that
+// doesn't watch the caller's context, so all its scopes share one slot and the wait honours the
+// caller's timeout. Otherwise each scope has its own slot, and a cached token never waits for
+// another scope's fetch.
 func (c *credential) slot(scope string) chan struct{} {
 	key := scope
-	if c.service == entraService {
+	if c.kind.oneFetchAtATime {
 		key = ""
 	}
 	c.mu.Lock()
@@ -236,16 +231,17 @@ func (c *credential) token(ctx context.Context, scope string, timeout time.Durat
 func (c *credential) describe(fetchCtx context.Context, err error) *tokenError {
 	var failed *azidentity.AuthenticationFailedError
 	isAuthFailure := errors.As(err, &failed)
+	service := c.kind.service
 	switch {
 	case errors.Is(err, errNoToken):
-		return &tokenError{reason: c.service + " returned an unusable response", cause: err}
+		return &tokenError{reason: service + " returned an unusable response", cause: err}
 	case fetchCtx.Err() != nil:
-		return &tokenError{reason: "timed out obtaining an access token from " + c.service, cause: err}
-	case !isAuthFailure && c.service == managedIdentityService:
+		return &tokenError{reason: "timed out obtaining an access token from " + service, cause: err}
+	case !isAuthFailure && c.kind.imds:
 		// The managed identity credential reports every failure as an AuthenticationFailedError,
-		// except the endpoint refusing the request without a usable response: IMDS's 400 for the
-		// host's default identity when the host has several, or a local proxy's 403.
-		return &tokenError{reason: c.service + " rejected the token request", cause: err, rejected: true}
+		// except IMDS refusing the request without a usable response: its 400 for the host's
+		// default identity when the host has several, or a local proxy's 403.
+		return &tokenError{reason: service + " rejected the token request", cause: err, rejected: true}
 	case isAuthFailure && failed.RawResponse != nil:
 		status, code := failed.RawResponse.StatusCode, oauthErrorCode(failed.RawResponse)
 		if c.refuses(status) {
@@ -253,15 +249,15 @@ func (c *credential) describe(fetchCtx context.Context, err error) *tokenError {
 			if code != "" {
 				detail += ", " + code
 			}
-			return &tokenError{reason: fmt.Sprintf("%s rejected the token request (%s)", c.service, detail), cause: err, rejected: true}
+			return &tokenError{reason: fmt.Sprintf("%s rejected the token request (%s)", service, detail), cause: err, rejected: true}
 		}
-		reason := fmt.Sprintf("%s returned HTTP %d", c.service, status)
+		reason := fmt.Sprintf("%s returned HTTP %d", service, status)
 		if code != "" {
 			reason += " (" + code + ")"
 		}
 		return &tokenError{reason: reason, cause: err}
 	default:
-		return &tokenError{reason: "could not obtain an access token from " + c.service, cause: err}
+		return &tokenError{reason: "could not obtain an access token from " + service, cause: err}
 	}
 }
 
@@ -271,7 +267,7 @@ func (c *credential) refuses(status int) bool {
 	switch {
 	case status < 400 || status >= 500 || status == http.StatusTooManyRequests:
 		return false
-	case c.service == managedIdentityService && (status == http.StatusNotFound || status == http.StatusGone):
+	case c.kind.imds && (status == http.StatusNotFound || status == http.StatusGone):
 		return false
 	default:
 		return true
