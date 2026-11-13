@@ -306,6 +306,13 @@ func TestManagedIdentityTokenRequest(t *testing.T) {
 	}
 }
 
+func TestAnUnknownAuthenticationTypeHasNoCredential(t *testing.T) {
+	_, err := newCredentialRegistry().get(identity{authenticationType: "client-secret"})
+	if err == nil || !strings.Contains(err.Error(), `unknown authentication type "client-secret"`) {
+		t.Fatalf("err = %v, want an unknown authentication type", err)
+	}
+}
+
 // Every API and route with the same identity shares one credential, and so one token cache.
 func TestOneCredentialPerIdentity(t *testing.T) {
 	setWorkloadIdentityEnv(t, "federated-token")
