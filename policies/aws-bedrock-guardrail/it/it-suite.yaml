@@ -37,7 +37,7 @@ blocks:
   # Runners on the default gateway configuration, whose runtime has no AWS workload credentials.
   # They create their own APIs and run at the same time.
   - name: aws-bedrock-guardrail
-    parallel: 3
+    parallel: 4
     components:
       - name: platform-gateway
         db:
@@ -47,6 +47,18 @@ blocks:
       - name: aws-bedrock-guardrail
         features:
           - features/aws_bedrock_guardrail.feature
+      - name: aws-bedrock-guardrail-configuration
+        features:
+          - features/aws_bedrock_guardrail_configuration.feature
+      - name: aws-bedrock-guardrail-api-lifecycle
+        features:
+          - features/aws_bedrock_guardrail_api_lifecycle.feature
+      - name: aws-bedrock-guardrail-credentials
+        features:
+          - features/aws_bedrock_guardrail_credentials.feature
+      - name: aws-bedrock-guardrail-service-failures
+        features:
+          - features/aws_bedrock_guardrail_service_failures.feature
       - name: aws-bedrock-guardrail-validation
         features:
           - features/aws_bedrock_guardrail_validation.feature
