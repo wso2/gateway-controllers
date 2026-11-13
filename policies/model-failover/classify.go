@@ -46,10 +46,13 @@ func (p *Policy) isFailoverWorthy(status int) bool {
 // ACCEPTED LIMIT: a transport failure is graded only through some reply that does reach the
 // response phase.
 //
-// There is deliberately no isTransportFailure here. Envoy makes no PER-ATTEMPT ext_proc call for
-// a refused connection, reset or per-try timeout — there is no response to process, and the
-// upstream position is request-only — so nothing ever asks this file to classify one. A
-// predicate that looked like it handled this would be dead code that reads as coverage.
+// There is deliberately no isTransportFailure here, and the reason is narrower than "no call
+// happens". A refused attempt DOES sometimes reach the per-attempt position — Probe T2 measured
+// the upstream filter invoked for a cluster whose port refuses, on roughly half of otherwise
+// identical requests. But that position is REQUEST-ONLY: the call happens on the way out, before
+// the connection fails, and carries no outcome. Nothing ever hands this file a transport failure
+// to classify, so a predicate that looked like it handled one would be dead code that reads as
+// coverage.
 //
 // What that does NOT mean is that such failures go unrecorded. Grading happens once, downstream,
 // on whatever reply finally travels back, and the attempt count attributes it across the chain:
