@@ -31,7 +31,7 @@ Feature: API key authentication policy consistency across multiple gateways
     Given the first gateway is running
     And the second gateway is running
     And I authenticate using basic auth as "admin"
-    And I generate a unique value from "aka-multigateway-project" and store it as "projectHandle"
+    And I generate a unique resource name from "aka-multigateway-project" and store it as "projectHandle"
     And I create a project "${CTX:projectHandle}" on the control plane
 
   @aka-g09 @aka-31

@@ -19,6 +19,7 @@
 package steps
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -268,6 +269,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendConcurrentAlternating)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" with per-request headers:$`,
 		b.sendConcurrent)
+	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" with per-request body:$`,
+		b.sendConcurrentWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+)$`, b.sendUntilStatus)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) or (\d+)$`, b.sendUntilStatusOneOf)
@@ -275,10 +278,14 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendUntilStatusAt)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) with body:$`,
 		b.sendUntilStatusWithBody)
-	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until header "([^"]*)" is "([^"]*)"$`,
-		b.sendUntilHeader)
-	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until header "([^"]*)" is "([^"]*)" with body:$`,
-		b.sendUntilHeaderWithBody)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until header "([^"]*)" is( not)? "([^"]*)"$`,
+		func(ctx context.Context, method, path, name, negation, want string) error {
+			return b.sendUntilHeaderMatches(ctx, method, path, name, want, negation != "", nil)
+		})
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until header "([^"]*)" is( not)? "([^"]*)" with body:$`,
+		func(ctx context.Context, method, path, name, negation, want string, body *godog.DocString) error {
+			return b.sendUntilHeaderMatches(ctx, method, path, name, want, negation != "", body)
+		})
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until it times out after "([^"]*)" seconds with status (\d+)$`,
 		b.sendUntilTimedOut)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the JSON field "([^"]*)" has length less than (\d+) with body:$`,
@@ -639,36 +646,111 @@ func sendAllConcurrently(ctx context.Context, client *httpx.Client, requests []h
 func sendAllConcurrentlyExpecting(
 	ctx context.Context, client *httpx.Client, requests []httpx.Request, wants []int, inFlight int,
 ) error {
-	if wants != nil && len(wants) != len(requests) {
-		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), len(requests))
-	}
+	return sendEachConcurrently(ctx, client, len(requests),
+		func(i int) httpx.Request { return requests[i] }, wants, inFlight)
+}
+
+// sendEachConcurrently issues n requests, at most inFlight at a time, without retrying. It builds
+// request i only once that request holds an in-flight slot, so no more than inFlight request
+// bodies exist at a time. Request i must return wants[i]; with no wants, every response must
+// succeed.
+func sendEachConcurrently(
+	ctx context.Context, client *httpx.Client, n int, build func(i int) httpx.Request, wants []int,
+	inFlight int,
+) error {
 	if client == nil {
 		return fmt.Errorf("an HTTP client is required")
 	}
 	if inFlight <= 0 {
 		return fmt.Errorf("the in-flight request limit must be positive, got %d", inFlight)
 	}
+	if wants != nil && len(wants) != n {
+		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), n)
+	}
 	slots := make(chan struct{}, inFlight)
-	errs := make([]error, len(requests))
+	errs := make([]error, n)
 	var wg sync.WaitGroup
-	for i, req := range requests {
+	for i := range n {
 		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
-			resp, err := client.Do(ctx, req, 0, 0)
+			resp, err := client.Do(ctx, build(i), 0, 0)
 			switch {
 			case err != nil:
-				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, len(requests), err)
+				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, n, err)
 			case wants == nil && !resp.Succeeded():
-				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, len(requests), resp.Describe())
+				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, n, resp.Describe())
 			case wants != nil && resp.StatusCode != wants[i]:
 				errs[i] = fmt.Errorf("request %d of %d returned %s, want status %d",
-					i+1, len(requests), resp.Describe(), wants[i])
+					i+1, n, resp.Describe(), wants[i])
 			}
 		})
 	}
 	wg.Wait()
 	return errors.Join(errs...)
+}
+
+// requestNumberPlaceholder is replaced with the request's 1-based number in the path and body
+// of each request sendConcurrentWithBody sends.
+const requestNumberPlaceholder = "{i}"
+
+// sendConcurrentWithBody invokes a data-plane path n times concurrently. Request i (1-based)
+// replaces every {i} in the path and the body with i, so every request has its own path or
+// body. Every response must succeed. None is published, as with sendConcurrent.
+func (b *Base) sendConcurrentWithBody(ctx context.Context, n int, method, path string, body *godog.DocString) error {
+	if n <= 0 || n > maxConcurrentSendRequests {
+		return fmt.Errorf("the concurrent request count must be between 1 and %d, got %d",
+			maxConcurrentSendRequests, n)
+	}
+	if body == nil {
+		return fmt.Errorf("a per-request body is required")
+	}
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	headers := b.scenarioHeaders(ctx)
+	payload, err := b.expandBody(ctx, body, headers)
+	if err != nil {
+		return err
+	}
+	build, err := numberedRequests(n, strings.ToUpper(method), resolved, payload, b.requestHost(ctx), headers, b.gatewayURL)
+	if err != nil {
+		return err
+	}
+	httpx.ClearPublished(ctx)
+	return sendEachConcurrently(ctx, b.funnel.Client(), n, build, nil, maxConcurrentSendInFlight)
+}
+
+// numberedRequests returns a builder of n requests, which replaces {i} in the path and body of
+// request i (0-based index, 1-based number) with its number. At least one of them must contain
+// {i}, or every request would be the same. The URLs are resolved here, so a bad path fails
+// before any request is sent. Each body is built only when its request is built.
+func numberedRequests(
+	n int, method, path string, body []byte, host string, shared map[string]string,
+	gatewayURL func(string) (string, error),
+) (func(i int) httpx.Request, error) {
+	if !strings.Contains(path, requestNumberPlaceholder) && !bytes.Contains(body, []byte(requestNumberPlaceholder)) {
+		return nil, fmt.Errorf("the path or the body must contain %s to vary between requests", requestNumberPlaceholder)
+	}
+	urls := make([]string, n)
+	for i := range urls {
+		url, err := gatewayURL(strings.ReplaceAll(path, requestNumberPlaceholder, strconv.Itoa(i+1)))
+		if err != nil {
+			return nil, err
+		}
+		urls[i] = url
+	}
+	return func(i int) httpx.Request {
+		headers := maps.Clone(shared)
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		return httpx.Request{
+			Method: method, URL: urls[i], Headers: headers, Host: host,
+			Body: bytes.ReplaceAll(body, []byte(requestNumberPlaceholder), []byte(strconv.Itoa(i+1))),
+		}
+	}, nil
 }
 
 // sendUntilStatus invokes a data-plane path until it answers with the wanted status.
@@ -824,14 +906,16 @@ func (b *Base) sendUntilTimedOut(ctx context.Context, method, path, wantSeconds 
 // Costs exactly one request against whatever bucket is live once the condition holds. Polls
 // taken before that are charged to the OLD bucket, so they spend nothing the scenario counts.
 func (b *Base) sendUntilHeader(ctx context.Context, method, path, name, want string) error {
-	return b.sendUntilHeaderWithBody(ctx, method, path, name, want, nil)
+	return b.sendUntilHeaderMatches(ctx, method, path, name, want, false, nil)
 }
 
-// sendUntilHeaderWithBody polls a data-plane path, with a body when one is given, until a
-// response header carries the wanted value. See sendUntilHeader for why a header (rather than a
-// status) is the right condition for this class of wait.
-func (b *Base) sendUntilHeaderWithBody(
-	ctx context.Context, method, path, name, want string, body *godog.DocString,
+// sendUntilHeaderMatches polls a data-plane path, with a body when one is given, until a
+// response header carries the wanted value or, when negate is set, any other present value. See
+// sendUntilHeader for why a header (rather than a status) is the right condition for this class
+// of wait. The negated form waits for a value that is not known in advance, such as refreshed
+// credentials, to replace a known one.
+func (b *Base) sendUntilHeaderMatches(
+	ctx context.Context, method, path, name, want string, negate bool, body *godog.DocString,
 ) error {
 	resolved, err := stepscommon.Expand(ctx, path)
 	if err != nil {
@@ -862,10 +946,33 @@ func (b *Base) sendUntilHeaderWithBody(
 			}
 			return response, nil
 		},
+		headerCondition(name, wantValue, negate),
+		fmt.Sprintf("waiting for %s %s to answer with header %s%s: %q",
+			strings.ToUpper(method), url, name, negatedPhrase(negate), wantValue))
+}
+
+func negatedPhrase(negate bool) string {
+	if negate {
+		return " other than"
+	}
+	return ""
+}
+
+// headerCondition reports whether a response's header equals want or, when negate is set, is
+// present and differs from it. A negated wait keeps polling while the header is absent, so a
+// transient error response without the header does not end a wait for a replacement value.
+func headerCondition(name, want string, negate bool) stepscommon.ResponseCondition {
+	return func(r *httpx.Response) bool {
+		if r == nil {
+			return false
+		}
 		// Get is case-insensitive per RFC 7230, matching responseHeaderEquals.
-		func(r *httpx.Response) bool { return r != nil && r.Headers.Get(name) == wantValue },
-		fmt.Sprintf("waiting for %s %s to answer with header %s: %q",
-			strings.ToUpper(method), url, name, wantValue))
+		got := r.Headers.Get(name)
+		if negate {
+			return got != "" && got != want
+		}
+		return got == want
+	}
 }
 
 // sendUntilJSONFieldStringLength polls a data-plane path, with a body, until a JSON response

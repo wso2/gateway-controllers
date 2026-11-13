@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": -32602,
+      "message": "Missing MCP resources name"
+    },
+    "id": 31,
+    "jsonrpc": "2.0"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}
