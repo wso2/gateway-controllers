@@ -90,6 +90,11 @@ jobs:
     needs: detect
     if: needs.detect.outputs.has_tests == 'true'
     runs-on: ubuntu-24.04
+    # Job-level permissions replace the workflow's, so contents is repeated. packages: read lets
+    # GITHUB_TOKEN pull the testbench image from GHCR.
+    permissions:
+      contents: read
+      packages: read
     strategy:
       fail-fast: false
       max-parallel: 3
@@ -125,6 +130,15 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
+      # Pulling a private GHCR image needs credentials; docker pull sends none unless logged in.
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        continue-on-error: true
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       # One run per gateway version builds the gateway once, from every policy of the repository on
       # the base images of that version, then executes the suite of every selected policy in turn
       # against that build and fails if any of them fails.
@@ -143,6 +157,7 @@ jobs:
           if docker pull "$image"; then
             exit 0
           fi
+          echo "::warning::Could not pull $image; building it from the pinned module source instead"
           dir="$(go list -m -f '{{.Dir}}' "$module")"
           docker build -f "$dir/testbench/Dockerfile" -t "$image" "$dir"
 
