@@ -1,0 +1,106 @@
+name: azure-authentication
+version: v0.1.0
+displayName: Azure Authentication
+description: |
+  Authenticates requests to Azure-hosted backends, such as Azure AI Foundry and
+  Azure OpenAI, with a short-lived Microsoft Entra ID access token instead of a
+  static API key. The token is injected into a request header (by default
+  "Authorization: Bearer <token>") before the request is forwarded upstream.
+  With authenticationType "workload-identity", the gateway exchanges the
+  Kubernetes service account token that AKS Workload Identity projects into the
+  pod for an access token of the user-assigned managed identity federated with
+  that service account; no secret is configured on the API. With
+  authenticationType "managed-identity", the gateway gets the access token for a
+  managed identity assigned to the host it runs on: from the Azure Instance
+  Metadata Service of a VM, VM scale set or AKS node, or from the managed
+  identity endpoint of App Service or Azure Arc. With authenticationType
+  "container-apps", the gateway runs in Azure Container Apps and gets the access
+  token for a managed identity of its container app from the Container Apps
+  identity endpoint. Tokens are obtained and cached by the Azure Identity SDK
+  for Go, one cache per identity, shared across routes.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    authenticationType:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        How the access token is obtained. "workload-identity" uses AKS Workload
+        Identity: the gateway pod must run with a service account federated with
+        a Microsoft Entra ID identity, so that the Workload Identity webhook
+        injects AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_FEDERATED_TOKEN_FILE
+        (and, for sovereign clouds, AZURE_AUTHORITY_HOST). "managed-identity" gets
+        the token for an identity assigned to the host the gateway runs on: from
+        the Azure Instance Metadata Service (IMDS) of a VM, VM scale set or AKS
+        node, or from the managed identity endpoint of App Service or Azure Arc.
+        "container-apps" gets the token for a managed identity of the Azure
+        Container Apps app the gateway runs in, from the identity endpoint
+        Container Apps sets in IDENTITY_ENDPOINT and IDENTITY_HEADER; the policy
+        fails to initialize if the app has no managed identity.
+      enum:
+        - workload-identity
+        - managed-identity
+        - container-apps
+    scope:
+      type: string
+      x-wso2-policy-advanced-param: false
+      pattern: "^\\S+/\\.default$"
+      default: "https://ai.azure.com/.default"
+      description: |
+        Scope of the requested access token: the target resource followed by
+        "/.default". Azure AI Foundry uses "https://ai.azure.com/.default";
+        Azure OpenAI and Azure AI Content Safety use
+        "https://cognitiveservices.azure.com/.default".
+    clientId:
+      type: string
+      x-wso2-policy-advanced-param: true
+      pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      description: |
+        Application (client) ID of the managed identity to use. With
+        workload-identity, defaults to AZURE_CLIENT_ID and must have a federated
+        credential that trusts the gateway pod's service account. With
+        managed-identity, selects a user-assigned managed identity of the host;
+        leave it unset for the host's default identity: its system-assigned
+        identity, or its only user-assigned identity if it has none. With
+        container-apps, selects a user-assigned managed identity of the container
+        app; leave it unset for the app's system-assigned identity, which the app
+        must then have.
+    tenantId:
+      type: string
+      x-wso2-policy-advanced-param: true
+      pattern: "^[A-Za-z0-9][A-Za-z0-9-]*(\\.[A-Za-z0-9-]+)*$"
+      description: |
+        Microsoft Entra tenant ID (GUID) or domain name. Defaults to the
+        AZURE_TENANT_ID environment variable. Only for workload-identity; must
+        not be set with managed-identity or container-apps.
+    headerName:
+      type: string
+      x-wso2-policy-advanced-param: true
+      minLength: 1
+      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+      default: "Authorization"
+      description: |
+        Request header the access token is injected into.
+    valuePrefix:
+      type: string
+      x-wso2-policy-advanced-param: true
+      pattern: '^[^\x00-\x1F\x7F]*$'
+      default: "Bearer"
+      description: |
+        Prefix placed before the access token, separated by a space. Use an
+        empty string to send the token alone. Control characters are not
+        allowed.
+    tokenRequestTimeout:
+      type: string
+      x-wso2-policy-advanced-param: true
+      pattern: '^(([1-9]|[12][0-9]|30)s|([1-9][0-9]{0,3}|[12][0-9]{4}|30000)ms)$'
+      default: "10s"
+      description: |
+        Maximum time to obtain a token from Microsoft Entra ID or the managed
+        identity endpoint, including retries: whole seconds from "1s" to "30s",
+        or milliseconds from "1ms" to "30000ms". Requests that cannot get a
+        token in time fail with 502 Bad Gateway.
+  required:
+    - authenticationType
