@@ -34,23 +34,29 @@ defaults:
     propagation: 60s
 
 blocks:
+  # Runners on the default gateway configuration, whose runtime has no AWS workload credentials.
+  # They create their own APIs and run at the same time.
   - name: aws-bedrock-guardrail
-    parallel: 1
+    parallel: 3
     components:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        overlay: overlays/gateway.toml
       - name: testbench
     runners:
-      - name: aws-bedrock-guardrail-legacy
-        tags: "gateway-version<=1.2.0"
+      - name: aws-bedrock-guardrail
         features:
           - features/aws_bedrock_guardrail.feature
-      - name: aws-bedrock-guardrail
+      - name: aws-bedrock-guardrail-validation
+        features:
+          - features/aws_bedrock_guardrail_validation.feature
+      - name: aws-bedrock-guardrail-error-compatibility
         features:
           - features/aws_bedrock_guardrail_error_compatibility.feature
-  - name: aws-bedrock-guardrail-default
+
+  # The restart runner restarts gateway services, which would interrupt any runner beside it, so it
+  # gets a block of its own.
+  - name: aws-bedrock-guardrail-restart
     parallel: 1
     components:
       - name: platform-gateway
@@ -58,7 +64,28 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
-      - name: aws-bedrock-guardrail
-        tags: "gateway-version>1.2.0"
+      - name: aws-bedrock-guardrail-restart
         features:
-          - features/aws_bedrock_guardrail.feature
+          - features/aws_bedrock_guardrail_restart.feature
+
+  # The short-message-timeout overlay makes the gateway answer a request whose policy processing
+  # takes longer than 5 seconds, and the staged credentials file gives the gateway runtime AWS
+  # workload credentials. Both apply to every runner in a block, so these runners get a block of
+  # their own.
+  - name: aws-bedrock-guardrail-credentials-short-timeout
+    parallel: 2
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/short-message-timeout.toml
+        stagedFiles:
+          aws-credentials: tests/framework/core/catalog/platformgateway/resources/aws/workload-credentials
+      - name: testbench
+    runners:
+      - name: aws-bedrock-guardrail-workload-credentials
+        features:
+          - features/aws_bedrock_guardrail_workload_credentials.feature
+      - name: aws-bedrock-guardrail-policy-timeout
+        features:
+          - features/aws_bedrock_guardrail_policy_timeout.feature
