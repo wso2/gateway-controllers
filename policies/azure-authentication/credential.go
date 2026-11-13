@@ -131,7 +131,7 @@ func (r *credentialRegistry) get(id identity) (*credential, error) {
 	c := &credential{
 		sdk:        sdkCredential,
 		service:    entraService,
-		fetching:   make(chan struct{}, 1),
+		slots:      make(map[string]chan struct{}),
 		rejections: make(map[string]rejection),
 	}
 	if id.authenticationType == AuthenticationTypeManagedIdentity {
@@ -147,12 +147,29 @@ type credential struct {
 	sdk     azcore.TokenCredential
 	service string // entraService or managedIdentityService
 
-	// fetching admits one GetToken at a time. The SDK fetches one token at a time per credential
-	// anyway, behind a lock that doesn't watch the caller's context; waiting here does.
-	fetching chan struct{}
-
 	mu         sync.Mutex
+	slots      map[string]chan struct{} // see slot
 	rejections map[string]rejection
+}
+
+// slot returns the admission slot a GetToken for scope waits for, one caller at a time. The
+// workload identity SDK fetches one token at a time per credential, behind a lock that doesn't
+// watch the caller's context, so all its scopes share one slot and the wait honours the caller's
+// timeout. The managed identity SDK fetches each scope on its own, so each scope has its own slot
+// and a cached token never waits for another scope's fetch.
+func (c *credential) slot(scope string) chan struct{} {
+	key := scope
+	if c.service == entraService {
+		key = ""
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s, ok := c.slots[key]
+	if !ok {
+		s = make(chan struct{}, 1)
+		c.slots[key] = s
+	}
+	return s
 }
 
 type rejection struct {
@@ -187,9 +204,10 @@ func (c *credential) token(ctx context.Context, scope string, timeout time.Durat
 
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	slot := c.slot(scope)
 	select {
-	case c.fetching <- struct{}{}:
-		defer func() { <-c.fetching }()
+	case slot <- struct{}{}:
+		defer func() { <-slot }()
 	case <-fetchCtx.Done():
 		return "", c.describe(fetchCtx, fetchCtx.Err())
 	}
