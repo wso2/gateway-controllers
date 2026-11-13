@@ -38,21 +38,6 @@ import (
 )
 
 const (
-	// AuthenticationTypeWorkloadIdentity exchanges the pod's AKS Workload Identity federated
-	// token for an access token.
-	AuthenticationTypeWorkloadIdentity = "workload-identity"
-
-	// AuthenticationTypeManagedIdentity gets the access token for an identity assigned to the host:
-	// from the Azure Instance Metadata Service (IMDS) on a VM, VM scale set or AKS node, or from the
-	// host's own managed identity endpoint on App Service, Container Apps or Azure Arc.
-	AuthenticationTypeManagedIdentity = "managed-identity"
-
-	// AuthType is the AuthContext.AuthType value recorded for workload-identity.
-	AuthType = "azure-workload-identity"
-
-	// AuthTypeManagedIdentity is the AuthContext.AuthType value recorded for managed-identity.
-	AuthTypeManagedIdentity = "azure-managed-identity"
-
 	// hostDefaultCredentialID is the AuthContext.CredentialID of a managed identity without a
 	// clientId. The host then uses its system-assigned identity or, if it has none, its only
 	// user-assigned identity, so the policy does not know which one it is.
@@ -92,18 +77,18 @@ var (
 // Policy injects an Entra ID access token for the gateway's workload identity or managed identity
 // into a request header before the request is forwarded upstream.
 type Policy struct {
-	authenticationType string
-	scope              string
-	tenantID           string // workload-identity only
-	clientID           string // "" for a managed identity without clientId: the host's default
-	headerName         string
-	valuePrefix        string
-	timeout            time.Duration
-	credential         *credential
+	kind        *authenticationKind
+	scope       string
+	tenantID    string // only for a kind that usesTenant
+	clientID    string // "" for a host's identity without clientId: the host's default
+	headerName  string
+	valuePrefix string
+	timeout     time.Duration
+	credential  *credential
 }
 
 type params struct {
-	authenticationType  string
+	kind                *authenticationKind
 	scope               string
 	clientID            string
 	tenantID            string
@@ -120,48 +105,44 @@ func GetPolicy(metadata policy.PolicyMetadata, rawParams map[string]interface{})
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
-	cred, err := credentials.get(identity{authenticationType: p.authenticationType, clientID: p.clientID, tenantID: p.tenantID})
+	cred, err := credentials.get(identity{authenticationType: p.kind.name, clientID: p.clientID, tenantID: p.tenantID})
 	if err != nil {
-		if p.authenticationType == AuthenticationTypeManagedIdentity {
-			return nil, fmt.Errorf("managed identity is not available: %w", err)
-		}
-		return nil, fmt.Errorf("workload identity is not available (the AKS Workload Identity webhook normally sets "+
-			"AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_FEDERATED_TOKEN_FILE): %w", err)
+		return nil, fmt.Errorf("%s: %w", p.kind.unavailable, err)
 	}
 
 	pol := &Policy{
-		authenticationType: p.authenticationType,
-		scope:              p.scope,
-		clientID:           p.clientID,
-		headerName:         p.headerName,
-		valuePrefix:        p.valuePrefix,
-		timeout:            p.tokenRequestTimeout,
-		credential:         cred,
+		kind:        p.kind,
+		scope:       p.scope,
+		clientID:    p.clientID,
+		headerName:  p.headerName,
+		valuePrefix: p.valuePrefix,
+		timeout:     p.tokenRequestTimeout,
+		credential:  cred,
 	}
-	if p.authenticationType == AuthenticationTypeWorkloadIdentity {
-		// The credential falls back to the webhook's variables; resolve them the same way for the
+	if p.kind.usesTenant {
+		// The credential falls back to the AZURE_* variables; resolve them the same way for the
 		// AuthContext and the log.
 		pol.clientID = cmp.Or(p.clientID, os.Getenv("AZURE_CLIENT_ID"))
 		pol.tenantID = cmp.Or(p.tenantID, os.Getenv("AZURE_TENANT_ID"))
 	}
 
 	slog.Debug("AzureAuthentication: policy initialized", append(append([]any{
-		"route", metadata.RouteName, "apiName", metadata.APIName, "authenticationType", p.authenticationType},
+		"route", metadata.RouteName, "apiName", metadata.APIName, "authenticationType", p.kind.name},
 		pol.identityAttrs()...), "headerName", p.headerName)...)
 
 	return pol, nil
 }
 
 // identityAttrs are the log attributes naming the policy's identity and scope: the tenant only
-// for workload-identity, and host-default for a managed identity without a client ID.
+// for a kind that usesTenant, and host-default for a host's identity without a client ID.
 func (p *Policy) identityAttrs() []any {
-	if p.authenticationType == AuthenticationTypeManagedIdentity {
+	if !p.kind.usesTenant {
 		return []any{"clientId", p.credentialID(), "scope", p.scope}
 	}
 	return []any{"tenantId", p.tenantID, "clientId", p.clientID, "scope", p.scope}
 }
 
-// credentialID is the identity's client ID, or host-default for a managed identity without one.
+// credentialID is the identity's client ID, or host-default for a host's identity without one.
 func (p *Policy) credentialID() string {
 	if p.clientID == "" {
 		return hostDefaultCredentialID
@@ -192,11 +173,12 @@ func extractParams(raw map[string]interface{}) (params, error) {
 	if err = rejectUnknownParams(raw); err != nil {
 		return p, err
 	}
-	if p.authenticationType, err = requiredString(raw, "authenticationType"); err != nil {
+	authenticationType, err := requiredString(raw, "authenticationType")
+	if err != nil {
 		return p, err
 	}
-	if p.authenticationType != AuthenticationTypeWorkloadIdentity && p.authenticationType != AuthenticationTypeManagedIdentity {
-		return p, fmt.Errorf("'authenticationType' must be %q or %q", AuthenticationTypeWorkloadIdentity, AuthenticationTypeManagedIdentity)
+	if p.kind = kindOf(authenticationType); p.kind == nil {
+		return p, fmt.Errorf("'authenticationType' must be %s", listing(authenticationTypeNames(), "or"))
 	}
 
 	if p.scope, err = optionalString(raw, "scope", defaultScope); err != nil {
@@ -206,8 +188,8 @@ func extractParams(raw map[string]interface{}) (params, error) {
 		return p, fmt.Errorf("'scope' must be a single scope ending in /.default, e.g. %s", defaultScope)
 	}
 
-	// For workload-identity both fall back to the environment; a managed identity's tenant comes
-	// from the identity itself.
+	// For a kind that usesTenant both fall back to the environment; a host's identity takes its
+	// tenant from the identity itself.
 	if p.clientID, err = optionalString(raw, "clientId", ""); err != nil {
 		return p, err
 	}
@@ -217,8 +199,8 @@ func extractParams(raw map[string]interface{}) (params, error) {
 	if p.tenantID, err = optionalString(raw, "tenantId", ""); err != nil {
 		return p, err
 	}
-	if p.authenticationType == AuthenticationTypeManagedIdentity && p.tenantID != "" {
-		return p, fmt.Errorf("'tenantId' is not used with authenticationType %q", AuthenticationTypeManagedIdentity)
+	if !p.kind.usesTenant && p.tenantID != "" {
+		return p, fmt.Errorf("'tenantId' is not used with authenticationType %q", p.kind.name)
 	}
 	if p.tenantID != "" && !tenantPattern.MatchString(p.tenantID) {
 		return p, errors.New("'tenantId' must be a tenant ID (GUID) or a domain name")
@@ -266,12 +248,20 @@ func rejectUnknownParams(raw map[string]interface{}) error {
 		return nil
 	}
 	slices.Sort(unknown)
-	known := strings.Join(paramNames[:len(paramNames)-1], ", ") + " and " + paramNames[len(paramNames)-1]
+	known := listing(paramNames, "and")
 	if len(unknown) == 1 {
 		return fmt.Errorf("%s is not a parameter of the azure-authentication policy; its parameters are %s", unknown[0], known)
 	}
 	return fmt.Errorf("%s are not parameters of the azure-authentication policy; its parameters are %s",
 		strings.Join(unknown, ", "), known)
+}
+
+// listing joins items for a message: "a", "a or b", "a, b or c".
+func listing(items []string, conjunction string) string {
+	if len(items) == 1 {
+		return items[0]
+	}
+	return strings.Join(items[:len(items)-1], ", ") + " " + conjunction + " " + items[len(items)-1]
 }
 
 // requiredString returns a trimmed, non-empty string param.
@@ -352,7 +342,7 @@ func (p *Policy) authFailure(reqCtx *policy.RequestHeaderContext, err *tokenErro
 	if err.cached {
 		level = slog.LevelDebug
 	}
-	slog.Log(context.Background(), level, "AzureAuthentication: could not obtain an access token from "+p.credential.service, attrs...)
+	slog.Log(context.Background(), level, "AzureAuthentication: could not obtain an access token from "+p.kind.service, attrs...)
 
 	p.recordAuth(reqCtx, false)
 	return failureResponse(err.reason)
@@ -396,19 +386,16 @@ func (p *Policy) recordAuth(reqCtx *policy.RequestHeaderContext, ok bool) {
 	if reqCtx == nil || reqCtx.SharedContext == nil {
 		return
 	}
-	authType := AuthType
 	props := map[string]string{
-		"authenticationType": p.authenticationType,
+		"authenticationType": p.kind.name,
 		"scope":              p.scope,
 	}
-	if p.authenticationType == AuthenticationTypeManagedIdentity {
-		authType = AuthTypeManagedIdentity
-	} else {
+	if p.kind.usesTenant {
 		props["tenantId"] = p.tenantID
 	}
 	reqCtx.AuthContext = &policy.AuthContext{
 		Authenticated: ok,
-		AuthType:      authType,
+		AuthType:      p.kind.authType,
 		CredentialID:  p.credentialID(),
 		Properties:    props,
 		Previous:      reqCtx.AuthContext,
