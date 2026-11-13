@@ -271,6 +271,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendConcurrent)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" with per-request body:$`,
 		b.sendConcurrentWithBody)
+	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" cycling through:$`,
+		b.sendConcurrentCycling)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+)$`, b.sendUntilStatus)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) or (\d+)$`, b.sendUntilStatusOneOf)
@@ -667,6 +669,53 @@ func sendEachConcurrently(
 	if wants != nil && len(wants) != n {
 		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), n)
 	}
+	var expected []concurrentExpectation
+	if wants != nil {
+		expected = make([]concurrentExpectation, n)
+		for i, want := range wants {
+			expected[i] = concurrentExpectation{status: want}
+		}
+	}
+	return sendEachConcurrentlyChecking(ctx, client, n, build, expected, inFlight)
+}
+
+// concurrentExpectation is what the response to one concurrent request must be: the status, and
+// text its body contains. A zero status accepts any successful status; an empty contains checks
+// nothing in the body.
+type concurrentExpectation struct {
+	status   int
+	contains string
+}
+
+// check returns why resp does not meet the expectation, or nil.
+func (e concurrentExpectation) check(resp *httpx.Response) error {
+	switch {
+	case e.status == 0 && !resp.Succeeded():
+		return fmt.Errorf("returned %s", resp.Describe())
+	case e.status != 0 && resp.StatusCode != e.status:
+		return fmt.Errorf("returned %s, want status %d", resp.Describe(), e.status)
+	case e.contains != "" && !strings.Contains(resp.Text(), e.contains):
+		return fmt.Errorf("returned a body without %q: %s", e.contains, resp.Describe())
+	}
+	return nil
+}
+
+// sendEachConcurrentlyChecking is sendEachConcurrently with a full expectation per request. The
+// response to request i must meet expected[i]; with no expectations, every response must
+// succeed.
+func sendEachConcurrentlyChecking(
+	ctx context.Context, client *httpx.Client, n int, build func(i int) httpx.Request,
+	expected []concurrentExpectation, inFlight int,
+) error {
+	if client == nil {
+		return fmt.Errorf("an HTTP client is required")
+	}
+	if inFlight <= 0 {
+		return fmt.Errorf("the in-flight request limit must be positive, got %d", inFlight)
+	}
+	if expected != nil && len(expected) != n {
+		return fmt.Errorf("got %d expectations for %d requests", len(expected), n)
+	}
 	slots := make(chan struct{}, inFlight)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -674,15 +723,15 @@ func sendEachConcurrently(
 		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
+			var want concurrentExpectation
+			if expected != nil {
+				want = expected[i]
+			}
 			resp, err := client.Do(ctx, build(i), 0, 0)
-			switch {
-			case err != nil:
+			if err != nil {
 				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, n, err)
-			case wants == nil && !resp.Succeeded():
-				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, n, resp.Describe())
-			case wants != nil && resp.StatusCode != wants[i]:
-				errs[i] = fmt.Errorf("request %d of %d returned %s, want status %d",
-					i+1, n, resp.Describe(), wants[i])
+			} else if err := want.check(resp); err != nil {
+				errs[i] = fmt.Errorf("request %d of %d %w", i+1, n, err)
 			}
 		})
 	}
@@ -691,7 +740,8 @@ func sendEachConcurrently(
 }
 
 // requestNumberPlaceholder is replaced with the request's 1-based number in the path and body
-// of each request sendConcurrentWithBody sends.
+// of each request sendConcurrentWithBody sends, and in the path, body and expected text of each
+// request sendConcurrentCycling sends.
 const requestNumberPlaceholder = "{i}"
 
 // sendConcurrentWithBody invokes a data-plane path n times concurrently. Request i (1-based)
@@ -751,6 +801,119 @@ func numberedRequests(
 			Body: bytes.ReplaceAll(body, []byte(requestNumberPlaceholder), []byte(strconv.Itoa(i+1))),
 		}
 	}, nil
+}
+
+// cycledRequest is one request row of the table sendConcurrentCycling cycles through.
+type cycledRequest struct {
+	body     string
+	status   int
+	contains string
+}
+
+// sendConcurrentCycling invokes a data-plane path n times concurrently. The table's header row
+// names its columns: body, status and, optionally, contains. Request i (1-based) sends the body
+// of request row ((i-1) mod rows), and its response must have that row's status and contain its
+// text. Every {i} in the path, a body or an expected text is replaced with i, so related requests
+// and responses can be told apart. Like sendConcurrent, it publishes no response.
+func (b *Base) sendConcurrentCycling(ctx context.Context, n int, method, path string, table *godog.Table) error {
+	if n <= 0 || n > maxConcurrentSendRequests {
+		return fmt.Errorf("the concurrent request count must be between 1 and %d, got %d",
+			maxConcurrentSendRequests, n)
+	}
+	rows, err := cycledRequests(ctx, table)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	urls := make([]string, n)
+	expected := make([]concurrentExpectation, n)
+	for i := range n {
+		number := strconv.Itoa(i + 1)
+		if urls[i], err = b.gatewayURL(strings.ReplaceAll(resolved, requestNumberPlaceholder, number)); err != nil {
+			return err
+		}
+		row := rows[i%len(rows)]
+		expected[i] = concurrentExpectation{
+			status:   row.status,
+			contains: strings.ReplaceAll(row.contains, requestNumberPlaceholder, number),
+		}
+	}
+	method = strings.ToUpper(method)
+	host := b.requestHost(ctx)
+	shared := b.scenarioHeaders(ctx)
+	build := func(i int) httpx.Request {
+		headers := maps.Clone(shared)
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		var body []byte
+		if row := rows[i%len(rows)]; row.body != "" {
+			body = []byte(strings.ReplaceAll(row.body, requestNumberPlaceholder, strconv.Itoa(i+1)))
+			if headers["Content-Type"] == "" {
+				headers["Content-Type"] = "application/json"
+			}
+		}
+		return httpx.Request{Method: method, URL: urls[i], Headers: headers, Host: host, Body: body}
+	}
+	httpx.ClearPublished(ctx)
+	return sendEachConcurrentlyChecking(ctx, b.funnel.Client(), n, build, expected, maxConcurrentSendInFlight)
+}
+
+// cycledRequests reads the table of sendConcurrentCycling, expanding context references in every
+// cell.
+func cycledRequests(ctx context.Context, table *godog.Table) ([]cycledRequest, error) {
+	if table == nil || len(table.Rows) < 2 {
+		return nil, fmt.Errorf("a table with a header row and at least one request row is required")
+	}
+	columns := map[string]int{}
+	for i, cell := range table.Rows[0].Cells {
+		name := strings.TrimSpace(cell.Value)
+		if name != "body" && name != "status" && name != "contains" {
+			return nil, fmt.Errorf("unknown column %q; the columns are body, status and contains", name)
+		}
+		if _, seen := columns[name]; seen {
+			return nil, fmt.Errorf("duplicate column %q", name)
+		}
+		columns[name] = i
+	}
+	for _, name := range []string{"body", "status"} {
+		if _, ok := columns[name]; !ok {
+			return nil, fmt.Errorf("the %s column is required", name)
+		}
+	}
+	rows := make([]cycledRequest, 0, len(table.Rows)-1)
+	for i, row := range table.Rows[1:] {
+		if row == nil || len(row.Cells) != len(columns) {
+			return nil, fmt.Errorf("request row %d must contain %d cells", i+1, len(columns))
+		}
+		cell := func(name string) (string, error) {
+			at, ok := columns[name]
+			if !ok {
+				return "", nil
+			}
+			return stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[at].Value))
+		}
+		var parsed cycledRequest
+		var err error
+		if parsed.body, err = cell("body"); err != nil {
+			return nil, err
+		}
+		if parsed.contains, err = cell("contains"); err != nil {
+			return nil, err
+		}
+		status, err := cell("status")
+		if err != nil {
+			return nil, err
+		}
+		if parsed.status, err = strconv.Atoi(status); err != nil || parsed.status < 100 || parsed.status > 599 {
+			return nil, fmt.Errorf("request row %d has an invalid status %q", i+1, status)
+		}
+		rows = append(rows, parsed)
+	}
+	return rows, nil
 }
 
 // sendUntilStatus invokes a data-plane path until it answers with the wanted status.
