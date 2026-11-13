@@ -497,6 +497,43 @@ func TestWaitingForAnotherFetchStopsAtTheTimeout(t *testing.T) {
 	}
 }
 
+// The managed identity SDK fetches each scope on its own, so a scope with a cached token answers at
+// once while another scope's fetch is slow.
+func TestAManagedIdentityCacheHitDoesNotWaitForAnotherScope(t *testing.T) {
+	cached, slow := uniqueScope(t), uniqueScope(t)
+	slowResource := strings.TrimSuffix(slow, "/.default")
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	useFakeAzure(t, func(ctx context.Context, r tokenRequest) (int, any) {
+		if r.url.Query().Get("resource") == slowResource {
+			started <- struct{}{}
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+		return http.StatusOK, imdsToken("tok-1", r.url.Query().Get("resource"))
+	})
+	defer close(release)
+
+	cred, err := credentials.get(identity{authenticationType: AuthenticationTypeManagedIdentity, clientID: testClientID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, terr := cred.token(context.Background(), cached, time.Second); terr != nil {
+		t.Fatalf("token: %v", terr)
+	}
+	go cred.token(context.Background(), slow, 5*time.Second)
+	<-started
+
+	start := time.Now()
+	if tok, terr := cred.token(context.Background(), cached, 100*time.Millisecond); terr != nil || tok != "tok-1" {
+		t.Fatalf("token = %q, error = %+v; want the cached token", tok, terr)
+	}
+	if elapsed := time.Since(start); elapsed > 50*time.Millisecond {
+		t.Fatalf("the cached token took %v, want it at once", elapsed)
+	}
+}
+
 // A token response without a token is a failure, not an empty Authorization header.
 func TestAnEmptyTokenIsAFailure(t *testing.T) {
 	scope := uniqueScope(t)
