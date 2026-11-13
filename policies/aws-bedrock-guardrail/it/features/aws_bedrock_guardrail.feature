@@ -24,6 +24,7 @@ Feature: AWS Bedrock guardrail policy
   Background:
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
+    And I resolve the "capture" service URL at "" and store it as "captureUpstream"
 
   Scenario: Request with safe content passes through
     Given I generate a unique value from "bedrock-safe-request" and store it as "apiName"
@@ -86,7 +87,7 @@ Feature: AWS Bedrock guardrail policy
       | spec.version           | ${CTX:apiVersion}                 |
       | spec.context           | ${CTX:apiContext}/$version        |
       | spec.upstream.main.url | http://testbench:3002              |
-      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"request":{"showAssessment":true}}}]},{"method":"GET","path":"/health"}] |
+      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"request":{"jsonPath":"","showAssessment":true}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
@@ -97,7 +98,9 @@ Feature: AWS Bedrock guardrail policy
       """
     Then the response status code should be 422
     And the response should be valid JSON
-    And the response body should contain "assessments"
+    And the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
+    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.assessments.contentPolicy.filters[0].type" should be "VIOLENCE"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -113,11 +116,16 @@ Feature: AWS Bedrock guardrail policy
       | spec.version           | ${CTX:apiVersion}                 |
       | spec.context           | ${CTX:apiContext}/$version        |
       | spec.upstream.main.url | http://testbench:3002              |
-      | spec.operations        | [{"method":"GET","path":"/data","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"response":{"jsonPath":"","showAssessment":false}}}]},{"method":"GET","path":"/health"}] |
+      | spec.operations        | [{"method":"GET","path":"/data","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"response":{"enabled":true,"jsonPath":"","showAssessment":false}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/data" until status 200
+
+    # The echo reflects the query, so this response carries "violence" and is blocked.
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/data?topic=violence"
+    Then the response status code should be 422
+    And the JSON response field "message.direction" should be "RESPONSE"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -164,18 +172,22 @@ Feature: AWS Bedrock guardrail policy
       | spec.displayName       | ${CTX:apiName}                    |
       | spec.version           | ${CTX:apiVersion}                 |
       | spec.context           | ${CTX:apiContext}/$version        |
-      | spec.upstream.main.url | http://testbench:3002              |
+      | spec.upstream.main.url | ${CTX:captureUpstream}/${CTX:apiName} |
       | spec.operations        | [{"method":"POST","path":"/anything","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"request":{"jsonPath":"","redactPII":false},"response":{"enabled":true,"jsonPath":""}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
-    # The echo upstream reflects the request body, so PII restoration is verified by seeing
-    # the ORIGINAL address in the final client-visible response.
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/anything" until status 200 with body:
       """
       {"message":"Contact me at mask-test@example.com"}
       """
     Then the response body should contain "mask-test@example.com"
+    And the response body should not contain "EMAIL_0000"
+
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/anything"
+    Then the response status code should be 200
+    And the JSON response field "body" should contain "Contact me at EMAIL_0000"
+    And the response body should not contain "mask-test@example.com"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -216,7 +228,7 @@ Feature: AWS Bedrock guardrail policy
       | spec.version           | ${CTX:apiVersion}                 |
       | spec.context           | ${CTX:apiContext}/$version        |
       | spec.upstream.main.url | http://testbench:3002              |
-      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"request":{"jsonPath":""},"response":{"jsonPath":""}}}]},{"method":"GET","path":"/health"}] |
+      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"request":{"jsonPath":""},"response":{"enabled":true,"jsonPath":""}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
@@ -224,6 +236,22 @@ Feature: AWS Bedrock guardrail policy
       """
       {"message":"Safe request content"}
       """
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message":"This request contains violence"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.direction" should be "REQUEST"
+
+    # The request phase checks only the body. The echo reflects the query, so only the response
+    # carries "violence".
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate?topic=violence" with body:
+      """
+      {"message":"Safe request content"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.direction" should be "RESPONSE"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -344,7 +372,7 @@ Feature: AWS Bedrock guardrail policy
       | spec.version           | ${CTX:apiVersion}                 |
       | spec.context           | ${CTX:apiContext}/$version        |
       | spec.upstream.main.url | http://testbench:3002              |
-      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"request":{"showAssessment":true}}}]},{"method":"GET","path":"/health"}] |
+      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIAIOSFODNN7TEST","awsSecretAccessKey":"testsecretaccesskeytestsecretaccesskey1"},"response":{"enabled":true,"jsonPath":"","showAssessment":true}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
@@ -356,7 +384,11 @@ Feature: AWS Bedrock guardrail policy
     Then the response status code should be 422
     And the response should be valid JSON
     And the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
-    And the response body should contain "assessments"
+    And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
+    And the JSON response field "message.interveningGuardrail" should be "AWS Bedrock Guardrail"
+    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.direction" should be "RESPONSE"
+    And the JSON response field "message.assessments.contentPolicy.filters[0].type" should be "VIOLENCE"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
