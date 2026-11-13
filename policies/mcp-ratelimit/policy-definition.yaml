@@ -1,5 +1,5 @@
 name: mcp-ratelimit
-version: v1.3.0
+version: v1.4.0
 description: |
   Applies rate limits to MCP traffic per tool, resource, prompt, or JSON-RPC method.
   Each entry targets a capability by name (or "*") and declares one or more
@@ -574,6 +574,56 @@ systemParameters:
           minimum: 0
           default: 0
           "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.pool_size}"
+
+        tls:
+          type: object
+          description: |
+            Configures TLS for the Redis connection. Disabled by default; when enabled,
+            the gateway connects to Redis over TLS (TLS 1.2 or later).
+          additionalProperties: false
+          properties:
+            enabled:
+              type: boolean
+              description: Connects to Redis over TLS when true. Other tls settings are ignored when false.
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.enabled}"
+
+            caFile:
+              type: string
+              description: |
+                Path to a PEM CA bundle used to verify the Redis server certificate.
+                Empty uses the system trust store.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.ca_file}"
+
+            serverName:
+              type: string
+              description: |
+                Server name to verify against the Redis certificate. Empty uses the Redis host.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.server_name}"
+
+            insecureSkipVerify:
+              type: boolean
+              description: |
+                Disables verification of the Redis server certificate. For testing only;
+                a warning is logged when enabled.
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.insecure_skip_verify}"
+
+            certFile:
+              type: string
+              description: |
+                Path to a PEM client certificate for mutual TLS. Must be set together with keyFile.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.cert_file}"
+
+            keyFile:
+              type: string
+              description: |
+                Path to the PEM private key for certFile. Must be set together with certFile.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.key_file}"
 
     memory:
       type: object

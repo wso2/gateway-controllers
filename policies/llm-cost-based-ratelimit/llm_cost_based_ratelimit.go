@@ -86,6 +86,9 @@ func GetPolicy(
 	metadata policy.PolicyMetadata,
 	params map[string]interface{},
 ) (policy.Policy, error) {
+	if err := validateRedisTLS(params); err != nil {
+		return nil, err
+	}
 	return &LLMCostRateLimitPolicy{
 		metadata: metadata,
 	}, nil

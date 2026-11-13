@@ -140,6 +140,9 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]any) (policy.Po
 			p.systemParams[key] = v
 		}
 	}
+	if err := validateRedisTLS(params); err != nil {
+		return nil, fmt.Errorf("mcp-ratelimit: %w", err)
+	}
 
 	sectionCounts := map[string]int{}
 	for _, e := range entries {
