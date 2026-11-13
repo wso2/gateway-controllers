@@ -1809,6 +1809,9 @@ var serviceEndpoints = map[string]struct {
 	"analytics":                    {component: "testbench", endpoint: "analytics", partitioned: true},
 	"capture":                      {component: "testbench", endpoint: "capture", partitioned: true},
 	"oauth2":                       {component: "testbench", endpoint: "oauth2", partitioned: true},
+	// fault-injection answers the faults a scenario scripts, then forwards to another testbench
+	// service; its scripts are block-partitioned and named by the scenario.
+	"fault-injection": {component: "testbench", endpoint: "fault-injection", partitioned: true},
 	// The TypeSafe Jev API. Not block-partitioned here: a scenario addresses its own partition
 	// as the first path segment, so request counts are scoped to the scenario.
 	"jev":     {component: "testbench", endpoint: "jev"},
