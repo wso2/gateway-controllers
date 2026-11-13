@@ -88,6 +88,114 @@ Feature: mcp-acl-list access decisions
       # so the listed tool runs and an unlisted tool is denied (allow would swap the verdicts).
       | no mode, defaults to deny                             | {"exceptions":["add"]}                      | add     | echo    |
 
+  # ---- Resource reads -------------------------------------------------------------------
+
+  # The upstream is the MCP mock (testbench port 3009), which serves two fixed resources:
+  # file:///docs/readme.txt (name readme, text "This is the readme.") and
+  # file:///docs/changelog.txt (name changelog, text "v1.0.0: first release."). The permitted
+  # read returns the mock's own text and carries x-envoy-upstream-service-time, which the
+  # gateway adds only to an answer that came from the mock; the denied read must not carry it,
+  # so it never reached the mock. The denial body is the same as for a tool, so the denied read
+  # uses id 21 and is held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario Outline: A resources/read is decided by the resources block (<case>)
+    Given I generate a unique resource name from "mcp-acl-read" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-read" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-read" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-read" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"resources":<resources>}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":41,"method":"resources/read","params":{"uri":"<allowed>"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.contents[0].uri" should be "<allowed>"
+    And the JSON response field "result.contents[0].text" should be "<text>"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"resources/read","params":{"uri":"<denied>"}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: resources
+      | case                                   | resources                                                            | allowed                    | text                   | denied                     |
+      # MAC #4: deny mode with R1 as the only exception; R1 returns the mock's content, R2 is denied.
+      | deny mode with one exception           | {"mode":"deny","exceptions":["file:///docs/readme.txt"]}             | file:///docs/readme.txt    | This is the readme.    | file:///docs/changelog.txt |
+      # MAC #5: allow mode with R1 as the only exception; R2 succeeds, R1 is denied.
+      | allow mode with one exception          | {"mode":"allow","exceptions":["file:///docs/readme.txt"]}            | file:///docs/changelog.txt | v1.0.0: first release. | file:///docs/readme.txt    |
+      # MAC #4: resources are matched on the URI, not the name. R1 is listed by its name only and
+      # is denied; R2 is listed by its URI and is read, which shows the exceptions are applied.
+      | exceptions match the uri, not the name | {"mode":"deny","exceptions":["readme","file:///docs/changelog.txt"]} | file:///docs/changelog.txt | v1.0.0: first release. | file:///docs/readme.txt    |
+
+  # ---- Prompt gets ----------------------------------------------------------------------
+
+  # The upstream is the MCP mock (testbench port 3009), which serves two fixed prompts:
+  # greeting ("Say hello to <name>.", World when no name is given) and summary ("Summarize
+  # this text: <text>"). Prompts are matched on their name. The permitted get returns the
+  # mock's own user message and carries x-envoy-upstream-service-time; the denied get must not
+  # carry it, so it never reached the mock. The denial body is the same as for a tool, so the
+  # denied get uses id 21 and is held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario Outline: A prompts/get is decided by the prompts block (<case>)
+    Given I generate a unique resource name from "mcp-acl-prompt" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-prompt" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-prompt" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-prompt" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"prompts":<prompts>}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":41,"method":"prompts/get","params":{"name":"<allowed>","arguments":<arguments>}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.messages[0].role" should be "user"
+    And the JSON response field "result.messages[0].content.text" should be "<text>"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"prompts/get","params":{"name":"<denied>"}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: prompts
+      | case                          | prompts                                    | allowed  | arguments          | text                         | denied   |
+      # MAC #6: prompts with P1 (greeting) as the exception, first in deny mode and then in allow
+      # mode; P1 returns its messages and P2 is denied, then the verdicts swap.
+      | deny mode with one exception  | {"mode":"deny","exceptions":["greeting"]}  | greeting | {}                 | Say hello to World.          | summary  |
+      | allow mode with one exception | {"mode":"allow","exceptions":["greeting"]} | summary  | {"text":"a story"} | Summarize this text: a story | greeting |
+
   # ---- Tool lists -----------------------------------------------------------------------
 
   # The upstream is the MCP mock (testbench port 3009), which serves three real tools: add,
@@ -201,6 +309,298 @@ Feature: mcp-acl-list access decisions
     And the JSON response array "result.tools" item with "name" equal to "add" should have "inputSchema.additionalProperties" equal to "false"
     And the JSON response field "result.cacheScope" should be "public"
     And the JSON response field "result.ttlMs" should be 0
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+  # MAC #9: resources/list and prompts/list keep only what their own block permits, and the
+  # entry the policy keeps reaches the client with its fields unchanged. One proxy carries a
+  # resources block and a prompts block and no tools block, so tools/list must stay complete.
+  # Each expected value is the MCP mock's own definition (testbench port 3009); the same lists
+  # sent straight to the mock at the end still hold the removed entries, so the shorter lists
+  # were made by the policy. The mock answers in SSE, which the JSON steps cannot read, so the
+  # direct answers are matched as text.
+  Scenario: A resources/list and a prompts/list keep only permitted entries, with their fields unchanged
+    Given I generate a unique resource name from "mcp-acl-lists" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-lists" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-lists" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-lists" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"resources":{"mode":"deny","exceptions":["file:///docs/readme.txt"]},"prompts":{"mode":"deny","exceptions":["greeting"]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # Resources: only R1, with every field the mock defines.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.resources" should have 1 item
+    And the JSON response array "result.resources" should not contain an item with "uri" equal to "file:///docs/changelog.txt"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "name" equal to "readme"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "title" equal to "Readme"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "description" equal to "A short project readme"
+    And the JSON response array "result.resources" item with "uri" equal to "file:///docs/readme.txt" should have "mimeType" equal to "text/plain"
+    And the JSON response field "result.cacheScope" should be "public"
+
+    # Prompts: only greeting, with every field the mock defines.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response field "error" should not exist
+    And the JSON response array field "result.prompts" should have 1 item
+    And the JSON response array "result.prompts" should not contain an item with "name" equal to "summary"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "title" equal to "Greeting"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "description" equal to "Greets someone by name"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "arguments[0].name" equal to "name"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should have "arguments[0].description" equal to "Who to greet; World when omitted"
+    And the JSON response array "result.prompts" item with "name" equal to "greeting" should not have field "arguments[1]"
+    And the JSON response field "result.cacheScope" should be "public"
+
+    # Tools: no tools block, so the list is untouched.
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 3 items
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    # The same lists straight from the mock still hold the entries the policy removed.
+    When I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to the "mcp" service at "/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should contain "file:///docs/readme.txt"
+    And the response body should contain "file:///docs/changelog.txt"
+    When I send a "POST" request to the "mcp" service at "/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should contain "Greets someone by name"
+    And the response body should contain "Asks for a summary of a text"
+
+  # MAC #12: only the tools block is set, so resources and prompts are not governed at all.
+  # The tools block is a full lockdown, so the policy is clearly active: a tool call is denied
+  # and the tool list is emptied. Resources and prompts must still pass through untouched. Two
+  # proxies point at the same MCP mock (testbench port 3009): one without any policy, which
+  # gives the baseline, and one with the tools block. MAC #11 shows a proxy without the policy
+  # passes the mock's answers on unchanged, and a list the policy filters comes back re-encoded
+  # (MAC #7, MAC #9), so a list through the policy proxy that equals the baseline byte for
+  # byte was not touched by the policy.
+  Scenario: Resources and prompts pass through untouched when only the tools block is set
+    Given I generate a unique resource name from "mcp-acl-plain" and store it as "baselineName"
+    And I generate a unique value from "mcp-acl-plain" and store it as "baselineDisplayName"
+    And I generate a unique API version from "mcp-acl-plain" and store it as "baselineVersion"
+    And I generate a unique API context from "/mcp-acl-plain" and store it as "baselineContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:baselineName} |
+      | displayName       | ${CTX:baselineDisplayName} |
+      | version           | ${CTX:baselineVersion} |
+      | context           | ${CTX:baselineContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:baselineContext}/mcp" until successful
+
+    Given I generate a unique resource name from "mcp-acl-tools-only" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-tools-only" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-tools-only" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-tools-only" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"deny","exceptions":[]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # The tools block is active: the call is denied and the list is emptied.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 0 items
+
+    # Every resource and prompt is served by the mock.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":41,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.contents[0].text" should be "This is the readme."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":42,"method":"resources/read","params":{"uri":"file:///docs/changelog.txt"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.contents[0].text" should be "v1.0.0: first release."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":43,"method":"prompts/get","params":{"name":"greeting"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.messages[0].content.text" should be "Say hello to World."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":44,"method":"prompts/get","params":{"name":"summary","arguments":{"text":"a story"}}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.messages[0].content.text" should be "Summarize this text: a story"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    # Both lists are exactly the baseline's, byte for byte.
+    When I use the MCP Client to send this request to "${CTX:baselineContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response array field "result.resources" should have 2 items
+    And I store the response body as "baselineResources"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should be:
+      """
+      ${CTX:baselineResources}
+      """
+    When I use the MCP Client to send this request to "${CTX:baselineContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response array field "result.prompts" should have 2 items
+    And I store the response body as "baselinePrompts"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the response body should be:
+      """
+      ${CTX:baselinePrompts}
+      """
+
+    When I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+    When I delete the MCP proxy "${CTX:baselineName}"
+    Then the response should be successful
+
+  # MAC #13: all three blocks with different modes on one proxy (tools allow, resources allow,
+  # prompts deny); each type is governed only by its own block, so the deny mode of the prompts
+  # block makes neither tools nor resources stricter. One permitted and one denied capability of
+  # each type is exercised, and each list keeps exactly what its own block permits. The upstream
+  # is the MCP mock (testbench port 3009). Every permitted answer carries
+  # x-envoy-upstream-service-time and every denial does not; the denials use id 21 so they can
+  # be held to the recorded mcp-acl-list-tool-denied.json.
+  Scenario: Each capability type is governed only by its own block
+    Given I generate a unique resource name from "mcp-acl-mixed" and store it as "mcpName"
+    And I generate a unique value from "mcp-acl-mixed" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-acl-mixed" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-acl-mixed" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-acl-list","version":"v1","params":{"tools":{"mode":"allow","exceptions":["echo"]},"resources":{"mode":"allow","exceptions":["file:///docs/changelog.txt"]},"prompts":{"mode":"deny","exceptions":["greeting"]}}}] |
+    Then the resource creation response should indicate successful deployment
+    And I use the MCP Client to send an initialize request to "${CTX:mcpContext}/mcp" until successful
+
+    # Tools, allow mode with echo excepted: add runs, echo is denied.
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"echo","arguments":{"message":"denied"}}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    # Resources, allow mode with R2 excepted: R1 is read, R2 is denied.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":42,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.contents[0].text" should be "This is the readme."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"resources/read","params":{"uri":"file:///docs/changelog.txt"}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    # Prompts, deny mode with greeting excepted: greeting is answered, summary is denied.
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":43,"method":"prompts/get","params":{"name":"greeting"}}
+      """
+    Then the response should be successful
+    And the JSON response field "result.messages[0].content.text" should be "Say hello to World."
+    And the response header "x-envoy-upstream-service-time" should exist
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":21,"method":"prompts/get","params":{"name":"summary"}}
+      """
+    Then the response status code should be 400
+    And the response should match the expected error response "mcp-acl-list-tool-denied"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    # Each list keeps exactly what its own block permits.
+    When I use the MCP Client to send a tools/list request to "${CTX:mcpContext}/mcp"
+    Then the response should be successful
+    And the JSON response array field "result.tools" should have 2 items
+    And the JSON response array "result.tools" should not contain an item with "name" equal to "echo"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":3,"method":"resources/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response array field "result.resources" should have 1 item
+    And the JSON response array "result.resources" should contain an item with "uri" equal to "file:///docs/readme.txt"
+    When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":4,"method":"prompts/list","params":{}}
+      """
+    Then the response should be successful
+    And the JSON response array field "result.prompts" should have 1 item
+    And the JSON response array "result.prompts" should contain an item with "name" equal to "greeting"
 
     When I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
