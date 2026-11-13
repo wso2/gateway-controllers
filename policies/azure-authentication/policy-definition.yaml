@@ -13,9 +13,11 @@ description: |
   authenticationType "managed-identity", the gateway gets the access token for a
   managed identity assigned to the host it runs on: from the Azure Instance
   Metadata Service of a VM, VM scale set or AKS node, or from the managed
-  identity endpoint of App Service, Container Apps or Azure Arc. Tokens are
-  obtained and cached by the Azure Identity SDK for Go, one cache per identity,
-  shared across routes.
+  identity endpoint of App Service or Azure Arc. With authenticationType
+  "container-apps", the gateway runs in Azure Container Apps and gets the access
+  token for a managed identity of its container app from the Container Apps
+  identity endpoint. Tokens are obtained and cached by the Azure Identity SDK
+  for Go, one cache per identity, shared across routes.
 
 parameters:
   type: object
@@ -32,11 +34,15 @@ parameters:
         (and, for sovereign clouds, AZURE_AUTHORITY_HOST). "managed-identity" gets
         the token for an identity assigned to the host the gateway runs on: from
         the Azure Instance Metadata Service (IMDS) of a VM, VM scale set or AKS
-        node, or from the managed identity endpoint of App Service, Container Apps
-        or Azure Arc.
+        node, or from the managed identity endpoint of App Service or Azure Arc.
+        "container-apps" gets the token for a managed identity of the Azure
+        Container Apps app the gateway runs in, from the identity endpoint
+        Container Apps sets in IDENTITY_ENDPOINT and IDENTITY_HEADER; the policy
+        fails to initialize if the app has no managed identity.
       enum:
         - workload-identity
         - managed-identity
+        - container-apps
     scope:
       type: string
       x-wso2-policy-advanced-param: false
@@ -57,7 +63,10 @@ parameters:
         credential that trusts the gateway pod's service account. With
         managed-identity, selects a user-assigned managed identity of the host;
         leave it unset for the host's default identity: its system-assigned
-        identity, or its only user-assigned identity if it has none.
+        identity, or its only user-assigned identity if it has none. With
+        container-apps, selects a user-assigned managed identity of the container
+        app; leave it unset for the app's system-assigned identity, which the app
+        must then have.
     tenantId:
       type: string
       x-wso2-policy-advanced-param: true
@@ -65,7 +74,7 @@ parameters:
       description: |
         Microsoft Entra tenant ID (GUID) or domain name. Defaults to the
         AZURE_TENANT_ID environment variable. Only for workload-identity; must
-        not be set with managed-identity.
+        not be set with managed-identity or container-apps.
     headerName:
       type: string
       x-wso2-policy-advanced-param: true
@@ -89,9 +98,9 @@ parameters:
       pattern: '^(([1-9]|[12][0-9]|30)s|([1-9][0-9]{0,3}|[12][0-9]{4}|30000)ms)$'
       default: "10s"
       description: |
-        Maximum time to obtain a token from Microsoft Entra ID or IMDS,
-        including retries: whole seconds from "1s" to "30s", or milliseconds from "1ms"
-        to "30000ms". Requests that cannot get a token in time fail with 502
-        Bad Gateway.
+        Maximum time to obtain a token from Microsoft Entra ID or the managed
+        identity endpoint, including retries: whole seconds from "1s" to "30s",
+        or milliseconds from "1ms" to "30000ms". Requests that cannot get a
+        token in time fail with 502 Bad Gateway.
   required:
     - authenticationType

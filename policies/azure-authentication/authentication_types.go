@@ -33,11 +33,19 @@ const (
 	// host's own managed identity endpoint on App Service, Container Apps or Azure Arc.
 	AuthenticationTypeManagedIdentity = "managed-identity"
 
+	// AuthenticationTypeContainerApps gets the access token for a managed identity of the Azure
+	// Container Apps app the gateway runs in, from the identity endpoint Container Apps sets in
+	// IDENTITY_ENDPOINT.
+	AuthenticationTypeContainerApps = "container-apps"
+
 	// AuthType is the AuthContext.AuthType value recorded for workload-identity.
 	AuthType = "azure-workload-identity"
 
 	// AuthTypeManagedIdentity is the AuthContext.AuthType value recorded for managed-identity.
 	AuthTypeManagedIdentity = "azure-managed-identity"
+
+	// AuthTypeContainerApps is the AuthContext.AuthType value recorded for container-apps.
+	AuthTypeContainerApps = "azure-container-apps"
 )
 
 // authenticationKind describes an authenticationType: how its credential is built, how its
@@ -87,6 +95,14 @@ var authenticationKinds = []*authenticationKind{
 		unavailable:   "managed identity is not available",
 		imds:          true,
 		newCredential: newManagedIdentityCredential,
+	},
+	{
+		name:     AuthenticationTypeContainerApps,
+		authType: AuthTypeContainerApps,
+		service:  "the Container Apps identity endpoint",
+		unavailable: "Container Apps managed identity is not available (Container Apps sets " +
+			"IDENTITY_ENDPOINT and IDENTITY_HEADER when the container app has a managed identity)",
+		newCredential: newContainerAppsCredential,
 	},
 }
 

@@ -18,12 +18,14 @@
 package azureauthentication
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
+	"os"
 	"regexp"
 	"sync"
 	"time"
@@ -44,6 +46,11 @@ var (
 	// SDK lists for IMDS (404, 410, 429 and 5xx); Entra ID retries azcore's defaults.
 	entraRetry   = azpolicy.RetryOptions{MaxRetries: 2, RetryDelay: 200 * time.Millisecond, MaxRetryDelay: 2 * time.Second}
 	managedRetry = azpolicy.RetryOptions{MaxRetries: 4, RetryDelay: time.Second, MaxRetryDelay: 4 * time.Second}
+
+	// containerAppsRetry is Entra ID's: the Container Apps identity endpoint runs beside the app
+	// and gets its tokens from Entra ID, so it fails the way Entra ID does, not the way IMDS does
+	// while it starts.
+	containerAppsRetry = azpolicy.RetryOptions{MaxRetries: 2, RetryDelay: 200 * time.Millisecond, MaxRetryDelay: 2 * time.Second}
 
 	// transport is the credentials' HTTP transport. nil means the SDK's default client; tests
 	// replace it.
@@ -73,15 +80,43 @@ type identity struct {
 	tenantID           string
 }
 
-// newManagedIdentityCredential builds the SDK credential for a host's managed identity. It never
-// reads AZURE_CLIENT_ID: the Workload Identity webhook sets it for the federated identity, which
-// need not be assigned to the host.
+// newManagedIdentityCredential builds the SDK credential for the host's managed identity, from
+// whichever endpoint the host's environment points the SDK at.
 func newManagedIdentityCredential(id identity) (azcore.TokenCredential, error) {
-	opts := &azidentity.ManagedIdentityCredentialOptions{
-		ClientOptions: azcore.ClientOptions{Retry: managedRetry, Transport: transport},
+	return managedIdentityCredential(id.clientID, managedRetry)
+}
+
+// newContainerAppsCredential builds the SDK credential for a managed identity of the container app
+// the gateway runs in. The SDK uses the Container Apps identity endpoint only while
+// IDENTITY_ENDPOINT and IDENTITY_HEADER are set; otherwise it falls back to IMDS, which Container
+// Apps doesn't have, and every request would wait out its timeout.
+func newContainerAppsCredential(id identity) (azcore.TokenCredential, error) {
+	var missing []string
+	for _, name := range []string{"IDENTITY_ENDPOINT", "IDENTITY_HEADER"} {
+		if os.Getenv(name) == "" {
+			missing = append(missing, name)
+		}
 	}
-	if id.clientID != "" {
-		opts.ID = azidentity.ClientID(id.clientID)
+	switch {
+	case len(missing) == 1:
+		return nil, fmt.Errorf("%s is not set", missing[0])
+	case len(missing) > 1:
+		return nil, fmt.Errorf("%s are not set", listing(missing, "and"))
+	case os.Getenv("IDENTITY_SERVER_THUMBPRINT") != "":
+		return nil, errors.New("IDENTITY_SERVER_THUMBPRINT is set, which points the SDK at Service Fabric's endpoint instead")
+	}
+	return managedIdentityCredential(id.clientID, containerAppsRetry)
+}
+
+// managedIdentityCredential builds the SDK credential for the host's managed identity clientID, or
+// its default identity when clientID is "". It never reads AZURE_CLIENT_ID: the Workload Identity
+// webhook sets it for the federated identity, which need not be assigned to the host.
+func managedIdentityCredential(clientID string, retry azpolicy.RetryOptions) (azcore.TokenCredential, error) {
+	opts := &azidentity.ManagedIdentityCredentialOptions{
+		ClientOptions: azcore.ClientOptions{Retry: retry, Transport: transport},
+	}
+	if clientID != "" {
+		opts.ID = azidentity.ClientID(clientID)
 	}
 	return azidentity.NewManagedIdentityCredential(opts)
 }
@@ -275,19 +310,25 @@ func (c *credential) refuses(status int) bool {
 }
 
 // oauthErrorCode returns the OAuth error code in resp's body, such as invalid_client, or "" if the
-// body has none. The description is left out: it can name the tenant and the application.
+// body has none. The Container Apps identity endpoint passes Entra ID's code on as errorCode. The
+// description and message are left out: they can name the tenant, the application and the resource.
 func oauthErrorCode(resp *http.Response) string {
 	body, err := runtime.Payload(resp)
 	if err != nil {
 		return ""
 	}
 	var parsed struct {
-		Error string `json:"error"`
+		Error     string `json:"error"`
+		ErrorCode string `json:"errorCode"`
 	}
-	if json.Unmarshal(body, &parsed) != nil || !oauthErrorCodePattern.MatchString(parsed.Error) {
+	if json.Unmarshal(body, &parsed) != nil {
 		return ""
 	}
-	return parsed.Error
+	code := cmp.Or(parsed.Error, parsed.ErrorCode)
+	if !oauthErrorCodePattern.MatchString(code) {
+		return ""
+	}
+	return code
 }
 
 // recentRejection returns the cached rejection of scope, or nil if there is none or it expired.
