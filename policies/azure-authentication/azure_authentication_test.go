@@ -119,7 +119,9 @@ func TestGetPolicyRejectsInvalidParams(t *testing.T) {
 	}{
 		{name: "missing authenticationType", params: map[string]interface{}{}, wantInError: "authenticationType"},
 		{name: "non-string authenticationType", params: map[string]interface{}{"authenticationType": 1}, wantInError: "authenticationType"},
-		{name: "unsupported authenticationType", params: map[string]interface{}{"authenticationType": "client-secret"}, wantInError: "managed-identity"},
+		{name: "unsupported authenticationType", params: map[string]interface{}{"authenticationType": "client-secret"}, wantInError: `"workload-identity", "managed-identity" or "container-apps"`},
+		{name: "container-apps with tenantId", params: map[string]interface{}{"authenticationType": "container-apps", "tenantId": "contoso.onmicrosoft.com"}, wantInError: `'tenantId' is not used with authenticationType "container-apps"`},
+		{name: "container-apps with a clientId that is not a GUID", params: map[string]interface{}{"authenticationType": "container-apps", "clientId": "my-app"}, wantInError: "clientId"},
 		{name: "managed-identity with tenantId", params: map[string]interface{}{"authenticationType": "managed-identity", "tenantId": "contoso.onmicrosoft.com"}, wantInError: `'tenantId' is not used with authenticationType "managed-identity"`},
 		{name: "managed-identity with a clientId that is not a GUID", params: map[string]interface{}{"authenticationType": "managed-identity", "clientId": "my-app"}, wantInError: "clientId"},
 		{name: "scope without .default", params: valid(map[string]interface{}{"scope": "https://ai.azure.com"}), wantInError: "scope"},
@@ -583,6 +585,116 @@ func TestOnRequestHeadersRecordsManagedIdentityAuthContext(t *testing.T) {
 				t.Fatal("the inbound AuthContext was not kept as Previous")
 			}
 		})
+	}
+}
+
+// Without its endpoint the SDK would fall back to IMDS, which Container Apps doesn't have, and every
+// request would wait out its timeout, so container-apps fails when the policy is created instead.
+func TestContainerAppsNeedsItsEndpoint(t *testing.T) {
+	tests := []struct {
+		name string
+		env  map[string]string
+		want string
+		// managed-identity takes whatever endpoint the environment offers, IMDS included.
+		managedIdentityBuilds bool
+	}{
+		{name: "no managed identity on the app", want: "IDENTITY_ENDPOINT and IDENTITY_HEADER are not set", managedIdentityBuilds: true},
+		{name: "no IDENTITY_HEADER", env: map[string]string{"IDENTITY_ENDPOINT": testIdentityEndpoint}, want: "IDENTITY_HEADER is not set", managedIdentityBuilds: true},
+		{name: "no IDENTITY_ENDPOINT", env: map[string]string{"IDENTITY_HEADER": testIdentityHeader}, want: "IDENTITY_ENDPOINT is not set", managedIdentityBuilds: true},
+		{
+			name: "a Service Fabric endpoint",
+			env:  map[string]string{"IDENTITY_ENDPOINT": testIdentityEndpoint, "IDENTITY_HEADER": testIdentityHeader, "IDENTITY_SERVER_THUMBPRINT": "0123456789ABCDEF"},
+			want: "IDENTITY_SERVER_THUMBPRINT is set",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useFakeAzure(t, answer(http.StatusOK, imdsToken("tok-1", "https://ai.azure.com")))
+			for name, value := range tt.env {
+				t.Setenv(name, value)
+			}
+
+			_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "container-apps"})
+			if err == nil || !strings.Contains(err.Error(), "Container Apps managed identity is not available") || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want Container Apps managed identity not available: %s", err, tt.want)
+			}
+			if tt.managedIdentityBuilds {
+				if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "managed-identity"}); err != nil {
+					t.Fatalf("managed-identity: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestOnRequestHeadersRecordsContainerAppsAuthContext(t *testing.T) {
+	tests := []struct {
+		name             string
+		params           map[string]interface{}
+		wantCredentialID string
+	}{
+		{"user-assigned", map[string]interface{}{"authenticationType": "container-apps", "clientId": testClientID}, testClientID},
+		{"system-assigned", map[string]interface{}{"authenticationType": "container-apps"}, "host-default"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			useFakeAzure(t, answer(http.StatusOK, containerAppsToken("tok-1", "https://ai.azure.com", testClientID)))
+			setContainerAppsEnv(t)
+			inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey", CredentialID: "app-1"}
+			shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
+			scope := uniqueScope(t)
+			tt.params["scope"] = scope
+
+			p := mustGetPolicy(t, tt.params)
+			mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(shared), nil))
+			if got := mods.HeadersToSet["Authorization"]; got != "Bearer tok-1" {
+				t.Fatalf("Authorization = %q, want Bearer tok-1", got)
+			}
+
+			got := shared.AuthContext
+			if got == nil || !got.Authenticated || got.AuthType != "azure-container-apps" || got.CredentialID != tt.wantCredentialID {
+				t.Fatalf("AuthContext = %+v", got)
+			}
+			wantProps := map[string]string{"authenticationType": "container-apps", "scope": scope}
+			if !reflect.DeepEqual(got.Properties, wantProps) {
+				t.Fatalf("Properties = %v, want %v", got.Properties, wantProps)
+			}
+			if got.Previous != inbound {
+				t.Fatal("the inbound AuthContext was not kept as Previous")
+			}
+		})
+	}
+}
+
+// IDENTITY_HEADER keeps anything but the app itself from minting tokens at the identity endpoint,
+// so it must never reach a log line or a fault.
+func TestTheIdentityHeaderIsNeverLogged(t *testing.T) {
+	logs := captureLogs(t)
+	var descriptions []string
+	for _, tt := range []struct {
+		status int
+		body   any
+	}{
+		{http.StatusBadRequest, containerAppsError(http.StatusBadRequest, "Unable to load the proper Managed Identity.")},
+		{http.StatusForbidden, rawBody("")},
+		{http.StatusInternalServerError, containerAppsError(http.StatusInternalServerError, "An error occurred.")},
+		{0, nil},
+	} {
+		useFakeAzure(t, answer(tt.status, tt.body))
+		setContainerAppsEnv(t)
+		p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "container-apps", "scope": uniqueScope(t)})
+		resp := requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+		descriptions = append(descriptions, resp.Fault.Description)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "could not obtain an access token from the Container Apps identity endpoint") {
+		t.Fatalf("the failures were not logged:\n%s", out)
+	}
+	for _, text := range append(descriptions, out) {
+		if strings.Contains(text, testIdentityHeader) {
+			t.Fatalf("the identity header appears in:\n%s", text)
+		}
 	}
 }
 
