@@ -1,0 +1,36 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# MAN #13, #10 and #9: a gateway where mcp-auth takes the token from another header, with another
+# scheme, and answers a failed authentication with 403 instead of 401. A proxy cannot set these
+# (on gateway 1.2.0 the controller rejects them in params), so they get their own block.
+[policy_configurations.jwtauth_v1]
+headername = "X-MCP-Token"
+authheaderscheme = "Token"
+# Written as 403.0 on purpose: the integer 403 reaches mcp-auth as an int64, which its integer
+# reader does not accept, so the setting is silently ignored and the answer stays 401.
+onfailurestatuscode = 403.0
+
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "mock-jwks"
+issuer = "http://testbench:3001/token"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"
+
+[policy_configurations.mcpauth_v1]
+gatewayurl = "https://mcp-e2e-gatewayurl.example.com:7777"

@@ -1,0 +1,10 @@
+{
+  "body": {
+    "error": "Internal Server Error",
+    "message": "invalid policy configuration: keyManagers must be an array"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 500
+}

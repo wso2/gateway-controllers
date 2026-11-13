@@ -1,0 +1,10 @@
+{
+  "body": {
+    "error": "Unauthorized",
+    "message": "MCP authentication failed: no matching issuers found"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 401
+}
