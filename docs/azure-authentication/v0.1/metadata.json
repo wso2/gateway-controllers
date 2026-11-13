@@ -1,0 +1,11 @@
+{
+  "name": "azure-authentication",
+  "displayName": "Azure Authentication",
+  "version": "0.1",
+  "provider": "WSO2",
+  "categories": [
+    "Security",
+    "AI"
+  ],
+  "description": "Authenticates requests to Azure-hosted backends, such as Azure AI Foundry and Azure OpenAI, with a short-lived\nMicrosoft Entra ID access token instead of a static API key. With AKS Workload Identity, the gateway exchanges the\nservice account token projected into its pod for an access token of the user-assigned managed identity federated\nwith that service account, so no secret is configured on the API. With a managed identity, the gateway gets the\naccess token for an identity assigned to the host it runs on, through IMDS or the host's managed identity endpoint.\nTokens are obtained and cached by the Azure Identity SDK for Go, one cache per identity, shared across routes."
+}
