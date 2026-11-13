@@ -60,6 +60,15 @@ var (
 	// oauthErrorCodePattern matches an OAuth error code such as invalid_client.
 	oauthErrorCodePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
+	// tokenFieldPattern and jwtPattern find tokens in the SDK's error text: MSAL quotes a response
+	// body it couldn't decode, and that body may carry the token it was meant to deliver.
+	tokenFieldPattern = regexp.MustCompile(`("(?:access_token|refresh_token|id_token)"\s*:\s*)"[^"]*"`)
+	jwtPattern        = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*`)
+
+	// errNoToken is a token response that succeeded without a token, which MSAL's managed identity
+	// client passes on as a success.
+	errNoToken = errors.New("the token response has no access token")
+
 	// credentials holds the credentials shared by every policy instance in the process.
 	credentials = newCredentialRegistry()
 )
@@ -119,7 +128,12 @@ func (r *credentialRegistry) get(id identity) (*credential, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &credential{sdk: sdkCredential, service: entraService, rejections: make(map[string]rejection)}
+	c := &credential{
+		sdk:        sdkCredential,
+		service:    entraService,
+		fetching:   make(chan struct{}, 1),
+		rejections: make(map[string]rejection),
+	}
 	if id.authenticationType == AuthenticationTypeManagedIdentity {
 		c.service = managedIdentityService
 	}
@@ -132,6 +146,10 @@ func (r *credentialRegistry) get(id identity) (*credential, error) {
 type credential struct {
 	sdk     azcore.TokenCredential
 	service string // entraService or managedIdentityService
+
+	// fetching admits one GetToken at a time. The SDK fetches one token at a time per credential
+	// anyway, behind a lock that doesn't watch the caller's context; waiting here does.
+	fetching chan struct{}
 
 	mu         sync.Mutex
 	rejections map[string]rejection
@@ -151,11 +169,17 @@ type tokenError struct {
 	cached   bool // answered from the rejection cache, without a new request
 }
 
-func (e *tokenError) Error() string { return e.reason + ": " + e.cause.Error() }
+func (e *tokenError) Error() string { return e.reason + ": " + e.loggable() }
 func (e *tokenError) Unwrap() error { return e.cause }
 
-// token returns an access token for scope, asking the SDK for at most timeout. A request the
-// service refused is answered from the rejection cache for about rejectionCacheFor.
+// loggable is the SDK's error text with any token in it replaced by [REDACTED].
+func (e *tokenError) loggable() string {
+	text := tokenFieldPattern.ReplaceAllString(e.cause.Error(), `$1"[REDACTED]"`)
+	return jwtPattern.ReplaceAllString(text, "[REDACTED]")
+}
+
+// token returns an access token for scope, obtained within timeout. A request the service refused
+// is answered from the rejection cache for about rejectionCacheFor.
 func (c *credential) token(ctx context.Context, scope string, timeout time.Duration) (string, *tokenError) {
 	if err := c.recentRejection(scope); err != nil {
 		return "", err
@@ -163,7 +187,21 @@ func (c *credential) token(ctx context.Context, scope string, timeout time.Durat
 
 	fetchCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	select {
+	case c.fetching <- struct{}{}:
+		defer func() { <-c.fetching }()
+	case <-fetchCtx.Done():
+		return "", c.describe(fetchCtx, fetchCtx.Err())
+	}
+	// A caller that waited behind a refused request takes its answer instead of asking again.
+	if err := c.recentRejection(scope); err != nil {
+		return "", err
+	}
+
 	tok, err := c.sdk.GetToken(fetchCtx, azpolicy.TokenRequestOptions{Scopes: []string{scope}})
+	if err == nil && tok.Token == "" {
+		err = errNoToken
+	}
 	if err == nil {
 		return tok.Token, nil
 	}
@@ -179,10 +217,18 @@ func (c *credential) token(ctx context.Context, scope string, timeout time.Durat
 // with the response attached, so the reason comes from the status and the OAuth error code.
 func (c *credential) describe(fetchCtx context.Context, err error) *tokenError {
 	var failed *azidentity.AuthenticationFailedError
+	isAuthFailure := errors.As(err, &failed)
 	switch {
+	case errors.Is(err, errNoToken):
+		return &tokenError{reason: c.service + " returned an unusable response", cause: err}
 	case fetchCtx.Err() != nil:
 		return &tokenError{reason: "timed out obtaining an access token from " + c.service, cause: err}
-	case errors.As(err, &failed) && failed.RawResponse != nil:
+	case !isAuthFailure && c.service == managedIdentityService:
+		// The managed identity credential reports every failure as an AuthenticationFailedError,
+		// except the endpoint refusing the request without a usable response: IMDS's 400 for the
+		// host's default identity when the host has several, or a local proxy's 403.
+		return &tokenError{reason: c.service + " rejected the token request", cause: err, rejected: true}
+	case isAuthFailure && failed.RawResponse != nil:
 		status, code := failed.RawResponse.StatusCode, oauthErrorCode(failed.RawResponse)
 		if c.refuses(status) {
 			detail := fmt.Sprintf("HTTP %d", status)

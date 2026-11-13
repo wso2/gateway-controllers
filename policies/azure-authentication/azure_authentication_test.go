@@ -174,6 +174,18 @@ func TestUnknownParamErrorListsTheParameters(t *testing.T) {
 	}
 }
 
+// The gateway controller adds attachedTo to the params of every policy it attaches, so it must not
+// be rejected as an unknown parameter.
+func TestGetPolicyAcceptsTheGatewaysAttachedToParam(t *testing.T) {
+	setWorkloadIdentityEnv(t, "federated-token")
+	useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+
+	for _, level := range []string{"api", "route"} {
+		p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "attachedTo": level})
+		requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+	}
+}
+
 // paramNames must list exactly the parameters of policy-definition.yaml, in order, or a parameter
 // added there would be rejected as unknown when it arrives through upstream.auth.
 func TestParamNamesMatchThePolicyDefinition(t *testing.T) {
@@ -587,6 +599,33 @@ func TestModeProcessesOnlyRequestHeaders(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("Mode() = %+v, want %+v", got, want)
+	}
+}
+
+// When the SDK can't decode a token response, its error quotes the response body, token and all.
+// The log keeps the error but not the token.
+func TestTokensInAnUndecodableResponseAreNotLogged(t *testing.T) {
+	logs := captureLogs(t)
+	setWorkloadIdentityEnv(t, "federated-token")
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJodHRwczovL2FpLmF6dXJlLmNvbSJ9.c2lnbmF0dXJl"
+	useFakeAzure(t, answer(http.StatusOK, map[string]any{
+		"token_type":   "Bearer",
+		"access_token": "access-token-secret",
+		"id_token":     jwt,
+		"expires_in":   map[string]any{"not": "a number"},
+	}))
+
+	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
+	requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+
+	out := logs.String()
+	if !strings.Contains(out, "could not obtain an access token from Microsoft Entra ID") || !strings.Contains(out, "[REDACTED]") {
+		t.Fatalf("the failure was not logged with a redacted response:\n%s", out)
+	}
+	for _, secret := range []string{"access-token-secret", jwt} {
+		if strings.Contains(out, secret) {
+			t.Errorf("logs contain %q:\n%s", secret, out)
+		}
 	}
 }
 

@@ -174,6 +174,11 @@ var paramNames = []string{
 	"authenticationType", "scope", "clientId", "tenantId", "headerName", "valuePrefix", "tokenRequestTimeout",
 }
 
+// attachedToParam is the key the gateway controller adds to the params of every policy it attaches:
+// whether the policy is on the API or a route. The policy engine also passes it as
+// PolicyMetadata.AttachedTo; the policy doesn't use it.
+const attachedToParam = "attachedTo"
+
 // extractParams reads and checks the policy params. It is the only check for params given in an
 // LLM provider's upstream.auth, which the controller does not validate, so it rejects a key that
 // is not a parameter: a misspelled clientId, tenantId or scope would otherwise silently give a
@@ -248,12 +253,12 @@ func extractParams(raw map[string]interface{}) (params, error) {
 	return p, nil
 }
 
-// rejectUnknownParams fails when raw has a key that is not one of paramNames, naming every such
-// key and the parameters the policy has.
+// rejectUnknownParams fails when raw has a key that is neither one of paramNames nor the gateway's
+// attachedTo, naming every such key and the parameters the policy has.
 func rejectUnknownParams(raw map[string]interface{}) error {
 	var unknown []string
 	for key := range raw {
-		if !slices.Contains(paramNames, key) {
+		if key != attachedToParam && !slices.Contains(paramNames, key) {
 			unknown = append(unknown, "'"+key+"'")
 		}
 	}
@@ -338,7 +343,7 @@ func headerValue(prefix, token string) string {
 // credential that could not be obtained. The client sees a generic message; the reason goes to
 // fault policies (Description), and the reason and the SDK's error go to the log.
 func (p *Policy) authFailure(reqCtx *policy.RequestHeaderContext, err *tokenError) policy.RequestHeaderAction {
-	attrs := append([]any{"reason", err.reason, "error", err.cause}, p.identityAttrs()...)
+	attrs := append([]any{"reason", err.reason, "error", err.loggable()}, p.identityAttrs()...)
 	if reqCtx != nil && reqCtx.SharedContext != nil {
 		attrs = append(attrs, "requestId", reqCtx.RequestID, "apiName", reqCtx.APIName)
 	}

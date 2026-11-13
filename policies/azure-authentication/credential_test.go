@@ -412,18 +412,105 @@ func TestFaultReasons(t *testing.T) {
 	}
 }
 
-// A system-assigned identity that IMDS refuses comes back from the SDK without the response, so
-// the reason is the generic one and the failure isn't cached.
-func TestFaultReasonForARefusedSystemAssignedIdentity(t *testing.T) {
-	useFakeAzure(t, answer(http.StatusBadRequest, oauthError("invalid_request", "Identity not found")))
+// The SDK reports IMDS refusing the host's default identity without the response, such as when the
+// host has no system-assigned identity and several user-assigned ones. It is still a refusal, so
+// it is cached like one.
+func TestARefusedHostDefaultIdentityIsCached(t *testing.T) {
+	f := useFakeAzure(t, answer(http.StatusBadRequest, oauthError("invalid_request",
+		"Multiple user assigned identities exist, please specify the clientId / resourceId of the identity in the token request")))
+	scope := uniqueScope(t)
 
 	cred, err := credentials.get(identity{authenticationType: AuthenticationTypeManagedIdentity})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, terr := cred.token(context.Background(), uniqueScope(t), time.Second)
-	if terr == nil || terr.reason != "could not obtain an access token from the managed identity endpoint" || terr.rejected {
-		t.Fatalf("error = %+v, want the generic reason, not rejected", terr)
+	first := mustFail(t, cred, scope)
+	if want := "the managed identity endpoint rejected the token request"; first.reason != want || !first.rejected {
+		t.Fatalf("error = %+v, want %q, rejected", first, want)
+	}
+	if again := mustFail(t, cred, scope); !again.cached {
+		t.Fatal("the refusal was not cached")
+	}
+	if n := len(f.tokenRequests()); n != 1 {
+		t.Fatalf("token requests = %d, want 1", n)
+	}
+}
+
+// Calls that arrive together, before the first refusal is cached, share it rather than each asking
+// the service again.
+func TestConcurrentCallsShareARejection(t *testing.T) {
+	setWorkloadIdentityEnv(t, "federated-token")
+	f := useFakeAzure(t, func(context.Context, tokenRequest) (int, any) {
+		time.Sleep(50 * time.Millisecond) // let every caller arrive while the first request is out
+		return http.StatusUnauthorized, oauthError("invalid_client", "AADSTS700213", 700213)
+	})
+
+	cred, err := credentials.get(identity{authenticationType: AuthenticationTypeWorkloadIdentity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 10 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, terr := cred.token(context.Background(), "https://ai.azure.com/.default", 5*time.Second); terr == nil || !terr.rejected {
+				t.Errorf("error = %+v, want the rejection", terr)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := len(f.tokenRequests()); n != 1 {
+		t.Fatalf("token requests = %d, want 1", n)
+	}
+}
+
+// A caller waiting for another caller's fetch on the same credential gives up at its own timeout,
+// even when the other fetch has a longer one.
+func TestWaitingForAnotherFetchStopsAtTheTimeout(t *testing.T) {
+	setWorkloadIdentityEnv(t, "federated-token")
+	started, release := make(chan struct{}, 1), make(chan struct{})
+	useFakeAzure(t, func(ctx context.Context, _ tokenRequest) (int, any) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return http.StatusOK, entraToken("tok-1")
+	})
+	defer close(release)
+
+	cred, err := credentials.get(identity{authenticationType: AuthenticationTypeWorkloadIdentity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go cred.token(context.Background(), "https://ai.azure.com/.default", 5*time.Second)
+	<-started
+
+	start := time.Now()
+	_, terr := cred.token(context.Background(), "https://cognitiveservices.azure.com/.default", 100*time.Millisecond)
+	if terr == nil || terr.reason != "timed out obtaining an access token from Microsoft Entra ID" {
+		t.Fatalf("error = %+v, want a timeout", terr)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("the caller waited %v, want about 100ms", elapsed)
+	}
+}
+
+// A token response without a token is a failure, not an empty Authorization header.
+func TestAnEmptyTokenIsAFailure(t *testing.T) {
+	scope := uniqueScope(t)
+	body := imdsToken("", strings.TrimSuffix(scope, "/.default"))
+	delete(body, "access_token")
+	useFakeAzure(t, answer(http.StatusOK, body))
+
+	cred, err := credentials.get(identity{authenticationType: AuthenticationTypeManagedIdentity, clientID: testClientID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, terr := cred.token(context.Background(), scope, time.Second)
+	if terr == nil || terr.reason != "the managed identity endpoint returned an unusable response" {
+		t.Fatalf("token = %q, error = %+v; want an unusable response", tok, terr)
 	}
 }
 
