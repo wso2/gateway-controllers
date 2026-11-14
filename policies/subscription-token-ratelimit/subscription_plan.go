@@ -341,10 +341,10 @@ func checkLimit(ctx context.Context, reqCtx *policy.RequestHeaderContext, delega
 	if !blocked {
 		return nil, quotaMetadata(ec.ID, quotaWithin, "", "")
 	}
-	// Only a 429 means the quota is used up. Any other response is the limiter failing (its store
-	// unreachable, fail-closed): the quota status is unknown, so no analytics status is recorded.
-	// The limiter's own response is kept when the condition rejects; with allow, the request passes.
-	if immediate.StatusCode != http.StatusTooManyRequests {
+	// Only a quota rejection means the quota is used up. The limiter failing (its store unreachable,
+	// fail-closed) leaves the quota status unknown, so no analytics status is recorded. The limiter's
+	// own response is kept when the condition rejects; with allow, the request passes.
+	if !quotaRejection(immediate) {
 		slog.Warn("subscription limit could not be checked", "condition", ec.ID,
 			"subscriptionId", subscriptionID, "status", immediate.StatusCode)
 		if !ec.Reject {
@@ -363,6 +363,18 @@ func checkLimit(ctx context.Context, reqCtx *policy.RequestHeaderContext, delega
 	metadata := quotaMetadata(ec.ID, quotaOver, quotaRejected, limit)
 	resp.AnalyticsMetadata = metadata
 	return &resp, metadata
+}
+
+// quotaRejection reports whether the delegate's response rejects a request that went over the
+// quota, rather than the limiter failing. Both are 429s: a fail-closed limiter error carries no
+// limit headers, because no quota result was read; a quota rejection carries the limit of its
+// one quota (the delegate always sends the X-RateLimit and RateLimit headers).
+func quotaRejection(r policy.ImmediateResponse) bool {
+	if r.StatusCode != http.StatusTooManyRequests {
+		return false
+	}
+	_, hasLimit := headerInt(r.Headers, "x-ratelimit-limit")
+	return hasLimit || r.Headers["ratelimit-policy"] != ""
 }
 
 // Analytics metadata on every counted request, so overage can be charged apart from the quota:
