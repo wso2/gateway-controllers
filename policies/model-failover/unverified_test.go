@@ -72,10 +72,10 @@ func TestRecordUnverified_DoesNotShieldATargetFromItsRealFailures(t *testing.T) 
 	// Two real failures with a truncated "success" between them, twice over. If the
 	// provisional outcome counted as a success, the counter would never reach three.
 	for i := 0; i < 2; i++ {
-		store.RecordFailure(targetA, 0, now)
-		store.RecordUnverified(targetA, now)
+		store.RecordFailure(targetA, Admission{}, 0, now)
+		store.RecordUnverified(targetA, Admission{}, now)
 	}
-	if ev := store.RecordFailure(targetA, 0, now); ev == nil {
+	if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev == nil {
 		t.Fatal("the third real failure must suspend: a provisional outcome must not " +
 			"reset the consecutive-failure count, which is what lets a truncating " +
 			"provider immunise itself against its own failures")
@@ -95,11 +95,11 @@ func TestRecordUnverified_DoesNotDiluteTheErrorRateWindow(t *testing.T) {
 	// 33% error rate -- under the threshold. Counted as nothing it is 100%.
 	var suspended bool
 	for i := 0; i < 20; i++ {
-		if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+		if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 			suspended = true
 		}
-		store.RecordUnverified(targetA, now)
-		store.RecordUnverified(targetA, now)
+		store.RecordUnverified(targetA, Admission{}, now)
+		store.RecordUnverified(targetA, Admission{}, now)
 	}
 	if !suspended {
 		t.Fatal("the rate rule must fire: provisional outcomes must not enter the window " +
@@ -120,7 +120,7 @@ func TestRecordUnverified_StillAdvancesProbeRecovery(t *testing.T) {
 	// Three failures suspend it for the 30s base duration.
 	var suspension *SuspensionEvent
 	for i := 0; i < 3; i++ {
-		if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+		if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 			suspension = ev
 		}
 	}
@@ -128,15 +128,23 @@ func TestRecordUnverified_StillAdvancesProbeRecovery(t *testing.T) {
 		t.Fatal("precondition: three failures should have suspended the target")
 	}
 
-	// Past the window. Asserted by driving the store rather than by reading Healthy,
-	// which ADMITS a probe rather than merely reporting -- using it here would consume
-	// the very slot the test is about.
+	// Past the window. Each probe is admitted first and graded against the receipt that
+	// admission returned: a provisional outcome advances the run only for the reservation it
+	// actually ran on, so the zero Admission would leave the target suspended for ever.
 	later := now.Add(31 * time.Second)
 
-	if ev := store.RecordUnverified(targetA, later); ev != nil {
+	first, admitted := store.Admit(targetA, later)
+	if !admitted {
+		t.Fatal("precondition: the suspension window has ended, so a probe must be admitted")
+	}
+	if ev := store.RecordUnverified(targetA, first, later); ev != nil {
 		t.Fatal("one probe must not complete a two-probe recovery run")
 	}
-	if ev := store.RecordUnverified(targetA, later); ev == nil {
+	second, admitted := store.Admit(targetA, later)
+	if !admitted {
+		t.Fatal("the first probe resolved, so the gate must admit the second")
+	}
+	if ev := store.RecordUnverified(targetA, second, later); ev == nil {
 		t.Fatal("a streamed response must still count toward recovery, or a target that " +
 			"only ever streams can never come back")
 	}

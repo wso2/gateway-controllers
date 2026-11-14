@@ -94,7 +94,7 @@ func TestOnResponseHeaders_AttributesOutcomeToTheAttemptingTarget(t *testing.T) 
 	respond(p, chain, 200, 2)
 
 	// Target 1 was retried away from, so it failed; target 2 answered.
-	if !p.health.Healthy(chain[1], clock) {
+	if !healthy(p.health, chain[1], clock) {
 		t.Fatal("the target that produced the 200 must be healthy")
 	}
 	failures := consecutiveFailuresFor(p.health, chain[0])
@@ -160,11 +160,11 @@ func TestOnResponseHeaders_ConsistentlyFailingTargetIsEventuallySuspended(t *tes
 		clock = clock.Add(time.Second)
 	}
 
-	if p.health.Healthy(chain[0], clock) {
+	if healthy(p.health, chain[0], clock) {
 		t.Fatal("a target that failed on every rescued request must be suspended; " +
 			"otherwise failover masks the failure forever and the target is retried indefinitely")
 	}
-	if !p.health.Healthy(chain[1], clock) {
+	if !healthy(p.health, chain[1], clock) {
 		t.Fatal("the rescuing target must remain healthy")
 	}
 }
@@ -181,7 +181,7 @@ func TestOnResponseHeaders_NonFailoverWorthyStatusCountsAsSuccess(t *testing.T) 
 		clock = clock.Add(time.Second)
 	}
 
-	if !p.health.Healthy(chain[0], clock) {
+	if !healthy(p.health, chain[0], clock) {
 		t.Fatal("repeated 400s must never suspend a target — the provider answered every time")
 	}
 }
@@ -238,7 +238,7 @@ func TestOnResponseHeaders_ExhaustedChainSuspendsEveryMember(t *testing.T) {
 	respond(p, chain, 503, len(chain))
 
 	for i, target := range chain {
-		if p.health.Healthy(target, clock) {
+		if healthy(p.health, target, clock) {
 			t.Fatalf("chain[%d] (%s) is still healthy after two exhausted runs; every member "+
 				"should be suspended", i, targetLabel(target))
 		}
@@ -271,5 +271,77 @@ func TestOnResponseHeaders_NarrowedStatusCodesSpareTheFinalTarget(t *testing.T) 
 	if got := consecutiveFailuresFor(p.health, chain[1]); got != 0 {
 		t.Fatalf("chain[1] consecutiveFailures = %d, want 0: 503 is outside the configured "+
 			"statusCodes, so the final target reads as having answered", got)
+	}
+}
+
+// respondWithAdmissions drives the response phase with the probe receipts a chain resolution
+// would have produced, which is what the release path reads.
+func respondWithAdmissions(p *Policy, chain []Target, admissions []Admission, status, attempts int) {
+	headers := map[string][]string{}
+	if attempts > 0 {
+		headers[attemptCountHeader] = []string{itoa(attempts)}
+	}
+	respCtx := &policy.ResponseHeaderContext{
+		SharedContext: &policy.SharedContext{
+			Metadata: map[string]interface{}{
+				metadataKeyChain:        chain,
+				metadataKeyAdmissions:   admissions,
+				metadataKeyRequestStart: p.now(),
+			},
+		},
+		ResponseHeaders: policy.NewHeaders(headers),
+		ResponseStatus:  status,
+	}
+	p.OnResponseHeaders(context.Background(), respCtx, nil)
+}
+
+// Resolving a chain admits every member it keeps, and admitting a half-open member consumes
+// that member's single probe slot. Envoy then attempts them one at a time and, when the first
+// answers, never reaches the rest — so the slot of every member below the serving one was spent
+// on a request that never tried it. Held for the full lease, that excludes the member from the
+// next request, which may be the one whose primary has just failed.
+//
+// The store-level test proves ReleaseProbe reopens the gate. This one proves the response phase
+// actually calls it: delete that loop and the store-level test still passes.
+func TestOnResponseHeaders_HandsBackTheProbesOfMembersTheRequestNeverReached(t *testing.T) {
+	clock := time.Now()
+	p := NewPolicy(map[string]interface{}{
+		"suspendDuration":       float64(30),
+		"suspendAfterFailures":  float64(1),
+		"recoverAfterSuccesses": float64(3), // stays half-open across the test
+	})
+	p.now = func() time.Time { return clock }
+
+	chain := testTargets()
+	fallback := chain[1]
+
+	// Put the FALLBACK into the half-open state: suspend it, then step past the window.
+	p.health.RecordFailure(fallback, Admission{}, 0, clock)
+	if healthy(p.health, fallback, clock) {
+		t.Fatal("precondition: the fallback should be suspended")
+	}
+	clock = clock.Add(31 * time.Second)
+
+	// What resolveChain does for this request: admit both members, reserving the fallback's
+	// probe slot.
+	leading, admitted := p.health.Admit(chain[0], clock)
+	if !admitted {
+		t.Fatal("precondition: the leading target should be admitted")
+	}
+	probe, admitted := p.health.Admit(fallback, clock)
+	if !admitted {
+		t.Fatal("precondition: the half-open fallback should be admitted as a probe")
+	}
+	if !probe.Probe {
+		t.Fatal("precondition: admitting a half-open target must reserve its probe slot")
+	}
+
+	// The leading target answers on attempt 1, so the fallback is never dispatched.
+	respondWithAdmissions(p, chain, []Admission{leading, probe}, 200, 1)
+
+	// Same instant — the lease has not expired, so only an explicit release can explain this.
+	if !healthy(p.health, fallback, clock) {
+		t.Fatal("the fallback's probe slot is still held by a request that never reached it; " +
+			"the next request to need it will be told the fallback is unavailable")
 	}
 }

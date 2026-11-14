@@ -65,7 +65,7 @@ func TestFault_GradesHealthWhenTheResponseHookWasSkipped(t *testing.T) {
 	metadata := publishChain(p, "gpt-4o")
 	p.OnFault(context.Background(), faultContext(metadata, 503, "1"), nil)
 
-	if p.health.Healthy(Target{Model: "gpt-4o"}, p.now()) {
+	if healthy(p.health, Target{Model: "gpt-4o"}, p.now()) {
 		t.Fatal("the failing target was not charged, so with the fault flow enabled no target could ever be suspended")
 	}
 }
@@ -136,7 +136,7 @@ func TestFault_DoesNotChargeARequestTheResponseHookAlreadyGraded(t *testing.T) {
 	// The same request now reaches the fault flow.
 	p.OnFault(context.Background(), faultContext(metadata, 503, "1"), nil)
 
-	if !p.health.Healthy(Target{Model: "gpt-4o"}, p.now()) {
+	if !healthy(p.health, Target{Model: "gpt-4o"}, p.now()) {
 		t.Fatal("one request was charged twice: a single failure suspended a target configured to tolerate two")
 	}
 }

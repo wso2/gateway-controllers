@@ -36,7 +36,7 @@ func completionPolicy(t *testing.T, target Target, suspendAfter int) (*Policy, t
 	p := NewPolicy(map[string]interface{}{})
 	p.health = NewHealthStore(Suspension{ConsecutiveFailures: suspendAfter, DurationSeconds: 30})
 	p.now = func() time.Time { return now }
-	p.correlation.Remember("req-1", []Target{target}, map[string]string{target.Provider: testCluster})
+	p.correlation.Remember("req-1", []Target{target}, nil, map[string]string{target.Provider: testCluster})
 	return p, now
 }
 
@@ -58,15 +58,15 @@ func TestOnAttemptComplete_SuspendsATargetThatTruncatesAfterCommitting(t *testin
 	target := Target{Model: "gpt-4o", Provider: "openai"}
 	p, now := completionPolicy(t, target, 2)
 
-	if !p.health.Healthy(target, now) {
+	if !healthy(p.health, target, now) {
 		t.Fatal("precondition: target starts healthy")
 	}
 
 	p.OnAttemptComplete(context.Background(), verdict(200, testCluster), nil)
-	p.correlation.Remember("req-1", []Target{target}, map[string]string{target.Provider: testCluster})
+	p.correlation.Remember("req-1", []Target{target}, nil, map[string]string{target.Provider: testCluster})
 	p.OnAttemptComplete(context.Background(), verdict(200, testCluster), nil)
 
-	if p.health.Healthy(target, now) {
+	if healthy(p.health, target, now) {
 		t.Error("two post-commitment failures must reach suspendAfterFailures=2 and suspend the target")
 	}
 }
@@ -80,7 +80,7 @@ func TestOnAttemptComplete_IgnoresFailuresTheResponsePhaseAlreadySaw(t *testing.
 
 	p.OnAttemptComplete(context.Background(), verdict(502, testCluster), nil)
 
-	if !p.health.Healthy(target, now) {
+	if !healthy(p.health, target, now) {
 		t.Error("a 502 was already graded by the response phase; grading it again double-counts")
 	}
 }
@@ -94,12 +94,12 @@ func TestOnAttemptComplete_RecordsNothingWhenTheRequestIsUnknown(t *testing.T) {
 	unknownRequest := verdict(200, testCluster)
 	unknownRequest.RequestID = "never-published"
 	p.OnAttemptComplete(context.Background(), unknownRequest, nil)
-	if !p.health.Healthy(target, now) {
+	if !healthy(p.health, target, now) {
 		t.Error("a verdict for a request this policy never published must not grade anything")
 	}
 
 	p.OnAttemptComplete(context.Background(), verdict(200, "some_other_cluster"), nil)
-	if !p.health.Healthy(target, now) {
+	if !healthy(p.health, target, now) {
 		t.Error("a verdict naming a cluster outside this request's chain must not grade anything")
 	}
 }
@@ -122,13 +122,13 @@ func TestOnAttemptComplete_FeedsTheRealDurationToTheLatencyWindow(t *testing.T) 
 		P95LatencyMs: 1000, MinimumRequests: 1, WindowSeconds: 60, DurationSeconds: 30,
 	})
 	p.now = func() time.Time { return now }
-	p.correlation.Remember("req-1", []Target{target}, map[string]string{target.Provider: testCluster})
+	p.correlation.Remember("req-1", []Target{target}, nil, map[string]string{target.Provider: testCluster})
 
 	slow := verdict(200, testCluster)
 	slow.Duration = 30 * time.Second
 	p.OnAttemptComplete(context.Background(), slow, nil)
 
-	if p.health.Healthy(target, now) {
+	if healthy(p.health, target, now) {
 		t.Error("a 30s attempt must land in the latency window as 30s and trip a 1000ms p95 rule")
 	}
 }
@@ -140,7 +140,7 @@ func TestAttemptCorrelation_ExpiresEntriesItIsNeverAskedAbout(t *testing.T) {
 	clock := now
 	store := newAttemptCorrelation(func() time.Time { return clock })
 	target := Target{Model: "m", Provider: "p"}
-	store.Remember("req-1", []Target{target}, map[string]string{"p": testCluster})
+	store.Remember("req-1", []Target{target}, nil, map[string]string{"p": testCluster})
 
 	if _, ok := store.Lookup("req-1", testCluster); !ok {
 		t.Fatal("precondition: entry is readable while fresh")
@@ -159,10 +159,10 @@ func TestAttemptCorrelation_SharedClusterResolvesToTheEarlierMember(t *testing.T
 	store := newAttemptCorrelation(nil)
 	first := Target{Model: "gpt-4o", Provider: "openai"}
 	second := Target{Model: "gpt-4o-mini", Provider: "openai"}
-	store.Remember("req-1", []Target{first, second}, map[string]string{"openai": testCluster})
+	store.Remember("req-1", []Target{first, second}, nil, map[string]string{"openai": testCluster})
 
 	got, ok := store.Lookup("req-1", testCluster)
-	if !ok || got != first {
+	if !ok || got.Target != first {
 		t.Errorf("expected the first member on the shared cluster, got %+v (ok=%v)", got, ok)
 	}
 }
@@ -209,8 +209,68 @@ func TestOnAttemptComplete_GradesThroughTheRealPublishPath(t *testing.T) {
 		Duration:        2 * time.Second,
 	}, nil)
 
-	if p.health.Healthy(target, now) {
+	if healthy(p.health, target, now) {
 		t.Error("the fallback target truncated after committing its response and must be suspended; " +
 			"if this fails, the correlation recorded during OnRequestBody is missing")
+	}
+}
+
+// A streamed probe is credited the moment its headers arrive — it has to be, or a target whose
+// responses are all streamed could never leave the half-open state (FR-030p). That credit is a
+// guess about a body that did not exist yet, and this is where the guess is settled.
+//
+// The store knows how to take the credit back; this test is about the wiring. The verdict has
+// to carry the reservation the stream ran on, which means the correlation store has to have
+// kept it. Pass the zero Admission from here — or forget to store it in Remember — and the
+// reversal silently does nothing while every store-level test still passes.
+func TestOnAttemptComplete_ReversesTheCreditAStreamedProbeWasGivenEarly(t *testing.T) {
+	target := Target{Model: "gpt-4o", Provider: "openai"}
+	now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	p := NewPolicy(map[string]interface{}{})
+	// One clean probe is a full recovery, so the optimistic credit restores the target
+	// outright and the reversal has a visible state change to undo.
+	//
+	// suspendAfterFailures is deliberately high: a single ordinary failure must not be able
+	// to suspend this target. That is what makes the assertion specific — if the verdict is
+	// graded as an ordinary failure against a recovered target it changes nothing, and only
+	// the reversal, which puts the target back in the half-open state first, can suspend it.
+	p.health = NewHealthStore(Suspension{
+		ConsecutiveFailures:   5,
+		DurationSeconds:       30,
+		RecoverAfterSuccesses: 1,
+	})
+	p.now = func() time.Time { return now }
+
+	// Suspend it, then step past the window so the next admission is a probe.
+	for i := 0; i < 5; i++ {
+		p.health.RecordFailure(target, Admission{}, 0, now)
+	}
+	if healthy(p.health, target, now) {
+		t.Fatal("precondition: the target should be suspended")
+	}
+	now = now.Add(31 * time.Second)
+
+	probe, admitted := p.health.Admit(target, now)
+	if !admitted || !probe.Probe {
+		t.Fatal("precondition: the ended window should admit a probe")
+	}
+	// This is what the request path records, and the receipt has to travel with it.
+	p.correlation.Remember("req-1", []Target{target}, []Admission{probe},
+		map[string]string{target.Provider: testCluster})
+
+	// The response phase sees a streamed 200 and banks the probe.
+	if recovered := p.health.RecordUnverified(target, probe, now); recovered == nil {
+		t.Fatal("precondition: a provisional outcome should complete a one-probe run")
+	}
+	if !healthy(p.health, target, now) || !healthy(p.health, target, now) {
+		t.Fatal("precondition: the credit should have returned the target to full rotation")
+	}
+
+	// The body then died, and the access-log verdict says so.
+	p.OnAttemptComplete(context.Background(), verdict(200, testCluster), nil)
+
+	if healthy(p.health, target, now) {
+		t.Fatal("the target is still in rotation: the probe that restored it was credited on " +
+			"a status its body never earned, and the verdict failed to take that back")
 	}
 }

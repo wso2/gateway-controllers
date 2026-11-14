@@ -44,7 +44,7 @@ func openHealth() HealthStore {
 }
 
 func resolved(published []Target, target Target, fallbacks []Target) string {
-	chain, _ := resolveChain(published, target, fallbacks, openHealth(), time.Now())
+	chain, _, _ := resolveChain(published, target, fallbacks, openHealth(), time.Now())
 	return names(chain)
 }
 
@@ -104,9 +104,9 @@ func TestResolveChain_SuspendedTargetsAreExcluded(t *testing.T) {
 	health := NewHealthStore(s)
 
 	now := time.Now()
-	health.RecordFailure(m("A"), 0, now) // A is now suspended
+	health.RecordFailure(m("A"), Admission{}, 0, now) // A is now suspended
 
-	chain, _ := resolveChain([]Target{m("A"), m("D")}, m("A"), []Target{m("B")}, health, now)
+	chain, _, _ := resolveChain([]Target{m("A"), m("D")}, m("A"), []Target{m("B")}, health, now)
 	got := names(chain)
 	if strings.Contains(got, "A") {
 		t.Fatalf("chain = %q, want the suspended target excluded", got)

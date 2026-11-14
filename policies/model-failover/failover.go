@@ -56,6 +56,11 @@ const (
 	// what per-target latency grading needs; the request's elapsed time is not per-attempt.
 	upstreamServiceTimeHeader = "x-envoy-upstream-service-time"
 	metadataKeyChain          = "model_failover.chain"
+	// metadataKeyAdmissions carries the probe receipt for each chain member, in the same
+	// order as the chain. The response phase needs them to grade the attempt that ran
+	// against the reservation it was admitted on, and to hand back the reservations for
+	// members the request never reached.
+	metadataKeyAdmissions = "model_failover.admissions"
 	// Request-time facts the response phase cannot recompute: by then the published
 	// ranking has served its purpose and the health store has moved on, so which targets
 	// were skipped and where the order came from would both be lost.
@@ -240,7 +245,7 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		return policy.UpstreamRequestModifications{}
 	}
 
-	resolved, skipped := resolveChain(published, first, fallbacks, p.health, now)
+	resolved, admissions, skipped := resolveChain(published, first, fallbacks, p.health, now)
 
 	// Every candidate is suspended. Answer now rather than letting the request fall through
 	// to its configured upstream, which is one of the suspended targets: sending traffic to a
@@ -278,11 +283,13 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		// incorrectly. Here the publisher's targets DID resolve, so the route carries real
 		// priority groups — and publishing nothing hands the request to those, serving a
 		// provider this ranking never nominated with the whole retry budget behind it.
+		p.releaseAdmissions(resolved, admissions, now)
 		return p.rejectUnroutableRanking(requestedModel, published, skipped, dropped)
 	}
 	if metadata == nil {
 		// Nothing to fail over between. The policy is inert: no metadata, no telemetry, no
 		// behavioural difference from not being attached at all (FR-030b, FR-030e).
+		p.releaseAdmissions(resolved, admissions, now)
 		return policy.UpstreamRequestModifications{}
 	}
 
@@ -295,20 +302,29 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 	// so health suspended a target that never received a request — and sized the budget one
 	// attempt longer than there were groups, spending the surplus on the last group a second
 	// time, against the at-most-once property (FR-010, FR-056a).
-	servable := resolved
+	servable, servableAdmissions := resolved, admissions
 	if len(dropped) > 0 {
 		servable = make([]Target, 0, len(resolved)-len(dropped))
-		for _, target := range resolved {
+		servableAdmissions = make([]Admission, 0, len(resolved)-len(dropped))
+		for i, target := range resolved {
 			if cluster, ok := p.params.ProviderClusters[target.Provider]; ok && cluster != "" {
 				servable = append(servable, target)
+				servableAdmissions = append(servableAdmissions, admissionAt(admissions, i))
+				continue
 			}
+			// Dropped: Envoy has no priority group for it, so no attempt can ever reach
+			// it. Holding its probe slot for the lease would keep a half-open target out
+			// of a later request's chain on the strength of this one, which never had a
+			// way to try it.
+			p.health.ReleaseProbe(target, admissionAt(admissions, i), now)
 		}
 	}
 
 	// Remember which cluster serves which member, so a completion verdict arriving long after
 	// this request finished can be graded against the right target. The verdict names only a
 	// cluster, and a cluster does not identify a target — see attempt_correlation.go.
-	p.correlation.Remember(requestIDFrom(reqCtx.Headers), servable, p.params.ProviderClusters)
+	p.correlation.Remember(requestIDFrom(reqCtx.Headers), servable, servableAdmissions,
+		p.params.ProviderClusters)
 
 	// Carry the WHOLE chain to the response phase, not just the first member.
 	//
@@ -320,6 +336,7 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 	leading := servable[0]
 	if reqCtx.Metadata != nil {
 		reqCtx.Metadata[metadataKeyChain] = servable
+		reqCtx.Metadata[metadataKeyAdmissions] = servableAdmissions
 		reqCtx.Metadata[metadataKeySelectedModel] = leading.Model
 		reqCtx.Metadata[metadataKeySelectedProvider] = leading.Provider
 		reqCtx.Metadata[metadataKeyRequestedModel] = requestedModel
@@ -383,6 +400,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 		// The policy was inert for this request, or another policy cleared the metadata.
 		return policy.DownstreamResponseHeaderModifications{}
 	}
+	admissions := admissionsFromMetadata(respCtx.Metadata)
 
 	now := p.now()
 	// Per attempt, not per request. latencySince measures the WHOLE request, so charging it to
@@ -398,22 +416,34 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	// failover hid the failure from the client.
 	attempts := p.attemptCount(respCtx, len(chain))
 	for i := 0; i < attempts-1 && i < len(chain); i++ {
-		if event := p.health.RecordFailure(chain[i], unknownLatency, now); event != nil {
+		if event := p.health.RecordFailure(chain[i], admissionAt(admissions, i), unknownLatency, now); event != nil {
 			p.logSuspension(event)
 		}
 	}
 
-	target := chain[0]
-	if idx := attempts - 1; idx > 0 && idx < len(chain) {
-		target = chain[idx]
+	// Everything below the attempt that answered was admitted but never dispatched: Envoy
+	// stopped as soon as one attempt produced a response. Each of those admissions may hold a
+	// half-open member's single probe slot, and holding it for the full lease would exclude
+	// that member from a later request that genuinely needs it — on the strength of a request
+	// that never tried it. Hand them back now, while the chain and its receipts are still in
+	// hand (FR-019d).
+	for i := attempts; i < len(chain); i++ {
+		p.health.ReleaseProbe(chain[i], admissionAt(admissions, i), now)
 	}
+
+	targetIndex := 0
+	if idx := attempts - 1; idx > 0 && idx < len(chain) {
+		targetIndex = idx
+	}
+	target := chain[targetIndex]
+	servingAdmission := admissionAt(admissions, targetIndex)
 
 	failed := append([]Target{}, chain[:min(attempts-1, len(chain))]...)
 
 	outcome := outcomeServed
 	switch {
 	case p.isFailoverWorthy(status):
-		if event := p.health.RecordFailure(target, servingLatency, now); event != nil {
+		if event := p.health.RecordFailure(target, servingAdmission, servingLatency, now); event != nil {
 			p.logSuspension(event)
 		}
 		// The last target answered with a failure too, so the chain is spent. That is the
@@ -430,7 +460,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 		// provider that truncates everything immunises itself against the suspension its
 		// real failures would otherwise trigger. Probe accounting still advances, or a
 		// target whose responses are all streamed could never recover (FR-030p).
-		if recovered := p.health.RecordUnverified(target, now); recovered != nil {
+		if recovered := p.health.RecordUnverified(target, servingAdmission, now); recovered != nil {
 			p.logRecovery(recovered)
 		}
 		if attempts > 1 {
@@ -439,7 +469,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	default:
 		// Any non-failover-worthy status counts as a success for health purposes: the target
 		// answered. A 400 is the client's problem, not the provider's.
-		recovered, suspended := p.health.RecordSuccess(target, servingLatency, now)
+		recovered, suspended := p.health.RecordSuccess(target, servingAdmission, servingLatency, now)
 		if recovered != nil {
 			p.logRecovery(recovered)
 		}
@@ -612,6 +642,43 @@ func appendRankingEntry(targets []Target, model, provider string) []Target {
 		return targets
 	}
 	return append(targets, Target{Model: model, Provider: provider})
+}
+
+// admissionsFromMetadata reads the probe receipts published alongside the chain.
+//
+// A missing or mistyped value yields nil rather than an error: every receipt then reads as the
+// zero Admission, which is "no probe was reserved". That degrades to the behaviour of a chain
+// with no half-open members — nothing is resolved and nothing is released — rather than letting
+// a lost slice resolve or release a reservation it knows nothing about.
+func admissionsFromMetadata(metadata map[string]interface{}) []Admission {
+	if metadata == nil {
+		return nil
+	}
+	admissions, _ := metadata[metadataKeyAdmissions].([]Admission)
+	return admissions
+}
+
+// admissionAt returns the receipt for position i, or the zero receipt when the list is shorter
+// than the chain. The two are built together and stay in step; this keeps a truncated or absent
+// list from indexing out of range in the response phase, where the chain is what drives the
+// loop.
+func admissionAt(admissions []Admission, i int) Admission {
+	if i < 0 || i >= len(admissions) {
+		return Admission{}
+	}
+	return admissions[i]
+}
+
+// releaseAdmissions hands back every probe reservation taken for a chain that will not be used.
+//
+// Called on the paths that abandon a resolved chain — an unroutable ranking, or the policy
+// going inert because nothing resolved to a cluster. Without it those requests reserve a probe
+// slot on every half-open member and then return without attempting any of them, so the members
+// stay excluded for the lease on the strength of a request that was never sent.
+func (p *Policy) releaseAdmissions(chain []Target, admissions []Admission, now time.Time) {
+	for i, target := range chain {
+		p.health.ReleaseProbe(target, admissionAt(admissions, i), now)
+	}
 }
 
 func (p *Policy) chainFromMetadata(metadata map[string]interface{}) ([]Target, bool) {

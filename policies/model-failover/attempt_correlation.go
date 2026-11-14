@@ -70,8 +70,19 @@ type attemptCorrelation struct {
 
 type correlationEntry struct {
 	// byCluster maps the cluster serving a member to that member.
-	byCluster map[string]Target
+	byCluster map[string]correlatedTarget
 	expires   time.Time
+}
+
+// correlatedTarget is a chain member together with the probe receipt it was admitted on.
+//
+// The receipt travels with the target because a completion verdict is graded through
+// HealthStore.RecordFailure, and that call needs to know which reservation the attempt ran
+// against: a streamed probe is credited optimistically at the response phase, and only a
+// verdict naming the SAME reservation may take that credit back.
+type correlatedTarget struct {
+	Target    Target
+	Admission Admission
 }
 
 func newAttemptCorrelation(now func() time.Time) *attemptCorrelation {
@@ -88,13 +99,15 @@ func newAttemptCorrelation(now func() time.Time) *attemptCorrelation {
 //
 // A member whose provider has no cluster is skipped: no attempt can be routed to it, so no
 // verdict can ever name it.
-func (c *attemptCorrelation) Remember(requestID string, chain []Target, providerClusters map[string]string) {
+func (c *attemptCorrelation) Remember(requestID string, chain []Target, admissions []Admission,
+	providerClusters map[string]string) {
+
 	if c == nil || requestID == "" || len(chain) == 0 {
 		return
 	}
 
-	byCluster := make(map[string]Target, len(chain))
-	for _, target := range chain {
+	byCluster := make(map[string]correlatedTarget, len(chain))
+	for i, target := range chain {
 		cluster, ok := providerClusters[target.Provider]
 		if !ok || cluster == "" {
 			continue
@@ -105,7 +118,7 @@ func (c *attemptCorrelation) Remember(requestID string, chain []Target, provider
 		if _, seen := byCluster[cluster]; seen {
 			continue
 		}
-		byCluster[cluster] = target
+		byCluster[cluster] = correlatedTarget{Target: target, Admission: admissionAt(admissions, i)}
 	}
 	if len(byCluster) == 0 {
 		return
@@ -127,10 +140,11 @@ func (c *attemptCorrelation) Remember(requestID string, chain []Target, provider
 	}
 }
 
-// Lookup returns the target the given cluster was serving for this request.
-func (c *attemptCorrelation) Lookup(requestID, cluster string) (Target, bool) {
+// Lookup returns the target the given cluster was serving for this request, with the probe
+// receipt the attempt was admitted on.
+func (c *attemptCorrelation) Lookup(requestID, cluster string) (correlatedTarget, bool) {
 	if c == nil || requestID == "" || cluster == "" {
-		return Target{}, false
+		return correlatedTarget{}, false
 	}
 
 	c.mu.Lock()
@@ -138,10 +152,10 @@ func (c *attemptCorrelation) Lookup(requestID, cluster string) (Target, bool) {
 
 	entry, ok := c.entries[requestID]
 	if !ok || !c.now().Before(entry.expires) {
-		return Target{}, false
+		return correlatedTarget{}, false
 	}
-	target, ok := entry.byCluster[cluster]
-	return target, ok
+	correlated, ok := entry.byCluster[cluster]
+	return correlated, ok
 }
 
 // Forget drops a request's entry.

@@ -40,7 +40,7 @@ func TestRemember_DoesNotSweepOnEveryWriteAboveTheThreshold(t *testing.T) {
 
 	chain := []Target{{Model: "gpt-4o"}}
 	clusters := map[string]string{"": "cluster_default"}
-	c.Remember("req-a", chain, clusters)
+	c.Remember("req-a", chain, nil, clusters)
 	swept := len(c.entries)
 	if swept >= before {
 		t.Fatalf("the first write above the threshold must sweep: %d -> %d", before, swept)
@@ -51,14 +51,14 @@ func TestRemember_DoesNotSweepOnEveryWriteAboveTheThreshold(t *testing.T) {
 		c.entries[fmt.Sprintf("old2-%d", i)] = correlationEntry{expires: now.Add(-time.Minute)}
 	}
 	refilled := len(c.entries)
-	c.Remember("req-b", chain, clusters)
+	c.Remember("req-b", chain, nil, clusters)
 	if len(c.entries) < refilled {
 		t.Fatalf("a second write within the interval swept again: %d -> %d", refilled, len(c.entries))
 	}
 
 	// Past the interval, it sweeps again.
 	now = now.Add(correlationSweepInterval + time.Second)
-	c.Remember("req-c", chain, clusters)
+	c.Remember("req-c", chain, nil, clusters)
 	if len(c.entries) >= refilled {
 		t.Fatalf("no sweep after the interval elapsed: %d -> %d", refilled, len(c.entries))
 	}

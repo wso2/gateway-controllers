@@ -59,7 +59,7 @@ func (p *Policy) OnAttemptComplete(_ context.Context, attemptCtx *policy.Attempt
 		return
 	}
 
-	target, ok := p.correlation.Lookup(attemptCtx.RequestID, attemptCtx.UpstreamCluster)
+	correlated, ok := p.correlation.Lookup(attemptCtx.RequestID, attemptCtx.UpstreamCluster)
 	if !ok {
 		// Ordinary, not an error: the verdict may belong to a request this policy never
 		// published a chain for, or one whose entry has aged out. Nothing is recorded,
@@ -72,7 +72,12 @@ func (p *Policy) OnAttemptComplete(_ context.Context, attemptCtx *policy.Attempt
 	// One verdict per request, so the entry has done its job.
 	p.correlation.Forget(attemptCtx.RequestID)
 
-	event := p.health.RecordFailure(target, attemptCtx.Duration, p.now())
+	target := correlated.Target
+	// The receipt matters here, not just the target. A streamed probe was credited
+	// optimistically when its headers arrived; passing the reservation it ran on is what lets
+	// that credit be taken back, so this failure is graded against the probe it actually was
+	// rather than against a target the same response already returned to rotation (FR-030p).
+	event := p.health.RecordFailure(target, correlated.Admission, attemptCtx.Duration, p.now())
 
 	slog.Warn("ModelFailover: target failed after committing its response",
 		"model", target.Model,

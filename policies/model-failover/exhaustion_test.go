@@ -122,7 +122,7 @@ func TestExhaustion_ChainWhittledDownByHealthStillExhausts(t *testing.T) {
 	s.DurationSeconds = 300
 	s.clamp()
 	p.health = NewHealthStore(s)
-	p.health.RecordFailure(Target{Model: "gpt-4o"}, 0, p.now())
+	p.health.RecordFailure(Target{Model: "gpt-4o"}, Admission{}, 0, p.now())
 
 	// Only the anthropic fallback survives into the chain, and it fails too.
 	resp := immediate(t, respondTo(p, "gpt-4o", 503, "1"))
@@ -152,8 +152,8 @@ func TestExhaustion_EverySuspendedTargetIsRejectedWithoutAnAttempt(t *testing.T)
 	s.clamp()
 	p.health = NewHealthStore(s)
 	now := p.now()
-	p.health.RecordFailure(Target{Model: "gpt-4o"}, 0, now)
-	p.health.RecordFailure(Target{Model: "claude-sonnet-4-5", Provider: "anthropic"}, 0, now)
+	p.health.RecordFailure(Target{Model: "gpt-4o"}, Admission{}, 0, now)
+	p.health.RecordFailure(Target{Model: "claude-sonnet-4-5", Provider: "anthropic"}, Admission{}, 0, now)
 
 	metadata := map[string]interface{}{}
 	body, _ := json.Marshal(map[string]interface{}{"model": "gpt-4o"})
@@ -205,7 +205,7 @@ func TestExhaustion_StillRecordsTheFailuresThatCausedIt(t *testing.T) {
 		{Model: "gpt-4o"},
 		{Model: "claude-sonnet-4-5", Provider: "anthropic"},
 	} {
-		if p.health.Healthy(target, now) {
+		if healthy(p.health, target, now) {
 			t.Fatalf("%s was not recorded as failed, so an exhausted chain would be re-attempted in the same order next request", targetLabel(target))
 		}
 	}

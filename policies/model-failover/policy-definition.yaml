@@ -49,8 +49,13 @@ description: |
 
   It is not, however, ungraded: the response-header phase records a provisional outcome, and a
   post-commitment failure is graded afterwards against the target that served it, so a member that
-  truncates repeatedly is still suspended. What the provisional record does not do is change the
-  analytics outcome already emitted for the request — that still reads as a success.
+  truncates repeatedly is still suspended. That includes a member being probed back from
+  suspension: the probe is credited when the stream's headers arrive, because a member whose
+  responses are all streamed could otherwise never finish a recovery run, and the credit is taken
+  back if the completion verdict for that same probe reports a failure — so a stream that dies
+  mid-body re-suspends the member rather than leaving it restored. What the provisional record
+  does not do is change the analytics outcome already emitted for the request — that still reads
+  as a success.
 
   Failover is never attempted after response headers or streamed content have reached the client.
 

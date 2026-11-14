@@ -194,7 +194,7 @@ func TestTelemetry_ReportsTargetsSkippedOnHealth(t *testing.T) {
 
 	// Suspend the leading target, then drive a fresh request past it.
 	now := p.now()
-	p.health.RecordFailure(Target{Model: "gpt-4o"}, 0, now)
+	p.health.RecordFailure(Target{Model: "gpt-4o"}, Admission{}, 0, now)
 
 	got := telemetryFor(t, p, "gpt-4o", 200, "1")
 	skipped := fmt.Sprint(field(t, got, analyticsKeySkippedTargets))

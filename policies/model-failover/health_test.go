@@ -52,16 +52,16 @@ func TestHealth_ConsecutiveFailuresSuspend(t *testing.T) {
 	store := NewHealthStore(testSuspension())
 	now := time.Now()
 
-	if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+	if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 		t.Fatal("one failure must not suspend")
 	}
-	store.RecordSuccess(targetA, 0, now)
-	if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+	store.RecordSuccess(targetA, Admission{}, 0, now)
+	if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 		t.Fatal("the success must have reset the consecutive count")
 	}
 
-	store.RecordFailure(targetA, 0, now)
-	ev := store.RecordFailure(targetA, 0, now)
+	store.RecordFailure(targetA, Admission{}, 0, now)
+	ev := store.RecordFailure(targetA, Admission{}, 0, now)
 	if ev == nil {
 		t.Fatal("three consecutive failures must suspend")
 	}
@@ -71,7 +71,7 @@ func TestHealth_ConsecutiveFailuresSuspend(t *testing.T) {
 	if ev.DurationSeconds != 30 {
 		t.Errorf("first suspension must use the base duration, got %d", ev.DurationSeconds)
 	}
-	if store.Healthy(targetA, now) {
+	if healthy(store, targetA, now) {
 		t.Error("a suspended target must not be healthy")
 	}
 }
@@ -90,9 +90,9 @@ func TestHealth_IntermittentFailuresCaughtByErrorRate(t *testing.T) {
 	// One failure every third request: the consecutive counter never exceeds 1.
 	for i := 0; i < 30 && suspended == nil; i++ {
 		if i%3 == 0 {
-			suspended = store.RecordFailure(targetA, 0, now)
+			suspended = store.RecordFailure(targetA, Admission{}, 0, now)
 		} else {
-			store.RecordSuccess(targetA, 0, now)
+			store.RecordSuccess(targetA, Admission{}, 0, now)
 		}
 	}
 
@@ -118,7 +118,7 @@ func TestHealth_RateRuleInertBelowMinimumSample(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < 5; i++ {
-		if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+		if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 			t.Fatalf("suspended on a sample of %d, below the minimum of %d", i+1, s.MinimumRequests)
 		}
 	}
@@ -142,7 +142,7 @@ func TestHealth_LatencyPercentileSuspends(t *testing.T) {
 	// target it exists for.
 	var suspended *SuspensionEvent
 	for i := 0; i < 25 && suspended == nil; i++ {
-		_, suspended = store.RecordSuccess(targetA, 2*time.Second, now)
+		_, suspended = store.RecordSuccess(targetA, Admission{}, 2*time.Second, now)
 	}
 
 	if suspended == nil {
@@ -172,7 +172,7 @@ func TestHealth_BackoffDoublesAndCaps(t *testing.T) {
 	suspendOnce := func(at time.Time) *SuspensionEvent {
 		var first *SuspensionEvent
 		for i := 0; i < s.ConsecutiveFailures; i++ {
-			if ev := store.RecordFailure(targetA, 0, at); ev != nil && first == nil {
+			if ev := store.RecordFailure(targetA, Admission{}, 0, at); ev != nil && first == nil {
 				first = ev
 			}
 		}
@@ -191,7 +191,7 @@ func TestHealth_BackoffDoublesAndCaps(t *testing.T) {
 		}
 		// Move past the suspension so the target returns to full rotation, then fail it again.
 		at = at.Add(time.Duration(ev.DurationSeconds)*time.Second + time.Second)
-		if !store.Healthy(targetA, at) {
+		if !healthy(store, targetA, at) {
 			t.Fatalf("step %d: target must return to rotation once the suspension expires", step+1)
 		}
 	}
@@ -206,24 +206,25 @@ func TestHealth_BackoffResetsAfterHealthyPeriod(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < s.ConsecutiveFailures; i++ {
-		store.RecordFailure(targetA, 0, now)
+		store.RecordFailure(targetA, Admission{}, 0, now)
 	}
 	// Expire the suspension, then stay healthy well past the reset period.
 	later := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
-	if !store.Healthy(targetA, later) {
+	probe, admitted := store.Admit(targetA, later)
+	if !admitted {
 		t.Fatal("expected the target back in rotation")
 	}
 	// One clean probe completes recovery (RecoverAfterSuccesses is 1 here), and THAT is when
 	// the healthy clock starts — not when the window ended. The target has to then stay
 	// healthy for BackoffResetSeconds to earn its way back to the base duration.
-	store.RecordSuccess(targetA, 0, later)
+	store.RecordSuccess(targetA, probe, 0, later)
 
 	recovered := later.Add(time.Duration(s.BackoffResetSeconds)*time.Second + time.Second)
-	store.RecordSuccess(targetA, 0, recovered)
+	store.RecordSuccess(targetA, Admission{}, 0, recovered)
 
 	var ev *SuspensionEvent
 	for i := 0; i < s.ConsecutiveFailures; i++ {
-		ev = store.RecordFailure(targetA, 0, recovered)
+		ev = store.RecordFailure(targetA, Admission{}, 0, recovered)
 	}
 	if ev == nil {
 		t.Fatal("expected a suspension")
@@ -241,13 +242,13 @@ func TestHealth_SameModelDifferentProvidersAreIndependent(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < 3; i++ {
-		store.RecordFailure(targetA, 0, now)
+		store.RecordFailure(targetA, Admission{}, 0, now)
 	}
 
-	if store.Healthy(targetA, now) {
+	if healthy(store, targetA, now) {
 		t.Error("targetA must be suspended")
 	}
-	if !store.Healthy(targetB, now) {
+	if !healthy(store, targetB, now) {
 		t.Error("the same model on a different provider must be unaffected")
 	}
 }
@@ -262,11 +263,11 @@ func TestHealth_SuspensionDisabled(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < 50; i++ {
-		if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+		if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 			t.Fatal("no criterion is enabled, so nothing may suspend")
 		}
 	}
-	if !store.Healthy(targetA, now) {
+	if !healthy(store, targetA, now) {
 		t.Error("target must stay healthy when suspension is disabled")
 	}
 }
@@ -286,7 +287,7 @@ func TestHealth_ConcurrentFailuresSuspendOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if ev := store.RecordFailure(targetA, 0, now); ev != nil {
+			if ev := store.RecordFailure(targetA, Admission{}, 0, now); ev != nil {
 				mu.Lock()
 				events = append(events, ev)
 				mu.Unlock()
@@ -310,7 +311,7 @@ func TestHealth_HealthyTargetsFiltersSuspended(t *testing.T) {
 	now := time.Now()
 
 	for i := 0; i < 3; i++ {
-		store.RecordFailure(targetA, 0, now)
+		store.RecordFailure(targetA, Admission{}, 0, now)
 	}
 
 	healthy := store.HealthyTargets([]Target{targetA, targetB}, now)
@@ -323,6 +324,17 @@ func TestHealth_HealthyTargetsFiltersSuspended(t *testing.T) {
 // Half-open recovery (recoverAfterSuccesses) — the approved design's probe phase.
 // ---------------------------------------------------------------------------
 
+// healthy answers the admission question and discards the receipt, for the many tests that only
+// care whether a target is in rotation.
+//
+// Discarding is deliberate and is itself part of the contract: a probe admitted this way has no
+// receipt, so an outcome later recorded with the zero Admission will NOT resolve its run. A test
+// about probe accounting keeps the receipt by calling Admit directly.
+func healthy(store HealthStore, target Target, now time.Time) bool {
+	_, ok := store.Admit(target, now)
+	return ok
+}
+
 func halfOpenSuspension(recoverAfter int) Suspension {
 	s := testSuspension()
 	s.RecoverAfterSuccesses = recoverAfter
@@ -332,7 +344,7 @@ func halfOpenSuspension(recoverAfter int) Suspension {
 
 func suspend(store HealthStore, s Suspension, at time.Time) {
 	for i := 0; i < s.ConsecutiveFailures; i++ {
-		store.RecordFailure(targetA, 0, at)
+		store.RecordFailure(targetA, Admission{}, 0, at)
 	}
 }
 
@@ -347,10 +359,10 @@ func TestHealth_HalfOpenAdmitsOneProbeAtATime(t *testing.T) {
 
 	after := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
 
-	if !store.Healthy(targetA, after) {
+	if !healthy(store, targetA, after) {
 		t.Fatal("the first request after the window must be admitted as a probe")
 	}
-	if store.Healthy(targetA, after) {
+	if healthy(store, targetA, after) {
 		t.Fatal("a second concurrent request must NOT be admitted while a probe is in flight")
 	}
 }
@@ -364,15 +376,18 @@ func TestHealth_HalfOpenRestoresOnlyAfterTheFullRun(t *testing.T) {
 	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
 
 	for i := 1; i <= 3; i++ {
-		if !store.Healthy(targetA, at) {
+		probe, admitted := store.Admit(targetA, at)
+		if !admitted {
 			t.Fatalf("probe %d was not admitted", i)
 		}
-		store.RecordSuccess(targetA, 0, at)
+		// Graded against the receipt the admission returned. Passing the zero Admission
+		// here would leave the run at zero for ever, which is the point of the receipt.
+		store.RecordSuccess(targetA, probe, 0, at)
 		at = at.Add(time.Second)
 	}
 
 	// Restored: two requests in a row are now admitted, which never happens while half-open.
-	if !store.Healthy(targetA, at) || !store.Healthy(targetA, at) {
+	if !healthy(store, targetA, at) || !healthy(store, targetA, at) {
 		t.Fatal("after the full run of successful probes the target must be back in normal rotation")
 	}
 }
@@ -386,10 +401,11 @@ func TestHealth_FailedProbeReSuspendsImmediately(t *testing.T) {
 	suspend(store, s, now)
 	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
 
-	if !store.Healthy(targetA, at) {
+	probe, admitted := store.Admit(targetA, at)
+	if !admitted {
 		t.Fatal("probe not admitted")
 	}
-	ev := store.RecordFailure(targetA, 0, at)
+	ev := store.RecordFailure(targetA, probe, 0, at)
 	if ev == nil {
 		t.Fatal("a failed probe must re-suspend the target on its own")
 	}
@@ -397,7 +413,7 @@ func TestHealth_FailedProbeReSuspendsImmediately(t *testing.T) {
 		t.Fatalf("re-suspension must double the window: got %ds, want %ds",
 			ev.DurationSeconds, 2*s.DurationSeconds)
 	}
-	if store.Healthy(targetA, at) {
+	if healthy(store, targetA, at) {
 		t.Fatal("the target must be out of rotation again")
 	}
 }
@@ -411,16 +427,16 @@ func TestHealth_PartialProbeRunIsNotBanked(t *testing.T) {
 	suspend(store, s, now)
 
 	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
-	store.Healthy(targetA, at)
-	store.RecordSuccess(targetA, 0, at) // 1 of 3
-	store.Healthy(targetA, at)
-	store.RecordFailure(targetA, 0, at) // fails — run discarded
+	first, _ := store.Admit(targetA, at)
+	store.RecordSuccess(targetA, first, 0, at) // 1 of 3
+	second, _ := store.Admit(targetA, at)
+	store.RecordFailure(targetA, second, 0, at) // fails — run discarded
 
 	at = at.Add(time.Duration(2*s.DurationSeconds)*time.Second + time.Second)
-	store.Healthy(targetA, at)
-	store.RecordSuccess(targetA, 0, at) // 1 of 3 again, NOT 2 of 3
+	third, _ := store.Admit(targetA, at)
+	store.RecordSuccess(targetA, third, 0, at) // 1 of 3 again, NOT 2 of 3
 
-	if store.Healthy(targetA, at) && store.Healthy(targetA, at) {
+	if healthy(store, targetA, at) && healthy(store, targetA, at) {
 		t.Fatal("target restored after a single success — the earlier partial run was banked")
 	}
 }
@@ -435,14 +451,14 @@ func TestHealth_ProbeLeaseExpiryReleasesTheGate(t *testing.T) {
 	suspend(store, s, now)
 	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
 
-	if !store.Healthy(targetA, at) {
+	if !healthy(store, targetA, at) {
 		t.Fatal("probe not admitted")
 	}
 	// No outcome is ever recorded for it.
-	if store.Healthy(targetA, at.Add(probeLeaseSeconds*time.Second-time.Second)) {
+	if healthy(store, targetA, at.Add(probeLeaseSeconds*time.Second-time.Second)) {
 		t.Fatal("the gate must stay shut while the lease is live")
 	}
-	if !store.Healthy(targetA, at.Add(probeLeaseSeconds*time.Second+time.Second)) {
+	if !healthy(store, targetA, at.Add(probeLeaseSeconds*time.Second+time.Second)) {
 		t.Fatal("the gate must reopen once the lease expires, or the target can never recover")
 	}
 }
@@ -459,7 +475,7 @@ func TestHealth_PublicationDoesNotConsumeAProbe(t *testing.T) {
 	if got := store.HealthyTargets([]Target{targetA}, at); len(got) != 0 {
 		t.Fatalf("a half-open target must not be published as healthy, got %v", got)
 	}
-	if !store.Healthy(targetA, at) {
+	if !healthy(store, targetA, at) {
 		t.Fatal("publication consumed the probe slot")
 	}
 }
@@ -475,7 +491,7 @@ func TestHealth_RecoveryIsReportedOnceWhenTheProbeRunCompletes(t *testing.T) {
 	target := Target{Model: "claude-3", Provider: "anthropic"}
 
 	start := time.Now()
-	store.RecordFailure(target, 0, start)
+	store.RecordFailure(target, Admission{}, 0, start)
 
 	later := start.Add(61 * time.Second)
 	required := s.RecoverAfterSuccesses
@@ -483,10 +499,11 @@ func TestHealth_RecoveryIsReportedOnceWhenTheProbeRunCompletes(t *testing.T) {
 	var events int
 	var last *RecoveryEvent
 	for i := 0; i < required; i++ {
-		if !store.Healthy(target, later) {
+		probe, admitted := store.Admit(target, later)
+		if !admitted {
 			t.Fatalf("probe %d was not admitted", i+1)
 		}
-		if event, _ := store.RecordSuccess(target, 0, later); event != nil {
+		if event, _ := store.RecordSuccess(target, probe, 0, later); event != nil {
 			events++
 			last = event
 		}
@@ -513,7 +530,7 @@ func TestHealth_RecoveryIsReportedOnceWhenTheProbeRunCompletes(t *testing.T) {
 // A plain success on a healthy target is not a recovery, or every request would report one.
 func TestHealth_NoRecoveryEventWithoutASuspension(t *testing.T) {
 	store := NewHealthStore(testSuspension())
-	if event, _ := store.RecordSuccess(Target{Model: "gpt-4o"}, 0, time.Now()); event != nil {
+	if event, _ := store.RecordSuccess(Target{Model: "gpt-4o"}, Admission{}, 0, time.Now()); event != nil {
 		t.Fatalf("got a recovery event for a target that was never suspended: %+v", event)
 	}
 }
@@ -538,10 +555,10 @@ func TestHealth_SustainedSlownessSuspendsWithNoFailureAtAll(t *testing.T) {
 	// Every request succeeds, every one of them slow. No timeouts, no errors — exactly the
 	// degradation a timeout-only rule cannot see.
 	for i := 0; i < 25; i++ {
-		store.RecordSuccess(targetA, 2*time.Second, now)
+		store.RecordSuccess(targetA, Admission{}, 2*time.Second, now)
 	}
 
-	if store.Healthy(targetA, now) {
+	if healthy(store, targetA, now) {
 		t.Fatal("a target whose p95 is twice the configured threshold is still taking traffic; " +
 			"the latency rule is unreachable without a failure, so FR-018e never fires for the case it exists for")
 	}
@@ -559,14 +576,14 @@ func TestHealth_OneSlowRequestAmongFastOnesSuspendsNothing(t *testing.T) {
 	store := NewHealthStore(s)
 	now := time.Now()
 
-	store.RecordSuccess(targetA, 9*time.Second, now) // the outlier
+	store.RecordSuccess(targetA, Admission{}, 9*time.Second, now) // the outlier
 	for i := 0; i < 39; i++ {
-		if _, suspended := store.RecordSuccess(targetA, 10*time.Millisecond, now); suspended != nil {
+		if _, suspended := store.RecordSuccess(targetA, Admission{}, 10*time.Millisecond, now); suspended != nil {
 			t.Fatalf("a fast target was suspended after one slow request: p95 read as %v over %d samples",
 				suspended.Observed, suspended.SampleSize)
 		}
 	}
-	if !store.Healthy(targetA, now) {
+	if !healthy(store, targetA, now) {
 		t.Fatal("a target whose requests are fast apart from one outlier must keep taking traffic")
 	}
 }
@@ -586,9 +603,9 @@ func TestHealth_SuccessDoesNotEvaluateTheErrorRateRule(t *testing.T) {
 	// Nine failures, then a success takes the window to the minimum sample size with the
 	// rate still at 90%. The success must not be what suspends it.
 	for i := 0; i < 9; i++ {
-		store.RecordFailure(targetA, 0, now)
+		store.RecordFailure(targetA, Admission{}, 0, now)
 	}
-	if _, suspended := store.RecordSuccess(targetA, 0, now); suspended != nil {
+	if _, suspended := store.RecordSuccess(targetA, Admission{}, 0, now); suspended != nil {
 		t.Fatalf("a success evaluated the error-rate rule and suspended the target: %+v", suspended)
 	}
 }
@@ -612,14 +629,14 @@ func TestHealthStore_EvictsIdleEntriesButKeepsSuspendedOnes(t *testing.T) {
 
 	// One target that is genuinely suspended, and must survive any sweep.
 	suspended := Target{Model: "gpt-4o", Provider: "openai"}
-	m.RecordFailure(suspended, 5*time.Millisecond, now)
-	if m.Healthy(suspended, now) {
+	m.RecordFailure(suspended, Admission{}, 5*time.Millisecond, now)
+	if healthy(m, suspended, now) {
 		t.Fatal("fixture is wrong: the target should be suspended")
 	}
 
 	// Past the threshold with idle, stateless entries, all older than the TTL.
 	for i := 0; i < healthSweepThreshold+50; i++ {
-		m.Healthy(Target{Model: fmt.Sprintf("wildcard-model-%d", i), Provider: "openai"}, now)
+		healthy(m, Target{Model: fmt.Sprintf("wildcard-model-%d", i), Provider: "openai"}, now)
 	}
 	grown := len(m.targets)
 	if grown <= healthSweepThreshold {
@@ -628,7 +645,7 @@ func TestHealthStore_EvictsIdleEntriesButKeepsSuspendedOnes(t *testing.T) {
 
 	// Long enough later that the idle entries are evictable and the sweep interval has passed.
 	later := now.Add(healthIdleTTL + healthSweepInterval + time.Minute)
-	m.Healthy(Target{Model: "one-more", Provider: "openai"}, later)
+	healthy(m, Target{Model: "one-more", Provider: "openai"}, later)
 
 	if len(m.targets) >= grown {
 		t.Fatalf("no eviction: %d entries before, %d after", grown, len(m.targets))
@@ -636,7 +653,7 @@ func TestHealthStore_EvictsIdleEntriesButKeepsSuspendedOnes(t *testing.T) {
 	if _, stillThere := m.targets[suspended.Key()]; !stillThere {
 		t.Fatal("the suspended target's entry was evicted outright")
 	}
-	if m.Healthy(suspended, later) {
+	if healthy(m, suspended, later) {
 		t.Fatal("the suspended target was evicted; its suspension would be cleared and a " +
 			"failing provider would get its traffic back")
 	}
@@ -656,7 +673,7 @@ func TestHealthStore_SuspendedEntryStateAtSweepTime(t *testing.T) {
 	m := NewHealthStore(s).(*memoryHealthStore)
 	now := time.Now()
 	target := Target{Model: "gpt-4o", Provider: "openai"}
-	m.RecordFailure(target, 5*time.Millisecond, now)
+	m.RecordFailure(target, Admission{}, 5*time.Millisecond, now)
 
 	h := m.targets[target.Key()]
 	later := now.Add(healthIdleTTL + healthSweepInterval + time.Minute)
@@ -677,5 +694,162 @@ func TestHealthStore_SuspendedEntryStateAtSweepTime(t *testing.T) {
 	if h.consecutiveFailures != 0 || total != 0 {
 		t.Fatalf("fixture drifted: consecutiveFailures=%d windowCount=%d, expected both zero so "+
 			"the two guards under test are the only protection", h.consecutiveFailures, total)
+	}
+}
+
+// A chain admits every member it keeps, but Envoy attempts them one at a time and usually
+// stops at the first. The members below the serving one were reserved and never tried, and
+// holding their slots for the full lease excludes them from a later request that genuinely
+// needs them — on the strength of a request that never reached them.
+func TestHealth_ReleasingAnUnusedProbeReopensTheGateAtOnce(t *testing.T) {
+	s := halfOpenSuspension(3)
+	store := NewHealthStore(s)
+	now := time.Now()
+	suspend(store, s, now)
+	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
+
+	probe, admitted := store.Admit(targetA, at)
+	if !admitted {
+		t.Fatal("precondition: the window has ended, so a probe must be admitted")
+	}
+	// Control: while the reservation stands, nobody else gets in.
+	if healthy(store, targetA, at) {
+		t.Fatal("precondition: a live reservation must keep the gate shut")
+	}
+
+	store.ReleaseProbe(targetA, probe, at)
+
+	// Immediately, not probeLeaseSeconds later. The clock has not moved.
+	if !healthy(store, targetA, at) {
+		t.Fatal("a released reservation must reopen the gate at once, or an unattempted " +
+			"fallback stays excluded for the whole lease")
+	}
+}
+
+// Releasing is itself identity-checked. A receipt that no longer names the live reservation
+// must not open a gate somebody else is holding, or the release path becomes a way to run two
+// probes at once against a target that is still being judged one request at a time.
+func TestHealth_ReleasingAStaleReceiptDoesNotOpenAnotherProbesGate(t *testing.T) {
+	s := halfOpenSuspension(3)
+	store := NewHealthStore(s)
+	now := time.Now()
+	suspend(store, s, now)
+	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
+
+	stale, admitted := store.Admit(targetA, at)
+	if !admitted {
+		t.Fatal("precondition: first probe not admitted")
+	}
+	// Let the lease lapse so a second reservation can be issued, then take one.
+	expired := at.Add(probeLeaseSeconds*time.Second + time.Second)
+	live, admitted := store.Admit(targetA, expired)
+	if !admitted {
+		t.Fatal("precondition: the lapsed lease must let a second probe in")
+	}
+	if live.ID == stale.ID {
+		t.Fatal("precondition: a replacement reservation must have its own identity")
+	}
+
+	store.ReleaseProbe(targetA, stale, expired)
+
+	if healthy(store, targetA, expired) {
+		t.Fatal("a stale receipt released the live probe's gate — two probes can now run " +
+			"against a target that may still be broken")
+	}
+}
+
+// The same identity check on the outcome path. An outcome that arrives after its own lease
+// expired belongs to a reservation that no longer exists; counting it releases the gate of the
+// probe that replaced it and credits that run with an answer from minutes ago.
+func TestHealth_AStaleOutcomeDoesNotResolveTheProbeThatReplacedIt(t *testing.T) {
+	s := halfOpenSuspension(2)
+	store := NewHealthStore(s)
+	now := time.Now()
+	suspend(store, s, now)
+	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
+
+	stale, admitted := store.Admit(targetA, at)
+	if !admitted {
+		t.Fatal("precondition: first probe not admitted")
+	}
+	expired := at.Add(probeLeaseSeconds*time.Second + time.Second)
+	if _, admitted = store.Admit(targetA, expired); !admitted {
+		t.Fatal("precondition: the lapsed lease must let a second probe in")
+	}
+
+	if recovered, _ := store.RecordSuccess(targetA, stale, 0, expired); recovered != nil {
+		t.Fatal("a stale outcome reported a recovery for a run it was never part of")
+	}
+	// The gate is the observable half: if the stale success had been counted it would have
+	// released the live probe, letting a third request through while the second is still out.
+	if healthy(store, targetA, expired) {
+		t.Fatal("a stale outcome released the live probe's gate")
+	}
+}
+
+// A streamed probe is credited when its headers arrive, because withholding that would leave a
+// target whose responses are all streamed suspended for ever (FR-030p). The credit is therefore
+// optimistic, and a completion verdict naming the SAME reservation has to be able to take it
+// back — otherwise the stream that died mid-body is graded against a target its own headers
+// already returned to rotation.
+func TestHealth_AStreamThatDiesAfterItsHeadersUndoesTheProbeCredit(t *testing.T) {
+	s := halfOpenSuspension(1) // one clean probe is a full recovery, so the credit restores it
+	store := NewHealthStore(s)
+	now := time.Now()
+	suspend(store, s, now)
+	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
+
+	probe, admitted := store.Admit(targetA, at)
+	if !admitted {
+		t.Fatal("precondition: probe not admitted")
+	}
+	if recovered := store.RecordUnverified(targetA, probe, at); recovered == nil {
+		t.Fatal("precondition: a provisional outcome must complete a one-probe run (FR-030p)")
+	}
+	// Control: the optimistic credit really did restore it — two admissions in a row, which
+	// never happens while half-open.
+	if !healthy(store, targetA, at) || !healthy(store, targetA, at) {
+		t.Fatal("precondition: the probe credit should have returned the target to rotation")
+	}
+
+	// The body then died. The verdict names the reservation the stream ran on.
+	event := store.RecordFailure(targetA, probe, 0, at)
+
+	if event == nil {
+		t.Fatal("the completion verdict must re-suspend the target: the probe it was graded " +
+			"against had already been credited on a status that the body never earned")
+	}
+	if healthy(store, targetA, at) {
+		t.Fatal("the target is still in rotation after its probe failed")
+	}
+}
+
+// And the reversal is identity-checked too: a verdict for some OTHER reservation must not take
+// back a credit it has nothing to do with.
+func TestHealth_AnUnrelatedVerdictDoesNotUndoAProbeCredit(t *testing.T) {
+	s := halfOpenSuspension(1)
+	s.ConsecutiveFailures = 5 // high, so an ordinary failure cannot suspend on its own here
+	s.clamp()
+	store := NewHealthStore(s)
+	now := time.Now()
+	for i := 0; i < s.ConsecutiveFailures; i++ {
+		store.RecordFailure(targetA, Admission{}, 0, now)
+	}
+	at := now.Add(time.Duration(s.DurationSeconds)*time.Second + time.Second)
+
+	probe, admitted := store.Admit(targetA, at)
+	if !admitted {
+		t.Fatal("precondition: probe not admitted")
+	}
+	if recovered := store.RecordUnverified(targetA, probe, at); recovered == nil {
+		t.Fatal("precondition: the provisional outcome should have completed the run")
+	}
+
+	// A verdict carrying a receipt that was never issued for this target.
+	if event := store.RecordFailure(targetA, Admission{Probe: true, ID: probe.ID + 1000}, 0, at); event != nil {
+		t.Fatal("an unrelated verdict re-suspended a target whose own probe is still credited")
+	}
+	if !healthy(store, targetA, at) {
+		t.Fatal("an unrelated verdict pushed the target out of rotation")
 	}
 }

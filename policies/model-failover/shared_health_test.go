@@ -61,9 +61,9 @@ func TestSharedHealth_BothChainsOfOneOperationSeeTheSameHealth(t *testing.T) {
 	}
 
 	now := time.Now()
-	a.health.RecordFailure(Target{Model: "gpt-4o"}, 0, now)
+	a.health.RecordFailure(Target{Model: "gpt-4o"}, Admission{}, 0, now)
 
-	if b.health.Healthy(Target{Model: "gpt-4o"}, now) {
+	if healthy(b.health, Target{Model: "gpt-4o"}, now) {
 		t.Fatal("a failure recorded by one chain is invisible to the other, so grading on the fault path would change nothing")
 	}
 }
@@ -78,9 +78,9 @@ func TestSharedHealth_IsScopedToTheAttachment(t *testing.T) {
 	} {
 		mine, _ := GetPolicy(attachment("api-1", "route-1"), chainParams())
 		theirs, _ := GetPolicy(other, chainParams())
-		mine.(*Policy).health.RecordFailure(Target{Model: "gpt-4o"}, 0, now)
+		mine.(*Policy).health.RecordFailure(Target{Model: "gpt-4o"}, Admission{}, 0, now)
 
-		if !theirs.(*Policy).health.Healthy(Target{Model: "gpt-4o"}, now) {
+		if !healthy(theirs.(*Policy).health, Target{Model: "gpt-4o"}, now) {
 			t.Fatalf("health leaked to %+v — one operation's outage suspended another's target", other)
 		}
 	}
@@ -92,13 +92,13 @@ func TestSharedHealth_IsScopedToTheAttachment(t *testing.T) {
 func TestSharedHealth_ConfigChangeReplacesTheStore(t *testing.T) {
 	meta := attachment("api-cfg", "route-1")
 	first, _ := GetPolicy(meta, chainParams())
-	first.(*Policy).health.RecordFailure(Target{Model: "gpt-4o"}, 0, time.Now())
+	first.(*Policy).health.RecordFailure(Target{Model: "gpt-4o"}, Admission{}, 0, time.Now())
 
 	changed := chainParams()
 	changed["suspendDuration"] = 900
 
 	second, _ := GetPolicy(meta, changed)
-	if !second.(*Policy).health.Healthy(Target{Model: "gpt-4o"}, time.Now()) {
+	if !healthy(second.(*Policy).health, Target{Model: "gpt-4o"}, time.Now()) {
 		t.Fatal("the store survived a suspension-config change, so the new settings are not in force")
 	}
 
