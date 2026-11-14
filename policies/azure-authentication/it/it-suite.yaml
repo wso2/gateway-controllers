@@ -17,9 +17,10 @@
 # --------------------------------------------------------------------
 
 # The integration suite of the azure-authentication policy. The gateway runtime has the Azure
-# Workload Identity the test framework gives it (AZURE_* variables and a fixture federated token),
-# and the testbench entra service stands in for Microsoft Entra ID and the Entra-protected Azure
-# services. Feature paths are relative to this directory.
+# Workload Identity the test framework gives it (AZURE_* variables and a fixture federated token)
+# and the managed identity endpoint Azure Container Apps gives an app (IDENTITY_ENDPOINT and
+# IDENTITY_HEADER), and the testbench entra service stands in for Microsoft Entra ID, that endpoint
+# and the Entra-protected Azure services. Feature paths are relative to this directory.
 
 suite: azure-authentication
 

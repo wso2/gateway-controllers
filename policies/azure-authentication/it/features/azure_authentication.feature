@@ -24,14 +24,17 @@ Feature: Azure Authentication policy
 
   # Obtaining a Microsoft Entra ID token for the gateway's Azure Workload Identity and sending it
   # upstream: token delivery and sharing, parameters, failures and recovery, policy changes on a
-  # deployed API, and LLM providers. Rejected configurations, gateway restarts and an unreadable
+  # deployed API, and LLM providers. Rejected configurations, gateway restarts and an empty
   # federated token are in the other azure_authentication_*.feature files.
   #
   # The gateway runtime's identity is tenant 7f3c2a10-4b5e-4c6d-8e9f-0a1b2c3d4e5f and client
   # 5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e, its authority is the testbench entra service at
   # https://testbench:3028/ and its federated token is "testbench-federated-identity-token".
   # The entra service issues tokens at /<tenant>/oauth2/v2.0/token and records every token request
-  # at /<tenant>/test/requests. Its Entra-protected resources, http://testbench:3027/<tenant>/foundry
+  # at /<tenant>/test/requests, with the scope as the policy's Azure Identity SDK sends it: the
+  # resource's /.default followed by "openid offline_access profile". The SDK reads the tenant's
+  # OpenID configuration before its first token request; that read is not a token request and is
+  # not recorded. Its Entra-protected resources, http://testbench:3027/<tenant>/foundry
   # (audience https://ai.azure.com) and .../cognitive (audience https://cognitiveservices.azure.com),
   # answer a valid token with a chat completion echoing the request headers, anything else with
   # 401, and report the token they received in the X-Testbench-Entra-Token, -Tid and -Aud response
@@ -121,7 +124,7 @@ Feature: Azure Authentication policy
     And the JSON response field "requests[0].grantType" should be "client_credentials"
     And the JSON response field "requests[0].clientAssertionType" should be "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
     And the JSON response field "requests[0].clientId" should be "5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e"
-    And the JSON response field "requests[0].scope" should be "https://ai.azure.com/.default"
+    And the JSON response field "requests[0].scope" should be "https://ai.azure.com/.default openid offline_access profile"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -162,9 +165,9 @@ Feature: Azure Authentication policy
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
   # A token is replaced once it is due for refresh (Entra ID's refresh_in): the first token is due
-  # after 2 seconds, a later request carries a new one, and Entra ID gets exactly two token requests.
-  # The unit tests cover that the refresh runs in the background. The policy-free /health operation
-  # shows the route is live before the first token is stored.
+  # after 2 seconds, the first request after that fetches a new one, and Entra ID gets exactly two
+  # token requests. The policy-free /health operation shows the route is live before the first
+  # token is stored.
   Scenario: A token due for refresh is replaced
     Given I generate a unique resource name from "az" and store it as "tenant"
     And I generate a unique value from "az-refresh" and store it as "apiName"
@@ -273,7 +276,7 @@ Feature: Azure Authentication policy
     When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
     Then the response status code should be 200
     And the JSON response field "requests[0].clientId" should be "11111111-2222-4333-8444-555555555555"
-    And the JSON response field "requests[0].scope" should be "https://cognitiveservices.azure.com/.default"
+    And the JSON response field "requests[0].scope" should be "https://cognitiveservices.azure.com/.default openid offline_access profile"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -386,8 +389,8 @@ Feature: Azure Authentication policy
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
 
   # A throttled (429) or failing (500) token request is retried within the same client request,
-  # which then succeeds: one client request, two token requests. The unit tests check that the
-  # retry waits for Retry-After.
+  # which then succeeds: one client request, two token requests. Waiting for Retry-After is the
+  # Azure SDK's retry policy, which the scenario does not time.
   Scenario Outline: Retry a throttled or failing token request (<case>)
     Given I generate a unique resource name from "az" and store it as "tenant"
     And I generate a unique value from "az-retry" and store it as "apiName"
@@ -618,7 +621,7 @@ Feature: Azure Authentication policy
     When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
     Then the response status code should be 200
     And the JSON response field "count" should be 2
-    And the JSON response field "requests[1].scope" should be "https://cognitiveservices.azure.com/.default"
+    And the JSON response field "requests[1].scope" should be "https://cognitiveservices.azure.com/.default openid offline_access profile"
 
     When I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
