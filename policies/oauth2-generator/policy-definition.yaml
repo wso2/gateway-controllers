@@ -1,5 +1,5 @@
 name: oauth2-generator
-version: v0.10.0
+version: v0.10.1
 displayName: OAuth2 Generator
 description: |
   Injects an upstream OAuth2 credential into a request header before
@@ -27,6 +27,7 @@ parameters:
         bearerToken is set.
     clientSecret:
       type: string
+      writeOnly: true
       x-wso2-policy-advanced-param: false
       minLength: 1
       description: |
@@ -74,6 +75,7 @@ parameters:
         Resource owner username. Required when grantType is password.
     password:
       type: string
+      writeOnly: true
       x-wso2-policy-advanced-param: true
       minLength: 1
       description: |

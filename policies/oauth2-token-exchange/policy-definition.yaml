@@ -1,5 +1,5 @@
 name: oauth2-token-exchange
-version: v0.10.0
+version: v0.10.1
 description: |
   Exchanges the caller's inbound credential for a backend-specific token at an
   external OAuth2 authorization server, then attaches it to the upstream
@@ -59,6 +59,7 @@ parameters:
 
     clientSecret:
       type: string
+      writeOnly: true
       x-wso2-policy-advanced-param: false
       minLength: 1
       description: OAuth2 client secret paired with clientId.

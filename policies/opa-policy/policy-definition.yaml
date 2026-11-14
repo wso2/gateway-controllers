@@ -1,5 +1,5 @@
 name: opa-policy
-version: v0.2.0
+version: v0.2.1
 description: |
   Validates requests against an Open Policy Agent (OPA) policy engine. The
   gateway extracts a predefined set of request metadata (method, path, headers,
@@ -21,6 +21,7 @@ parameters:
       pattern: '^https?://[^\s]+$'
     accessKey:
       type: string
+      writeOnly: true
       format: password
       x-wso2-policy-advanced-param: false
       description: >-
