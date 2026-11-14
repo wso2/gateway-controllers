@@ -17,9 +17,9 @@
 # --------------------------------------------------------------------
 
 @azure-authentication
-Feature: Azure Authentication policy with an unreadable federated token
+Feature: Azure Authentication policy with an empty federated token
   As an API developer
-  I want a request to fail cleanly when the gateway cannot read its federated service account token
+  I want a request to fail cleanly when the gateway's federated service account token is empty
   So that a broken workload identity setup is visible and never sends an unauthenticated request
 
   # The gateway runtime's federated token file is empty, a setting that applies to every runner in
@@ -29,10 +29,11 @@ Feature: Azure Authentication policy with an unreadable federated token
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
-  # The policy reads the token file before every token request, so an empty file fails the request
-  # with the policy's 502 and no token request reaches Entra ID. The scenario names its own tenant to
-  # count them, and the gateway runtime log says why.
-  Scenario: An unreadable federated token fails the request with 502
+  # The policy's Azure Identity SDK sends the token file's contents as the client assertion, so an
+  # empty file sends an empty assertion, which Entra ID refuses (AADSTS50027). The request fails
+  # with the policy's 502, Entra ID gets exactly that one token request, and the gateway runtime log
+  # says why. The scenario names its own tenant to count the token requests.
+  Scenario: An empty federated token fails the request with 502
     Given I generate a unique resource name from "az" and store it as "tenant"
     And I generate a unique value from "az-token-file" and store it as "apiName"
     And I generate a unique API version from "az-token-file" and store it as "apiVersion"
@@ -51,10 +52,15 @@ Feature: Azure Authentication policy with an unreadable federated token
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 502
     Then the response should match the expected error response "azure-authentication-upstream-auth-failed"
-    And the "gateway-runtime" service logs should contain "the federated service account token could not be read"
+    And the "gateway-runtime" service logs should have exactly 1 line containing:
+      | Microsoft Entra ID rejected the token request (HTTP 400, invalid_request) |
+      | ${CTX:tenant}                                                             |
+      | 50027                                                                     |
     When I send a "GET" request to the "entra" service at "/${CTX:tenant}/test/requests"
     Then the response status code should be 200
-    And the JSON response field "count" should be 0
+    And the JSON response field "count" should be 1
+    And the JSON response field "requests[0].clientAssertion" should be ""
+    And the JSON response field "requests[0].status" should be 400
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
