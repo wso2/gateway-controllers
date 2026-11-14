@@ -46,6 +46,18 @@ Feature: Content length guardrail policy
       {"message": "This is a valid message with 50 bytes"}
       """
     Then the response status code should be 200
+    And the JSON response field "body" should be:
+      """
+      {"message": "This is a valid message with 50 bytes"}
+      """
+
+    # A 7-byte body is under the minimum of 10.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"a":1}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -74,6 +86,15 @@ Feature: Content length guardrail policy
     And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
     And the response body should contain "GUARDRAIL_INTERVENED"
 
+    # One byte under the minimum: 49 bytes.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"msg": "one byte short of the fifty-byte limit"}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
+    And the response body should contain "GUARDRAIL_INTERVENED"
+
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
@@ -96,6 +117,14 @@ Feature: Content length guardrail policy
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
       """
       {"message": "This is a very long message that exceeds the maximum allowed length of 50 bytes"}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
+
+    # One byte over the maximum: 51 bytes.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message": "one byte over the fifty-byte maximum"}
       """
     Then the response status code should be 422
     And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
@@ -150,6 +179,14 @@ Feature: Content length guardrail policy
       """
     Then the response status code should be 200
 
+    # One byte under the minimum: 19 bytes.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"msg":"123456789"}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
+
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
@@ -175,6 +212,14 @@ Feature: Content length guardrail policy
       """
     Then the response status code should be 200
 
+    # One byte over the maximum: 51 bytes.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message":"1234567890123456789012345678901234567"}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
+
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
@@ -199,6 +244,14 @@ Feature: Content length guardrail policy
       {"message": "Hello World"}
       """
     Then the response status code should be 200
+
+    # The extracted message is 2 bytes, under the minimum of 5.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message": "Hi"}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -250,6 +303,14 @@ Feature: Content length guardrail policy
       {"data": {"description": "Valid content here"}}
       """
     Then the response status code should be 200
+
+    # The extracted description is 9 bytes, under the minimum of 10.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"data": {"description": "Too short"}}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -329,6 +390,14 @@ Feature: Content length guardrail policy
       """
     Then the response status code should be 200
 
+    # A 30-byte body falls inside the excluded window.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"msg":"inside the window ok"}
+      """
+    Then the response status code should be 422
+    And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
+
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
@@ -383,6 +452,7 @@ Feature: Content length guardrail policy
     Then the response status code should be 422
     And the response body should contain "CONTENT_LENGTH_GUARDRAIL"
     And the response body should contain "GUARDRAIL_INTERVENED"
+    And the JSON response field "message.assessments" should not exist
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
