@@ -189,6 +189,30 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 	requestedModel := requestedModelFrom(reqCtx.Body)
 	published := p.publishedRanking(reqCtx.Metadata, requestedModel)
 
+	// A request that names NO model, with no routing policy speaking for it, is not this
+	// policy's to act on (FR-060).
+	//
+	// requestedModelFrom returns "" for four different things: no body, a body that is not
+	// JSON, JSON with no `model` key, and a `model` that is not a string. None of them is a
+	// model this policy can fail over between — but selectChain matches a "*" catch-all on
+	// ANY requested model, including "", so without this guard all four were treated as
+	// unmatched traffic and absorbed by the catch-all. That is not what a catch-all is for:
+	// it exists for a model that WAS named and matched no chain (FR-050), which is a
+	// publisher's deliberate "send the rest here", not "apply failover to anything at all".
+	//
+	// Two concrete consequences, which is why this is a guard rather than a tidy-up. On a
+	// kind with no model concept — an A2A agent, a GraphQL API — attaching this policy
+	// alongside a catch-all made it publish a ranking and raise the retry budget on every
+	// request, when FR-030b requires it to be inert there. And on a kind that does have
+	// models, a malformed or model-less body was fanned across every provider in the chain,
+	// turning one bad request into as many upstream calls as the chain is long.
+	//
+	// Guarded on BOTH conditions: a routing policy's ranking names its own models and is
+	// perfectly valid for a request whose body named none, so it must still be honoured.
+	if requestedModel == "" && len(published) == 0 {
+		return policy.UpstreamRequestModifications{}
+	}
+
 	// The target this request will ACTUALLY be sent to first — a routing policy's choice when
 	// it made one, otherwise the model the client named, since that is where it goes by
 	// default.
@@ -240,6 +264,18 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 				"no cluster on this API; the ranking is shorter than configured",
 				"dropped", targetLabels(dropped), "published", len(resolved)-len(dropped))
 		}
+	}
+	if metadata == nil && len(dropped) > 0 && len(published) > 0 {
+		// A routing policy ranked this request, and not one of its targets can be addressed
+		// here. Refuse rather than go inert (FR-061).
+		//
+		// Inert is harmless everywhere else because the control plane makes it so: with none
+		// of the PUBLISHER's targets resolvable the controller emits no cluster specifier and
+		// no retry policy, so the route is ordinary and there is nothing to fall back to
+		// incorrectly. Here the publisher's targets DID resolve, so the route carries real
+		// priority groups — and publishing nothing hands the request to those, serving a
+		// provider this ranking never nominated with the whole retry budget behind it.
+		return p.rejectUnroutableRanking(requestedModel, published, skipped, dropped)
 	}
 	if metadata == nil {
 		// Nothing to fail over between. The policy is inert: no metadata, no telemetry, no

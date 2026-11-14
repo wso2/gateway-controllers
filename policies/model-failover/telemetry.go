@@ -57,6 +57,14 @@ const (
 	// too long or a threshold that is too tight. Counting them as one hides the second
 	// behind the first, which is the failure mode an operator is least likely to guess at.
 	outcomeUnavailable = "unavailable"
+	// outcomeUnroutable: a routing policy's ranking named only providers with no upstream on
+	// this API, so nothing could be published and nothing was attempted.
+	//
+	// Separate from unavailable because health withheld nothing here, and separate from
+	// exhausted because no target was tried. The fix is the routing policy's configuration or
+	// this API's providers, not a suspension window — and counting it as either would hide a
+	// configuration error inside a runtime one (FR-061).
+	outcomeUnroutable = "unroutable"
 )
 
 // Ranking sources, so an operator reading a record can tell WHY the chain was ordered the way
