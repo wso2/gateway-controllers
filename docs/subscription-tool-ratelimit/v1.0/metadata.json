@@ -1,0 +1,11 @@
+{
+  "name": "subscription-tool-ratelimit",
+  "displayName": "Subscription Tool Rate Limit",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "MCP",
+    "Security"
+  ],
+  "description": "Enforces the tool call limits of the caller's subscription plan on MCP APIs, counting each tools/call request with a counter per subscription. Runs after subscription-validation v2, which records the subscription and plan, and delegates counting to the advanced-ratelimit engine with in-memory or Redis backends."
+}
