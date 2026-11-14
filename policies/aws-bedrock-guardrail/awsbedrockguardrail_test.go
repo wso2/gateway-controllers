@@ -187,12 +187,12 @@ func TestEvaluateGuardrailResponse_BasicActions(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 	metadata := map[string]interface{}{}
 
-	violation, modified, err := p.evaluateGuardrailResponse(nil, "hello", false, true, metadata)
-	if !violation || modified != "" || err == nil {
-		t.Fatalf("expected invalid response error, got violation=%v modified=%q err=%v", violation, modified, err)
+	violation, replacements, err := p.evaluateGuardrailResponse(nil, false, true, metadata)
+	if !violation || replacements != nil || err == nil {
+		t.Fatalf("expected invalid response error, got violation=%v replacements=%v err=%v", violation, replacements, err)
 	}
 
-	violation, modified, err = p.evaluateGuardrailResponse("bad-type", "hello", false, true, metadata)
+	violation, _, err = p.evaluateGuardrailResponse("bad-type", false, true, metadata)
 	if !violation || err == nil {
 		t.Fatalf("expected invalid output type error, got violation=%v err=%v", violation, err)
 	}
@@ -201,16 +201,16 @@ func TestEvaluateGuardrailResponse_BasicActions(t *testing.T) {
 		Action:      types.GuardrailActionNone,
 		Assessments: []types.GuardrailAssessment{},
 	}
-	violation, modified, err = p.evaluateGuardrailResponse(noViolationOutput, "hello", false, true, metadata)
-	if violation || modified != "" || err != nil {
-		t.Fatalf("expected no violation for action NONE, got violation=%v modified=%q err=%v", violation, modified, err)
+	violation, replacements, err = p.evaluateGuardrailResponse(noViolationOutput, false, true, metadata)
+	if violation || len(replacements) != 0 || err != nil {
+		t.Fatalf("expected no violation for action NONE, got violation=%v replacements=%v err=%v", violation, replacements, err)
 	}
 
 	unexpectedOutput := &bedrockruntime.ApplyGuardrailOutput{
 		Action:      types.GuardrailAction("UNKNOWN"),
 		Assessments: []types.GuardrailAssessment{},
 	}
-	violation, modified, err = p.evaluateGuardrailResponse(unexpectedOutput, "hello", false, true, metadata)
+	violation, _, err = p.evaluateGuardrailResponse(unexpectedOutput, false, true, metadata)
 	if !violation || err == nil {
 		t.Fatalf("expected unexpected action error, got violation=%v err=%v", violation, err)
 	}
@@ -223,29 +223,29 @@ func TestEvaluateGuardrailResponse_InterventionPaths(t *testing.T) {
 		Action:      types.GuardrailActionGuardrailIntervened,
 		Assessments: []types.GuardrailAssessment{},
 	}
-	violation, modified, err := p.evaluateGuardrailResponse(noPIIOutput, "hello", false, true, map[string]interface{}{})
-	if !violation || modified != "" || err != nil {
-		t.Fatalf("expected violation for non-PII intervention, got violation=%v modified=%q err=%v", violation, modified, err)
+	violation, replacements, err := p.evaluateGuardrailResponse(noPIIOutput, false, true, map[string]interface{}{})
+	if !violation || len(replacements) != 0 || err != nil {
+		t.Fatalf("expected violation for non-PII intervention, got violation=%v replacements=%v err=%v", violation, replacements, err)
 	}
 
 	original := "contact john@example.com"
 	output := makePIIIntervenedOutput("john@example.com")
 	metadata := map[string]interface{}{}
 
-	violation, modified, err = p.evaluateGuardrailResponse(output, original, true, true, metadata)
+	violation, replacements, err = p.evaluateGuardrailResponse(output, true, true, metadata)
 	if violation || err != nil {
 		t.Fatalf("expected redact path to pass with modified content, got violation=%v err=%v", violation, err)
 	}
-	if !strings.Contains(modified, "*****") {
+	if modified := applyPIIReplacements(original, replacements); !strings.Contains(modified, "*****") {
 		t.Fatalf("expected redacted content, got: %q", modified)
 	}
 
 	metadata = map[string]interface{}{}
-	violation, modified, err = p.evaluateGuardrailResponse(output, original, false, true, metadata)
+	violation, replacements, err = p.evaluateGuardrailResponse(output, false, true, metadata)
 	if violation || err != nil {
 		t.Fatalf("expected masking path to pass, got violation=%v err=%v", violation, err)
 	}
-	if modified == original || !strings.Contains(modified, "EMAIL_0000") {
+	if modified := applyPIIReplacements(original, replacements); modified == original || !strings.Contains(modified, "EMAIL_0000") {
 		t.Fatalf("expected masked placeholder in content, got: %q", modified)
 	}
 
@@ -254,9 +254,13 @@ func TestEvaluateGuardrailResponse_InterventionPaths(t *testing.T) {
 		t.Fatalf("expected metadata to include original->placeholder mapping, got: %#v", metadata[MetadataKeyPIIEntities])
 	}
 
-	violation, modified, err = p.evaluateGuardrailResponse(output, original, false, false, metadata)
-	if violation || modified != "" || err != nil {
-		t.Fatalf("expected response masking path to return no-op, got violation=%v modified=%q err=%v", violation, modified, err)
+	// Response phase: PII from the upstream is masked with its type, not passed through.
+	violation, replacements, err = p.evaluateGuardrailResponse(output, false, false, metadata)
+	if violation || err != nil {
+		t.Fatalf("expected response masking path to pass, got violation=%v err=%v", violation, err)
+	}
+	if modified := applyPIIReplacements(original, replacements); modified != "contact {EMAIL}" {
+		t.Fatalf("expected response PII to be masked, got: %q", modified)
 	}
 }
 
@@ -274,39 +278,85 @@ func TestRestorePIIInResponse(t *testing.T) {
 	}
 }
 
-func TestUpdatePayloadWithMaskedContent(t *testing.T) {
-	p := &AWSBedrockGuardrailPolicy{}
+func TestExtractPayloadRebuild(t *testing.T) {
+	maskAll := func(t *testing.T, payload []byte, jsonPath string) []byte {
+		t.Helper()
+		extracted, err := extractPayload(payload, jsonPath)
+		if err != nil {
+			t.Fatalf("extractPayload(%q) returned an unexpected error: %v", jsonPath, err)
+		}
+		for _, segment := range extracted.segments {
+			segment.set("*****")
+		}
+		rebuilt, err := extracted.rebuild()
+		if err != nil {
+			t.Fatalf("rebuild returned an unexpected error: %v", err)
+		}
+		return rebuilt
+	}
 
-	if got := string(p.updatePayloadWithMaskedContent([]byte(`ignored`), "a", "b", "")); got != "b" {
+	if got := string(maskAll(t, []byte(`ignored`), "")); got != "*****" {
 		t.Fatalf("expected direct replacement when jsonPath is empty, got: %q", got)
 	}
 
-	original := []byte(`{"message":"hello","nested":{"text":"hello"}}`)
-	updated := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text")
-
+	updated := maskAll(t, []byte(`{"message":"hello","nested":{"text":"hello"}}`), "$.nested.text")
 	var payload map[string]interface{}
 	if err := json.Unmarshal(updated, &payload); err != nil {
 		t.Fatalf("failed to unmarshal updated payload: %v", err)
 	}
 	nested := payload["nested"].(map[string]interface{})
-	if nested["text"] != "*****" {
-		t.Fatalf("expected nested.text to be updated, got: %#v", nested["text"])
+	if nested["text"] != "*****" || payload["message"] != "hello" {
+		t.Fatalf("expected only nested.text to be updated, got: %s", string(updated))
 	}
 
-	invalidJSON := []byte(`{"message":`)
-	if got := p.updatePayloadWithMaskedContent(invalidJSON, "x", "y", "$.message"); string(got) != string(invalidJSON) {
-		t.Fatalf("expected original payload on invalid JSON")
+	if _, err := extractPayload([]byte(`{"message":`), "$.message"); err == nil {
+		t.Fatalf("expected an error on invalid JSON")
 	}
 
-	if got := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text.value"); string(got) != string(original) {
-		t.Fatalf("expected original payload on invalid JSONPath")
+	if _, err := extractPayload([]byte(`{"nested":{"text":"hello"}}`), "$.nested.text.value"); err == nil {
+		t.Fatalf("expected an error on a JSONPath that matches nothing")
 	}
 }
 
-func TestValidatePayload_EarlyAndErrorPaths(t *testing.T) {
-	p := &AWSBedrockGuardrailPolicy{}
+// An event stream passes unchecked only when it carries JSON-RPC messages the path does not
+// apply to. A stream with no JSON event has nothing vouching for it, so it must be an error.
+func TestExtractPayloadEventStreamWithoutJSONRPC(t *testing.T) {
+	const path = "$.result.content[*].text"
 
-	// Response restoration path should return before any AWS call.
+	notification := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n"
+	if _, err := extractPayload([]byte(notification), path); err != nil {
+		t.Fatalf("a stream of JSON-RPC messages the path does not match should pass, got: %v", err)
+	}
+
+	for name, body := range map[string]string{
+		"only a DONE marker": "data: [DONE]\n\n",
+		"comments only":      ": keep-alive\n\n",
+		"empty events":       "event: message\n\n",
+	} {
+		if _, err := extractPayload([]byte(body), path); err == nil {
+			t.Fatalf("%s: expected an error, the stream has no JSON-RPC message to vouch for it", name)
+		}
+	}
+}
+
+// withPassingBedrock wires a mocked Bedrock that reports no intervention.
+func withPassingBedrock(p *AWSBedrockGuardrailPolicy) *AWSBedrockGuardrailPolicy {
+	mockClient := &mockBedrockClient{
+		output: &bedrockruntime.ApplyGuardrailOutput{Action: types.GuardrailActionNone},
+	}
+	p.loadAWSConfigFunc = func(_ context.Context, _ string) (aws.Config, error) {
+		return aws.Config{}, nil
+	}
+	p.newBedrockClientFunc = func(_ aws.Config) bedrockGuardrailClient {
+		return mockClient
+	}
+	return p
+}
+
+func TestValidatePayload_EarlyAndErrorPaths(t *testing.T) {
+	p := withPassingBedrock(&AWSBedrockGuardrailPolicy{})
+
+	// Response restoration happens after the response passes the guardrail.
 	metadata := map[string]interface{}{
 		MetadataKeyPIIEntities: map[string]string{
 			"alice@example.com": "EMAIL_0000",
@@ -521,13 +571,13 @@ func TestOnResponse_DisabledResponseFlow_ReturnsNoOp(t *testing.T) {
 }
 
 func TestOnResponse_RestoreAndBlockPaths(t *testing.T) {
-	restorePolicy := &AWSBedrockGuardrailPolicy{
+	restorePolicy := withPassingBedrock(&AWSBedrockGuardrailPolicy{
 		hasResponseParams: true,
 		responseParams: AWSBedrockGuardrailPolicyParams{
 			Enabled:   true,
 			RedactPII: false,
 		},
-	}
+	})
 
 	restoreCtx := &policy.ResponseContext{
 		SharedContext: &policy.SharedContext{

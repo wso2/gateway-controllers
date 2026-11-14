@@ -36,7 +36,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/bedrockruntime/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
-	utils "github.com/wso2/api-platform/sdk/core/utils"
 )
 
 // guardrailCodeFor derives the specific code from what Bedrock actually reported, so a caller
@@ -967,8 +966,9 @@ func (p *AWSBedrockGuardrailPolicy) loadAWSConfig(ctx context.Context, region st
 	return cfg, nil
 }
 
-// applyBedrockGuardrail calls AWS Bedrock Guardrail ApplyGuardrail API
-func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, awsCfg aws.Config, guardrailID, guardrailVersion, content string) (*bedrockruntime.ApplyGuardrailOutput, error) {
+// applyBedrockGuardrail calls the AWS Bedrock ApplyGuardrail API. Each piece of
+// text is sent as its own content block, so one call checks the whole payload.
+func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, awsCfg aws.Config, guardrailID, guardrailVersion string, contents []string) (*bedrockruntime.ApplyGuardrailOutput, error) {
 	// Create Bedrock Runtime client
 	newClient := p.newBedrockClientFunc
 	if newClient == nil {
@@ -978,18 +978,21 @@ func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, a
 	}
 	client := newClient(awsCfg)
 
+	blocks := make([]types.GuardrailContentBlock, 0, len(contents))
+	for _, content := range contents {
+		blocks = append(blocks, &types.GuardrailContentBlockMemberText{
+			Value: types.GuardrailTextBlock{
+				Text: aws.String(content),
+			},
+		})
+	}
+
 	// Prepare ApplyGuardrail input
 	input := &bedrockruntime.ApplyGuardrailInput{
 		GuardrailIdentifier: aws.String(guardrailID),
 		GuardrailVersion:    aws.String(guardrailVersion),
 		Source:              types.GuardrailContentSourceInput,
-		Content: []types.GuardrailContentBlock{
-			&types.GuardrailContentBlockMemberText{
-				Value: types.GuardrailTextBlock{
-					Text: aws.String(content),
-				},
-			},
-		},
+		Content:             blocks,
 	}
 
 	// Call ApplyGuardrail API
@@ -1001,179 +1004,207 @@ func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, a
 	return output, nil
 }
 
-// evaluateGuardrailResponse processes the AWS Bedrock Guardrail response
-func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}, originalContent string, redactPII bool, isRequest bool, metadata map[string]interface{}) (bool, string, error) {
+// guardrailFindings summarises what the guardrail decided across all assessments.
+type guardrailFindings struct {
+	// blocked is true when any filter, topic, word, PII entity, regex or
+	// grounding check has the action BLOCKED.
+	blocked bool
+	// anonymized is true when any PII entity or regex has the action ANONYMIZED.
+	anonymized bool
+	// unmaskable is true when an ANONYMIZED PII entity or regex carries no
+	// matched text, so the policy cannot mask it.
+	unmaskable bool
+}
+
+func collectGuardrailFindings(output *bedrockruntime.ApplyGuardrailOutput) guardrailFindings {
+	var findings guardrailFindings
+	for _, assessment := range output.Assessments {
+		if cp := assessment.ContentPolicy; cp != nil {
+			for _, filter := range cp.Filters {
+				if filter.Action == types.GuardrailContentPolicyActionBlocked {
+					findings.blocked = true
+				}
+			}
+		}
+		if tp := assessment.TopicPolicy; tp != nil {
+			for _, topic := range tp.Topics {
+				if topic.Action == types.GuardrailTopicPolicyActionBlocked {
+					findings.blocked = true
+				}
+			}
+		}
+		if wp := assessment.WordPolicy; wp != nil {
+			for _, word := range wp.CustomWords {
+				if word.Action == types.GuardrailWordPolicyActionBlocked {
+					findings.blocked = true
+				}
+			}
+			for _, word := range wp.ManagedWordLists {
+				if word.Action == types.GuardrailWordPolicyActionBlocked {
+					findings.blocked = true
+				}
+			}
+		}
+		if sip := assessment.SensitiveInformationPolicy; sip != nil {
+			for _, entity := range sip.PiiEntities {
+				switch entity.Action {
+				case types.GuardrailSensitiveInformationPolicyActionBlocked:
+					findings.blocked = true
+				case types.GuardrailSensitiveInformationPolicyActionAnonymized:
+					findings.anonymized = true
+					if aws.ToString(entity.Match) == "" {
+						findings.unmaskable = true
+					}
+				}
+			}
+			for _, regex := range sip.Regexes {
+				switch regex.Action {
+				case types.GuardrailSensitiveInformationPolicyActionBlocked:
+					findings.blocked = true
+				case types.GuardrailSensitiveInformationPolicyActionAnonymized:
+					findings.anonymized = true
+					if aws.ToString(regex.Match) == "" {
+						findings.unmaskable = true
+					}
+				}
+			}
+		}
+		if cg := assessment.ContextualGroundingPolicy; cg != nil {
+			for _, filter := range cg.Filters {
+				if filter.Action == types.GuardrailContextualGroundingPolicyActionBlocked {
+					findings.blocked = true
+				}
+			}
+		}
+	}
+	return findings
+}
+
+// piiReplacement replaces one piece of PII found by the guardrail.
+type piiReplacement struct {
+	match       string
+	replacement string
+}
+
+// evaluateGuardrailResponse decides what to do with the guardrail's result.
+// It returns violation=true when the content must be blocked; otherwise it
+// returns the PII replacements to apply (none when nothing needs masking).
+//
+// The content is blocked when any finding has the action BLOCKED, even if PII
+// was also found. It is masked only when every finding that acted is ANONYMIZED.
+// An intervention with no finding the policy can identify, or with an
+// ANONYMIZED finding that has no matched text to mask, is blocked (fail closed).
+func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}, redactPII bool, isRequest bool, metadata map[string]interface{}) (bool, []piiReplacement, error) {
 	if output == nil {
-		return true, "", fmt.Errorf("AWS Bedrock Guardrails API returned an invalid response")
+		return true, nil, fmt.Errorf("AWS Bedrock Guardrails API returned an invalid response")
 	}
 
 	outputTyped, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
-	if !ok {
-		return true, "", fmt.Errorf("invalid output type")
+	if !ok || outputTyped == nil {
+		return true, nil, fmt.Errorf("invalid output type")
 	}
 
-	// Check if guardrail intervened
-	if outputTyped.Action == types.GuardrailActionGuardrailIntervened {
-		// Check if there are PII entities or sensitive information that was masked
-		hasPIIMasking := false
-		if len(outputTyped.Assessments) > 0 {
-			for _, assessment := range outputTyped.Assessments {
-				if assessment.SensitiveInformationPolicy != nil {
-					if len(assessment.SensitiveInformationPolicy.PiiEntities) > 0 || len(assessment.SensitiveInformationPolicy.Regexes) > 0 {
-						hasPIIMasking = true
-						break
-					}
-				}
-			}
-		}
-
-		// If PII masking was applied
-		if hasPIIMasking {
-			if redactPII {
-				// Redaction mode: extract redacted content
-				redactedContent := p.extractRedactedContent(outputTyped, originalContent)
-				return false, redactedContent, nil
-			} else if isRequest {
-				// Masking mode: process PII entities for masking
-				maskedContent, maskedPII := p.processPIIEntitiesForMasking(outputTyped, originalContent)
-				if len(maskedPII) > 0 {
-					metadata[MetadataKeyPIIEntities] = maskedPII
-				}
-				return false, maskedContent, nil
-			} else {
-				// Response case: PII was already masked in request, allow through
-				// Restoration happens earlier in validatePayload
-				return false, "", nil
-			}
-		}
-
-		// Other intervention reasons - block by default (content policy, topic policy, word policy violations)
-		return true, "", nil // Violation detected, block content
+	switch outputTyped.Action {
+	case types.GuardrailActionNone:
+		return false, nil, nil
+	case types.GuardrailActionGuardrailIntervened:
+	default:
+		return true, nil, fmt.Errorf("AWS Bedrock Guardrails returned unexpected response action: %s", string(outputTyped.Action))
 	}
 
-	// Check for no intervention
-	if outputTyped.Action == types.GuardrailActionNone {
-		return false, "", nil // No violation, continue processing
+	findings := collectGuardrailFindings(outputTyped)
+	if findings.blocked || findings.unmaskable || !findings.anonymized {
+		return true, nil, nil
 	}
 
-	// Unexpected response
-	return true, "", fmt.Errorf("AWS Bedrock Guardrails returned unexpected response action: %s", string(outputTyped.Action))
+	return false, p.buildPIIReplacements(outputTyped, redactPII, isRequest, metadata), nil
 }
 
-// processPIIEntitiesForMasking handles PII masking when redactPII is disabled
-func (p *AWSBedrockGuardrailPolicy) processPIIEntitiesForMasking(output *bedrockruntime.ApplyGuardrailOutput, originalContent string) (string, map[string]string) {
-	if output == nil || len(output.Assessments) == 0 {
-		return originalContent, nil
-	}
-
-	maskedPII := make(map[string]string)
-	updatedContent := originalContent
-	counter := 0
-
-	// Collect all matches first, then sort by length (longest first) to avoid substring collisions
+// buildPIIReplacements lists the ANONYMIZED PII matches and what replaces each:
+//   - redactPII: "*****".
+//   - request: a placeholder such as EMAIL_0000, saved in metadata so the
+//     response can restore the original value.
+//   - response: the entity type in braces, such as {EMAIL}, like Bedrock's own
+//     masking. This PII came from the upstream (e.g. an MCP tool result), so
+//     it is not restored.
+func (p *AWSBedrockGuardrailPolicy) buildPIIReplacements(output *bedrockruntime.ApplyGuardrailOutput, redactPII bool, isRequest bool, metadata map[string]interface{}) []piiReplacement {
 	type matchInfo struct {
 		match      string
 		entityType string
-		isRegex    bool
 	}
 
+	seen := make(map[string]bool)
 	var matches []matchInfo
+	add := func(match, entityType string) {
+		if match == "" || seen[match] {
+			return
+		}
+		seen[match] = true
+		matches = append(matches, matchInfo{match: match, entityType: entityType})
+	}
 
 	for _, assessment := range output.Assessments {
-		if assessment.SensitiveInformationPolicy != nil {
-			// Collect PII entities
-			if len(assessment.SensitiveInformationPolicy.PiiEntities) > 0 {
-				for _, entity := range assessment.SensitiveInformationPolicy.PiiEntities {
-					if entity.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
-						match := aws.ToString(entity.Match)
-						if match != "" && maskedPII[match] == "" {
-							matches = append(matches, matchInfo{
-								match:      match,
-								entityType: string(entity.Type),
-								isRegex:    false,
-							})
-							maskedPII[match] = "" // Mark as seen to avoid duplicates
-						}
-					}
-				}
+		sip := assessment.SensitiveInformationPolicy
+		if sip == nil {
+			continue
+		}
+		for _, entity := range sip.PiiEntities {
+			if entity.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
+				add(aws.ToString(entity.Match), string(entity.Type))
 			}
-
-			// Collect regex matches
-			if len(assessment.SensitiveInformationPolicy.Regexes) > 0 {
-				for _, regex := range assessment.SensitiveInformationPolicy.Regexes {
-					if regex.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
-						match := aws.ToString(regex.Match)
-						name := aws.ToString(regex.Name)
-						if match != "" && maskedPII[match] == "" {
-							matches = append(matches, matchInfo{
-								match:      match,
-								entityType: name,
-								isRegex:    true,
-							})
-							maskedPII[match] = "" // Mark as seen to avoid duplicates
-						}
-					}
-				}
+		}
+		for _, regex := range sip.Regexes {
+			if regex.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
+				add(aws.ToString(regex.Match), aws.ToString(regex.Name))
 			}
 		}
 	}
 
-	// Sort matches by length (longest first) to prevent substring collisions
-	sort.Slice(matches, func(i, j int) bool {
+	// Longest first, so a match that contains another is replaced whole.
+	sort.SliceStable(matches, func(i, j int) bool {
 		return len(matches[i].match) > len(matches[j].match)
 	})
 
-	// Clear maskedPII map and rebuild with replacements
-	maskedPII = make(map[string]string)
-
-	// Process matches in order (longest first)
-	for _, matchInfo := range matches {
-		replacement := fmt.Sprintf("%s_%04x", matchInfo.entityType, counter)
-		updatedContent = strings.ReplaceAll(updatedContent, matchInfo.match, replacement)
-		maskedPII[matchInfo.match] = replacement
-		counter++
+	maskedPII := make(map[string]string)
+	replacements := make([]piiReplacement, 0, len(matches))
+	for counter, m := range matches {
+		var replacement string
+		switch {
+		case redactPII:
+			replacement = "*****"
+		case isRequest:
+			replacement = fmt.Sprintf("%s_%04x", m.entityType, counter)
+			maskedPII[m.match] = replacement
+		default:
+			replacement = "{" + m.entityType + "}"
+		}
+		replacements = append(replacements, piiReplacement{match: m.match, replacement: replacement})
 	}
 
-	return updatedContent, maskedPII
+	if len(maskedPII) > 0 && metadata != nil {
+		if existing, ok := metadata[MetadataKeyPIIEntities].(map[string]string); ok {
+			for original, placeholder := range maskedPII {
+				existing[original] = placeholder
+			}
+		} else {
+			metadata[MetadataKeyPIIEntities] = maskedPII
+		}
+	}
+
+	return replacements
 }
 
-// extractRedactedContent extracts redacted content from guardrail outputs
-func (p *AWSBedrockGuardrailPolicy) extractRedactedContent(output *bedrockruntime.ApplyGuardrailOutput, originalContent string) string {
-	redactedText := originalContent
-	// Replace all PII entity matches with *****
-	if output != nil && len(output.Assessments) > 0 && output.Assessments[0].SensitiveInformationPolicy != nil {
-		// Collect all matches first
-		var matches []string
-
-		for _, entity := range output.Assessments[0].SensitiveInformationPolicy.PiiEntities {
-			match := aws.ToString(entity.Match)
-			if match != "" {
-				matches = append(matches, match)
-			}
-		}
-		for _, regex := range output.Assessments[0].SensitiveInformationPolicy.Regexes {
-			match := aws.ToString(regex.Match)
-			if match != "" {
-				matches = append(matches, match)
-			}
-		}
-
-		// Sort matches by length (longest first) to prevent substring collisions
-		sort.Slice(matches, func(i, j int) bool {
-			return len(matches[i]) > len(matches[j])
-		})
-
-		// Process matches in order (longest first)
-		for _, match := range matches {
-			redactedText = strings.ReplaceAll(redactedText, match, "*****")
-		}
+// applyPIIReplacements applies the replacements to one piece of text.
+func applyPIIReplacements(content string, replacements []piiReplacement) string {
+	for _, r := range replacements {
+		content = strings.ReplaceAll(content, r.match, r.replacement)
 	}
-	return redactedText
+	return content
 }
 
 // restorePIIInResponse handles PII restoration in responses when redactPII is disabled
 func (p *AWSBedrockGuardrailPolicy) restorePIIInResponse(originalContent string, maskedPIIEntities map[string]string) string {
-	if maskedPIIEntities == nil || len(maskedPIIEntities) == 0 {
+	if len(maskedPIIEntities) == 0 {
 		return originalContent
 	}
 
@@ -1205,36 +1236,6 @@ func (p *AWSBedrockGuardrailPolicy) restorePIIInResponse(originalContent string,
 	}
 
 	return transformedContent
-}
-
-// updatePayloadWithMaskedContent updates the original payload by replacing the extracted content
-// Fallback policy: If jsonPath is empty, returns modifiedContent directly. For all JSON processing
-// errors (unmarshal, SetValueAtJSONPath, marshal), logs the error and returns originalPayload to
-// avoid returning invalid JSON or silently losing guardrail modifications.
-func (p *AWSBedrockGuardrailPolicy) updatePayloadWithMaskedContent(originalPayload []byte, extractedValue, modifiedContent string, jsonPath string) []byte {
-	if jsonPath == "" {
-		return []byte(modifiedContent)
-	}
-
-	var jsonData map[string]interface{}
-	if err := json.Unmarshal(originalPayload, &jsonData); err != nil {
-		slog.Debug("AWSBedrockGuardrail: Failed to unmarshal payload for content update", "jsonPath", jsonPath, "extractedValue", extractedValue, "error", err)
-		return originalPayload
-	}
-
-	err := utils.SetValueAtJSONPath(jsonData, jsonPath, modifiedContent)
-	if err != nil {
-		slog.Debug("AWSBedrockGuardrail: Failed to set value at JSONPath", "jsonPath", jsonPath, "extractedValue", extractedValue, "error", err)
-		return originalPayload
-	}
-
-	updatedPayload, err := json.Marshal(jsonData)
-	if err != nil {
-		slog.Debug("AWSBedrockGuardrail: Failed to marshal updated payload", "jsonPath", jsonPath, "extractedValue", extractedValue, "error", err)
-		return originalPayload
-	}
-
-	return updatedPayload
 }
 
 // buildGuardrailErrorResponse describes the intervention for the gateway: the code and
@@ -1504,42 +1505,79 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 }
 
 // validatePayload validates payload against AWS Bedrock Guardrail, returning policy actions.
+//
+// For responses (when redactPII is off), placeholders that the request phase
+// put in place of PII are restored only after the response has been checked,
+// so a response that carries a placeholder is still validated in full.
 func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}) interface{} {
-	if !params.RedactPII && isResponse {
-		if maskedPII, exists := metadata[MetadataKeyPIIEntities]; exists {
-			if maskedPIIMap, ok := maskedPII.(map[string]string); ok {
-				restoredContent := p.restorePIIInResponse(string(payload), maskedPIIMap)
-				if restoredContent != string(payload) {
-					return policy.DownstreamResponseModifications{
-						Body: []byte(restoredContent),
-					}
-				}
-			}
-		}
+	result := p.checkPayload(payload, params, isResponse, metadata)
+	if !isResponse || params.RedactPII {
+		return result
 	}
 
+	mod, ok := result.(policy.DownstreamResponseModifications)
+	if !ok || mod.StatusCode != nil {
+		return result
+	}
+	maskedPIIMap, ok := metadata[MetadataKeyPIIEntities].(map[string]string)
+	if !ok || len(maskedPIIMap) == 0 {
+		return result
+	}
+	body := mod.Body
+	if body == nil {
+		body = payload
+	}
+	if body == nil {
+		return result
+	}
+	restored := p.restorePIIInResponse(string(body), maskedPIIMap)
+	if restored != string(body) {
+		mod.Body = []byte(restored)
+	}
+	return mod
+}
+
+// passOrBlock returns a pass-through action when passthroughOnError is set, and a
+// guardrail error response otherwise. The fault describes why the check could not run
+// (no guardrail verdict exists), so it replaces the verdict fault buildErrorResponse declares.
+func (p *AWSBedrockGuardrailPolicy) passOrBlock(reason string, err error, params AWSBedrockGuardrailPolicyParams, isResponse bool, output interface{}, fault *policy.FaultDetails) interface{} {
+	if params.PassthroughOnError {
+		slog.Debug("AWSBedrockGuardrail: "+reason+", passthrough enabled", "error", err, "isResponse", isResponse)
+		return noModification(isResponse)
+	}
+	slog.Debug("AWSBedrockGuardrail: "+reason, "error", err, "isResponse", isResponse)
+	return withFault(p.buildErrorResponse(reason, err, isResponse, params.ShowAssessment, output), fault)
+}
+
+func noModification(isResponse bool) interface{} {
+	if isResponse {
+		return policy.DownstreamResponseModifications{}
+	}
+	return policy.UpstreamRequestModifications{}
+}
+
+// checkPayload runs the guardrail on the payload and blocks, masks or passes it.
+func (p *AWSBedrockGuardrailPolicy) checkPayload(payload []byte, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}) interface{} {
 	if payload == nil {
-		if isResponse {
-			return policy.DownstreamResponseModifications{}
-		}
-		return policy.UpstreamRequestModifications{}
+		return noModification(isResponse)
 	}
 
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	extracted, err := extractPayload(payload, params.JsonPath)
 	if err != nil {
-		if params.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: JSONPath extraction error, passthrough enabled", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-			if isResponse {
-				return policy.DownstreamResponseModifications{}
-			}
-			return policy.UpstreamRequestModifications{}
-		}
-		slog.Debug("AWSBedrockGuardrail: Error extracting value from JSONPath", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
-		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, nil), extractionFault("Error extracting value from JSONPath", err, isResponse))
+		return p.passOrBlock("Error extracting value from JSONPath", err, params, isResponse, nil, extractionFault("Error extracting value from JSONPath", err, isResponse))
 	}
 
-	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")
-	extractedValue = strings.TrimSpace(extractedValue)
+	contents := make([]string, 0, len(extracted.segments))
+	for _, segment := range extracted.segments {
+		text := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(segment.value, ""))
+		if text != "" {
+			contents = append(contents, text)
+		}
+	}
+	if len(contents) == 0 {
+		slog.Debug("AWSBedrockGuardrail: No text to validate", "jsonPath", params.JsonPath, "isResponse", isResponse)
+		return noModification(isResponse)
+	}
 
 	loadConfig := p.loadAWSConfigFunc
 	if loadConfig == nil {
@@ -1548,42 +1586,17 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 
 	awsCfg, err := loadConfig(context.Background(), p.region)
 	if err != nil {
-		if params.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: AWS config error, passthrough enabled", "error", err, "isResponse", isResponse)
-			if isResponse {
-				return policy.DownstreamResponseModifications{}
-			}
-			return policy.UpstreamRequestModifications{}
-		}
-		slog.Debug("AWSBedrockGuardrail: Error loading AWS config", "error", err, "isResponse", isResponse)
-		return withFault(p.buildErrorResponse("Error loading AWS config", err, isResponse, params.ShowAssessment, nil), checkFailureFault("Error loading AWS config", isResponse))
+		return p.passOrBlock("Error loading AWS config", err, params, isResponse, nil, checkFailureFault("Error loading AWS config", isResponse))
 	}
 
-	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, extractedValue)
+	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, contents)
 	if err != nil {
-		if params.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: Guardrail API error, passthrough enabled", "error", err, "isResponse", isResponse)
-			if isResponse {
-				return policy.DownstreamResponseModifications{}
-			}
-			return policy.UpstreamRequestModifications{}
-		}
-		slog.Debug("AWSBedrockGuardrail: Error calling AWS Bedrock Guardrail", "error", err, "isResponse", isResponse)
-		return withFault(p.buildErrorResponse("Error calling AWS Bedrock Guardrail", err, isResponse, params.ShowAssessment, nil), checkFailureFault("Error calling AWS Bedrock Guardrail", isResponse))
+		return p.passOrBlock("Error calling AWS Bedrock Guardrail", err, params, isResponse, nil, checkFailureFault("Error calling AWS Bedrock Guardrail", isResponse))
 	}
 
-	var outputInterface interface{} = output
-	violation, modifiedContent, err := p.evaluateGuardrailResponse(outputInterface, extractedValue, params.RedactPII, !isResponse, metadata)
+	violation, replacements, err := p.evaluateGuardrailResponse(output, params.RedactPII, !isResponse, metadata)
 	if err != nil {
-		if params.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: Guardrail evaluation error, passthrough enabled", "error", err, "isResponse", isResponse)
-			if isResponse {
-				return policy.DownstreamResponseModifications{}
-			}
-			return policy.UpstreamRequestModifications{}
-		}
-		slog.Debug("AWSBedrockGuardrail: Error evaluating guardrail response", "error", err, "isResponse", isResponse)
-		return withFault(p.buildErrorResponse("Error evaluating guardrail response", err, isResponse, params.ShowAssessment, output), checkFailureFault("Error evaluating guardrail response", isResponse))
+		return p.passOrBlock("Error evaluating guardrail response", err, params, isResponse, output, checkFailureFault("Error evaluating guardrail response", isResponse))
 	}
 
 	if violation {
@@ -1591,20 +1604,32 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		return p.buildErrorResponse("Violation of AWS Bedrock Guardrails detected", nil, isResponse, params.ShowAssessment, output)
 	}
 
-	if modifiedContent != "" && modifiedContent != extractedValue {
-		slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
-		modifiedPayload := p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, params.JsonPath)
-		if isResponse {
-			return policy.DownstreamResponseModifications{Body: modifiedPayload}
+	changed := false
+	for _, segment := range extracted.segments {
+		masked := applyPIIReplacements(segment.value, replacements)
+		if masked != segment.value {
+			segment.set(masked)
+			changed = true
 		}
-		return policy.UpstreamRequestModifications{Body: modifiedPayload}
 	}
 
-	slog.Debug("AWSBedrockGuardrail: Validation passed", "isResponse", isResponse)
-	if isResponse {
-		return policy.DownstreamResponseModifications{}
+	if !changed {
+		slog.Debug("AWSBedrockGuardrail: Validation passed", "isResponse", isResponse)
+		return noModification(isResponse)
 	}
-	return policy.UpstreamRequestModifications{}
+
+	modifiedPayload, err := extracted.rebuild()
+	if err != nil {
+		// Never forward the unmasked payload when masking was required.
+		slog.Debug("AWSBedrockGuardrail: Failed to rebuild masked payload", "error", err, "isResponse", isResponse)
+		return p.buildErrorResponse("Error updating payload with masked content", err, isResponse, params.ShowAssessment, output)
+	}
+
+	slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
+	if isResponse {
+		return policy.DownstreamResponseModifications{Body: modifiedPayload}
+	}
+	return policy.UpstreamRequestModifications{Body: modifiedPayload}
 }
 
 // buildErrorResponse builds a policy error response for both request and response phases.

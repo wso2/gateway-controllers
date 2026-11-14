@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.4.0
+version: v1.5.0
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
@@ -180,7 +180,9 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
+            JSONPath expression selecting the content to validate. Supports [n], [-1], [*] and .* .
+            When it selects an object or array, every string inside it is validated.
+            For MCP tool calls, use "$.params.arguments". If empty, the whole payload is validated.
           default: "$.messages[-1].content"
         redactPII:
           type: boolean
@@ -217,7 +219,10 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
+            JSONPath expression selecting the content to validate. Supports [n], [-1], [*] and .* .
+            When it selects an object or array, every string inside it is validated.
+            Server-Sent Events bodies are supported: the path is applied to each event's JSON data.
+            For MCP tool results, use "$.result.content[*].text". If empty, the whole payload is validated.
           default: "$.choices[0].message.content"
         passthroughOnError:
           type: boolean
