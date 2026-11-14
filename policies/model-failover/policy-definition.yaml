@@ -1,0 +1,312 @@
+name: model-failover
+version: v0.1.0
+displayName: Model Failover
+description: |
+  Re-attempts a failed AI model request against the next member of a declared fallback chain, so a
+  client application receives a successful response instead of an upstream failure.
+
+  Chains are keyed by the model the CLIENT asked for. An exact entry always wins over "*", so a
+  publisher can give gpt-4o one chain, gpt-4.1 another, and let everything else fall through to a
+  catch-all.
+
+  A request whose model matches no chain is NOT left alone. The route carries its cluster
+  specifier unconditionally, so such a request still traverses the configured group order -
+  publishing no ordering means the order is not overridden, not that failover is bypassed. The
+  practical consequence is that an unmatched model can be re-attempted against a target the
+  publisher never chose for it. Declare a "*" catch-all naming a destination you are willing to
+  send unmatched traffic to, rather than relying on an absent entry to mean "do nothing".
+
+  Attachable to any API kind whose operations resolve model targets (RestApi, LlmProxy), matching
+  model-round-robin. APIs that do not attach it are unaffected, including those routing to the same
+  shared provider upstream.
+
+  Members are (model, provider) pairs with independent health. A member that fails repeatedly is
+  suspended. When the suspension expires the member does not return to full traffic at once: it is
+  probed one request at a time, and recoverAfterSuccesses successes in a row restore it. Any failed
+  probe suspends it again for double the previous window, up to maxSuspendMultiplier times the base.
+
+  When a routing policy that publishes an ordered target preference list is attached to the same
+  operation, that ranking is traversed first and this chain follows as a last-resort tail. See
+  contracts/target-preference-list.md.
+
+  Health is learned per gateway instance and never shared. Each instance watches only the requests
+  it serves, so behind a load balancer with N instances a failing member can absorb up to N times
+  suspendAfterFailures before every instance has suspended it — with the default of 1 and four
+  instances, four failed requests rather than one. Suspension windows and their escalation are
+  per instance too, so the same member can be suspended on one instance and still be taking probe
+  traffic on another. Nothing is published between instances and no setting changes this; raising
+  suspendAfterFailures multiplies the total, it does not coordinate it.
+
+  Known limit — a member whose host does not resolve is suspended but never failed over. The proxy
+  answers such a request locally, before any upstream request exists, and a local answer is not
+  retriable — so the chain stops there and the client receives the error. The member IS recorded as
+  failed, so later requests route around it; only the first one is lost per suspension window. A
+  member that resolves but refuses or resets fails over normally.
+
+  Known limit — failure after the response has started cannot be FAILED OVER. Once response
+  headers have reached the client the proxy cannot retry, so a stream that opens successfully and
+  then dies is delivered to the client incomplete.
+
+  It is not, however, ungraded: the response-header phase records a provisional outcome, and a
+  post-commitment failure is graded afterwards against the target that served it, so a member that
+  truncates repeatedly is still suspended. What the provisional record does not do is change the
+  analytics outcome already emitted for the request — that still reads as a success.
+
+  Failover is never attempted after response headers or streamed content have reached the client.
+
+  Works whether or not the deployment routes upstream failures through the fault flow. With
+  policy_engine.fault_policies.handle_upstream_faults enabled the gateway skips every response
+  policy for a response of 400 or above — which for this policy is exactly the set of responses
+  it grades — so it also runs as a fault policy, and the control plane attaches it to the fault
+  chain automatically for any operation that resolved a failover configuration. A publisher
+  configures failover once; nothing has to be listed twice. On that path it runs FIRST, so the
+  exhaustion error is a default an operator's own fault entries can still reshape, and the
+  client receives the same status and body either way.
+
+  When the chain runs out the caller receives one fixed error — HTTP 503 with code 960100,
+  `failover_exhausted` — and never the final provider's own response. A provider error body
+  routinely names the account it was billed to, the region that rejected it or the key that was
+  refused, none of which the caller was ever shown; which member failed and why is answered in the
+  telemetry record and the log line instead. The status is always 503, including when the last
+  member answered 429: a spent chain is a gateway with nowhere left to send the request, not a
+  rate-limited caller. A chain with a single member is exempt and returns its own response
+  unchanged, exactly as it would with no failover policy attached.
+
+  The same error is returned immediately, with nothing dispatched, when every member of a chain is
+  suspended — rather than attempting a member health has already withdrawn. Telemetry separates
+  the two: a chain that was tried and failed is `exhausted`, a chain that was never attempted is
+  `unavailable`, and the second usually points at the suspension settings rather than at the
+  providers.
+
+  Every attempt carries the request-body mutations applied by preceding policies — masking,
+  redaction, guardrail rewrites, prompt decoration — so a fallback target never receives content
+  the first target was not allowed to receive. What an attempt does NOT carry is the previous
+  attempt's provider-specific work: its context path, its transformation, its credential.
+
+  WHERE TO ATTACH IT, AND WHY ITS POSITION IS NOT YOURS TO SET. Attach it once, at whichever
+  scope you want it to cover: `globalPolicies` applies it to every operation of the API,
+  `operationPolicies` to one. A chain is keyed by the model the client asked for and never by
+  path, so the API level is usually what you want — "fall back from gpt-4o wherever this API
+  serves it" — and attaching per path is the special case. An operation that writes its own
+  attachment overrides the API-level one for that operation rather than adding to it: a route
+  carries one failover configuration, so the two cannot be merged, and the discarded one is
+  reported at deployment rather than dropped quietly.
+
+  Where you attach it decides which operations it covers. It does NOT decide when it runs: the
+  gateway always moves it to the END of the request chain, whatever order you wrote it in and at
+  whichever scope, and logs that it did so when it actually moved something. Write it wherever
+  the configuration reads best.
+
+  It is moved because it consumes what every earlier policy decided — the provider a routing
+  policy selected, the body a guardrail rewrote — so it has to run after them. Chain order looks
+  like it already says that, but it only half does, and the half it misses is invisible in the
+  configuration: the gateway runs EVERY policy's request-header phase before ANY policy's
+  request-body phase, and this policy resolves its chain in the body phase. So a routing policy
+  that publishes in the header phase is honoured wherever it sits, while one that publishes in
+  the body phase would be silently ignored if written after this policy — identical-looking
+  configuration, opposite outcomes, decided by something no policy's configuration declares.
+  Rather than ask you to know which is which, the gateway places this one for you.
+
+  The same reasoning places it FIRST on the fault chain, where it writes the exhaustion error as
+  a default your own fault entries can still reshape. And because response phases run the chain
+  in reverse, last-on-request makes it first-on-response — which is wanted: it grades the
+  provider's own status and headers before another response policy reshapes them.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    targets:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        Ordered list of client-requested-model failover chains. Each entry's own model/provider are
+        authored at the same level as its fallbacks[] entries use, so a chain reads as the target
+        followed by what replaces it.
+      items:
+        type: object
+        additionalProperties: false
+        properties:
+          model:
+            type: string
+            description: |
+              The client-requested model this chain matches. "*" makes this the catch-all chain for
+              any model no other entry names (an exact entry always wins). A "*" member passes the
+              client's own model through unchanged, and one circuit covers every model it serves.
+            minLength: 1
+          provider:
+            type: string
+            description: |
+              Optionally names the provider this target's own request is sent to: a provider's alias
+              (its id when no alias is set) on the LlmProxy. Omitted, defaults to the proxy's primary
+              provider. The pair (model, provider) is the member's identity and the unit of health
+              tracking.
+            minLength: 1
+          fallbacks:
+            type: array
+            description: Ordered fallback chain tried in sequence after the target fails.
+            items:
+              type: object
+              additionalProperties: false
+              properties:
+                model:
+                  type: string
+                  description: |
+                    The model to request from this fallback. "*" keeps the client's requested model,
+                    e.g. to fail over to the same model on another provider.
+                  minLength: 1
+                provider:
+                  type: string
+                  description: |
+                    Names the provider this fallback is sent to: a provider's alias (its id when no
+                    alias is set) on the LlmProxy. Omitted, inherits this chain's target provider —
+                    name the primary provider explicitly to fail over to it from a target on another
+                    provider.
+                  minLength: 1
+              required:
+                - model
+        required:
+          - model
+      minItems: 1
+
+    statusCodes:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: |
+        Response status codes that trigger escalation to the next chain member, and count as that
+        member's failure for suspension purposes. Omitted, defaults to any 5xx plus 429. When set,
+        this REPLACES that default entirely rather than extending it — list every code that should
+        trigger failover, 5xx codes included if still wanted.
+
+        This list governs responses the provider actually sent. Connection failures, resets and
+        per-attempt timeouts always fail over regardless of what is listed here, because the proxy
+        handles them before any response exists.
+
+        Client-input and authorization failures are deliberately absent from the default: retrying
+        them elsewhere fails the same way, or bills a second inference call to mask a client bug.
+      items:
+        type: integer
+        minimum: 400
+        maximum: 599
+      minItems: 1
+
+    perTryTimeout:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Seconds each individual chain-member attempt may take, so a hung target fails over instead
+        of consuming the whole request. perTryTimeout x chain length must fit inside the route's
+        overall timeout. Omitted or 0 leaves the route's overall timeout in effect.
+      minimum: 0
+      default: 0
+
+    suspendDuration:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Seconds a failing member is skipped for. If it fails again as soon as it comes back, the
+        window doubles each time, up to maxSuspendMultiplier times this value.
+
+        When a window ends the member does NOT return to full rotation at once: it enters a
+        half-open phase and is probed one request at a time, and recoverAfterSuccesses successes
+        in a row restore it. A failed probe suspends it again for the next, longer window. That is
+        why a recovered member carries normal traffic only after the probes pass — restoring at
+        full share would expose a burst to a target that is still broken. Set to 0 to disable
+        suspension tracking entirely.
+      minimum: 0
+      default: 0
+
+    suspendAfterFailures:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Number of CONSECUTIVE qualifying failures (per statusCodes) required before a member is
+        suspended. A success resets the count. Omitted or 1 suspends on the very first qualifying
+        failure.
+      minimum: 1
+      default: 1
+
+    maxSuspendMultiplier:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Caps how far suspendDuration doubles for a member that keeps failing right after it comes
+        back, as a multiple of suspendDuration (8 with suspendDuration 30 caps the window at 240
+        seconds). 1 disables the doubling.
+      minimum: 1
+      default: 8
+
+    errorRatePercent:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Failure rate within windowSeconds that suspends a member, independently of
+        suspendAfterFailures. Catches a member failing intermittently, which never produces a run of
+        consecutive failures. 0 disables the windowed rule.
+      minimum: 0
+      maximum: 100
+      default: 50
+
+    windowSeconds:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: Rolling window over which errorRatePercent is evaluated.
+      minimum: 1
+      default: 60
+
+    minimumRequests:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Minimum requests within the window before errorRatePercent is evaluated. Without this, two
+        failures out of two requests reads as a 100% error rate and would suspend a healthy member
+        during quiet periods. Health state is per replica, so a thinly-trafficked replica must not
+        draw conclusions from a handful of attempts.
+      minimum: 1
+      default: 20
+
+    p95LatencyMs:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        95th-percentile latency over windowSeconds that suspends a member, subject to
+        minimumRequests. Judges sustained slowness; a single slow request fails over but never
+        suspends on its own. 0 disables latency-based suspension.
+
+        Enable with care: for LLM traffic, latency correlates with prompt and completion size as
+        much as with provider health, so a member serving legitimately large requests can look slow
+        without being unhealthy. Defaults to 0 for that reason.
+      minimum: 0
+      default: 0
+
+    backoffResetSeconds:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        How long a restored member must stay healthy before its next suspension starts from
+        suspendDuration again. A member that keeps flapping never earns the reset and keeps doubling
+        toward the maxSuspendMultiplier ceiling.
+      minimum: 1
+      default: 600
+
+    recoverAfterSuccesses:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Successful probe requests in a row needed to restore a suspended member once its window
+        ends. Probes are sent one at a time; any failed probe suspends the member again, with the
+        doubled window.
+
+        Without this gate a member returns to its full share of traffic the instant its window
+        ends, and nothing discovers it is still broken until the next failure is recorded — so
+        every request dispatched in that gap pays an extra attempt.
+      minimum: 1
+      default: 3
+
+  required:
+    - targets
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties: {}
