@@ -125,6 +125,18 @@ When a window with `onExceed: reject` is used up, the request is rejected with t
 
 Successful responses carry the advanced-ratelimit engine's rate-limit headers for the token windows.
 
+## Analytics
+
+So that overage can be charged apart from the plan's quota, the policy adds these keys to the request's analytics metadata, per condition. The condition id is part of each key, so several subscription policies on one request don't overwrite each other.
+
+| Key | Value | When |
+|---|---|---|
+| `x-wso2-subscription-quota-status-tokens` | `within` or `over` | Every counted request |
+| `x-wso2-subscription-quota-action-tokens` | `allowed` (`onExceed: allow`, the request went through) or `rejected` (`onExceed: reject`, the request got 429) | Only when `over` |
+| `x-wso2-subscription-quota-limit-tokens` | The window that was exceeded, e.g. "50000 tokens per 1 day" | Only when `over` and the window is known |
+
+It is decided when the request comes in, before the response's tokens are counted: a request is `within` while the token quota is not used up yet, and `over` once it is. The response that crosses the limit is the last one marked `within`. A request without a subscription (subscription-validation v2 did not run), or whose plan has no token-count condition, carries none of these keys.
+
 ## Reference Scenarios
 
 ### Example 1: LLM Provider

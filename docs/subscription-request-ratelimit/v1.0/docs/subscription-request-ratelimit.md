@@ -106,6 +106,18 @@ When a window with `onExceed: reject` is used up, the request is rejected with t
   ```
 - **Headers:** the violated window's `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (Unix time), `X-RateLimit-Full-Quota-Reset`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` (seconds), `RateLimit-Full-Quota-Reset`, `RateLimit-Policy` (`<limit>;w=<window seconds>`) and `Retry-After`.
 
+## Analytics
+
+So that overage can be charged apart from the plan's quota, the policy adds these keys to the request's analytics metadata, per condition. The condition id is part of each key, so several subscription policies on one request don't overwrite each other.
+
+| Key | Value | When |
+|---|---|---|
+| `x-wso2-subscription-quota-status-requests` | `within` or `over` | Every counted request |
+| `x-wso2-subscription-quota-action-requests` | `allowed` (`onExceed: allow`, the request went through) or `rejected` (`onExceed: reject`, the request got 429) | Only when `over` |
+| `x-wso2-subscription-quota-limit-requests` | The window that was exceeded, e.g. "5 requests per 1 minute" | Only when `over` and the window is known |
+
+Every counted request carries it. A request without a subscription (subscription-validation v2 did not run), or whose plan has no request-count condition, carries none of these keys.
+
 ## Reference Scenarios
 
 ### Example 1: REST API

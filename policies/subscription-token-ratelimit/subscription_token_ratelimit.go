@@ -121,8 +121,14 @@ func (p *SubscriptionTokenRateLimitPolicy) OnRequestHeaders(ctx context.Context,
 	}
 	reqCtx.Metadata[metadataKeyDelegate] = key
 
-	if resp := checkLimit(ctx, reqCtx, delegate, ec, plan.SubscriptionID, "tokens", faultMessage); resp != nil {
+	// The tokens of a response are counted after it; the status here is whether the plan's token
+	// quota was already used up when the request came in.
+	resp, analytics := checkLimit(ctx, reqCtx, delegate, ec, plan.SubscriptionID, "tokens", faultMessage)
+	if resp != nil {
 		return *resp
+	}
+	if analytics != nil {
+		return policy.UpstreamRequestHeaderModifications{AnalyticsMetadata: analytics}
 	}
 	return nil
 }

@@ -331,23 +331,67 @@ type requestHeaderPolicer interface {
 // checkLimit runs the delegate's header-phase check. It returns the 429 to send, or nil to let
 // the request through; with onExceed allow an exceeded limit is logged and let through.
 func checkLimit(ctx context.Context, reqCtx *policy.RequestHeaderContext, delegate policy.Policy,
-	ec enforcedCondition, subscriptionID, unit, faultMessage string) *policy.ImmediateResponse {
+	ec enforcedCondition, subscriptionID, unit, faultMessage string) (*policy.ImmediateResponse, map[string]any) {
 	rl, ok := delegate.(requestHeaderPolicer)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	immediate, blocked := rl.OnRequestHeaders(ctx, reqCtx, nil).(policy.ImmediateResponse)
 	if !blocked {
-		return nil
+		return nil, quotaMetadata(ec.ID, quotaWithin, "", "")
 	}
+	limit := exceededLimit(immediate.Headers, unit)
 	if !ec.Reject {
 		slog.Warn("subscription limit exceeded; onExceed is allow, letting it through",
 			"condition", ec.ID, "subscriptionId", subscriptionID, "apiId", reqCtx.APIId)
-		return nil
+		return nil, quotaMetadata(ec.ID, quotaOver, quotaAllowed, limit)
 	}
 	slog.Debug("subscription limit exceeded", "condition", ec.ID, "subscriptionId", subscriptionID)
 	resp := throttledResponse(immediate, unit, faultMessage)
-	return &resp
+	metadata := quotaMetadata(ec.ID, quotaOver, quotaRejected, limit)
+	resp.AnalyticsMetadata = metadata
+	return &resp, metadata
+}
+
+// Analytics metadata on every counted request, so overage can be charged apart from the quota:
+// per condition (a request can be counted by several of these policies), whether it was within the
+// quota or over it, whether it was let through or rejected, and the limit it went over.
+const (
+	quotaStatusKeyPrefix = "x-wso2-subscription-quota-status-"
+	quotaActionKeyPrefix = "x-wso2-subscription-quota-action-"
+	quotaLimitKeyPrefix  = "x-wso2-subscription-quota-limit-"
+
+	quotaWithin   = "within"
+	quotaOver     = "over"
+	quotaAllowed  = "allowed"
+	quotaRejected = "rejected"
+)
+
+// quotaMetadata is the analytics metadata for one counted request: its quota status for the
+// condition, and when over, what happened to it and the limit it went over (when known).
+func quotaMetadata(conditionID, status, action, limit string) map[string]any {
+	metadata := map[string]any{quotaStatusKeyPrefix + conditionID: status}
+	if action != "" {
+		metadata[quotaActionKeyPrefix+conditionID] = action
+	}
+	if limit != "" {
+		metadata[quotaLimitKeyPrefix+conditionID] = limit
+	}
+	return metadata
+}
+
+// exceededLimit describes the window the delegate refused, e.g. "5 requests per 1 minute", from
+// its RateLimit headers; empty when they don't say.
+func exceededLimit(h map[string]string, unit string) string {
+	limit, hasLimit := headerInt(h, "x-ratelimit-limit")
+	var windowSeconds int64
+	if m := windowParamPattern.FindStringSubmatch(h["ratelimit-policy"]); m != nil {
+		windowSeconds, _ = strconv.ParseInt(m[1], 10, 64)
+	}
+	if !hasLimit || windowSeconds <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d %s per %s", limit, unit, describeWindow(time.Duration(windowSeconds)*time.Second))
 }
 
 var windowParamPattern = regexp.MustCompile(`;w=(\d+)`)
@@ -365,9 +409,8 @@ func throttledResponse(delegated policy.ImmediateResponse, unit, faultMessage st
 	}
 
 	message := "Subscription quota exceeded"
-	if hasLimit && windowSeconds > 0 {
-		message = fmt.Sprintf("Subscription quota exceeded: %d %s per %s", limit, unit,
-			describeWindow(time.Duration(windowSeconds)*time.Second))
+	if described := exceededLimit(h, unit); described != "" {
+		message = "Subscription quota exceeded: " + described
 	}
 	body, err := json.Marshal(map[string]string{
 		"error":   "rate_limit_exceeded",

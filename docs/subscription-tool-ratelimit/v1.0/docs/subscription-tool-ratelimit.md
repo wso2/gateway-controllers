@@ -114,6 +114,18 @@ When a window with `onExceed: reject` is used up, the call is rejected with `429
 
 The response carries the violated window's `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, `X-RateLimit-Full-Quota-Reset`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `RateLimit-Full-Quota-Reset`, `RateLimit-Policy` and `Retry-After` headers, as `subscription-validation` v1 did, and echoes the `mcp-session-id` header.
 
+## Analytics
+
+So that overage can be charged apart from the plan's quota, the policy adds these keys to the request's analytics metadata, per condition. The condition id is part of each key, so several subscription policies on one request don't overwrite each other.
+
+| Key | Value | When |
+|---|---|---|
+| `x-wso2-subscription-quota-status-tool-calls` | `within` or `over` | Every counted request |
+| `x-wso2-subscription-quota-action-tool-calls` | `allowed` (`onExceed: allow`, the request went through) or `rejected` (`onExceed: reject`, the request got 429) | Only when `over` |
+| `x-wso2-subscription-quota-limit-tool-calls` | The window that was exceeded, e.g. "200 tool calls per 1 hour" | Only when `over` and the window is known |
+
+Only `tools/call` requests carry it; `initialize`, `tools/list` and other methods are not counted and carry nothing from this policy. A request without a subscription (subscription-validation v2 did not run), or whose plan has no tool-call-count condition, carries none of these keys.
+
 ## Reference Scenarios
 
 ### Example 1: MCP API

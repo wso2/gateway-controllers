@@ -82,8 +82,12 @@ func (p *SubscriptionToolRateLimitPolicy) OnRequestHeaders(ctx context.Context, 
 	if facts.Method != methodToolsCall {
 		return nil
 	}
-	if resp := p.limit(ctx, reqCtx, facts.RequestID); resp != nil {
+	resp, analytics := p.limit(ctx, reqCtx, facts.RequestID)
+	if resp != nil {
 		return *resp
+	}
+	if analytics != nil {
+		return policy.UpstreamRequestHeaderModifications{AnalyticsMetadata: analytics}
 	}
 	return nil
 }
@@ -104,29 +108,34 @@ func (p *SubscriptionToolRateLimitPolicy) OnRequestBody(ctx context.Context, req
 	if !isCall {
 		return nil
 	}
-	if resp := p.limit(ctx, synthesizeHeaderContext(reqCtx), requestID); resp != nil {
+	resp, analytics := p.limit(ctx, synthesizeHeaderContext(reqCtx), requestID)
+	if resp != nil {
 		return *resp
+	}
+	if analytics != nil {
+		return policy.UpstreamRequestModifications{AnalyticsMetadata: analytics}
 	}
 	return nil
 }
 
-// limit counts one tool call; it returns the rejection to send, or nil.
+// limit counts one tool call; it returns the rejection to send (or nil) and the call's quota
+// status for analytics (nil when the call wasn't counted).
 func (p *SubscriptionToolRateLimitPolicy) limit(ctx context.Context, reqCtx *policy.RequestHeaderContext,
-	requestID json.RawMessage) *policy.ImmediateResponse {
+	requestID json.RawMessage) (*policy.ImmediateResponse, map[string]any) {
 	plan, ok := readSubscriptionPlan(reqCtx.SharedContext)
 	if !ok {
 		slog.Debug("subscription-tool-ratelimit: no subscription in metadata (subscription-validation v2 must run first); not limiting",
 			"route", p.metadata.RouteName)
-		return nil
+		return nil, nil
 	}
 	cond, ok := plan.condition(conditionTypeToolCallCount)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	ec, err := resolveCondition(cond)
 	if err != nil {
 		slog.Warn("subscription-tool-ratelimit: not limiting", "error", err, "planId", plan.PlanID)
-		return nil
+		return nil, nil
 	}
 
 	key := delegateCacheKey(plan.PlanID, ec, "")
@@ -136,15 +145,15 @@ func (p *SubscriptionToolRateLimitPolicy) limit(ctx context.Context, reqCtx *pol
 	})
 	if err != nil {
 		slog.Warn("subscription-tool-ratelimit: failed to build limiter; not limiting", "error", err, "planId", plan.PlanID)
-		return nil
+		return nil, nil
 	}
 
-	resp := checkLimit(ctx, reqCtx, delegate, ec, plan.SubscriptionID, "tool calls", faultMessage)
+	resp, analytics := checkLimit(ctx, reqCtx, delegate, ec, plan.SubscriptionID, "tool calls", faultMessage)
 	if resp == nil {
-		return nil
+		return nil, analytics
 	}
 	jsonRPC := toJSONRPC(*resp, requestID, reqCtx.DownstreamHeaders())
-	return &jsonRPC
+	return &jsonRPC, analytics
 }
 
 // toJSONRPC wraps the rejection in a JSON-RPC error envelope for the MCP client, as mcp-ratelimit

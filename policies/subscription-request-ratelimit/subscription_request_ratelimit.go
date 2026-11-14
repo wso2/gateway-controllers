@@ -86,8 +86,12 @@ func (p *SubscriptionRequestRateLimitPolicy) OnRequestHeaders(ctx context.Contex
 		return nil
 	}
 
-	if resp := checkLimit(ctx, reqCtx, delegate, ec, plan.SubscriptionID, "requests", "Subscription plan request limit exceeded"); resp != nil {
+	resp, analytics := checkLimit(ctx, reqCtx, delegate, ec, plan.SubscriptionID, "requests", "Subscription plan request limit exceeded")
+	if resp != nil {
 		return *resp
+	}
+	if analytics != nil {
+		return policy.UpstreamRequestHeaderModifications{AnalyticsMetadata: analytics}
 	}
 	return nil
 }
