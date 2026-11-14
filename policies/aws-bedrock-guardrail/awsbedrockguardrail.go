@@ -47,6 +47,120 @@ const (
 	ResponseDefaultJSONPath      = "$.choices[0].message.content"
 	RequestFlowEnabledByDefault  = true
 	ResponseFlowEnabledByDefault = false
+
+	// ResponseDefaultStreamingJSONPath locates the assistant text inside one SSE
+	// data frame. A streamed response carries text incrementally under
+	// choices[0].delta.content, so ResponseDefaultJSONPath — which addresses the
+	// non-streamed choices[0].message.content — never matches on a stream. The
+	// two paths cannot be collapsed into one: they address different shapes of
+	// the same response.
+	ResponseDefaultStreamingJSONPath = "$.choices[0].delta.content"
+
+	// DefaultStreamingTextUnitChars is how many characters of assistant text are
+	// batched before each ApplyGuardrail call.
+	//
+	// 1000 is Amazon's text unit: AWS's own guidance for streaming outputs is to
+	// batch chunks "into smaller batches that are closer to a text unit, which
+	// is approximately 1,000 characters", assessing as soon as the buffer
+	// exceeds one unit. It is also the billing unit, so a call carrying 40
+	// characters costs the same as one carrying 1000 — batching below a unit
+	// buys nothing and pays the same.
+	//
+	// This is counted in characters of extracted text, never in bytes of the
+	// wire format. One SSE event is ~150 bytes of framing around ~3 characters
+	// of content, so a byte-sized window under-fills a text unit by more than an
+	// order of magnitude and multiplies the bill accordingly.
+	DefaultStreamingTextUnitChars = 1000
+
+	// MinStreamingTextUnitChars floors the configured batch. Below this a batch
+	// cannot fill a text unit under any framing, so it only adds calls.
+	MinStreamingTextUnitChars = 100
+
+	// streamFlushPacerBytes is how many raw bytes accumulate before the kernel
+	// hands this policy a flush. It paces invocation and nothing else: whether
+	// an ApplyGuardrail call happens is decided by the text-unit batch above,
+	// which is measured on content this hook cannot see (see
+	// NeedsMoreResponseData). Not configurable — the operator-facing control is
+	// the text unit.
+	streamFlushPacerBytes = 4096
+
+	// maxHeldFlushBytes bounds the bytes withheld while their text is unassessed.
+	//
+	// The batch boundary is a character count, so a stream whose events carry no
+	// assessable text — keep-alive comments, role deltas, usage frames — never
+	// reaches it, and without this the withheld buffer grows for as long as the
+	// stream runs while the client receives nothing. One text unit of SSE is
+	// ~50 KB at typical framing, so this leaves room for a framing-heavy stream
+	// before forcing the issue.
+	//
+	// Hitting it assesses whatever text has accumulated and releases, rather than
+	// releasing unassessed: the guarantee is kept, at the cost of a batch billed
+	// below a full text unit.
+	maxHeldFlushBytes = 256 * 1024
+
+	// maxPartialLineBytes bounds the retained incomplete line. A stream carrying
+	// no line terminator at all would otherwise grow it without limit; past this
+	// the fragment is dropped with a warning rather than held.
+	maxPartialLineBytes = 64 * 1024
+
+	// SSE field names. The single space after the colon is optional in the
+	// specification — "data:{...}" and "data: {...}" are the same event — so
+	// these are the field names and the space is handled separately. Writing
+	// "data: " as a prefix would silently skip every event from an upstream
+	// that omits it.
+	sseDataField  = "data:"
+	sseEventField = "event:"
+	sseIDField    = "id:"
+	sseRetryField = "retry:"
+	// sseDataPrefix is only for events this policy emits itself.
+	sseDataPrefix = "data: "
+	sseDone       = "[DONE]"
+
+	// metaKeySSEStream records that this stream was classified as SSE. A later
+	// flush can carry only comments, "id:" or "retry:" lines and so look
+	// unclassifiable on its own; without this it would be mistaken for a
+	// non-SSE body and the accumulated text assessed as if it were one.
+	metaKeySSEStream = "awsbedrockguardrail:stream_is_sse"
+
+	// metaKeyAssessedInHeld counts assessed characters still sitting in withheld
+	// frames: the batch boundary generally falls inside a frame, and that frame
+	// is retained whole. Its assessed prefix is not in pending — it must not be
+	// assessed or billed twice — so it has to be counted here instead, or the
+	// next release boundary is short by that much and the frame lingers.
+	metaKeyAssessedInHeld = "awsbedrockguardrail:assessed_in_held"
+
+	// metaKeyPartialLine retains the trailing bytes of a flush that stopped in the
+	// middle of an SSE line. A truncated "data:" payload is unparseable JSON, so
+	// without this the text it carries is extracted from neither flush and is
+	// never assessed. Reached when the engine force-flushes at its accumulator
+	// ceiling, or whenever an upstream's writes do not align with event
+	// boundaries.
+	metaKeyPartialLine = "awsbedrockguardrail:partial_line"
+
+	// metaKeyNonSSEForwarded records that a non-SSE flush was already delivered,
+	// so the accumulated body must not be re-sent as a rewrite of a later chunk.
+	metaKeyNonSSEForwarded = "awsbedrockguardrail:non_sse_forwarded"
+
+	// metaKeyHeldBytes holds the flush bytes withheld from the client while the
+	// text they carry is still unassessed. Only used when ValidateBeforeDeliver
+	// is set; it is released verbatim once its text passes, and discarded
+	// without ever being delivered if the text fails.
+	metaKeyHeldBytes = "awsbedrockguardrail:held_bytes"
+
+	// metaKeyPendingText holds assistant text seen but not yet validated: the
+	// remainder carried over when a batch is trimmed back to a word or sentence
+	// boundary, prepended to the next batch. AWS's guidance is that batches
+	// "don't split words or sentences, and by carrying over any necessary
+	// context from the previous batch" — this is that carry-over.
+	metaKeyPendingText = "awsbedrockguardrail:streamed_pending_text"
+
+	// metaKeyAccStreamedContent accumulates the assistant text already validated
+	// in this stream.
+	metaKeyAccStreamedContent = "awsbedrockguardrail:streamed_content"
+
+	// metaKeyAccStreamedJSONBody accumulates a non-SSE chunked body across
+	// flushes, so it can be validated whole at end of stream.
+	metaKeyAccStreamedJSONBody = "awsbedrockguardrail:streamed_json_body"
 )
 
 // Credential-acquisition modes selectable through awsAuth.authenticationType.
@@ -132,6 +246,14 @@ type AWSBedrockGuardrailPolicyParams struct {
 	PassthroughOnError    bool
 	ShowAssessment        bool
 	ApplicableStatusCodes []statusCodeRange
+
+	// StreamingJsonPath addresses the assistant text inside one SSE data frame.
+	// Unused when Streaming is false.
+	StreamingJsonPath string
+
+	// StreamingTextUnitChars is how many characters of assistant text are
+	// batched before each ApplyGuardrail call. Unused when Streaming is false.
+	StreamingTextUnitChars int
 }
 
 // statusCodeRange is an inclusive range of HTTP status codes. A single code is
@@ -248,20 +370,47 @@ func GetPolicy(
 }
 
 // Mode returns the processing mode for the AWS Bedrock guardrail policy.
+// Mode declares this instance's body requirements from its own configuration.
+//
+// Up to v1.3.0 this returned BodyModeBuffer unconditionally, which had two
+// consequences an API author could not configure away. A flow the attachment
+// does not use still had its body buffered, so a request-only attachment forced
+// the whole response to be held; and because the kernel clears
+// SupportsResponseStreaming for the entire chain as soon as any policy declares
+// BUFFER, one such attachment also demoted every other policy on the route to
+// buffered. Declaring SKIP for an unused flow removes both.
+//
+// An enabled response flow declares STREAM. That is not a decision to stream:
+// the engine upgrades a route only when the upstream response is actually
+// chunked or text/event-stream, and falls back to the buffered OnResponseBody
+// for everything else. Declaring BUFFER instead is what made a streamed
+// response fail, since the buffered check cannot read SSE.
 func (p *AWSBedrockGuardrailPolicy) Mode() policy.ProcessingMode {
+	requestBodyMode := policy.BodyModeSkip
+	if p.hasRequestParams && p.requestParams.Enabled {
+		requestBodyMode = policy.BodyModeBuffer
+	}
+
+	responseBodyMode := policy.BodyModeSkip
+	if p.hasResponseParams && p.responseParams.Enabled {
+		responseBodyMode = policy.BodyModeStream
+	}
+
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
-		RequestBodyMode:    policy.BodyModeBuffer,
+		RequestBodyMode:    requestBodyMode,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   responseBodyMode,
 	}
 }
 
 // parseRequestResponseParams parses and validates request/response parameters from map to struct
 func parseRequestResponseParams(params map[string]interface{}, isResponse bool) (AWSBedrockGuardrailPolicyParams, error) {
 	result := AWSBedrockGuardrailPolicyParams{
-		JsonPath: RequestDefaultJSONPath,
-		Enabled:  RequestFlowEnabledByDefault,
+		JsonPath:               RequestDefaultJSONPath,
+		Enabled:                RequestFlowEnabledByDefault,
+		StreamingJsonPath:      ResponseDefaultStreamingJSONPath,
+		StreamingTextUnitChars: DefaultStreamingTextUnitChars,
 	}
 	if isResponse {
 		result.JsonPath = ResponseDefaultJSONPath
@@ -328,7 +477,71 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		}
 	}
 
+	// The streaming parameters below configure the response flow only. Accepting
+	// them on the request flow would imply the request can be validated
+	// incrementally, which it cannot: a request must be validated whole before it
+	// reaches the upstream, or there is nothing left to block.
+	if !isResponse {
+		for _, key := range []string{"streamingJsonPath", "streamingTextUnitChars"} {
+			if _, ok := params[key]; ok {
+				return result, fmt.Errorf("'%s' is only valid on the response flow", key)
+			}
+		}
+		return result, nil
+	}
+
+	// Extract optional streamingJsonPath parameter
+	if streamingJsonPathRaw, ok := params["streamingJsonPath"]; ok {
+		streamingJsonPath, ok := streamingJsonPathRaw.(string)
+		if !ok {
+			return result, fmt.Errorf("'streamingJsonPath' must be a string")
+		}
+		if strings.TrimSpace(streamingJsonPath) == "" {
+			return result, fmt.Errorf("'streamingJsonPath' must not be empty")
+		}
+		result.StreamingJsonPath = streamingJsonPath
+	}
+
+	// Extract optional streamingTextUnitChars parameter
+	if unitRaw, ok := params["streamingTextUnitChars"]; ok {
+		unit, err := extractInt(unitRaw)
+		if err != nil {
+			return result, fmt.Errorf("'streamingTextUnitChars' must be a number: %w", err)
+		}
+		if unit != 0 && unit < MinStreamingTextUnitChars {
+			return result, fmt.Errorf("'streamingTextUnitChars' must be 0 (assess the whole response) or at least %d",
+				MinStreamingTextUnitChars)
+		}
+		result.StreamingTextUnitChars = unit
+	}
+
 	return result, nil
+}
+
+// extractInt accepts the numeric shapes a policy parameter can arrive as. A
+// value decoded from JSON or YAML reaches a policy as float64 rather than int,
+// so an int-only assertion would reject every configured window.
+func extractInt(value interface{}) (int, error) {
+	switch v := value.(type) {
+	case int:
+		return v, nil
+	case int32:
+		return int(v), nil
+	case int64:
+		return int(v), nil
+	case float32:
+		if v != float32(int(v)) {
+			return 0, fmt.Errorf("value %v is not a whole number", v)
+		}
+		return int(v), nil
+	case float64:
+		if v != float64(int(v)) {
+			return 0, fmt.Errorf("value %v is not a whole number", v)
+		}
+		return int(v), nil
+	default:
+		return 0, fmt.Errorf("unsupported numeric type %T", value)
+	}
 }
 
 // parseStatusCodes parses a comma-separated list of HTTP status codes and
@@ -943,43 +1156,41 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 		return true, "", fmt.Errorf("invalid output type")
 	}
 
-	// Check if guardrail intervened
 	if outputTyped.Action == types.GuardrailActionGuardrailIntervened {
-		// Check if there are PII entities or sensitive information that was masked
-		hasPIIMasking := false
-		if len(outputTyped.Assessments) > 0 {
-			for _, assessment := range outputTyped.Assessments {
-				if assessment.SensitiveInformationPolicy != nil {
-					if len(assessment.SensitiveInformationPolicy.PiiEntities) > 0 || len(assessment.SensitiveInformationPolicy.Regexes) > 0 {
-						hasPIIMasking = true
-						break
-					}
-				}
-			}
+		// A BLOCKED finding anywhere in the assessment blocks, whatever else the
+		// assessment also contains.
+		//
+		// This used to treat the mere presence of PII entities as "masking was
+		// applied" and allow the content through. Two ways that let past content
+		// AWS had said to block: a prompt attack accompanied by an email address
+		// reported the content filter as BLOCKED and the email as ANONYMIZED, and
+		// only the email was looked at; and a PII type configured to BLOCK —
+		// AWS_ACCESS_KEY, say — was masked and delivered rather than blocked,
+		// because its own Action was never read.
+		if hasBlockedFinding(outputTyped) {
+			return true, "", nil
 		}
 
-		// If PII masking was applied
-		if hasPIIMasking {
+		// Nothing is blocked, so anything reported is anonymisable.
+		if hasAnonymizedFinding(outputTyped) {
 			if redactPII {
-				// Redaction mode: extract redacted content
-				redactedContent := p.extractRedactedContent(outputTyped, originalContent)
-				return false, redactedContent, nil
-			} else if isRequest {
-				// Masking mode: process PII entities for masking
+				return false, p.extractRedactedContent(outputTyped, originalContent), nil
+			}
+			if isRequest {
 				maskedContent, maskedPII := p.processPIIEntitiesForMasking(outputTyped, originalContent)
 				if len(maskedPII) > 0 {
 					metadata[MetadataKeyPIIEntities] = maskedPII
 				}
 				return false, maskedContent, nil
-			} else {
-				// Response case: PII was already masked in request, allow through
-				// Restoration happens earlier in validatePayload
-				return false, "", nil
 			}
+			// Response: the value was masked on the way to the upstream, and
+			// restoration happens in validatePayload.
+			return false, "", nil
 		}
 
-		// Other intervention reasons - block by default (content policy, topic policy, word policy violations)
-		return true, "", nil // Violation detected, block content
+		// Intervened, nothing BLOCKED, nothing ANONYMIZED: an intervention this
+		// policy cannot account for. Block rather than guess.
+		return true, "", nil
 	}
 
 	// Check for no intervention
@@ -989,6 +1200,86 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 
 	// Unexpected response
 	return true, "", fmt.Errorf("AWS Bedrock Guardrails returned unexpected response action: %s", string(outputTyped.Action))
+}
+
+// hasBlockedFinding reports whether any policy in the assessment blocked.
+//
+// Every policy type is checked, not only the sensitive-information one: a
+// content filter, a denied topic, a word filter and a contextual-grounding
+// filter each carry their own BLOCKED action, and any of them is a reason the
+// content must not be delivered.
+func hasBlockedFinding(output *bedrockruntime.ApplyGuardrailOutput) bool {
+	for _, assessment := range output.Assessments {
+		if cp := assessment.ContentPolicy; cp != nil {
+			for _, f := range cp.Filters {
+				if f.Action == types.GuardrailContentPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if tp := assessment.TopicPolicy; tp != nil {
+			for _, t := range tp.Topics {
+				if t.Action == types.GuardrailTopicPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if wp := assessment.WordPolicy; wp != nil {
+			for _, w := range wp.CustomWords {
+				if w.Action == types.GuardrailWordPolicyActionBlocked {
+					return true
+				}
+			}
+			for _, w := range wp.ManagedWordLists {
+				if w.Action == types.GuardrailWordPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if cg := assessment.ContextualGroundingPolicy; cg != nil {
+			for _, f := range cg.Filters {
+				if f.Action == types.GuardrailContextualGroundingPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+		if sip := assessment.SensitiveInformationPolicy; sip != nil {
+			for _, e := range sip.PiiEntities {
+				if e.Action == types.GuardrailSensitiveInformationPolicyActionBlocked {
+					return true
+				}
+			}
+			for _, r := range sip.Regexes {
+				if r.Action == types.GuardrailSensitiveInformationPolicyActionBlocked {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// hasAnonymizedFinding reports whether the assessment reported a value to mask
+// or redact. Only ANONYMIZED counts: a finding with any other action is not
+// something this policy can resolve by rewriting the text.
+func hasAnonymizedFinding(output *bedrockruntime.ApplyGuardrailOutput) bool {
+	for _, assessment := range output.Assessments {
+		sip := assessment.SensitiveInformationPolicy
+		if sip == nil {
+			continue
+		}
+		for _, e := range sip.PiiEntities {
+			if e.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
+				return true
+			}
+		}
+		for _, r := range sip.Regexes {
+			if r.Action == types.GuardrailSensitiveInformationPolicyActionAnonymized {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // processPIIEntitiesForMasking handles PII masking when redactPII is disabled
@@ -1071,35 +1362,78 @@ func (p *AWSBedrockGuardrailPolicy) processPIIEntitiesForMasking(output *bedrock
 // extractRedactedContent extracts redacted content from guardrail outputs
 func (p *AWSBedrockGuardrailPolicy) extractRedactedContent(output *bedrockruntime.ApplyGuardrailOutput, originalContent string) string {
 	redactedText := originalContent
-	// Replace all PII entity matches with *****
-	if output != nil && len(output.Assessments) > 0 && output.Assessments[0].SensitiveInformationPolicy != nil {
-		// Collect all matches first
-		var matches []string
-
-		for _, entity := range output.Assessments[0].SensitiveInformationPolicy.PiiEntities {
-			match := aws.ToString(entity.Match)
-			if match != "" {
-				matches = append(matches, match)
-			}
-		}
-		for _, regex := range output.Assessments[0].SensitiveInformationPolicy.Regexes {
-			match := aws.ToString(regex.Match)
-			if match != "" {
-				matches = append(matches, match)
-			}
-		}
-
-		// Sort matches by length (longest first) to prevent substring collisions
-		sort.Slice(matches, func(i, j int) bool {
-			return len(matches[i]) > len(matches[j])
-		})
-
-		// Process matches in order (longest first)
-		for _, match := range matches {
-			redactedText = strings.ReplaceAll(redactedText, match, "*****")
-		}
+	// Process matches longest first to prevent substring collisions
+	for _, match := range redactionMatches(output) {
+		redactedText = strings.ReplaceAll(redactedText, match, "*****")
 	}
 	return redactedText
+}
+
+// redactionMatches returns the values the guardrail reported, longest first.
+//
+// Shared by the redaction rewrite and the leak check that follows it: the same
+// list that says what to replace is what says whether anything was missed.
+func redactionMatches(output *bedrockruntime.ApplyGuardrailOutput) []string {
+	if output == nil || len(output.Assessments) == 0 || output.Assessments[0].SensitiveInformationPolicy == nil {
+		return nil
+	}
+
+	var matches []string
+	for _, entity := range output.Assessments[0].SensitiveInformationPolicy.PiiEntities {
+		if match := aws.ToString(entity.Match); match != "" {
+			matches = append(matches, match)
+		}
+	}
+	for _, regex := range output.Assessments[0].SensitiveInformationPolicy.Regexes {
+		if match := aws.ToString(regex.Match); match != "" {
+			matches = append(matches, match)
+		}
+	}
+
+	sort.Slice(matches, func(i, j int) bool {
+		return len(matches[i]) > len(matches[j])
+	})
+	return matches
+}
+
+// redactedFlush applies the guardrail's redactions to a flush and reports
+// whether any reported value survived.
+//
+// Redaction is written back frame by frame, because that is the only place an
+// SSE value can be replaced without re-framing the stream. A value the model
+// emitted across two events — "john@" in one, "example.com" in the next — is
+// therefore present in neither frame's text and is replaced in neither, so the
+// rewrite alone cannot guarantee it is gone.
+//
+// The check closes that: the rewritten flush is re-read as a whole and tested
+// against the same match list. A survivor means this flush cannot be delivered
+// redacted, and the caller fails closed rather than forward the value — the one
+// thing redaction mode exists to prevent.
+func (p *AWSBedrockGuardrailPolicy) redactedFlush(
+	flush string,
+	output interface{},
+	rp AWSBedrockGuardrailPolicyParams,
+) (rewritten string, changed, leaked bool) {
+	typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
+	if !ok {
+		return flush, false, false
+	}
+	matches := redactionMatches(typed)
+	if len(matches) == 0 {
+		return flush, false, false
+	}
+
+	rewritten, changed = rewriteSSEDeltaContent(flush, rp.StreamingJsonPath, func(frameText string) string {
+		return p.extractRedactedContent(typed, frameText)
+	})
+
+	joined := extractSSEDeltaContent(rewritten, rp.StreamingJsonPath)
+	for _, match := range matches {
+		if strings.Contains(joined, match) {
+			return rewritten, changed, true
+		}
+	}
+	return rewritten, changed, false
 }
 
 // restorePIIInResponse handles PII restoration in responses when redactPII is disabled
@@ -1337,16 +1671,1013 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 	return p.validatePayload(content, p.responseParams, true, respCtx.Metadata).(policy.ResponseAction)
 }
 
+// ─── Streaming response path ─────────────────────────────────────────────────
+//
+// The response flow can validate a streamed response incrementally instead of
+// holding it whole. The division of labour is the one the SDK defines: the
+// kernel owns the buffer and asks NeedsMoreResponseData whether to keep
+// accumulating, and this policy owns the stop condition and the verdict.
+//
+// What this path cannot do, by construction: once a chunk has been flushed
+// downstream the response status and headers are committed, so a violation
+// found mid-stream cannot become a 422. It ends the stream with a final SSE
+// error event instead, which means text already delivered stays delivered.
+// That is a property of streaming, not of this implementation — an API that
+// must never emit unvalidated text has to stay buffered (streaming: false).
+
+// NeedsMoreResponseData implements policy.StreamingResponsePolicy.
+//
+// It is the window rule, and the reason this policy cannot simply flush every
+// chunk the way the locally-computed guardrails do: every validation here is a
+// billed ApplyGuardrail round trip. Flushing per chunk would put an AWS call
+// between every pair of tokens.
+//
+// Four cases:
+//
+//   - A unary JSON document that happens to arrive over chunked transfer
+//     accumulates whole. Such a response is not incrementally consumable by a
+//     client anyway, so there is no latency to protect, and holding it keeps the
+//     buffered path's property that nothing unvalidated reaches the client. The
+//     kernel always flushes at end of stream, so this cannot stall.
+//   - Below the window, keep accumulating.
+//   - At or past the window: an SSE buffer is released only on an event
+//     boundary, because a flush cut through the middle of a `data:` line leaves
+//     JSON that no JSONPath can read — the original failure. Anything else is
+//     released as soon as the window is reached; see below for why that is safe.
+//
+// Note what this hook is given: the kernel passes the *raw* accumulated upstream
+// bytes, before any policy has run. That is not what OnResponseBodyChunk
+// receives. On a Bedrock-backed route, openai-to-bedrock-transformer sits later
+// in the chain, so by reverse response ordering it runs first and rewrites each
+// flush into OpenAI SSE — which is what this policy then validates. Here the
+// bytes are still Amazon's binary event-stream framing.
+//
+// So an "is this SSE?" test cannot decide whether to hold: answering "not SSE,
+// therefore accumulate" would hold every Bedrock stream to end of stream and
+// defeat the whole point. Frame integrity for that format is not this policy's
+// problem either — the transformer declares its own NeedsMoreResponseData for a
+// partial frame, and the kernel flushes only when *no* policy wants more data,
+// so releasing here can never cut a frame.
+//
+// The one case that must still be held is a unary JSON body, which is why the
+// discriminator below is "does this look like a JSON document", not "is this
+// SSE". An opaque framing with no transformer ahead of it in the chain is
+// forwarded unvalidated until end of stream; that is logged by
+// handleNonSSEStreamFlush.
+func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bool {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
+		return false
+	}
+	if looksLikeJSONDocument(accumulated) {
+		return true
+	}
+	if len(accumulated) < streamFlushPacerBytes {
+		return true
+	}
+	if isSSEChunk(string(accumulated)) {
+		return !endsAtSSEEventBoundary(accumulated)
+	}
+	return false
+}
+
+// looksLikeJSONDocument reports whether b opens a JSON object or array, ignoring
+// leading whitespace. It is deliberately a test of the first meaningful byte
+// rather than a parse: it runs on every accumulated chunk, and a partially
+// received document must answer the same as a complete one.
+func looksLikeJSONDocument(b []byte) bool {
+	for _, c := range b {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// OnResponseBodyChunk implements policy.StreamingResponsePolicy. It is called
+// once per flush released by NeedsMoreResponseData, never once per chunk.
+func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
+	ctx context.Context,
+	respCtx *policy.ResponseStreamContext,
+	chunk *policy.StreamBody,
+	_ map[string]interface{},
+) policy.StreamingResponseAction {
+	if !p.hasResponseParams || !p.responseParams.Enabled {
+		return policy.ForwardResponseChunk{}
+	}
+	if chunk == nil {
+		return policy.ForwardResponseChunk{}
+	}
+	// An empty chunk mid-stream carries nothing to do. An empty chunk at end of
+	// stream is different: it is the bare sentinel many streaming frameworks send
+	// after the last event, and it is the last opportunity to assess the text
+	// still held in pending or the body accumulated from a non-SSE response.
+	// Returning early here would drop the final batch, which AWS's guidance is
+	// explicit must still be assessed.
+	if len(chunk.Chunk) == 0 && !chunk.EndOfStream {
+		return policy.ForwardResponseChunk{}
+	}
+	// applicableStatusCodes applies here exactly as it does on the buffered path
+	// (see OnResponseBody); the upstream status is known from the response
+	// headers, which were seen before any chunk arrived.
+	if !p.responseParams.shouldValidateStatus(respCtx.ResponseStatus) {
+		slog.Debug("AWSBedrockGuardrail: Response status not configured for validation, skipping",
+			"status", respCtx.ResponseStatus)
+		return policy.ForwardResponseChunk{}
+	}
+	if respCtx.Metadata == nil {
+		respCtx.Metadata = make(map[string]interface{})
+	}
+
+	chunkStr := string(chunk.Chunk)
+
+	// Classify once per stream and remember it. A later flush can carry only
+	// comments, "id:" or "retry:" lines — and the final one can be empty — so
+	// judging each flush alone would route the tail of an SSE stream down the
+	// non-SSE path and assess its accumulated text as a JSON body.
+	sseStream, _ := respCtx.Metadata[metaKeySSEStream].(bool)
+	if !sseStream && isSSEChunk(chunkStr) {
+		sseStream = true
+		respCtx.Metadata[metaKeySSEStream] = true
+	}
+
+	if sseStream {
+		return p.handleSSEStreamFlush(chunkStr, chunk, respCtx, p.responseParams)
+	}
+	return p.handleNonSSEStreamFlush(chunkStr, chunk, respCtx)
+}
+
+// handleNonSSEStreamFlush validates a non-SSE body that reached this path over
+// chunked transfer. NeedsMoreResponseData accumulates such a body whole, so the
+// flush is normally the complete response and is validated by exactly the same
+// code as the buffered path.
+func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
+	chunkStr string,
+	chunk *policy.StreamBody,
+	respCtx *policy.ResponseStreamContext,
+) policy.StreamingResponseAction {
+	previous, _ := respCtx.Metadata[metaKeyAccStreamedJSONBody].(string)
+	full := previous + chunkStr
+	respCtx.Metadata[metaKeyAccStreamedJSONBody] = full
+
+	if !chunk.EndOfStream {
+		// Two ways to get here: the kernel force-flushed at its accumulator
+		// ceiling, or the response is in a framing this policy cannot read and
+		// no transformer ahead of it in the chain rewrote it into SSE. Either
+		// way the bytes are on their way to the client and there is nothing to
+		// decide now; the accumulated body is still validated at end of stream.
+		slog.Warn("AWSBedrockGuardrail: unrecognised streaming response format flushed before end of stream, validation deferred to end of stream",
+			"accumulated_bytes", len(full))
+		// Remember that bytes went downstream: the accumulated body can no longer
+		// be delivered as a rewrite of a later chunk without repeating them.
+		respCtx.Metadata[metaKeyNonSSEForwarded] = true
+		return policy.ForwardResponseChunk{}
+	}
+
+	// An empty body has nothing to assess, and handing it to validatePayload
+	// would fail JSONPath extraction and reject a response that carries no
+	// content at all.
+	if strings.TrimSpace(full) == "" {
+		return policy.ForwardResponseChunk{}
+	}
+
+	result := p.validatePayload([]byte(full), p.responseParams, true, respCtx.Metadata)
+	modifications, ok := result.(policy.DownstreamResponseModifications)
+	if !ok {
+		return policy.ForwardResponseChunk{}
+	}
+	if modifications.StatusCode != nil {
+		// The buffered path answers a violation with a status; this one cannot,
+		// because the status went downstream with the headers. The body it built
+		// is still the right thing to deliver as the stream's last event.
+		return policy.TerminateResponseChunk{
+			Body:              modifications.Body,
+			AnalyticsMetadata: modifications.AnalyticsMetadata,
+		}
+	}
+	if modifications.Body != nil {
+		forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool)
+		if len(chunkStr) == 0 || forwarded {
+			// Two reasons the rewrite cannot be delivered: the flush in hand is
+			// the empty end-of-stream sentinel, so there is nothing to replace;
+			// or earlier flushes already went downstream, so replacing this one
+			// with the accumulated body would repeat everything sent before it.
+			// Either way the assessment still ran — only the rewrite is dropped.
+			slog.Debug("AWSBedrockGuardrail: response modification not delivered",
+				"reason_empty_final_chunk", len(chunkStr) == 0,
+				"reason_earlier_flush_forwarded", forwarded,
+				"accumulated_bytes", len(full))
+			return policy.ForwardResponseChunk{}
+		}
+		return policy.ForwardResponseChunk{Body: modifications.Body}
+	}
+	return policy.ForwardResponseChunk{}
+}
+
+// assessStreamBatch runs one ApplyGuardrail call for a batch. stop is true when
+// the returned action must be delivered immediately — a violation, or a failure
+// that passthroughOnError does not excuse.
+func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
+	cleaned string,
+	emit string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) (action policy.StreamingResponseAction, output interface{}, modified string, stop bool) {
+	output, err := p.applyGuardrailToText(cleaned)
+	if err != nil {
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed, passthrough enabled",
+				"error", err, "chunkIndex", chunk.Index)
+			return p.releaseBytes(emit, nil, "", respCtx, rp), nil, "", true
+		}
+		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
+			"error", err, "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Error calling AWS Bedrock Guardrail", err, rp.ShowAssessment, nil),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}, nil, "", true
+	}
+
+	violation, modifiedContent, err := p.evaluateGuardrailResponse(output, cleaned, rp.RedactPII, false, respCtx.Metadata)
+	if err != nil {
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed, passthrough enabled",
+				"error", err, "chunkIndex", chunk.Index)
+			return p.releaseBytes(emit, nil, "", respCtx, rp), nil, "", true
+		}
+		slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed",
+			"error", err, "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Error evaluating guardrail response", err, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}, nil, "", true
+	}
+
+	if violation {
+		slog.Debug("AWSBedrockGuardrail: streaming violation detected",
+			"chunkIndex", chunk.Index, "batchChars", len([]rune(cleaned)))
+		return policy.TerminateResponseChunk{
+			Body:              p.buildSSEErrorEvent("Violation of AWS Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+		}, nil, "", true
+	}
+
+	return nil, output, modifiedContent, false
+}
+
+// handleSSEStreamFlush assesses a batch before any of its bytes reach the
+// client.
+//
+// The flush bytes are withheld — returned as an empty body, which the engine
+// forwards as an empty streamed chunk — while their text accumulates. Once the
+// batch passes a text unit it is assessed: if it passes, the bytes that carried
+// it are released; if it fails, they are discarded and the client never receives
+// them.
+//
+// Holding the bytes here is the only way to get that guarantee on a Bedrock
+// route. The engine's own accumulator holds Amazon's binary frames, so a gate in
+// NeedsMoreResponseData cannot count characters of assistant text — the text
+// exists only after openai-to-bedrock-transformer has rewritten the flush, which
+// happens in this callback.
+//
+// The cost is delivery in batch-sized steps instead of continuously. For a
+// 1,000-character unit that is roughly one delivery per 1,000 characters
+// generated, so time to first byte is a text unit rather than a flush;
+// streamingTextUnitChars is the dial.
+func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
+	chunkStr string,
+	chunk *policy.StreamBody,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) policy.StreamingResponseAction {
+	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
+	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	newText := p.flushText(chunkStr, chunk.EndOfStream, respCtx, rp)
+	unit := p.effectiveTextUnit()
+
+	// Assess and release everything once the stream ends; there is no later
+	// batch to carry into, and nothing may be left undelivered.
+	if chunk.EndOfStream {
+		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
+	}
+
+	// The withheld buffer has grown as far as it may. Reached by a stream whose
+	// events carry little or no assessable text, which never trips the character
+	// boundary below.
+	if len(held)+len(chunkStr) > maxHeldFlushBytes {
+		slog.Warn("AWSBedrockGuardrail: withheld response bytes reached the limit; assessing and releasing early",
+			"held_bytes", len(held), "limit", maxHeldFlushBytes, "pending_chars", len([]rune(pending)))
+		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
+	}
+
+	combinedText := pending + newText
+	combinedHeld := held + chunkStr
+
+	// Past a text unit: trim the batch back to the end of a sentence, or failing
+	// that a word, exactly as the immediate-delivery path does — a phrase assessed
+	// as two halves can pass where the whole would not.
+	//
+	// The trim point generally falls inside a frame, so the bytes released are
+	// the frames whose text is wholly inside the batch and the straddling frame
+	// is retained. Withholding assessed text is harmless; releasing unassessed
+	// text is not.
+	if batch, carry := splitAtTextUnit(combinedText, unit, false); batch != "" {
+		// Assessed characters already sitting in withheld frames count toward the
+		// boundary: they are not in the batch, but the frames carrying them are
+		// in held, so the walk has to account for them to reach the same point.
+		assessedInHeld, _ := respCtx.Metadata[metaKeyAssessedInHeld].(int)
+		boundary := assessedInHeld + len([]rune(batch))
+
+		release, retain, covered := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, boundary)
+
+		action := p.assessBatchAndRelease(batch, release, respCtx, rp, chunk)
+		if action.TerminateStream() {
+			return action
+		}
+		respCtx.Metadata[metaKeyPendingText] = carry
+		respCtx.Metadata[metaKeyHeldBytes] = retain
+		respCtx.Metadata[metaKeyAssessedInHeld] = boundary - covered
+		return action
+	}
+
+	respCtx.Metadata[metaKeyPendingText] = combinedText
+	respCtx.Metadata[metaKeyHeldBytes] = combinedHeld
+	// Withhold: a non-nil empty body replaces the chunk, so nothing is delivered
+	// for this flush. A nil body would pass the bytes straight through.
+	return policy.ForwardResponseChunk{Body: []byte{}}
+}
+
+// assessAndRelease assesses everything still withheld and, if all of it passes,
+// releases the bytes. On a violation the bytes are dropped and the stream ends
+// with the guardrail event alone, so nothing unassessed was ever delivered.
+//
+// The text is assessed a unit at a time rather than in one call: a flush can
+// carry several units — the testbench's mock model writes a whole stream in one
+// flush, and a real upstream can coalesce — and one oversized call is both
+// billed by size anyway and further from the batch size AWS recommends.
+func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
+	batchText string,
+	heldBytes string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
+	// A trailing incomplete line's text is not in batchText — flushText could not
+	// read it — so its bytes must not be released here either. Mid-stream it
+	// stays withheld for the flush that completes it; at end of stream there is
+	// no such flush, and flushText has already joined it into the final text.
+	release := heldBytes
+	retain := ""
+	if !chunk.EndOfStream {
+		release, retain = splitTrailingPartialLine(heldBytes)
+	}
+
+	respCtx.Metadata[metaKeyPendingText] = ""
+	respCtx.Metadata[metaKeyHeldBytes] = retain
+	respCtx.Metadata[metaKeyAssessedInHeld] = 0
+
+	// The configured batch decides when to assess and deliver; it does not decide
+	// how much goes into one request. Every call carries at most one text unit,
+	// which is the size AWS recommends and which costs exactly the same as
+	// sending the batch whole — input is billed per text unit either way, so
+	// splitting is free. Letting the batch size through instead sent one
+	// oversized request: measured at 55,199 characters for a very large
+	// configured batch, because the withheld-bytes limit bounds the buffer and
+	// not the request. That is the long-context case AWS's guidance says to
+	// chunk.
+	callUnit := DefaultStreamingTextUnitChars
+	remaining := batchText
+
+	var (
+		lastOutput   interface{}
+		lastModified string
+		assessed     bool
+	)
+
+	for {
+		batch, carry := splitAtTextUnit(remaining, callUnit, true)
+		if batch == "" {
+			break
+		}
+		remaining = carry
+
+		cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batch, ""))
+		if cleaned == "" {
+			if carry == "" {
+				break
+			}
+			continue
+		}
+
+		action, output, modified, stop := p.assessStreamBatch(cleaned, release, respCtx, rp, chunk)
+		if stop {
+			if action.TerminateStream() {
+				slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
+					"held_bytes", len(release), "chunkIndex", chunk.Index)
+				return action
+			}
+			// passthroughOnError: this batch was not assessed, but withholding
+			// the bytes indefinitely would stall the stream, so they are
+			// released.
+			return p.releaseBytes(release, nil, "", respCtx, rp)
+		}
+
+		validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
+		respCtx.Metadata[metaKeyAccStreamedContent] = validated + batch
+		lastOutput, lastModified, assessed = output, modified, true
+
+		if carry == "" {
+			break
+		}
+	}
+
+	if !assessed {
+		// Framing only — nothing to assess, but the bytes are still owed to the
+		// client.
+		return p.releaseBytes(release, nil, "", respCtx, rp)
+	}
+	return p.releaseBytes(release, lastOutput, lastModified, respCtx, rp)
+}
+
+// assessBatchAndRelease assesses one batch and releases the bytes it covers,
+// leaving the caller to record whatever text and bytes remain withheld.
+func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
+	batchText string,
+	heldBytes string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
+	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batchText, ""))
+	if cleaned == "" {
+		// Framing only — nothing to assess, but the bytes are still owed to the
+		// client.
+		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+	}
+
+	action, output, modified, stop := p.assessStreamBatch(cleaned, heldBytes, respCtx, rp, chunk)
+	if stop {
+		if action.TerminateStream() {
+			slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
+				"held_bytes", len(heldBytes), "chunkIndex", chunk.Index)
+			return action
+		}
+		// passthroughOnError: the batch was not assessed, but withholding the
+		// bytes indefinitely would stall the stream, so they are released.
+		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+	}
+
+	validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
+	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batchText
+
+	return p.releaseBytes(heldBytes, output, modified, respCtx, rp)
+}
+
+// releaseBytes delivers withheld bytes, applying redaction or placeholder
+// restoration to them first. An empty release is still returned as an empty body
+// rather than nil, so the engine does not fall back to forwarding the original
+// chunk.
+func (p *AWSBedrockGuardrailPolicy) releaseBytes(
+	heldBytes string,
+	output interface{},
+	modified string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) policy.StreamingResponseAction {
+	if rp.RedactPII {
+		if modified != "" {
+			rewritten, changed, leaked := p.redactedFlush(heldBytes, output, rp)
+			if leaked {
+				slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; discarding the held bytes",
+					"held_bytes", len(heldBytes))
+				return policy.TerminateResponseChunk{
+					Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+						nil, rp.ShowAssessment, output),
+					AnalyticsMetadata: guardrailHitAnalytics(),
+				}
+			}
+			if changed {
+				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+			}
+		}
+		return policy.ForwardResponseChunk{Body: []byte(heldBytes)}
+	}
+
+	raw, exists := respCtx.Metadata[MetadataKeyPIIEntities]
+	if exists {
+		if maskedPII, ok := raw.(map[string]string); ok && len(maskedPII) > 0 {
+			if rewritten, changed := rewriteSSEDeltaContent(heldBytes, rp.StreamingJsonPath, func(frameText string) string {
+				return p.restorePIIInResponse(frameText, maskedPII)
+			}); changed {
+				return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+			}
+		}
+	}
+	return policy.ForwardResponseChunk{Body: []byte(heldBytes)}
+}
+
+// effectiveTextUnit returns the batch size to assess at.
+//
+// Redaction used to be a special case here, assessing every flush rather than
+// batching: it rewrites the frames of the flush in hand, so a finding deferred
+// to a later batch would arrive after those frames had been forwarded. That
+// reason is gone — no flush is forwarded until the batch covering it has been
+// assessed — and keeping the special case made redaction *worse*: a value split
+// across two flushes was in neither flush's text, so neither assessment
+// reported it and it was delivered unredacted. Batching joins the text first.
+func (p *AWSBedrockGuardrailPolicy) effectiveTextUnit() int {
+	return p.responseParams.StreamingTextUnitChars
+}
+
+// splitAtTextUnit divides accumulated text into the batch to validate now and
+// the remainder to carry into the next batch.
+//
+// Below a text unit nothing is validated yet unless the stream has ended, in
+// which case the final batch is assessed whatever its size — AWS's guidance is
+// explicit that the last batch must still be evaluated, and there will be no
+// later batch to carry into. At or above a unit the cut happens even at end of
+// stream, so a caller looping over this function assesses a long buffer as
+// several unit-sized calls rather than one oversized one.
+//
+// Above a unit the cut is moved back to the end of the last sentence, or
+// failing that the last word, so a batch never splits a phrase across two
+// calls. That matters for detection, not tidiness: "my SSN is 123-" and
+// "45-6789" assessed separately may each pass where the whole phrase would not.
+// If neither boundary exists within a reasonable distance the text is cut at
+// the unit, so a stream of boundary-free text cannot grow the carry without
+// bound.
+func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry string) {
+	runes := []rune(text)
+
+	// Zero: assess the whole response, so nothing is assessed until the stream
+	// ends. streamingTextUnitChars: 0 asks for this.
+	if unit <= 0 {
+		if endOfStream {
+			return text, ""
+		}
+		return "", text
+	}
+
+	if len(runes) < unit {
+		// Below a unit: hold for more text, unless there will be none.
+		if endOfStream {
+			return text, ""
+		}
+		return "", text
+	}
+
+	cut := lastSentenceEnd(runes, unit)
+	if cut <= 0 {
+		cut = lastWordEnd(runes, unit)
+	}
+	if cut <= 0 {
+		cut = unit
+	}
+	return string(runes[:cut]), string(runes[cut:])
+}
+
+// maxBoundarySearchRunes bounds how far back a boundary is looked for, so a
+// batch is never trimmed to a small fraction of a text unit by one very long
+// sentence.
+const maxBoundarySearchRunes = 200
+
+// lastSentenceEnd returns the index just past the last sentence terminator at or
+// before limit, or 0 if there is none within the search distance.
+//
+// A terminator only counts when whitespace follows it, or when it ends the text
+// available. Accepting any "." split the values this policy exists to catch:
+// with the batch boundary landing inside one, "john@example.com" was cut into
+// "john@example." and "com", and "192.168.1.1" into "192.168." and "1.1".
+// Neither half matches a PII rule, so neither assessment reported anything and
+// the value was released unchanged — the trimming meant to stop a phrase being
+// split was creating the split instead.
+//
+// A terminator followed by a closing quote or bracket is not accepted either.
+// That costs a little precision — the batch then ends at a word boundary rather
+// than a sentence — and a word boundary never cuts a value in half, which is
+// what matters here.
+func lastSentenceEnd(runes []rune, limit int) int {
+	floor := limit - maxBoundarySearchRunes
+	if floor < 0 {
+		floor = 0
+	}
+	for i := limit - 1; i >= floor; i-- {
+		switch runes[i] {
+		case '.', '!', '?':
+			if i+1 >= len(runes) || isSpaceRune(runes[i+1]) {
+				return i + 1
+			}
+		case '\n':
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// isSpaceRune reports whether r is one of the space characters that separate
+// words here. Kept explicit rather than unicode.IsSpace so the set is the same
+// one lastWordEnd splits on.
+func isSpaceRune(r rune) bool {
+	switch r {
+	case ' ', '\t', '\n', '\r':
+		return true
+	}
+	return false
+}
+
+// lastWordEnd returns the index just past the last whitespace at or before
+// limit, or 0 if there is none within the search distance.
+func lastWordEnd(runes []rune, limit int) int {
+	floor := limit - maxBoundarySearchRunes
+	if floor < 0 {
+		floor = 0
+	}
+	for i := limit - 1; i >= floor; i-- {
+		switch runes[i] {
+		case ' ', '\t', '\n', '\r':
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// applyGuardrailToText runs one ApplyGuardrail call for the given text.
+func (p *AWSBedrockGuardrailPolicy) applyGuardrailToText(text string) (interface{}, error) {
+	loadConfig := p.loadAWSConfigFunc
+	if loadConfig == nil {
+		loadConfig = p.loadAWSConfig
+	}
+	awsCfg, err := loadConfig(context.Background(), p.region)
+	if err != nil {
+		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, text)
+	if err != nil {
+		return nil, err
+	}
+	return output, nil
+}
+
+// guardrailHitAnalytics matches the analytics the buffered path reports, so a
+// stream terminated by this policy is attributed the same way as a buffered
+// rejection.
+func guardrailHitAnalytics() map[string]interface{} {
+	return map[string]interface{}{
+		"isGuardrailHit": true,
+		"guardrailName":  "AWS Bedrock Guardrail",
+	}
+}
+
+// buildSSEErrorEvent renders the rejection as the stream's final event. The
+// payload is the same shape the buffered path returns as a 422 body, so a
+// client parsing one already understands the other.
+func (p *AWSBedrockGuardrailPolicy) buildSSEErrorEvent(reason string, validationError error, showAssessment bool, output interface{}) []byte {
+	assessment := p.buildAssessmentObject(reason, validationError, true, showAssessment, output)
+	responseBody := map[string]interface{}{
+		"type":    "AWS_BEDROCK_GUARDRAIL",
+		"message": assessment,
+	}
+	bodyBytes, err := json.Marshal(responseBody)
+	if err != nil {
+		bodyBytes = []byte(`{"type":"AWS_BEDROCK_GUARDRAIL","message":"Internal error"}`)
+	}
+	return []byte(sseDataPrefix + string(bodyBytes) + "\n\n")
+}
+
+// ─── SSE helpers ─────────────────────────────────────────────────────────────
+
+// splitHeldAtTextBoundary divides withheld bytes at the frame boundary that
+// covers assessedChars of extracted text: the frames whose text is wholly inside
+// the assessed batch, and the remainder to keep withholding.
+//
+// This is what lets a batch be trimmed to a sentence while still being able to
+// release exact bytes. The trim point generally falls inside a frame, since a
+// frame carries a token rather than a sentence. That frame is retained whole —
+// withholding text that *has* been assessed is harmless, where releasing text
+// that has not is the thing this mode exists to prevent — and its text is
+// assessed again as part of the next batch, which costs nothing because the
+// batch is billed by size, not by novelty.
+//
+// Framing is kept with the block it introduces: an "event:", "id:" or "retry:"
+// line is released only once the data line it precedes is covered, so a block
+// is never released with its payload still withheld. Blank separators and
+// comments stand alone and are released as they are reached.
+//
+// coveredChars reports how much of the assessed text the released frames
+// actually carried. The remainder is assessed text still sitting in a retained
+// frame, which the caller must add to the next boundary or that frame lingers
+// one round longer than it needs to.
+func splitHeldAtTextBoundary(held, streamingJsonPath string, assessedChars int) (release, retain string, coveredChars int) {
+	if assessedChars <= 0 {
+		return "", held, 0
+	}
+
+	var (
+		chars     int
+		committed int // byte offset through which everything may be released
+		framing   int // byte offset where the current uncommitted framing run began
+	)
+	framing = -1
+
+	for i := 0; i < len(held); {
+		lineEnd := len(held)
+		if j := strings.IndexByte(held[i:], '\n'); j >= 0 {
+			lineEnd = i + j + 1
+		}
+		raw := held[i:lineEnd]
+		line := strings.TrimRight(raw, "\r\n")
+
+		// A line with no terminator is still arriving. Its payload is truncated,
+		// so its text could not be read and therefore cannot have been assessed:
+		// reading zero characters out of it must not be mistaken for carrying
+		// none. Retain it and everything after it.
+		if !strings.HasSuffix(raw, "\n") {
+			start := committed
+			if framing >= 0 {
+				start = framing
+			}
+			return held[:start], held[start:], chars
+		}
+
+		switch {
+		case isSSEIntroducerLine(line):
+			// Introduces the data line below it; hold both or release both.
+			if framing < 0 {
+				framing = i
+			}
+		default:
+			payload, _, isData := sseDataPayload(line)
+			if !isData {
+				// Blank separator or comment: nothing depends on it.
+				if framing < 0 {
+					committed = lineEnd
+				}
+				break
+			}
+			n := len([]rune(frameText(payload, streamingJsonPath)))
+			if chars+n > assessedChars {
+				// This frame straddles the boundary. Retain it, and the framing
+				// that introduced it.
+				start := committed
+				if framing >= 0 {
+					start = framing
+				}
+				return held[:start], held[start:], chars
+			}
+			chars += n
+			committed = lineEnd
+			framing = -1
+		}
+		i = lineEnd
+	}
+
+	if framing >= 0 {
+		return held[:framing], held[framing:], chars
+	}
+	return held[:committed], held[committed:], chars
+}
+
+// isSSEIntroducerLine reports whether a line introduces the data line that
+// follows it, rather than standing on its own.
+func isSSEIntroducerLine(line string) bool {
+	return strings.HasPrefix(line, sseEventField) ||
+		strings.HasPrefix(line, sseIDField) ||
+		strings.HasPrefix(line, sseRetryField)
+}
+
+// frameText returns the assistant text one data payload carries, or "" for a
+// payload that carries none.
+func frameText(payload, streamingJsonPath string) string {
+	if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+		return ""
+	}
+	value, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+	if err != nil {
+		return ""
+	}
+	return textCleanRegexCompiled.ReplaceAllString(value, "")
+}
+
+// splitTrailingPartialLine divides s at its last line terminator, returning the
+// complete lines and the incomplete remainder. A flush with no terminator at all
+// is entirely incomplete.
+func splitTrailingPartialLine(s string) (complete, partial string) {
+	if i := strings.LastIndexByte(s, '\n'); i >= 0 {
+		return s[:i+1], s[i+1:]
+	}
+	return "", s
+}
+
+// flushText returns the assistant text of this flush, joined to any incomplete
+// line retained from the previous one, and retains this flush's own incomplete
+// tail for the next.
+//
+// An SSE line cut in half is the problem being solved. A truncated "data:"
+// payload is unparseable JSON, so without this its text is extracted from
+// neither flush and never assessed. Reached when the engine force-flushes at its
+// accumulator ceiling, or whenever an upstream's writes do not align with event
+// boundaries.
+//
+// Only the text needs carrying: every byte of the flush is withheld until the
+// batch covering it has been assessed, so a half-frame can never be delivered
+// before the line completes. The retained fragment is what makes its text
+// assessable, and the frame is whole again by the time the bytes are released.
+//
+// Over maxPartialLineBytes the fragment stops being retained as a fragment: a
+// stream carrying no line terminator would otherwise grow it without limit. Its
+// bytes are still withheld with the rest, so nothing is lost — only the chance
+// to read text out of it.
+func (p *AWSBedrockGuardrailPolicy) flushText(
+	chunkStr string,
+	endOfStream bool,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) string {
+	carried, _ := respCtx.Metadata[metaKeyPartialLine].(string)
+	joined := carried + chunkStr
+
+	if endOfStream {
+		delete(respCtx.Metadata, metaKeyPartialLine)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+	}
+
+	complete, partial := splitTrailingPartialLine(joined)
+	if len(partial) > maxPartialLineBytes {
+		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, no longer retaining it",
+			"partial_bytes", len(partial), "limit", maxPartialLineBytes)
+		delete(respCtx.Metadata, metaKeyPartialLine)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+	}
+	respCtx.Metadata[metaKeyPartialLine] = partial
+	return extractSSEDeltaContent(complete, rp.StreamingJsonPath)
+}
+
+// isSSEChunk reports whether s looks like SSE framing.
+//
+// Any of the specification's field names counts, as does a comment line (one
+// beginning with ":", which is how upstreams send keep-alives). Testing only
+// "data:" and "event:" would misclassify a flush that happens to carry just
+// comments or just "id:"/"retry:" lines, and the whole flush is scanned rather
+// than its first few lines for the same reason.
+func isSSEChunk(s string) bool {
+	for rest := s; rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		if isSSEFieldLine(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSSEFieldLine reports whether one line is an SSE field or comment line.
+func isSSEFieldLine(line string) bool {
+	if strings.HasPrefix(line, ":") {
+		return true // comment, e.g. ": keep-alive"
+	}
+	return strings.HasPrefix(line, sseDataField) ||
+		strings.HasPrefix(line, sseEventField) ||
+		strings.HasPrefix(line, sseIDField) ||
+		strings.HasPrefix(line, sseRetryField)
+}
+
+// nextLine splits off the first line of s, dropping its terminator, and returns
+// it with the remainder. Used instead of strings.Split so a scan can stop at the
+// first match without splitting a whole multi-kilobyte flush.
+func nextLine(s string) (line, rest string) {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSuffix(s[:i], "\r"), s[i+1:]
+	}
+	return strings.TrimSuffix(s, "\r"), ""
+}
+
+// sseDataPayload returns the value of a "data:" line, the exact prefix it was
+// written with, and whether the line is a data line at all.
+//
+// Only one leading space is consumed, per the specification; any further
+// whitespace belongs to the value and is preserved, so a rewritten event is
+// byte-identical to the original apart from the value this policy changed.
+func sseDataPayload(line string) (payload, prefix string, ok bool) {
+	if !strings.HasPrefix(line, sseDataField) {
+		return "", "", false
+	}
+	payload = line[len(sseDataField):]
+	prefix = sseDataField
+	if strings.HasPrefix(payload, " ") {
+		payload = payload[1:]
+		prefix += " "
+	}
+	return payload, prefix, true
+}
+
+// endsAtSSEEventBoundary reports whether s ends where one event ends, so a
+// flush released here never cuts a `data:` line in half.
+//
+// Both terminators are accepted: matching "\n\n" alone would treat a CRLF
+// stream as one event that never ends, and accumulate it to the kernel's
+// ceiling instead of releasing it.
+func endsAtSSEEventBoundary(s []byte) bool {
+	text := string(s)
+	return strings.HasSuffix(text, "\n\n") || strings.HasSuffix(text, "\r\n\r\n")
+}
+
+// extractSSEDeltaContent concatenates the assistant text carried by every
+// complete data frame in s, read at streamingJsonPath.
+//
+// Frames with no text at that path — the opening role delta, usage frames,
+// `[DONE]`, comments — contribute nothing rather than contributing their raw
+// JSON. Sending framing to ApplyGuardrail would bill for it and could trip a
+// guardrail on the wire format rather than on the model's words.
+func extractSSEDeltaContent(s string, streamingJsonPath string) string {
+	var sb strings.Builder
+	for rest := s; rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		payload, _, ok := sseDataPayload(line)
+		if !ok {
+			continue
+		}
+		sb.WriteString(frameText(payload, streamingJsonPath))
+	}
+	return sb.String()
+}
+
+// rewriteSSEDeltaContent applies transform to the text at streamingJsonPath in
+// every data frame of chunkStr, returning the rewritten flush and whether
+// anything changed. A frame whose payload is not JSON, carries no text at that
+// path, or is unchanged by transform is passed through byte-for-byte.
+func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform func(string) string) (string, bool) {
+	lines := strings.Split(chunkStr, "\n")
+	changed := false
+
+	for i, line := range lines {
+		carriage := strings.HasSuffix(line, "\r")
+		trimmed := strings.TrimSuffix(line, "\r")
+		payload, prefix, ok := sseDataPayload(trimmed)
+		if !ok {
+			continue
+		}
+		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+			continue
+		}
+
+		var frame map[string]interface{}
+		if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+			continue
+		}
+		original, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+		if err != nil {
+			continue
+		}
+		replacement := transform(original)
+		if replacement == original {
+			continue
+		}
+		if err := utils.SetValueAtJSONPath(frame, streamingJsonPath, replacement); err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
+				"jsonPath", streamingJsonPath, "error", err)
+			continue
+		}
+		rewrittenPayload, err := json.Marshal(frame)
+		if err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to marshal rewritten SSE frame", "error", err)
+			continue
+		}
+
+		rebuilt := prefix + string(rewrittenPayload)
+		if carriage {
+			rebuilt += "\r"
+		}
+		lines[i] = rebuilt
+		changed = true
+	}
+
+	if !changed {
+		return chunkStr, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
 // validatePayload validates payload against AWS Bedrock Guardrail, returning policy actions.
 func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}) interface{} {
+	// Putting a masked value back used to return here, so the restored response
+	// was delivered without ever being assessed — the guardrail saw nothing of a
+	// response whose own request had masked something. The restoration now
+	// happens in place and the assessment continues on the restored text, which
+	// is what the client will receive.
+	restored := false
 	if !params.RedactPII && isResponse {
 		if maskedPII, exists := metadata[MetadataKeyPIIEntities]; exists {
 			if maskedPIIMap, ok := maskedPII.(map[string]string); ok {
 				restoredContent := p.restorePIIInResponse(string(payload), maskedPIIMap)
 				if restoredContent != string(payload) {
-					return policy.DownstreamResponseModifications{
-						Body: []byte(restoredContent),
-					}
+					payload = []byte(restoredContent)
+					restored = true
 				}
 			}
 		}
@@ -1359,11 +2690,41 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		return policy.UpstreamRequestModifications{}
 	}
 
-	extractedValue, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
+	// A streamed body can reach this buffered path: the engine demotes the whole
+	// chain to buffered as soon as any policy declares BUFFER, and then an SSE
+	// body arrives here whole. jsonPath addresses a non-streamed shape and
+	// cannot match it, which answered 422 for a response the upstream had
+	// returned 200 for. Read it as SSE instead — the same extraction the
+	// streaming path uses, over the whole body.
+	sseBody := isResponse && isSSEChunk(string(payload))
+	extractionPath := params.JsonPath
+	if sseBody {
+		extractionPath = params.StreamingJsonPath
+	}
+
+	var (
+		extractedValue string
+		err            error
+	)
+	if sseBody {
+		extractedValue = extractSSEDeltaContent(string(payload), extractionPath)
+		if strings.TrimSpace(extractedValue) == "" {
+			// Framing only — nothing to assess. Deliver whatever restoration did.
+			if restored {
+				return policy.DownstreamResponseModifications{Body: payload}
+			}
+			return policy.DownstreamResponseModifications{}
+		}
+	} else {
+		extractedValue, err = utils.ExtractStringValueFromJsonpath(payload, extractionPath)
+	}
 	if err != nil {
 		if params.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: JSONPath extraction error, passthrough enabled", "jsonPath", params.JsonPath, "error", err, "isResponse", isResponse)
+			slog.Debug("AWSBedrockGuardrail: JSONPath extraction error, passthrough enabled", "jsonPath", extractionPath, "error", err, "isResponse", isResponse)
 			if isResponse {
+				if restored {
+					return policy.DownstreamResponseModifications{Body: payload}
+				}
 				return policy.DownstreamResponseModifications{}
 			}
 			return policy.UpstreamRequestModifications{}
@@ -1427,7 +2788,21 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 
 	if modifiedContent != "" && modifiedContent != extractedValue {
 		slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
-		modifiedPayload := p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, params.JsonPath)
+		var modifiedPayload []byte
+		if sseBody {
+			// One value spanning several events cannot be written back in place,
+			// so the frames are rewritten individually and a survivor is a
+			// failure rather than something to deliver.
+			rewritten, _, leaked := p.redactedFlush(string(payload), output, params)
+			if leaked {
+				slog.Debug("AWSBedrockGuardrail: redaction could not be applied across events", "isResponse", isResponse)
+				return p.buildErrorResponse("Sensitive content could not be redacted in a streamed response",
+					nil, isResponse, params.ShowAssessment, output)
+			}
+			modifiedPayload = []byte(rewritten)
+		} else {
+			modifiedPayload = p.updatePayloadWithMaskedContent(payload, extractedValue, modifiedContent, extractionPath)
+		}
 		if isResponse {
 			return policy.DownstreamResponseModifications{Body: modifiedPayload}
 		}
@@ -1436,6 +2811,9 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 
 	slog.Debug("AWSBedrockGuardrail: Validation passed", "isResponse", isResponse)
 	if isResponse {
+		if restored {
+			return policy.DownstreamResponseModifications{Body: payload}
+		}
 		return policy.DownstreamResponseModifications{}
 	}
 	return policy.UpstreamRequestModifications{}
