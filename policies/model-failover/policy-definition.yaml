@@ -43,9 +43,14 @@ description: |
   failed, so later requests route around it; only the first one is lost per suspension window. A
   member that resolves but refuses or resets fails over normally.
 
-  Known limit — failure after the response has started is neither failed over nor recorded. Once
-  response headers have reached the client the proxy cannot retry, and this policy has already
-  graded those headers; a stream that opens successfully and then dies is counted as a success.
+  Known limit — failure after the response has started cannot be FAILED OVER. Once response
+  headers have reached the client the proxy cannot retry, so a stream that opens successfully and
+  then dies is delivered to the client incomplete.
+
+  It is not, however, ungraded: the response-header phase records a provisional outcome, and a
+  post-commitment failure is graded afterwards against the target that served it, so a member that
+  truncates repeatedly is still suspended. What the provisional record does not do is change the
+  analytics outcome already emitted for the request — that still reads as a success.
 
   Failover is never attempted after response headers or streamed content have reached the client.
 
@@ -200,9 +205,14 @@ parameters:
       x-wso2-policy-advanced-param: true
       description: |
         Seconds a failing member is skipped for. If it fails again as soon as it comes back, the
-        window doubles each time, up to maxSuspendMultiplier times this value. When a window ends
-        the member returns to full normal rotation immediately — there is no probe phase. Set to 0
-        to disable suspension tracking entirely.
+        window doubles each time, up to maxSuspendMultiplier times this value.
+
+        When a window ends the member does NOT return to full rotation at once: it enters a
+        half-open phase and is probed one request at a time, and recoverAfterSuccesses successes
+        in a row restore it. A failed probe suspends it again for the next, longer window. That is
+        why a recovered member carries normal traffic only after the probes pass — restoring at
+        full share would expose a burst to a target that is still broken. Set to 0 to disable
+        suspension tracking entirely.
       minimum: 0
       default: 0
 

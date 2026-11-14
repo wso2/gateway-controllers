@@ -70,6 +70,12 @@ var defaultStatusCodes = []int{429, 500, 502, 503, 504}
 // FailureConditions decides which upstream outcomes move to the next target.
 type FailureConditions struct {
 	StatusCodes []int
+	// AllFiveXX grades ANY 5xx as a failure, which is what the default means and what the
+	// generated Envoy retry policy already does: retry_on carries the `5xx` token, so every
+	// 5xx is retried whether or not it appears in StatusCodes. Without this the two disagree
+	// — a 501 fails over and is never recorded, so a provider returning it is never suspended.
+	// An explicit statusCodes list turns it off (see parse below).
+	AllFiveXX bool
 }
 
 // Suspension carries the three independent suspension criteria plus the escalating backoff.
@@ -145,6 +151,7 @@ func parseParams(params map[string]interface{}) Params {
 	result := Params{
 		FailureConditions: FailureConditions{
 			StatusCodes: append([]int(nil), defaultStatusCodes...),
+			AllFiveXX:   true,
 		},
 		Suspension: Suspension{
 			ConsecutiveFailures:   DefaultConsecutiveFailures,
@@ -167,6 +174,9 @@ func parseParams(params map[string]interface{}) Params {
 	// publisher who lists only 429 gets failover on 429 and nothing else.
 	if codes := parseIntSlice(params["statusCodes"]); len(codes) > 0 {
 		result.FailureConditions.StatusCodes = codes
+		// An explicit list REPLACES the default, including the 5xx range below: a publisher
+		// who lists only 429 means only 429.
+		result.FailureConditions.AllFiveXX = false
 	}
 
 	// The reviewed schema is flat: suspension parameters sit alongside targets rather than

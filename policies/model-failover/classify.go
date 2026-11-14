@@ -40,7 +40,12 @@ func (p *Policy) isFailoverWorthy(status int) bool {
 			return true
 		}
 	}
-	return false
+	// The default grades every 5xx, not just the enumerated ones, because the generated retry
+	// policy already RETRIES every 5xx: retry_on carries the `5xx` token independently of
+	// retriable_status_codes. Grading only the listed subset left a 501 or a 520 failing over
+	// without ever being recorded, so a provider returning one was retried away from on every
+	// request and never suspended. An explicit statusCodes list clears this (config.go).
+	return p.params.FailureConditions.AllFiveXX && status >= 500 && status <= 599
 }
 
 // ACCEPTED LIMIT: a transport failure is graded only through some reply that does reach the

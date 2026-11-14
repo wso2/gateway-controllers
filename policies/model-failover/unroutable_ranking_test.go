@@ -124,3 +124,39 @@ func TestUnroutableRanking_PartiallyAddressableRankingIsStillServed(t *testing.T
 		t.Fatal("no chain published for a ranking that still had a resolvable member")
 	}
 }
+
+// A dropped member must not appear in the chain the response phase grades against, nor size the
+// attempt budget. Envoy can only reach a member that has a priority group, so a chain containing
+// one that does not describes attempts that cannot happen: attempt 1 would be charged to a target
+// that never received a request, and the budget would run one attempt past the published groups.
+func TestPartialDrop_GradingChainAndBudgetCoverOnlyPublishedMembers(t *testing.T) {
+	p := NewPolicy(map[string]interface{}{
+		"targets": []interface{}{map[string]interface{}{
+			"model": "gpt-4o",
+			"fallbacks": []interface{}{
+				map[string]interface{}{"model": "llama-3", "provider": "bedrock"}, // no cluster
+				map[string]interface{}{"model": "gpt-4o-mini"},                    // primary, mapped
+			},
+		}},
+		ProviderClustersParam: map[string]interface{}{"": "cluster_default"},
+	})
+
+	action, metadata := runWithBody(t, p, []byte(`{"model":"gpt-4o"}`), nil)
+	if _, refused := action.(policy.ImmediateResponse); refused {
+		t.Fatal("a partially addressable chain must still be served")
+	}
+
+	chain, ok := metadata[metadataKeyChain].([]Target)
+	if !ok {
+		t.Fatalf("no chain published, got %T", metadata[metadataKeyChain])
+	}
+	for _, target := range chain {
+		if target.Provider == "bedrock" {
+			t.Fatalf("dropped member %q is in the grading chain; attempt attribution would "+
+				"charge a target Envoy cannot reach", target.Provider)
+		}
+	}
+	if len(chain) != 2 {
+		t.Fatalf("chain has %d members, want the 2 that were published", len(chain))
+	}
+}

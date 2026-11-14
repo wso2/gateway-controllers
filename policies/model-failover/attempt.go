@@ -111,6 +111,12 @@ func (p *Policy) substituteAttemptModel(reqCtx *policy.RequestContext, cluster s
 		// transport level; only the model rewrite is skipped.
 		return policy.UpstreamRequestModifications{}
 	}
+	if payload == nil {
+		// `null` is valid JSON and unmarshals to a nil map. Assigning into it panics, so this
+		// is the one unreadable body that must be rejected AFTER the unmarshal rather than by
+		// its error. Same outcome as every other body with no writable model field.
+		return policy.UpstreamRequestModifications{}
+	}
 	if existing, _ := payload["model"].(string); existing == model {
 		return policy.UpstreamRequestModifications{}
 	}

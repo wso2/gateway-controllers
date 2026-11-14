@@ -283,10 +283,29 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 		return policy.UpstreamRequestModifications{}
 	}
 
+	// From here on, only the members that were actually PUBLISHED may be used. Everything
+	// below describes what Envoy will do, and Envoy can only reach a member that has a
+	// priority group: the chain stored for grading, the leading target, and the attempt budget
+	// all have to match the ranking that was published rather than the one that was resolved.
+	//
+	// Keeping the unfiltered list here meant a dropped FIRST member was graded for attempt 1 —
+	// so health suspended a target that never received a request — and sized the budget one
+	// attempt longer than there were groups, spending the surplus on the last group a second
+	// time, against the at-most-once property (FR-010, FR-056a).
+	servable := resolved
+	if len(dropped) > 0 {
+		servable = make([]Target, 0, len(resolved)-len(dropped))
+		for _, target := range resolved {
+			if cluster, ok := p.params.ProviderClusters[target.Provider]; ok && cluster != "" {
+				servable = append(servable, target)
+			}
+		}
+	}
+
 	// Remember which cluster serves which member, so a completion verdict arriving long after
 	// this request finished can be graded against the right target. The verdict names only a
 	// cluster, and a cluster does not identify a target — see attempt_correlation.go.
-	p.correlation.Remember(requestIDFrom(reqCtx.Headers), resolved, p.params.ProviderClusters)
+	p.correlation.Remember(requestIDFrom(reqCtx.Headers), servable, p.params.ProviderClusters)
 
 	// Carry the WHOLE chain to the response phase, not just the first member.
 	//
@@ -295,9 +314,9 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 	// it for an answer a later one produced — so a consistently failing member would be
 	// recorded healthy every time failover rescued the request, and never suspended. The
 	// chain plus the attempt count is what makes correct attribution possible.
-	leading := resolved[0]
+	leading := servable[0]
 	if reqCtx.Metadata != nil {
-		reqCtx.Metadata[metadataKeyChain] = resolved
+		reqCtx.Metadata[metadataKeyChain] = servable
 		reqCtx.Metadata[metadataKeySelectedModel] = leading.Model
 		reqCtx.Metadata[metadataKeySelectedProvider] = leading.Provider
 		reqCtx.Metadata[metadataKeyRequestedModel] = requestedModel
@@ -311,12 +330,12 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 	}
 
 	slog.Debug("ModelFailover: published failover chain",
-		"requested_model", requestedModel, "members", len(resolved),
+		"requested_model", requestedModel, "members", len(servable),
 		"first_model", leading.Model, "first_provider", leading.Provider)
 
 	// Size the budget to the ranking actually published: N members need N-1 retries. Order
 	// comes from the metadata above, length from this header — both per request.
-	retries := len(resolved) - 1
+	retries := len(servable) - 1
 	if retries < 0 {
 		retries = 0
 	}

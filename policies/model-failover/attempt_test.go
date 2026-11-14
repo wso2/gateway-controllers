@@ -167,3 +167,27 @@ func TestBuildAttemptModels_SkipsUnresolvableMembers(t *testing.T) {
 		t.Fatalf("models = %v, want only upstream_anthropic->claude", models)
 	}
 }
+
+// A JSON `null` body unmarshals to a NIL map, which assignment panics on. It is the one
+// unreadable body whose error the unmarshal does not report, so it has to be caught after.
+func TestSubstituteAttemptModel_NullBodyDoesNotPanic(t *testing.T) {
+	p := policyWithChain()
+	// The metadata MUST name a model for this cluster, or substituteAttemptModel returns at
+	// its first guard and never reaches the body at all — which would make this test vacuous.
+	meta := map[string]interface{}{
+		FailoverMetadataNamespace: map[string]interface{}{
+			attemptModelsKey: map[string]interface{}{"cluster_anthropic": "claude-sonnet-4-5"},
+		},
+	}
+	if _, ok := modelForCluster(meta, "cluster_anthropic"); !ok {
+		t.Fatal("fixture does not reach the body path; the test would prove nothing")
+	}
+	ctx := &policy.RequestContext{
+		SharedContext: &policy.SharedContext{Metadata: meta},
+		Body:          &policy.Body{Content: []byte("null"), Present: true},
+	}
+	// Must return unchanged rather than panic on the nil map.
+	if act := p.substituteAttemptModel(ctx, "cluster_anthropic"); act == nil {
+		t.Fatal("expected an action, got nil")
+	}
+}
