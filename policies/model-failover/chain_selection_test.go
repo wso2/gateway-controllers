@@ -264,10 +264,53 @@ func TestChainShapes_ModelAndProviderVaryIndependently(t *testing.T) {
 				t.Fatalf("members = %+v, want %+v", got, tc.wantMembers)
 			}
 			for i := range got {
-				if got[i] != tc.wantMembers[i] {
+				// Compared on the ROUTING fields. A resolved wildcard also carries the
+				// model the publisher authored, which is deliberately not part of where
+				// the request goes — it is what the member is known by for health.
+				if got[i].Model != tc.wantMembers[i].Model || got[i].Provider != tc.wantMembers[i].Provider {
 					t.Fatalf("member %d = %+v, want %+v", i, got[i], tc.wantMembers[i])
 				}
 			}
 		})
+	}
+}
+
+// One authored "*" member keeps ONE health circuit, whatever model the client asked for.
+//
+// Chain.Members has always documented this — "resolution happens for routing, not for identity" —
+// but Key() read the resolved model, so a request for A and a request for B became separate
+// circuits. That split one member's suspension evidence across one circuit per model a caller
+// could name, so none of them reached a threshold, and the health map grew per distinct model.
+func TestChainMembers_WildcardKeepsOneHealthCircuitAcrossModels(t *testing.T) {
+	chains := parseParams(map[string]interface{}{"targets": []interface{}{
+		map[string]interface{}{
+			"model":     "*",
+			"fallbacks": []interface{}{map[string]interface{}{"model": "*", "provider": "azure"}},
+		},
+	}}).Chains
+
+	chainA, _ := selectChain(chains, "model-a")
+	chainB, _ := selectChain(chains, "model-b")
+	a := chainA.Members("model-a")
+	b := chainB.Members("model-b")
+
+	for i := range a {
+		if a[i].Model == b[i].Model {
+			t.Fatalf("member %d routes to the same model for both requests (%q); routing must "+
+				"follow the client", i, a[i].Model)
+		}
+		if a[i].Key() != b[i].Key() {
+			t.Fatalf("member %d has two health circuits: %q vs %q — one authored member must "+
+				"accumulate one target's worth of suspension evidence", i, a[i].Key(), b[i].Key())
+		}
+	}
+
+	// An ordinary (non-wildcard) member is unaffected: its identity IS its model.
+	plain := parseParams(map[string]interface{}{"targets": []interface{}{
+		map[string]interface{}{"model": "gpt-4o"},
+	}}).Chains
+	pc, _ := selectChain(plain, "gpt-4o")
+	if got := pc.Members("gpt-4o")[0].Key(); got != targetKeySeparator+"gpt-4o" {
+		t.Fatalf("plain member key = %q, want the model itself", got)
 	}
 }

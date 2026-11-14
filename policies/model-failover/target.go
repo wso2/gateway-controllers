@@ -40,6 +40,18 @@ type Target struct {
 	// shape the publisher wrote reaches here already reduced to one name.
 	// Empty means the primary provider.
 	Provider string
+	// authoredModel is the model as the PUBLISHER wrote it, kept when a wildcard member is
+	// resolved against the client's request. Empty for an ordinary member, where Model is
+	// already the authored value.
+	//
+	// Health identity and routing are different questions for a wildcard. Chain.Members has
+	// always said so — "one authored \"*\" member serves every model it matches while keeping
+	// a single health circuit per (provider, \"*\") pair; resolution happens for routing, not
+	// for identity" — but Key() read the resolved Model, so a request for A and a request for
+	// B became separate circuits. That split one authored member's health into one circuit per
+	// model a caller could name: the suspension evidence for a broken provider was divided
+	// among them, so none reached its threshold, and the map grew per distinct model seen.
+	authoredModel string
 }
 
 // Key returns the composite identity used for health tracking and de-duplication.
@@ -47,7 +59,16 @@ type Target struct {
 // Keying on provider+model rather than model alone is what keeps one region's degradation
 // from suspending the same model everywhere else (FR-017).
 func (t Target) Key() string {
-	return t.Provider + targetKeySeparator + t.Model
+	return t.Provider + targetKeySeparator + t.identityModel()
+}
+
+// identityModel is the model this target is KNOWN BY, which is the authored one for a resolved
+// wildcard and the model itself otherwise.
+func (t Target) identityModel() string {
+	if t.authoredModel != "" {
+		return t.authoredModel
+	}
+	return t.Model
 }
 
 // Valid reports whether the target is structurally usable. A target without a model name
@@ -105,6 +126,9 @@ func (c Chain) Members(requestedModel string) []Target {
 // resolveMember substitutes the client's requested model into a wildcard member.
 func resolveMember(member Target, requestedModel string) Target {
 	if member.Model == WildcardModel && requestedModel != "" {
+		// Remember what the publisher wrote BEFORE substituting, so health keeps one circuit
+		// for the authored member while routing uses the client's model.
+		member.authoredModel = member.Model
 		member.Model = requestedModel
 	}
 	return member
