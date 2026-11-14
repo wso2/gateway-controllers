@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -339,6 +340,17 @@ func checkLimit(ctx context.Context, reqCtx *policy.RequestHeaderContext, delega
 	immediate, blocked := rl.OnRequestHeaders(ctx, reqCtx, nil).(policy.ImmediateResponse)
 	if !blocked {
 		return nil, quotaMetadata(ec.ID, quotaWithin, "", "")
+	}
+	// Only a 429 means the quota is used up. Any other response is the limiter failing (its store
+	// unreachable, fail-closed): the quota status is unknown, so no analytics status is recorded.
+	// The limiter's own response is kept when the condition rejects; with allow, the request passes.
+	if immediate.StatusCode != http.StatusTooManyRequests {
+		slog.Warn("subscription limit could not be checked", "condition", ec.ID,
+			"subscriptionId", subscriptionID, "status", immediate.StatusCode)
+		if !ec.Reject {
+			return nil, nil
+		}
+		return &immediate, nil
 	}
 	limit := exceededLimit(immediate.Headers, unit)
 	if !ec.Reject {

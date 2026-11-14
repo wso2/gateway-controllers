@@ -19,6 +19,7 @@
 package subscriptionrequestratelimit
 
 import (
+	"context"
 	"reflect"
 	"testing"
 
@@ -102,4 +103,27 @@ func TestNoQuotaStatusWhenNothingIsCounted(t *testing.T) {
 	// A plan without a request-count condition.
 	tools := `[{"id":"tool-calls","type":"tool-call-count","params":{"limits":[{"count":1,"timeUnit":"MINUTE"}]}}]`
 	assertAnalytics(t, send(p, reqCtx(t, "sub-1", "plan-1", tools)), nil)
+}
+
+// erroringLimiter fails closed the way the rate-limit engine does when its store is unreachable.
+type erroringLimiter struct{}
+
+func (erroringLimiter) OnRequestHeaders(context.Context, *policy.RequestHeaderContext, map[string]interface{}) policy.RequestHeaderAction {
+	return policy.ImmediateResponse{StatusCode: 500, Body: []byte(`{"error":"rate limit store unavailable"}`)}
+}
+
+func (erroringLimiter) Mode() policy.ProcessingMode { return policy.ProcessingMode{} }
+
+func TestLimiterErrorIsNotOverage(t *testing.T) {
+	reqCtx := &policy.RequestHeaderContext{SharedContext: &policy.SharedContext{APIId: "api-1"}}
+	// Reject: the limiter's own error response is kept, with no quota status.
+	resp, metadata := checkLimit(context.Background(), reqCtx, erroringLimiter{}, enforcedCondition{ID: "c1", Reject: true}, "sub-1", "requests", "")
+	if resp == nil || resp.StatusCode != 500 || len(resp.AnalyticsMetadata) != 0 || metadata != nil {
+		t.Fatalf("reject: got %#v, %#v; want the limiter's 500 without quota metadata", resp, metadata)
+	}
+	// Allow: the request passes, with no quota status.
+	resp, metadata = checkLimit(context.Background(), reqCtx, erroringLimiter{}, enforcedCondition{ID: "c1"}, "sub-1", "requests", "")
+	if resp != nil || metadata != nil {
+		t.Fatalf("allow: got %#v, %#v; want nil, nil", resp, metadata)
+	}
 }
