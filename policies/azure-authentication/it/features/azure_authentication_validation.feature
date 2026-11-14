@@ -33,10 +33,11 @@ Feature: Azure Authentication policy configuration validation
     And I authenticate using basic auth as "admin"
 
   # The controller validates the policy reference and its parameters against the policy
-  # definition: authenticationType is a required string, workload-identity or managed-identity,
-  # scope ends in /.default, clientId is a GUID, tenantId a GUID or domain name, headerName an HTTP
-  # token, tokenRequestTimeout whole seconds up to 30s or milliseconds up to 30000ms, valuePrefix has
-  # no control characters, and the policy version must be a major version the gateway has loaded.
+  # definition: authenticationType is a required string, workload-identity, managed-identity or
+  # container-apps, scope ends in /.default, clientId is a GUID, tenantId a GUID or domain name,
+  # headerName an HTTP token, tokenRequestTimeout whole seconds up to 30s or milliseconds up to
+  # 30000ms, valuePrefix has no control characters, and the policy version must be a major version
+  # the gateway has loaded.
   Scenario Outline: Validate invalid policy configuration, including missing or unsupported authentication type, malformed identity, scope, header, prefix and timeout, and unsupported policy version (<case>)
     Given I generate a unique value from "az-invalid-config" and store it as "apiName"
     And I generate a unique API version from "az-invalid-config" and store it as "apiVersion"
