@@ -19,6 +19,7 @@
 package modelfailover
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -589,5 +590,92 @@ func TestHealth_SuccessDoesNotEvaluateTheErrorRateRule(t *testing.T) {
 	}
 	if _, suspended := store.RecordSuccess(targetA, 0, now); suspended != nil {
 		t.Fatalf("a success evaluated the error-rate rule and suspended the target: %+v", suspended)
+	}
+}
+
+// The target map must not grow without bound.
+//
+// A wildcard member resolves the CLIENT's model into the health key, so every distinct model a
+// caller names created a permanent entry and nothing removed it — unbounded by any quantity an
+// operator controls. Idle, stateless entries are now evicted.
+func TestHealthStore_EvictsIdleEntriesButKeepsSuspendedOnes(t *testing.T) {
+	s := testSuspension()
+	s.ConsecutiveFailures = 1
+	// Long enough to still be ACTIVE when the sweep runs. With a shorter window the
+	// suspension has already expired by then, another guard protects the entry, and the test
+	// would pass even if the suspended-target guard were deleted.
+	s.DurationSeconds = 7200
+	s.MaxDurationSeconds = 7200
+	s.clamp()
+	m := NewHealthStore(s).(*memoryHealthStore)
+	now := time.Now()
+
+	// One target that is genuinely suspended, and must survive any sweep.
+	suspended := Target{Model: "gpt-4o", Provider: "openai"}
+	m.RecordFailure(suspended, 5*time.Millisecond, now)
+	if m.Healthy(suspended, now) {
+		t.Fatal("fixture is wrong: the target should be suspended")
+	}
+
+	// Past the threshold with idle, stateless entries, all older than the TTL.
+	for i := 0; i < healthSweepThreshold+50; i++ {
+		m.Healthy(Target{Model: fmt.Sprintf("wildcard-model-%d", i), Provider: "openai"}, now)
+	}
+	grown := len(m.targets)
+	if grown <= healthSweepThreshold {
+		t.Fatalf("fixture is wrong: only %d entries, expected to exceed the threshold", grown)
+	}
+
+	// Long enough later that the idle entries are evictable and the sweep interval has passed.
+	later := now.Add(healthIdleTTL + healthSweepInterval + time.Minute)
+	m.Healthy(Target{Model: "one-more", Provider: "openai"}, later)
+
+	if len(m.targets) >= grown {
+		t.Fatalf("no eviction: %d entries before, %d after", grown, len(m.targets))
+	}
+	if _, stillThere := m.targets[suspended.Key()]; !stillThere {
+		t.Fatal("the suspended target's entry was evicted outright")
+	}
+	if m.Healthy(suspended, later) {
+		t.Fatal("the suspended target was evicted; its suspension would be cleared and a " +
+			"failing provider would get its traffic back")
+	}
+}
+
+// Which guards actually protect a suspended entry at sweep time.
+//
+// Pins the state the eviction test depends on, because the two relevant guards are redundant
+// with each other here: a single-guard mutation still passes, and only removing both evicts the
+// entry. Without this, a later change that quietly drops one guard would look safe.
+func TestHealthStore_SuspendedEntryStateAtSweepTime(t *testing.T) {
+	s := testSuspension()
+	s.ConsecutiveFailures = 1
+	s.DurationSeconds = 7200
+	s.MaxDurationSeconds = 7200
+	s.clamp()
+	m := NewHealthStore(s).(*memoryHealthStore)
+	now := time.Now()
+	target := Target{Model: "gpt-4o", Provider: "openai"}
+	m.RecordFailure(target, 5*time.Millisecond, now)
+
+	h := m.targets[target.Key()]
+	later := now.Add(healthIdleTTL + healthSweepInterval + time.Minute)
+	total, _ := h.window.counts(later)
+
+	// TWO guards hold a suspended entry, independently: the suspension itself, and the
+	// escalation step the suspension left behind. The window has aged out by now and the
+	// consecutive count was reset when the suspension was applied, so neither of those is
+	// doing the work. Removing either one alone still keeps the entry; removing both evicts
+	// it. Recorded so a future reader does not delete one as redundant — it is the other that
+	// is covering it, and only for a target suspended by the consecutive-failure criterion.
+	if !h.suspendedUntil.After(later) {
+		t.Fatal("suspension is not active at sweep time; the fixture no longer tests the guard")
+	}
+	if h.escalationStep == 0 {
+		t.Fatal("escalation step is zero; the second guard is no longer present")
+	}
+	if h.consecutiveFailures != 0 || total != 0 {
+		t.Fatalf("fixture drifted: consecutiveFailures=%d windowCount=%d, expected both zero so "+
+			"the two guards under test are the only protection", h.consecutiveFailures, total)
 	}
 }

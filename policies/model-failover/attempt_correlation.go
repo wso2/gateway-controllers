@@ -38,6 +38,13 @@ const correlationTTL = 5 * time.Minute
 // one, and the work is cheap and only matters when entries are actually accumulating.
 const correlationSweepThreshold = 1024
 
+// correlationSweepInterval is the shortest gap between two sweeps, whatever the size.
+//
+// A fraction of correlationTTL: long enough that steady traffic pays for the scan rarely rather
+// than on every write, short enough that expired entries cannot accumulate for a meaningful part
+// of their lifetime before being reclaimed.
+const correlationSweepInterval = 30 * time.Second
+
 // attemptCorrelation remembers, per request, which target each cluster was serving.
 //
 // It exists because a completion verdict names a CLUSTER, and a cluster does not identify a
@@ -52,6 +59,11 @@ const correlationSweepThreshold = 1024
 type attemptCorrelation struct {
 	mu      sync.Mutex
 	entries map[string]correlationEntry
+	// lastSweep bounds how often a write pays for the scan. Without it, a store that stays
+	// above the size threshold sweeps on EVERY write, and because entries live for
+	// correlationTTL a busy route keeps it above the threshold indefinitely — so steady
+	// traffic rescans the same mostly-live entries, turning an O(1) write into O(n).
+	lastSweep time.Time
 	// now is injectable so tests can drive expiry without sleeping.
 	now func() time.Time
 }
@@ -101,8 +113,13 @@ func (c *attemptCorrelation) Remember(requestID string, chain []Target, provider
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.entries) >= correlationSweepThreshold {
+	// Size says a sweep MIGHT be worth it; the interval says it is not worth it yet. An
+	// expired entry costs only memory until the next sweep, and the TTL already bounds how
+	// much.
+	if now := c.now(); len(c.entries) >= correlationSweepThreshold &&
+		now.Sub(c.lastSweep) >= correlationSweepInterval {
 		c.sweepLocked()
+		c.lastSweep = now
 	}
 	c.entries[requestID] = correlationEntry{
 		byCluster: byCluster,

@@ -118,3 +118,38 @@ func TestSharedHealth_ConfigChangeReplacesTheStore(t *testing.T) {
 		t.Fatalf("%d entries for one attachment, want 1 — the map grows per redeploy", count)
 	}
 }
+
+// A redeploy that repoints an alias at a different cluster must NOT inherit the previous store.
+//
+// Suspension settings alone cannot identify a store. With the same settings and a changed
+// topology, the old store came back — so a (model, provider) target suspended on the strength of
+// the OLD cluster's failures kept a healthy new upstream out of rotation until that window
+// expired, which is a suspension the new cluster never earned.
+func TestSharedStoresFor_ReplacedWhenTheProviderTopologyChanges(t *testing.T) {
+	meta := policy.PolicyMetadata{APIId: "api-1", RouteName: "route-1"}
+	susp := testSuspension()
+
+	first, _ := sharedStoresFor(meta, susp, map[string]string{"anthropic": "cluster_old"})
+	again, _ := sharedStoresFor(meta, susp, map[string]string{"anthropic": "cluster_old"})
+	if first != again {
+		t.Fatal("same settings and same topology must reuse the store, or every request rebuilds health")
+	}
+
+	repointed, _ := sharedStoresFor(meta, susp, map[string]string{"anthropic": "cluster_new"})
+	if repointed == first {
+		t.Fatal("the alias was repointed at a different cluster and the old store came back; " +
+			"its suspensions would exclude an upstream that never earned them")
+	}
+}
+
+// The fingerprint must not depend on map iteration order, or the stores are replaced on every
+// call and health never accumulates.
+func TestTopologyFingerprint_IsStableAcrossIterationOrder(t *testing.T) {
+	m := map[string]string{"a": "1", "b": "2", "c": "3", "d": "4", "e": "5"}
+	want := topologyFingerprint(m)
+	for i := 0; i < 50; i++ {
+		if got := topologyFingerprint(map[string]string{"e": "5", "c": "3", "a": "1", "d": "4", "b": "2"}); got != want {
+			t.Fatalf("fingerprint varies with iteration order: %q vs %q", got, want)
+		}
+	}
+}

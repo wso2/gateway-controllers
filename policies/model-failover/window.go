@@ -32,7 +32,19 @@ type windowSample struct {
 	at      time.Time
 	failure bool
 	latency time.Duration
+	// measured distinguishes "this attempt took 0ms" from "nobody timed this attempt".
+	//
+	// Only the attempt that produced the response in hand has a latency of its own, read from
+	// the upstream's own service time. The earlier attempts of a failover were never timed
+	// individually — charging them the whole request's elapsed time made a fast fallback
+	// inherit a slow primary's duration, and a latency threshold could then suspend a target
+	// whose own attempt was quick. An unmeasured sample still counts for the error rate; it
+	// is excluded from the percentile, because a number nobody measured is not evidence.
+	measured bool
 }
+
+// unknownLatency marks a sample whose duration was never measured.
+const unknownLatency = -1 * time.Nanosecond
 
 // rollingWindow holds recent request outcomes for one target, supporting the two aggregated
 // suspension criteria: error rate and latency percentile.
@@ -57,7 +69,11 @@ func (w *rollingWindow) add(now time.Time, failure bool, latency time.Duration) 
 	if len(w.samples) >= maxWindowSamples {
 		w.samples = w.samples[1:]
 	}
-	w.samples = append(w.samples, windowSample{at: now, failure: failure, latency: latency})
+	measured := latency != unknownLatency
+	if !measured {
+		latency = 0
+	}
+	w.samples = append(w.samples, windowSample{at: now, failure: failure, latency: latency, measured: measured})
 }
 
 // evict drops samples older than the window. Samples are appended in time order, so the
@@ -103,7 +119,13 @@ func (w *rollingWindow) percentile(now time.Time, q float64) time.Duration {
 
 	latencies := make([]time.Duration, 0, len(w.samples))
 	for _, s := range w.samples {
+		if !s.measured {
+			continue // never timed; including it as 0 would drag the percentile down
+		}
 		latencies = append(latencies, s.latency)
+	}
+	if len(latencies) == 0 {
+		return 0
 	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 

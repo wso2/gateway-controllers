@@ -20,6 +20,8 @@ package modelfailover
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 	"sync"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -65,9 +67,38 @@ type sharedHealthEntry struct {
 // (API, route) for the life of the process, never one per redeploy. An entry for a route that
 // is later deleted does linger — the SDK gives a policy no teardown hook to notice — but it is
 // one small struct per distinct route ever deployed, not per request or per deployment.
-func healthStoreFor(metadata policy.PolicyMetadata, suspension Suspension) HealthStore {
-	store, _ := sharedStoresFor(metadata, suspension)
+func healthStoreFor(metadata policy.PolicyMetadata, suspension Suspension,
+	providerClusters map[string]string) HealthStore {
+	store, _ := sharedStoresFor(metadata, suspension, providerClusters)
 	return store
+}
+
+// topologyFingerprint renders the provider-to-cluster mapping deterministically, so a change to
+// it replaces the shared stores instead of inheriting them.
+//
+// Suspension settings alone are not enough to identify a store. A redeploy that repoints an alias
+// at a different cluster, keeping the same suspension configuration, would otherwise reuse the
+// previous store — and a (model, provider) target suspended on the strength of the OLD cluster's
+// failures would keep a healthy new upstream out of rotation until that window expired. Sorted
+// because Go map iteration order is random, and an unstable fingerprint would replace the stores
+// on every call.
+func topologyFingerprint(providerClusters map[string]string) string {
+	if len(providerClusters) == 0 {
+		return ""
+	}
+	aliases := make([]string, 0, len(providerClusters))
+	for alias := range providerClusters {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+	var b strings.Builder
+	for _, alias := range aliases {
+		b.WriteString(alias)
+		b.WriteByte('=')
+		b.WriteString(providerClusters[alias])
+		b.WriteByte(';')
+	}
+	return b.String()
 }
 
 // sharedStoresFor returns BOTH of this attachment's shared stores, in one lock acquisition.
@@ -76,9 +107,10 @@ func healthStoreFor(metadata policy.PolicyMetadata, suspension Suspension) Healt
 // entries: a configuration change between two calls would hand back a health store and a
 // correlation store from different generations, and every verdict would then look up a request
 // the store never recorded — grading nothing, with no error anywhere.
-func sharedStoresFor(metadata policy.PolicyMetadata, suspension Suspension) (HealthStore, *attemptCorrelation) {
+func sharedStoresFor(metadata policy.PolicyMetadata, suspension Suspension,
+	providerClusters map[string]string) (HealthStore, *attemptCorrelation) {
 	key := metadata.APIId + "\x00" + metadata.RouteName
-	fingerprint := fmt.Sprintf("%+v", suspension)
+	fingerprint := fmt.Sprintf("%+v", suspension) + "\x00" + topologyFingerprint(providerClusters)
 
 	sharedHealth.mu.Lock()
 	defer sharedHealth.mu.Unlock()

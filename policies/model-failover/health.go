@@ -81,6 +81,9 @@ type targetHealth struct {
 	// BackoffResetSeconds is what earns the reset to base.
 	healthySince time.Time
 	window       *rollingWindow
+	// lastSeen is when this target was last looked up. Only used to evict entries nothing
+	// refers to any more — see sweepIdleLocked.
+	lastSeen time.Time
 
 	// --- half-open probing, once a suspension window has ended ---
 	//
@@ -164,6 +167,43 @@ type memoryHealthStore struct {
 	mu         sync.Mutex
 	targets    map[string]*targetHealth
 	suspension Suspension
+	// lastSweep bounds how often an insert pays for the idle scan.
+	lastSweep time.Time
+}
+
+// Bounds on the target map.
+//
+// A wildcard member resolves the CLIENT's model into the health key, so a long-running gateway
+// accumulates one entry per distinct model it has ever seen — and nothing removed them. The
+// entries are small, but "one per distinct string a caller can choose" is unbounded by any
+// operator-controlled quantity, which is the shape of a memory exhaustion rather than a leak.
+//
+// Eviction is deliberately conservative: only an entry that is HEALTHY, not probing, and whose
+// window holds nothing can go. Dropping a suspended target would clear its suspension and hand
+// a failing provider its traffic back, which is worse than the growth being bounded.
+const (
+	healthSweepThreshold = 1024
+	healthSweepInterval  = 60 * time.Second
+	healthIdleTTL        = 15 * time.Minute
+)
+
+// sweepIdleLocked drops entries that carry no state worth keeping. Caller holds the lock.
+func (m *memoryHealthStore) sweepIdleLocked(now time.Time) {
+	for key, h := range m.targets {
+		if !h.suspendedUntil.IsZero() && h.suspendedUntil.After(now) {
+			continue // suspended: dropping it would restore traffic to a failing target
+		}
+		if h.halfOpen || h.consecutiveFailures > 0 || h.escalationStep > 0 {
+			continue // mid-recovery or mid-escalation; the state is the point
+		}
+		if total, _ := h.window.counts(now); total > 0 {
+			continue // still inside its window, so it is still being judged
+		}
+		if now.Sub(h.lastSeen) < healthIdleTTL {
+			continue
+		}
+		delete(m.targets, key)
+	}
 }
 
 // NewHealthStore returns the per-instance health store described by FR-020.
@@ -193,6 +233,10 @@ func (m *memoryHealthStore) state(target Target, now time.Time) *targetHealth {
 	key := target.Key()
 	h, ok := m.targets[key]
 	if !ok {
+		if len(m.targets) >= healthSweepThreshold && now.Sub(m.lastSweep) >= healthSweepInterval {
+			m.sweepIdleLocked(now)
+			m.lastSweep = now
+		}
 		h = &targetHealth{
 			currentDurationSeconds: m.suspension.DurationSeconds,
 			healthySince:           now,
@@ -200,6 +244,7 @@ func (m *memoryHealthStore) state(target Target, now time.Time) *targetHealth {
 		}
 		m.targets[key] = h
 	}
+	h.lastSeen = now
 	return h
 }
 

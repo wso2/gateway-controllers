@@ -52,7 +52,10 @@ const (
 	metadataKeySelectedModel    = "model_failover.selected_model"
 	metadataKeySelectedProvider = "model_failover.selected_provider"
 	metadataKeyRequestStart     = "model_failover.request_start"
-	metadataKeyChain            = "model_failover.chain"
+	// upstreamServiceTimeHeader carries the SERVING attempt's own upstream duration, which is
+	// what per-target latency grading needs; the request's elapsed time is not per-attempt.
+	upstreamServiceTimeHeader = "x-envoy-upstream-service-time"
+	metadataKeyChain          = "model_failover.chain"
 	// Request-time facts the response phase cannot recompute: by then the published
 	// ranking has served its purpose and the health store has moved on, so which targets
 	// were skipped and where the order came from would both be lost.
@@ -113,7 +116,7 @@ func GetPolicy(
 	// shared_health.go. The factory runs once per CHAIN entry, so the response chain and the
 	// fault chain each get their own *Policy; private stores here would mean the fault chain
 	// graded into a store nothing reads.
-	health, correlation := sharedStoresFor(metadata, parsed.Suspension)
+	health, correlation := sharedStoresFor(metadata, parsed.Suspension, parsed.ProviderClusters)
 	return &Policy{
 		params:      parsed,
 		health:      health,
@@ -382,7 +385,11 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	}
 
 	now := p.now()
-	latency := p.latencySince(respCtx.Metadata, now)
+	// Per attempt, not per request. latencySince measures the WHOLE request, so charging it to
+	// every graded target made a fast fallback inherit a slow primary's duration and let a
+	// latency threshold suspend a target whose own attempt was quick. Only the attempt that
+	// produced this response has a latency of its own; the earlier ones were never timed.
+	servingLatency := p.servingAttemptLatency(respCtx)
 	status := respCtx.ResponseStatus
 
 	// Attempts 1..N-1 were retried, which only happens when they failed. Attempt N produced
@@ -391,7 +398,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	// failover hid the failure from the client.
 	attempts := p.attemptCount(respCtx, len(chain))
 	for i := 0; i < attempts-1 && i < len(chain); i++ {
-		if event := p.health.RecordFailure(chain[i], latency, now); event != nil {
+		if event := p.health.RecordFailure(chain[i], unknownLatency, now); event != nil {
 			p.logSuspension(event)
 		}
 	}
@@ -406,7 +413,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	outcome := outcomeServed
 	switch {
 	case p.isFailoverWorthy(status):
-		if event := p.health.RecordFailure(target, latency, now); event != nil {
+		if event := p.health.RecordFailure(target, servingLatency, now); event != nil {
 			p.logSuspension(event)
 		}
 		// The last target answered with a failure too, so the chain is spent. That is the
@@ -432,7 +439,7 @@ func (p *Policy) OnResponseHeaders(ctx context.Context, respCtx *policy.Response
 	default:
 		// Any non-failover-worthy status counts as a success for health purposes: the target
 		// answered. A 400 is the client's problem, not the provider's.
-		recovered, suspended := p.health.RecordSuccess(target, latency, now)
+		recovered, suspended := p.health.RecordSuccess(target, servingLatency, now)
 		if recovered != nil {
 			p.logRecovery(recovered)
 		}
@@ -624,6 +631,29 @@ func (p *Policy) chainFromMetadata(metadata map[string]interface{}) ([]Target, b
 //
 // A missing or unparseable header means one attempt. That is the safe reading: it grades only
 // the first target and never invents failures for targets the request may not have reached.
+// servingAttemptLatency is the time the SERVING attempt spent upstream, from Envoy's own
+// x-envoy-upstream-service-time. That header describes the upstream request that produced the
+// response in hand — the last attempt — so it is per-attempt by construction, where the request's
+// elapsed time is not.
+//
+// Returns unknownLatency when the header is absent or unparseable, which is the honest answer:
+// an unmeasured sample still counts toward the error rate and is left out of the percentile,
+// rather than being recorded as a duration nobody observed.
+func (p *Policy) servingAttemptLatency(respCtx *policy.ResponseHeaderContext) time.Duration {
+	if respCtx.ResponseHeaders == nil {
+		return unknownLatency
+	}
+	values := respCtx.ResponseHeaders.Get(upstreamServiceTimeHeader)
+	if len(values) == 0 {
+		return unknownLatency
+	}
+	ms, err := strconv.Atoi(values[0])
+	if err != nil || ms < 0 {
+		return unknownLatency
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
 func (p *Policy) attemptCount(respCtx *policy.ResponseHeaderContext, chainLen int) int {
 	attempts := 1
 	if respCtx.ResponseHeaders != nil {
