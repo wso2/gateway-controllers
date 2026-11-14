@@ -23,7 +23,7 @@ Use this policy when you need to:
 - **Automatic Token Extraction**: Token counts are extracted automatically from LLM provider responses using provider-specific templates — no manual cost configuration required.
 - **Multiple Time Windows**: Define multiple concurrent limits per token type (for example, 1000 tokens per minute AND 50000 tokens per day).
 - **Multiple Algorithms**: Supports GCRA (smooth rate limiting with burst support) and Fixed Window (simple counter per time window).
-- **Dual Backends**: Choose between in-memory storage (single instance) or Redis (distributed rate limiting across multiple gateway instances).
+- **Dual Backends**: Choose between in-memory storage (single instance) or Redis / Valkey (distributed rate limiting across multiple gateway instances).
 - **Comprehensive Rate Limit Headers**: Responses include standard rate limit headers (X-RateLimit-*, IETF RateLimit, Retry-After) for client-side visibility.
 - **Pre-Flight Quota Check**: Requests are blocked upfront when the token quota is already exhausted, preventing unnecessary upstream calls.
 
@@ -61,13 +61,13 @@ These parameters are set by the administrator and apply globally:
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `algorithm` | string | No | `"fixed-window"` | Rate limiting algorithm: `"gcra"` (smooth rate limiting with burst support) or `"fixed-window"` (simple counter per time window). |
-| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance or `"redis"` for distributed rate limiting. |
+| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance or `"redis"` for distributed rate limiting (supports Redis and Valkey). |
 | `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis`. |
 | `memory` | `Memory` object | No | - | In-memory storage configuration. Used when `backend=memory`. |
 
-#### Redis Configuration
+#### Redis / Valkey Configuration
 
-When using Redis as the backend, configure the following under `redis`:
+When using Redis or Valkey (as a drop-in replacement) as the backend, configure the following under `redis`:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|

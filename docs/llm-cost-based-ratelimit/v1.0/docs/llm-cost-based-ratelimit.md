@@ -21,7 +21,7 @@ Use this policy when you need to:
 - **Multiple Time Windows**: Configure multiple concurrent budget limits per route (for example, $5 per hour AND $50 per day).
 - **Dollar-Denominated Headers**: Responses include `x-ratelimit-cost-limit-dollars` and `x-ratelimit-cost-remaining-dollars` headers for client-side visibility.
 - **Multiple Algorithms**: Supports GCRA (smooth rate limiting with burst support) and Fixed Window (simple counter per time window).
-- **Dual Backends**: Choose between in-memory storage (single instance) or Redis (distributed rate limiting across multiple gateway instances).
+- **Dual Backends**: Choose between in-memory storage (single instance) or Redis / Valkey (distributed rate limiting across multiple gateway instances).
 - **Pre-Flight Quota Check**: Requests are blocked upfront when the budget is already exhausted, preventing unnecessary upstream calls.
 - **Precision Scaling**: Dollar amounts are scaled to nano-dollars internally (configurable) to preserve precision in integer counters.
 
@@ -50,13 +50,13 @@ Each entry in `budgetLimits` defines a spending cap for a specific time window:
 |-----------|------|----------|---------|-------------|
 | `costScaleFactor` | integer | No | `1000000000` | Scale factor for converting dollar amounts to internal integer units. Higher values preserve more decimal precision. See [Precision Scaling](#precision-scaling) for details. |
 | `algorithm` | string | No | `"gcra"` | Rate limiting algorithm: `"gcra"` (smooth rate limiting with burst support) or `"fixed-window"` (simple counter per time window). |
-| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance or `"redis"` for distributed rate limiting. |
+| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance or `"redis"` for distributed rate limiting (supports Redis and Valkey). |
 | `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis`. |
 | `memory` | `Memory` object | No | - | In-memory storage configuration. Used when `backend=memory`. |
 
-#### Redis Configuration
+#### Redis / Valkey Configuration
 
-When using Redis as the backend, configure the following under `redis`:
+When using Redis or Valkey (as a drop-in replacement) as the backend, configure the following under `redis`:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
