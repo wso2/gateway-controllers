@@ -190,7 +190,16 @@ func (p *Policy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContex
 	// A different job entirely: the ranking was decided once, downstream, and this instance
 	// only applies the part of it that has to travel in the payload.
 	if cluster, perAttempt := attemptCluster(reqCtx.Metadata); perAttempt {
-		return p.substituteAttemptModel(reqCtx, cluster)
+		// The attempt number selects the member; the cluster cross-checks it. Without a
+		// usable number there is no way to tell two members on one provider apart, and
+		// guessing is what the cluster-keyed lookup used to do -- so this declines instead.
+		attempt, ok := attemptNumber(reqCtx.Metadata)
+		if !ok {
+			slog.Warn("ModelFailover: per-attempt chain carries no attempt number, " +
+				"so this attempt's model is left alone")
+			return policy.UpstreamRequestModifications{}
+		}
+		return p.substituteAttemptModel(reqCtx, attempt, cluster)
 	}
 
 	now := p.now()

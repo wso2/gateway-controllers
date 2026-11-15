@@ -65,7 +65,7 @@ func TestBuildPriorityGroups_DropsMembersWithNoCluster(t *testing.T) {
 		{Model: "claude-sonnet-4", Provider: "anthropic"},
 	}
 
-	groups, dropped := buildPriorityGroups(chain, nil)
+	groups, _, dropped := buildPriorityGroups(chain, nil)
 
 	if groups != nil {
 		t.Fatalf("groups = %v, want nil: an unresolvable member must not be published", groups)
@@ -90,7 +90,7 @@ func TestBuildPriorityGroups_DropsOnlyTheUnresolvableMember(t *testing.T) {
 		{Model: "claude-sonnet-4", Provider: "typo-provider"},
 	}
 
-	groups, dropped := buildPriorityGroups(chain, map[string]string{"openai": "cluster_openai"})
+	groups, _, dropped := buildPriorityGroups(chain, map[string]string{"openai": "cluster_openai"})
 
 	if len(groups) != 1 {
 		t.Fatalf("groups = %d, want 1", len(groups))
@@ -113,7 +113,7 @@ func TestBuildPriorityGroups_PreservesChainOrder(t *testing.T) {
 	}
 	clusters := map[string]string{"p1": "c1", "p2": "c2", "p3": "c3"}
 
-	groups, dropped := buildPriorityGroups(chain, clusters)
+	groups, _, dropped := buildPriorityGroups(chain, clusters)
 
 	if len(dropped) != 0 {
 		t.Fatalf("dropped = %v, want none: every member resolves here", dropped)
@@ -135,7 +135,7 @@ func TestBuildFailoverMetadata_EmptyChainIsInert(t *testing.T) {
 	if metadata, _ := buildFailoverMetadata(nil, nil); metadata != nil {
 		t.Fatalf("expected nil metadata for an empty chain, got %v", metadata)
 	}
-	if groups, _ := buildPriorityGroups(nil, nil); groups != nil {
+	if groups, _, _ := buildPriorityGroups(nil, nil); groups != nil {
 		t.Fatalf("expected nil groups for an empty chain, got %v", groups)
 	}
 }
@@ -163,7 +163,7 @@ func TestBuildPriorityGroups_CarriesClusters(t *testing.T) {
 		"":          "upstream_main_host_8080",
 		"anthropic": "upstream_LlmProxy_abc_anthropic",
 	}
-	groups, _ := buildPriorityGroups([]Target{
+	groups, _, _ := buildPriorityGroups([]Target{
 		{Model: "gpt-4o"},
 		{Model: "claude-sonnet-4", Provider: "anthropic"},
 	}, clusters)
@@ -210,7 +210,7 @@ func TestBuildPriorityGroups_WildcardMemberStillResolves(t *testing.T) {
 		t.Fatal("the catch-all chain must match")
 	}
 	members := chain.Members("a-model-nobody-configured")
-	groups, _ := buildPriorityGroups(members, map[string]string{
+	groups, _, _ := buildPriorityGroups(members, map[string]string{
 		"":      "upstream_main_host_8080",
 		"azure": "upstream_LlmProxy_abc_azure",
 	})
@@ -243,5 +243,105 @@ func TestParseProviderClusters_ReadsTheInjectedMap(t *testing.T) {
 	}
 	if _, present := params.ProviderClusters["bad"]; present {
 		t.Fatal("a non-string cluster must be dropped, not coerced")
+	}
+}
+
+// The cheap structural guard, and the shape that would have caught both cluster-keyed defects
+// before they shipped: a chain whose members SHARE a provider, plus a member that is dropped.
+//
+// Three lists have to stay the same length and the same order -- the published groups, the
+// published models, and the members the caller treats as servable. Every way of getting the model
+// list wrong changes one of those lengths or one of those positions:
+//
+//	collapse the list back into a cluster-keyed map -> two members behind one cluster become one
+//	build it from the PRE-drop chain                 -> longer than the groups, and shifted after
+//	                                                    the drop
+//	omit a wildcard instead of holing it             -> shorter, and shifted after the wildcard
+//	let the drop predicates drift apart              -> groups and servable disagree
+//
+// Which is why it is asserted structurally rather than one defect at a time.
+func TestBuildPriorityGroups_ModelsStayParallelToGroups(t *testing.T) {
+	clusters := map[string]string{
+		"anthropic": "c_claude",
+		"google":    "c_gemini",
+		"openai":    "c_openai",
+		// "ghost" is deliberately absent: its member must be dropped from BOTH lists.
+	}
+	chain := []Target{
+		{Provider: "anthropic", Model: "claude-sonnet-4-5"},
+		{Provider: "ghost", Model: "nowhere"}, // dropped: no cluster
+		{Provider: "google", Model: "gemini-2.5-pro"},
+		{Provider: "anthropic", Model: "claude-opus-4-1"}, // SAME provider as member 0
+		{Provider: "openai", Model: ""},                   // wildcard: a hole, not an omission
+	}
+
+	groups, models, dropped := buildPriorityGroups(chain, clusters)
+
+	// What the caller independently computes as servable, by the same predicate.
+	var servable []Target
+	for _, target := range chain {
+		if _, ok := servableCluster(clusters, target.Provider); ok {
+			servable = append(servable, target)
+		}
+	}
+
+	if len(dropped) != 1 || dropped[0].Provider != "ghost" {
+		t.Fatalf("dropped = %v, want the ghost member only", dropped)
+	}
+	if len(groups) != len(servable) || len(models) != len(servable) {
+		t.Fatalf("lengths disagree: groups = %d, models = %d, servable = %d",
+			len(groups), len(models), len(servable))
+	}
+
+	for i, target := range servable {
+		cluster, _ := servableCluster(clusters, target.Provider)
+
+		entry, ok := models[i].(map[string]any)
+		if !ok {
+			t.Fatalf("models[%d] = %T, want an entry map", i, models[i])
+		}
+		if got := entry[attemptModelCluster]; got != cluster {
+			t.Fatalf("models[%d] cluster = %v, want %v", i, got, cluster)
+		}
+		// The model at position i must be THIS member's, not a sibling's on the same cluster.
+		if got := entry[attemptModelModel]; got != target.Model {
+			t.Fatalf("models[%d] model = %v, want %q (member %v)", i, got, target.Model, target)
+		}
+
+		group := groups[i].(map[string]any)
+		if got := group["name"]; got != groupName(target) {
+			t.Fatalf("groups[%d] name = %v, want %v", i, got, groupName(target))
+		}
+		groupCluster := group["clusters"].([]any)[0].(map[string]any)["cluster_name"]
+		if groupCluster != entry[attemptModelCluster] {
+			t.Fatalf("position %d: group cluster %v != model cluster %v",
+				i, groupCluster, entry[attemptModelCluster])
+		}
+	}
+}
+
+// The two members on one provider must appear as TWO entries carrying different models. Stated
+// separately from the structural guard because it is the defect in one line: keyed by cluster
+// these collapse, and whichever one wins, the other is never requested.
+func TestBuildFailoverMetadata_RepeatedProviderKeepsBothModels(t *testing.T) {
+	metadata, _ := buildFailoverMetadata([]Target{
+		{Provider: "anthropic", Model: "claude-sonnet-4-5"},
+		{Provider: "anthropic", Model: "claude-opus-4-1"},
+	}, map[string]string{"anthropic": "c_claude"})
+
+	models, ok := metadata[FailoverMetadataNamespace][attemptModelsKey].([]any)
+	if !ok {
+		t.Fatalf("attempt_models = %T, want an ordered list",
+			metadata[FailoverMetadataNamespace][attemptModelsKey])
+	}
+	if len(models) != 2 {
+		t.Fatalf("attempt_models = %d entries, want 2: both members share one cluster and "+
+			"must still be told apart", len(models))
+	}
+	if got := models[0].(map[string]any)[attemptModelModel]; got != "claude-sonnet-4-5" {
+		t.Fatalf("attempt 1 model = %v, want claude-sonnet-4-5", got)
+	}
+	if got := models[1].(map[string]any)[attemptModelModel]; got != "claude-opus-4-1" {
+		t.Fatalf("attempt 2 model = %v, want claude-opus-4-1", got)
 	}
 }

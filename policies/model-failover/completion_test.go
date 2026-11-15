@@ -142,26 +142,25 @@ func TestAttemptCorrelation_ExpiresEntriesItIsNeverAskedAbout(t *testing.T) {
 	target := Target{Model: "m", Provider: "p"}
 	store.Remember("req-1", []Target{target}, nil, map[string]string{"p": testCluster})
 
-	if _, ok := store.Lookup("req-1", testCluster); !ok {
+	if _, ok := store.Lookup("req-1", testCluster, 1); !ok {
 		t.Fatal("precondition: entry is readable while fresh")
 	}
 
 	clock = now.Add(correlationTTL + time.Second)
-	if _, ok := store.Lookup("req-1", testCluster); ok {
+	if _, ok := store.Lookup("req-1", testCluster, 1); ok {
 		t.Error("an expired entry must not be returned")
 	}
 }
 
-// Two members on one provider share a cluster, and the verdict cannot tell them apart. Grading
-// the one the chain would have reached FIRST matches the attempt order; picking arbitrarily
-// would suspend whichever member happened to be iterated last.
+// Attempt 1 on a shared cluster is the FIRST of the two members. True by index now, where it
+// used to be true only because the fallback map happened to keep the first one.
 func TestAttemptCorrelation_SharedClusterResolvesToTheEarlierMember(t *testing.T) {
 	store := newAttemptCorrelation(nil)
 	first := Target{Model: "gpt-4o", Provider: "openai"}
 	second := Target{Model: "gpt-4o-mini", Provider: "openai"}
 	store.Remember("req-1", []Target{first, second}, nil, map[string]string{"openai": testCluster})
 
-	got, ok := store.Lookup("req-1", testCluster)
+	got, ok := store.Lookup("req-1", testCluster, 1)
 	if !ok || got.Target != first {
 		t.Errorf("expected the first member on the shared cluster, got %+v (ok=%v)", got, ok)
 	}
@@ -272,5 +271,137 @@ func TestOnAttemptComplete_ReversesTheCreditAStreamedProbeWasGivenEarly(t *testi
 	if healthy(p.health, target, now) {
 		t.Fatal("the target is still in rotation: the probe that restored it was credited on " +
 			"a status its body never earned, and the verdict failed to take that back")
+	}
+}
+
+// The defect this positional lookup exists for. A cluster names a PROVIDER, so for
+// [openai/gpt-4o, openai/gpt-4o-mini] both members' verdicts arrive naming one cluster. Keyed by
+// cluster, the later member's post-commitment failure is charged to the earlier one — suspending
+// a model that was never contacted, while the one that actually truncated keeps its clean window
+// and all of the traffic.
+//
+// Mutant: ignore AttemptCount and fall back to byCluster. Attempt 2 then resolves to gpt-4o.
+func TestAttemptCorrelation_LaterMemberOnASharedClusterIsGradedAsItself(t *testing.T) {
+	store := newAttemptCorrelation(nil)
+	first := Target{Model: "gpt-4o", Provider: "openai"}
+	second := Target{Model: "gpt-4o-mini", Provider: "openai"}
+	store.Remember("req-1", []Target{first, second}, nil, map[string]string{"openai": testCluster})
+
+	got, ok := store.Lookup("req-1", testCluster, 2)
+	if !ok {
+		t.Fatal("attempt 2 was not resolved at all")
+	}
+	if got.Target != second {
+		t.Errorf("attempt 2 resolved to %+v, want the SECOND member %+v — charging it to the "+
+			"first suspends a model that was never contacted", got.Target, second)
+	}
+}
+
+// Zero is a real sentinel, not a position: the gateway reports it when the request never reached
+// an upstream, and an older gateway reports it always. It must fall back to the CLUSTER-keyed
+// guess, which is what this store did before the count existed.
+//
+// The chain here deliberately starts with a member on a DIFFERENT cluster than the verdict names.
+// A fixture whose first member is also the expected answer cannot tell the two behaviours apart:
+// clamping a zero count to chain[0] and falling back by cluster would both return it, and the
+// test would pass while the sentinel was gone. The distinguishing shape is the whole point —
+// see T106.
+//
+// Mutant: drop the sentinel and clamp the index. The gemini verdict then grades anthropic.
+func TestAttemptCorrelation_NoAttemptIdentityFallsBackToTheCluster(t *testing.T) {
+	store := newAttemptCorrelation(nil)
+	claude := Target{Model: "claude-opus-4-1", Provider: "anthropic"}
+	gemini := Target{Model: "gemini-2.5-pro", Provider: "google"}
+	store.Remember("req-1", []Target{claude, gemini}, nil, map[string]string{
+		"anthropic": "c_claude",
+		"google":    "c_gemini",
+	})
+
+	got, ok := store.Lookup("req-1", "c_gemini", 0)
+	if !ok {
+		t.Fatal("a verdict with no attempt identity must still grade by cluster")
+	}
+	if got.Target != gemini {
+		t.Errorf("fallback resolved to %+v, want %+v — the cluster names the provider that "+
+			"actually served, where chain[0] is simply the first member", got.Target, gemini)
+	}
+}
+
+// The same sentinel, on a shared-provider chain, where the cluster-keyed fallback is the only
+// answer available: both members are behind one cluster, so first-wins is the documented guess.
+func TestAttemptCorrelation_NoAttemptIdentityOnASharedClusterTakesTheFirstMember(t *testing.T) {
+	store := newAttemptCorrelation(nil)
+	first := Target{Model: "gpt-4o", Provider: "openai"}
+	second := Target{Model: "gpt-4o-mini", Provider: "openai"}
+	store.Remember("req-1", []Target{first, second}, nil, map[string]string{"openai": testCluster})
+
+	got, ok := store.Lookup("req-1", testCluster, 0)
+	if !ok || got.Target != first {
+		t.Errorf("got %+v (ok=%v), want the first member %+v", got.Target, ok, first)
+	}
+}
+
+// An attempt count past the end of the remembered chain cannot index it. Reachable if the two
+// ever disagree about which members were published, which is exactly when trusting the index
+// would grade the wrong target.
+func TestAttemptCorrelation_AttemptPastTheChainFallsBackToTheCluster(t *testing.T) {
+	store := newAttemptCorrelation(nil)
+	target := Target{Model: "gpt-4o", Provider: "openai"}
+	store.Remember("req-1", []Target{target}, nil, map[string]string{"openai": testCluster})
+
+	got, ok := store.Lookup("req-1", testCluster, 7)
+	if !ok || got.Target != target {
+		t.Errorf("got %+v (ok=%v), want the cluster-keyed fallback %+v", got.Target, ok, target)
+	}
+}
+
+// The cluster cross-checks the position rather than being ignored once a count is present. If
+// they disagree the correspondence has broken, and the verdict's own cluster is the gateway's
+// account of what actually served the attempt — so grading falls back to it rather than trusting
+// an index that is demonstrably describing a different target.
+//
+// Mutant: delete the cross-check. The gemini verdict is then charged to anthropic.
+func TestAttemptCorrelation_PositionDisagreeingWithTheClusterGradesByCluster(t *testing.T) {
+	store := newAttemptCorrelation(nil)
+	claude := Target{Model: "claude-opus-4-1", Provider: "anthropic"}
+	gemini := Target{Model: "gemini-2.5-pro", Provider: "google"}
+	store.Remember("req-1", []Target{claude, gemini}, nil, map[string]string{
+		"anthropic": "c_claude",
+		"google":    "c_gemini",
+	})
+
+	// Position 1 is anthropic, but the verdict says the attempt ran against gemini.
+	got, ok := store.Lookup("req-1", "c_gemini", 1)
+	if !ok {
+		t.Fatal("a disagreeing verdict must still be graded by its own cluster")
+	}
+	if got.Target != gemini {
+		t.Errorf("graded %+v, want %+v — the cluster is what actually served the attempt",
+			got.Target, gemini)
+	}
+}
+
+// End to end through the hook, not just the store: a post-commitment truncation on the SECOND
+// member of a shared-provider chain must suspend that member and leave the first one healthy.
+func TestOnAttemptComplete_ChargesTheLaterSharedProviderMember(t *testing.T) {
+	now := time.Date(2026, 11, 6, 10, 0, 0, 0, time.UTC)
+	first := Target{Model: "gpt-4o", Provider: "openai"}
+	second := Target{Model: "gpt-4o-mini", Provider: "openai"}
+
+	p := NewPolicy(map[string]interface{}{})
+	p.health = NewHealthStore(Suspension{ConsecutiveFailures: 1, DurationSeconds: 30})
+	p.now = func() time.Time { return now }
+	p.correlation.Remember("req-1", []Target{first, second}, nil,
+		map[string]string{"openai": testCluster})
+
+	v := verdict(200, testCluster)
+	v.AttemptCount = 2
+	p.OnAttemptComplete(context.Background(), v, nil)
+
+	if healthy(p.health, second, now) {
+		t.Error("the member that actually truncated was not suspended")
+	}
+	if !healthy(p.health, first, now) {
+		t.Error("a member that was never contacted was suspended in its place")
 	}
 }

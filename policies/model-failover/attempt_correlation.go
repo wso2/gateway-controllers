@@ -18,6 +18,7 @@
 package modelfailover
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -69,7 +70,17 @@ type attemptCorrelation struct {
 }
 
 type correlationEntry struct {
-	// byCluster maps the cluster serving a member to that member.
+	// chain is this request's published members IN ORDER, so a verdict carrying an attempt
+	// count can name exactly one of them. This is the primary index: attempt N is member N.
+	chain []correlatedTarget
+
+	// byCluster maps the cluster serving a member to that member, FIRST MEMBER WINS.
+	//
+	// Kept only for a verdict that carries no attempt identity -- a gateway too old to report
+	// the count, or a request that never reached an upstream at all. It cannot be the primary
+	// index because a cluster names a PROVIDER: two members on one vendor differ only by model
+	// and collapse onto one key here, so a failure on the later one is charged to the earlier,
+	// which may never have been contacted.
 	byCluster map[string]correlatedTarget
 	expires   time.Time
 }
@@ -83,6 +94,11 @@ type correlationEntry struct {
 type correlatedTarget struct {
 	Target    Target
 	Admission Admission
+
+	// Cluster is the cluster this member was published against. Carried so a positional
+	// lookup can CHECK itself against the cluster the verdict names, rather than trusting the
+	// index blindly.
+	Cluster string
 }
 
 func newAttemptCorrelation(now func() time.Time) *attemptCorrelation {
@@ -95,10 +111,12 @@ func newAttemptCorrelation(now func() time.Time) *attemptCorrelation {
 	}
 }
 
-// Remember records the clusters this request's resolved chain can reach.
+// Remember records this request's resolved chain, in order, with the cluster serving each member.
 //
 // A member whose provider has no cluster is skipped: no attempt can be routed to it, so no
-// verdict can ever name it.
+// verdict can ever name it. Skipping keeps this list in step with the published priority groups,
+// which drop the same members by the same predicate — the ordering is only an index if the two
+// agree about which members exist.
 func (c *attemptCorrelation) Remember(requestID string, chain []Target, admissions []Admission,
 	providerClusters map[string]string) {
 
@@ -106,21 +124,29 @@ func (c *attemptCorrelation) Remember(requestID string, chain []Target, admissio
 		return
 	}
 
+	ordered := make([]correlatedTarget, 0, len(chain))
 	byCluster := make(map[string]correlatedTarget, len(chain))
 	for i, target := range chain {
-		cluster, ok := providerClusters[target.Provider]
-		if !ok || cluster == "" {
+		cluster, ok := servableCluster(providerClusters, target.Provider)
+		if !ok {
 			continue
 		}
-		// First member wins for a shared cluster. Two members on one provider differ only by
-		// model, and the verdict cannot tell them apart — so grading the one the chain would
-		// have reached FIRST is the only defensible choice, and matches the attempt order.
-		if _, seen := byCluster[cluster]; seen {
-			continue
+		correlated := correlatedTarget{
+			Target:    target,
+			Admission: admissionAt(admissions, i),
+			Cluster:   cluster,
 		}
-		byCluster[cluster] = correlatedTarget{Target: target, Admission: admissionAt(admissions, i)}
+		ordered = append(ordered, correlated)
+		// First member wins in the FALLBACK index only. Two members on one provider differ
+		// only by model, so a verdict with no attempt identity cannot tell them apart —
+		// grading the one the chain would have reached first is the only defensible guess,
+		// and it matches the attempt order. A verdict that DOES carry an identity never
+		// reaches this map.
+		if _, seen := byCluster[cluster]; !seen {
+			byCluster[cluster] = correlated
+		}
 	}
-	if len(byCluster) == 0 {
+	if len(ordered) == 0 {
 		return
 	}
 
@@ -135,14 +161,30 @@ func (c *attemptCorrelation) Remember(requestID string, chain []Target, admissio
 		c.lastSweep = now
 	}
 	c.entries[requestID] = correlationEntry{
+		chain:     ordered,
 		byCluster: byCluster,
 		expires:   c.now().Add(correlationTTL),
 	}
 }
 
-// Lookup returns the target the given cluster was serving for this request, with the probe
-// receipt the attempt was admitted on.
-func (c *attemptCorrelation) Lookup(requestID, cluster string) (correlatedTarget, bool) {
+// Lookup returns the chain member this verdict describes, with the probe receipt the attempt was
+// admitted on.
+//
+// attempt is Envoy's 1-based upstream attempt count, and selecting by it is what makes this
+// correct for a chain whose members share a provider. The cluster alone names a PROVIDER: for
+// [claude/sonnet, gemini, claude/opus], a truncation on opus and one on sonnet arrive with the
+// same cluster, and charging opus's failure to sonnet suspends a model that was never contacted
+// while the one that actually failed keeps its clean window and all the traffic.
+//
+// Why the count is enough to index with: the gateway stops retrying the instant an attempt
+// commits its response, so a post-commitment verdict always describes the LAST attempt — which
+// makes the total count that member's position. The in-flight response phase already grades on
+// exactly this correspondence.
+//
+// attempt == 0 means the verdict carries no identity: the request never reached an upstream, or
+// an older gateway is paired with this policy. That falls back to the cluster-keyed guess, which
+// is what this store did before the count was available.
+func (c *attemptCorrelation) Lookup(requestID, cluster string, attempt uint32) (correlatedTarget, bool) {
 	if c == nil || requestID == "" || cluster == "" {
 		return correlatedTarget{}, false
 	}
@@ -154,6 +196,23 @@ func (c *attemptCorrelation) Lookup(requestID, cluster string) (correlatedTarget
 	if !ok || !c.now().Before(entry.expires) {
 		return correlatedTarget{}, false
 	}
+
+	if attempt >= 1 && int(attempt) <= len(entry.chain) {
+		candidate := entry.chain[attempt-1]
+		if candidate.Cluster == cluster {
+			return candidate, true
+		}
+		// The position and the verdict disagree about which target this was, so the
+		// correspondence this index rests on has broken. Fall back rather than decline: the
+		// cluster is Envoy's own account of what served the attempt, so the fallback still
+		// grades a member genuinely on that provider — a worse answer than the index, never
+		// a worse one than recording nothing.
+		slog.Warn("ModelFailover: attempt position disagrees with the cluster the verdict "+
+			"names, so this failure is graded by cluster instead",
+			"request_id", requestID, "attempt", attempt,
+			"verdict_cluster", cluster, "ranked_cluster", candidate.Cluster)
+	}
+
 	correlated, ok := entry.byCluster[cluster]
 	return correlated, ok
 }

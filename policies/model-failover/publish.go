@@ -28,15 +28,36 @@ const (
 	// priorityGroupsKey is the field the specifier looks for inside that namespace.
 	priorityGroupsKey = "priority_groups"
 
-	// attemptModelsKey carries this request's cluster-to-model mapping alongside the groups,
-	// so the per-attempt instance of this policy can substitute the model its own target
-	// expects. A sibling key rather than a field inside each group: the specifier parses
-	// priority_groups, and nothing is gained by handing it a shape it did not ask for.
+	// attemptModelsKey carries this request's per-member models alongside the groups, so the
+	// per-attempt instance of this policy can substitute the model its own target expects. A
+	// sibling key rather than a field inside each group: the specifier parses priority_groups,
+	// and nothing is gained by handing it a shape it did not ask for.
 	//
-	// Keyed by CLUSTER, not by position. An index into the ranking goes wrong the moment a
-	// member is suspended or skipped, whereas the cluster names the target directly -- the
-	// same reasoning as the engine's wso2.attempt namespace.
+	// An ORDERED LIST, positionally parallel to priority_groups: entry N describes the member
+	// attempt N is routed to. It was a cluster-keyed map, which is wrong because a cluster
+	// names a PROVIDER and a member is a provider AND a model. Two members on one vendor --
+	// `gpt-4o` then `gpt-4o-mini`, an ordinary cost-control chain -- collapsed onto one key and
+	// the last one won, so attempt 1 asked for the LAST member's model: the first model was
+	// never requested, and attempt 2 was a byte-identical request to the identical upstream,
+	// which is no failover at all.
+	//
+	// The position cannot be keyed by (provider, model) instead, because the model is the thing
+	// being looked up -- a lookup cannot be keyed by its own output. What the reader CAN know
+	// is which attempt it is, from the engine's wso2.attempt.number, so the list is indexed by
+	// that. Each entry still carries its cluster, not as the key but as a cross-check.
 	attemptModelsKey = "attempt_models"
+
+	// Fields of one attempt_models entry.
+	//
+	// attemptModelCluster is the cluster the ranking expects this position to be routed to. It
+	// is a CROSS-CHECK, never the lookup key: if it disagrees with the cluster the engine says
+	// this attempt is aimed at, the positional contract has broken and the reader declines to
+	// substitute rather than rewriting the payload for the wrong target.
+	attemptModelCluster = "cluster"
+	// attemptModelModel is the model to substitute, or "" for a wildcard member -- one whose
+	// model is whatever the client asked for. An empty entry is a HOLE, deliberately published
+	// rather than omitted: omitting it would shift every later member's index by one.
+	attemptModelModel = "model"
 
 	// groupNamePrefix names the per-request groups. Names only have to be unique and
 	// stable within the request; the specifier selects by position, not by name.
@@ -66,6 +87,25 @@ func groupName(target Target) string {
 	return groupNamePrefix + provider + ":" + target.Model
 }
 
+// servableCluster resolves the cluster that will serve a chain member, reporting false when the
+// member cannot be served at all and must be dropped from this request's ranking.
+//
+// ONE predicate, called from every place that decides whether a member is part of the ranking:
+// the group builder here, the servable filter in OnRequestBody, and the correlation store. They
+// used to spell it three slightly different ways -- `!ok`, `ok && cluster != ""`, and
+// `!ok || cluster == ""` -- which agree only because BuildProviderClusterMap never writes an
+// empty value. They are unified because the published list is now POSITIONAL: the moment two of
+// them disagree about one member, the groups and the model list have different lengths and every
+// index past the disagreement names a different member in each. Unreachable today, and exactly
+// the drift that would make the positional contract unsafe later.
+func servableCluster(providerClusters map[string]string, provider string) (string, bool) {
+	cluster, ok := providerClusters[provider]
+	if !ok || cluster == "" {
+		return "", false
+	}
+	return cluster, true
+}
+
 // buildPriorityGroups renders a resolved chain as the structure the priority_group cluster
 // specifier expects: an ordered list of groups, each naming one cluster.
 //
@@ -88,13 +128,19 @@ func groupName(target Target) string {
 // returning it is what lets the caller say so. Same reasoning as resolveChain returning its
 // health-skipped targets: a short chain reads identically whether it was configured short,
 // whittled down by health, or silently truncated here (FR-056a).
-func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]any, []Target) {
+func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]any, []any, []Target) {
 	if len(chain) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	var dropped []Target
 	groups := make([]any, 0, len(chain))
+	// Built in the SAME pass as the groups, and that is load-bearing rather than tidy. The model
+	// list used to be built from the PRE-drop chain while the groups were post-drop, which is
+	// harmless for a map keyed by cluster and fatal for a positional list: one dropped middle
+	// member shifts every later entry, so every later attempt would substitute its neighbour's
+	// model. Sharing the loop makes the two lists parallel by construction, not by agreement.
+	models := make([]any, 0, len(chain))
 	for _, target := range chain {
 		group := map[string]any{"name": groupName(target)}
 
@@ -108,7 +154,7 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]
 		// Envoy does NOT skip the entry, it substitutes the configured group at that
 		// position, which can route the request to a target the ranking never nominated and
 		// burn the whole attempt budget there.
-		cluster, ok := providerClusters[target.Provider]
+		cluster, ok := servableCluster(providerClusters, target.Provider)
 		if !ok {
 			// DROPPED, not published as a bare name (FR-056). A name-only group resolves
 			// only against a pre-configured group of the same name, and Probe G measured
@@ -137,6 +183,15 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]
 			map[string]any{"cluster_name": cluster, "weight": 1},
 		}
 		groups = append(groups, group)
+
+		// One entry per published group, ALWAYS -- including a wildcard member, whose
+		// empty model means "do not substitute, the client's own model stands". Skipping
+		// it would shift every later index by one and make each later attempt ask for its
+		// neighbour's model.
+		models = append(models, map[string]any{
+			attemptModelCluster: cluster,
+			attemptModelModel:   target.Model,
+		})
 	}
 	if len(groups) == 0 {
 		// Nothing resolved. Return nil rather than an empty list so the caller takes the
@@ -144,9 +199,9 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]
 		// would be a malformed ranking, where writing nothing leaves Envoy on the route's
 		// configured order, which is exactly how the policy behaves when unattached
 		// (FR-030b, FR-030e).
-		return nil, dropped
+		return nil, nil, dropped
 	}
-	return groups, dropped
+	return groups, models, dropped
 }
 
 // buildFailoverMetadata returns the dynamic-metadata payload for one request, or nil when
@@ -157,36 +212,18 @@ func buildPriorityGroups(chain []Target, providerClusters map[string]string) ([]
 // attached. Nothing is logged or counted about being inert — an inert policy is
 // indistinguishable from an absent one (FR-030b, FR-030e).
 func buildFailoverMetadata(chain []Target, providerClusters map[string]string) (map[string]map[string]any, []Target) {
-	groups, dropped := buildPriorityGroups(chain, providerClusters)
+	groups, models, dropped := buildPriorityGroups(chain, providerClusters)
 	if groups == nil {
 		return nil, dropped
 	}
-	payload := map[string]any{priorityGroupsKey: groups}
-	if models := buildAttemptModels(chain, providerClusters); len(models) > 0 {
-		payload[attemptModelsKey] = models
-	}
-	return map[string]map[string]any{FailoverMetadataNamespace: payload}, dropped
-}
-
-// buildAttemptModels maps each member's target cluster to the model that member asks for.
-//
-// This is what makes failover a MODEL failover rather than a provider failover: attempt 2 reaches
-// the fallback provider, but unless the payload also names that member's model it still asks for
-// the primary's -- a model the fallback may not serve at all.
-//
-// A member with no resolved cluster is omitted: no attempt can be routed to it, so no attempt can
-// read it back. A member with an empty model is omitted too -- a wildcard member carries whatever
-// the client asked for, and substituting "" would erase it.
-func buildAttemptModels(chain []Target, providerClusters map[string]string) map[string]any {
-	models := map[string]any{}
-	for _, target := range chain {
-		cluster, ok := providerClusters[target.Provider]
-		if !ok || cluster == "" || target.Model == "" {
-			continue
-		}
-		models[cluster] = target.Model
-	}
-	return models
+	// Published unconditionally alongside the groups, never under a len() guard. The two lists
+	// come out of one loop with one entry each per published member, so a guard here could only
+	// ever hide a desynchronisation -- and a model list SHORTER than the group list is precisely
+	// the bug the positional contract has to exclude.
+	return map[string]map[string]any{FailoverMetadataNamespace: {
+		priorityGroupsKey: groups,
+		attemptModelsKey:  models,
+	}}, dropped
 }
 
 // Contract keys shared with the routing policies.

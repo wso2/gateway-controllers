@@ -59,14 +59,19 @@ func (p *Policy) OnAttemptComplete(_ context.Context, attemptCtx *policy.Attempt
 		return
 	}
 
-	correlated, ok := p.correlation.Lookup(attemptCtx.RequestID, attemptCtx.UpstreamCluster)
+	// The attempt count selects WHICH member of the chain this verdict describes; the cluster
+	// cross-checks it, and carries the lookup alone when the count is absent. A cluster names a
+	// provider, so two members on one vendor are indistinguishable by it — see Lookup.
+	correlated, ok := p.correlation.Lookup(attemptCtx.RequestID, attemptCtx.UpstreamCluster,
+		attemptCtx.AttemptCount)
 	if !ok {
 		// Ordinary, not an error: the verdict may belong to a request this policy never
 		// published a chain for, or one whose entry has aged out. Nothing is recorded,
 		// which is the conservative outcome FR-030p asks for.
 		slog.Debug("ModelFailover: no target recorded for completion verdict",
 			"request_id", attemptCtx.RequestID,
-			"cluster", attemptCtx.UpstreamCluster)
+			"cluster", attemptCtx.UpstreamCluster,
+			"attempt", attemptCtx.AttemptCount)
 		return
 	}
 	// One verdict per request, so the entry has done its job.
@@ -83,6 +88,7 @@ func (p *Policy) OnAttemptComplete(_ context.Context, attemptCtx *policy.Attempt
 		"model", target.Model,
 		"provider", target.Provider,
 		"cluster", attemptCtx.UpstreamCluster,
+		"attempt", attemptCtx.AttemptCount,
 		"response_flags", attemptCtx.ResponseFlags,
 		"duration", attemptCtx.Duration,
 		"request_id", attemptCtx.RequestID)
