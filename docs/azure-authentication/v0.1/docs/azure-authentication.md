@@ -259,8 +259,11 @@ has a managed identity. This is Azure configuration, not something the policy cr
    fall back to an app's only user-assigned identity.
 
 Container Apps sets `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` when the app has a managed identity,
-and removes them when it has none. The endpoint is on `localhost`, which `HTTP_PROXY` and
-`HTTPS_PROXY` never apply to, so it needs no `NO_PROXY` entry.
+and removes them when it has none. Giving a running app its first identity, or removing its last,
+makes Container Apps restart the app's containers in the same revision, so no manual restart is
+needed; this restarts the gateway. An identity added to an app that already has one works without
+a restart. The endpoint is on `localhost`, which `HTTP_PROXY` and `HTTPS_PROXY` never apply to, so
+it needs no `NO_PROXY` entry.
 
 ## How It Works
 
