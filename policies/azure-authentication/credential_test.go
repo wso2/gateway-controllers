@@ -688,6 +688,43 @@ func TestWaitingForAnotherFetchStopsAtTheTimeout(t *testing.T) {
 	}
 }
 
+// The logged SDK error keeps everything before the first token field and withholds everything
+// from it on, however the body around the token is cut off or escaped. A JWT before it is
+// redacted too, and text without a token field is logged as it is.
+func TestLoggableWithholdsEverythingFromATokenFieldOn(t *testing.T) {
+	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJhcGk6Ly94In0.c2lnbmF0dXJl"
+	tests := []struct {
+		name, text, keep string
+	}{
+		{"a complete field", `decode error; body: {"access_token":"secret-1","expires_in":"x"}`, `decode error; body: {`},
+		{"a field cut off inside its value", `unexpected end of JSON input; body: {"token_type":"Bearer","access_token":"secret-1`, `body: {"token_type":"Bearer",`},
+		{"a body with escaped quotes", `body: "{\"token_type\":\"Bearer\",\"access_token\":\"secret-1\"}"`, `body: "{\"token_type\":\"Bearer\",`},
+		{"a body escaped twice", `body: "{\\\"access_token\\\":\\\"secret-1\\\"}"`, `body: "{`},
+		{"a refresh token", `body: {"refresh_token":"secret-1`, `body: {`},
+		{"an ID token", `body: {"id_token": "secret-1"}`, `body: {`},
+		{"a JWT before the field", `assertion ` + jwt + ` rejected; body: {"access_token":"secret-1"}`, `assertion [REDACTED] rejected; body: {`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := (&tokenError{reason: "r", cause: errors.New(tt.text)}).loggable()
+			if strings.Contains(got, "secret-1") || strings.Contains(got, jwt) {
+				t.Fatalf("loggable() = %q, which still has the token", got)
+			}
+			if !strings.Contains(got, tt.keep) {
+				t.Errorf("loggable() = %q, want it to keep %q", got, tt.keep)
+			}
+			if !strings.Contains(got, "[REDACTED]") {
+				t.Errorf("loggable() = %q, want it to say what it withheld", got)
+			}
+		})
+	}
+
+	const plain = `AADSTS700016: Application with identifier 'x' was not found in the directory 'y'.`
+	if got := (&tokenError{reason: "r", cause: errors.New(plain)}).loggable(); got != plain {
+		t.Errorf("loggable() = %q, want the text without a token field unchanged", got)
+	}
+}
+
 // The managed identity SDK fetches each scope on its own, so a scope with a cached token answers at
 // once while another scope's fetch is slow.
 func TestAManagedIdentityCacheHitDoesNotWaitForAnotherScope(t *testing.T) {

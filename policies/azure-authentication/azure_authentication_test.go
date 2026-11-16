@@ -741,6 +741,37 @@ func TestTokensInAnUndecodableResponseAreNotLogged(t *testing.T) {
 	}
 }
 
+// A token response cut off inside its token has no closing quote to end the token at. The log
+// keeps the error but nothing from the token field on.
+func TestATokenInATruncatedResponseIsNotLogged(t *testing.T) {
+	const truncated = `{"token_type":"Bearer","expires_in":3599,"access_token":"opaque-token-secret`
+	for _, tt := range []struct {
+		authenticationType string
+		setEnv             func(*testing.T)
+		failure            string
+	}{
+		{AuthenticationTypeWorkloadIdentity, func(t *testing.T) { setWorkloadIdentityEnv(t, "federated-token") }, "could not obtain an access token from Microsoft Entra ID"},
+		{AuthenticationTypeContainerApps, setContainerAppsEnv, "could not obtain an access token from the Container Apps identity endpoint"},
+	} {
+		t.Run(tt.authenticationType, func(t *testing.T) {
+			logs := captureLogs(t)
+			useFakeAzure(t, answer(http.StatusOK, rawBody(truncated)))
+			tt.setEnv(t)
+
+			p := mustGetPolicy(t, map[string]interface{}{"authenticationType": tt.authenticationType, "scope": uniqueScope(t)})
+			requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+
+			out := logs.String()
+			if !strings.Contains(out, tt.failure) {
+				t.Fatalf("the failure was not logged:\n%s", out)
+			}
+			if strings.Contains(out, "opaque-token-secret") {
+				t.Errorf("logs contain the token:\n%s", out)
+			}
+		})
+	}
+}
+
 // The failure log carries the SDK's error, with Entra ID's error codes, but never the access token
 // or the federated token.
 func TestSecretsAreNotLogged(t *testing.T) {
