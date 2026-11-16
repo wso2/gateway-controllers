@@ -60,8 +60,10 @@ var (
 	oauthErrorCodePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
 
 	// tokenFieldPattern and jwtPattern find tokens in the SDK's error text: MSAL quotes a response
-	// body it couldn't decode, and that body may carry the token it was meant to deliver.
-	tokenFieldPattern = regexp.MustCompile(`("(?:access_token|refresh_token|id_token)"\s*:\s*)"[^"]*"`)
+	// body it couldn't decode, and that body may carry the token it was meant to deliver, cut off
+	// or with its quotes escaped. tokenFieldPattern finds a token field's name however many times
+	// its quotes are escaped.
+	tokenFieldPattern = regexp.MustCompile(`\\*"(?:access_token|refresh_token|id_token)\\*"`)
 	jwtPattern        = regexp.MustCompile(`eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*`)
 
 	// errNoToken is a token response that succeeded without a token, which MSAL's managed identity
@@ -219,9 +221,14 @@ type tokenError struct {
 func (e *tokenError) Error() string { return e.reason + ": " + e.loggable() }
 func (e *tokenError) Unwrap() error { return e.cause }
 
-// loggable is the SDK's error text with any token in it replaced by [REDACTED].
+// loggable is the SDK's error text with everything after the first token field's name withheld,
+// and any JWT before it replaced by [REDACTED]. Withholding the rest, rather than the field's
+// value, holds for a body cut off inside the token, which has no closing quote to end the value at.
 func (e *tokenError) loggable() string {
-	text := tokenFieldPattern.ReplaceAllString(e.cause.Error(), `$1"[REDACTED]"`)
+	text := e.cause.Error()
+	if loc := tokenFieldPattern.FindStringIndex(text); loc != nil {
+		text = text[:loc[1]] + ": [REDACTED] (the rest of the error is withheld)"
+	}
 	return jwtPattern.ReplaceAllString(text, "[REDACTED]")
 }
 
