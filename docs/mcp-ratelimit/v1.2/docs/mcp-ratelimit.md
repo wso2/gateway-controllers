@@ -20,7 +20,7 @@ Enforcement is delegated to the [Advanced Rate Limit policy](../../../advanced-r
 - **Flexible Key Extraction**: Build the rate-limit key from headers, metadata, client IP, API name/version, route name, a CEL expression, or a constant — globally or per entry.
 - **SSE Support**: On a gateway without an MCP operation resolver, handles both plain JSON and `text/event-stream`-wrapped MCP request envelopes. On a gateway with one the body is parsed by the gateway, which accepts JSON only — note that no MCP revision permits a client to send an event-stream request body, so this affects non-conforming clients alone.
 - **MCP-Aware Error Responses**: Throttled requests receive a JSON-RPC 2.0 error envelope by default (overridable), preserving the `mcp-session-id` header.
-- **Dual Backends**: In-memory for single-instance deployments or Redis for distributed rate limiting across gateway replicas.
+- **Dual Backends**: In-memory for single-instance deployments or Redis / Valkey for distributed rate limiting across gateway replicas.
 
 ## Request identification
 
@@ -155,7 +155,7 @@ These parameters are set by the administrator and shared with the Advanced Rate 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `algorithm` | string | No | `"fixed-window"` | Rate-limiting algorithm: `"gcra"` (smoother burst handling) or `"fixed-window"` (simple interval counting). |
-| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance limits or `"redis"` for distributed limits. |
+| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance limits or `"redis"` for distributed limits (supports Redis and Valkey). |
 | `redis` | `Redis` object | No | - | Redis configuration (only used when `backend=redis`). |
 | `memory` | `Memory` object | No | - | In-memory storage configuration (only used when `backend=memory`). |
 | `headers` | `Headers` object | No | - | Controls which rate-limit headers are added to responses. |

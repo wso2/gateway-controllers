@@ -15,7 +15,7 @@ For advanced use cases (for example, custom key extraction, weighted costs, and 
 - **Multiple Concurrent Limits**: Enforce multiple windows simultaneously (for example, per-second and per-hour).
 - **Deterministic Keying**: Uses route-level identity by default for predictable quota behavior. When attached at the API level, uses the API name as the rate limit key.
 - **Shared Engine**: Uses the same backend and algorithm capabilities as the advanced policy (`memory`/`redis`, `gcra`/`fixed-window`).
-- **Distributed or Local Operation**: Supports in-memory single-instance mode and Redis-based distributed mode.
+- **Distributed or Local Operation**: Supports in-memory single-instance mode and Redis / Valkey-based distributed mode.
 - **Operational Compatibility**: Reuses the global rate-limit system configuration in `config.toml`.
 
 ## Configuration
@@ -29,13 +29,13 @@ These parameters are configured globally and shared with the advanced rate limit
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `algorithm` | string | No | `"fixed-window"` | Rate limiting algorithm: `"gcra"` for smooth token-bucket-style throttling, or `"fixed-window"` for window-based counters. |
-| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance operation, or `"redis"` for distributed quotas across gateway instances. |
+| `backend` | string | No | `"memory"` | Storage backend: `"memory"` for single-instance operation, or `"redis"` for distributed quotas across gateway instances (supports Redis and Valkey). |
 | `redis` | `Redis` object | No | - | Redis configuration. Used when `backend=redis`. |
 | `memory` | `Memory` object | No | - | In-memory storage configuration. Used when `backend=memory`. |
 
-#### Redis Configuration
+#### Redis / Valkey Configuration
 
-When using Redis as the backend, configure the following under `redis`:
+When using Redis or Valkey (as a drop-in replacement) as the backend, configure the following under `redis`:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
