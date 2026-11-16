@@ -2170,6 +2170,14 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		// delivering its bytes would release content no assessment has seen.
 		if rp.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: unassessable line, passthrough enabled", "chunkIndex", chunk.Index)
+			// Everything withheld is being delivered now, so the state it came
+			// from has to go with it: a later flush reading a stale metaKeyHeldBytes
+			// would send the same events a second time, and a stale pending text or
+			// assessed-character count would put the next boundary walk in the
+			// wrong place. flushText has already dropped the line's own fragment.
+			respCtx.Metadata[metaKeyHeldBytes] = ""
+			respCtx.Metadata[metaKeyPendingText] = ""
+			respCtx.Metadata[metaKeyAssessedInHeld] = 0
 			return p.releaseBytes(held+chunkStr, nil, "", respCtx, rp)
 		}
 		return policy.TerminateResponseChunk{
