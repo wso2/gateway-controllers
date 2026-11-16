@@ -2572,3 +2572,37 @@ func TestBufferedPath_PassthroughKeepsTheRestoredBody(t *testing.T) {
 		})
 	}
 }
+
+// TestStreaming_NoCallExceedsOneTextUnit holds both assessment paths to the
+// same rule: the configured batch decides when to assess and deliver, never how
+// much goes into one AWS request.
+//
+// assessAndRelease split into text units; the ordinary batch path did not, so a
+// configured streamingTextUnitChars of 8,000 sent 8,000 characters in a single
+// call. Splitting costs nothing — input is billed per text unit either way — and
+// an oversized request is the long-context case AWS's guidance says to chunk.
+func TestStreaming_NoCallExceedsOneTextUnit(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingTextUnitChars = 8000 // far above one text unit
+	})
+
+	// Enough text to trip the configured batch mid-stream, so the batch path
+	// runs as well as the end-of-stream one.
+	chunks := []string{
+		sseEvent(strings.Repeat("abcd ", 1000)),
+		sseEvent(strings.Repeat("abcd ", 1000)),
+		sseEvent("tail"),
+	}
+	feedStream(t, p, streamCtx(), chunks)
+
+	if len(client.texts) == 0 {
+		t.Fatalf("expected the guardrail to be called")
+	}
+	for i, sent := range client.texts {
+		if chars := len([]rune(sent)); chars > DefaultStreamingTextUnitChars {
+			t.Errorf("call %d carried %d characters, above the %d-character text unit",
+				i, chars, DefaultStreamingTextUnitChars)
+		}
+	}
+}
