@@ -2430,3 +2430,73 @@ func TestStreaming_EveryAssessedUnitsRedactionIsApplied(t *testing.T) {
 		t.Fatalf("expected the assessed bytes to be delivered")
 	}
 }
+
+// blocksOnRealValueClient blocks only on the real value, never on the
+// placeholder that stands in for it.
+type blocksOnRealValueClient struct {
+	texts []string
+	real  string
+}
+
+func (c *blocksOnRealValueClient) ApplyGuardrail(_ context.Context, params *bedrockruntime.ApplyGuardrailInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error) {
+	var sent string
+	for _, content := range params.Content {
+		if text, ok := content.(*types.GuardrailContentBlockMemberText); ok {
+			sent += aws.ToString(text.Value.Text)
+		}
+	}
+	c.texts = append(c.texts, sent)
+	if strings.Contains(sent, c.real) {
+		return makeContentViolationOutput(), nil
+	}
+	return makeNoInterventionOutput(), nil
+}
+
+// TestStreaming_AssessesRestoredTextNotThePlaceholder holds the streaming path
+// to the contract validatePayload follows on the buffered path: what is
+// assessed must be what the client receives.
+//
+// The request masked a value; the response flow puts it back. Restoring at
+// delivery left the guardrail assessing "EMAIL_0000" while the client got the
+// address — so a response whose restored content the guardrail would block was
+// delivered anyway. validatePayload restores before extracting for exactly this
+// reason; the streaming path now does the same.
+func TestStreaming_AssessesRestoredTextNotThePlaceholder(t *testing.T) {
+	const real = "john@example.com"
+	client := &blocksOnRealValueClient{real: real}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = false
+		params.StreamingTextUnitChars = MinStreamingTextUnitChars
+	})
+
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{real: "EMAIL_0000"}
+
+	chunks := []string{strings.Repeat(sseEvent("contact EMAIL_0000 today"), 6), sseEvent("bye")}
+
+	var delivered string
+	var terminated bool
+	for _, action := range feedStream(t, p, respCtx, chunks) {
+		switch v := action.(type) {
+		case policy.ForwardResponseChunk:
+			delivered += string(v.Body)
+		case policy.TerminateResponseChunk:
+			terminated = true
+		}
+	}
+
+	if len(client.texts) == 0 {
+		t.Fatalf("expected the guardrail to be called")
+	}
+	for i, sent := range client.texts {
+		if strings.Contains(sent, "EMAIL_0000") {
+			t.Errorf("call %d assessed the placeholder rather than the value the client receives", i)
+		}
+	}
+	if strings.Contains(delivered, real) {
+		t.Fatalf("the restored value was delivered though the guardrail blocks it")
+	}
+	if !terminated {
+		t.Fatalf("expected the violation on the restored text to end the stream")
+	}
+}

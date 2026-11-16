@@ -1955,6 +1955,18 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) policy.StreamingResponseAction {
+	// Put masked values back before anything reads this flush, so the text
+	// assessed below is the text the client will receive. validatePayload does
+	// the same on the buffered path, restoring the payload before extracting
+	// from it. Restoring at delivery instead left the guardrail assessing
+	// "EMAIL_0000" while the client got the address back.
+	//
+	// It has to happen here rather than later because the boundary accounting
+	// counts characters: a placeholder and the value it stands for are different
+	// lengths, so assessing one and splitting the frames on the other puts the
+	// release point in the wrong place.
+	chunkStr = p.restoreFlushFrames(chunkStr, respCtx, rp)
+
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
 	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
 	newText := p.flushText(chunkStr, chunk.EndOfStream, respCtx, rp)
@@ -2264,6 +2276,38 @@ func (p *AWSBedrockGuardrailPolicy) releaseBytes(
 		}
 	}
 	return policy.ForwardResponseChunk{Body: []byte(heldBytes)}
+}
+
+// restoreFlushFrames puts masked values back into a flush's frames before the
+// flush is accumulated, assessed or split.
+//
+// releaseBytes still restores at delivery, which is not redundant: a placeholder
+// split across two flushes is in neither frame here and only becomes whole
+// later. That case is the documented limitation -- such a value reaches the
+// client without having been assessed -- and is unchanged by this.
+func (p *AWSBedrockGuardrailPolicy) restoreFlushFrames(
+	chunkStr string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) string {
+	if rp.RedactPII {
+		return chunkStr
+	}
+	raw, exists := respCtx.Metadata[MetadataKeyPIIEntities]
+	if !exists {
+		return chunkStr
+	}
+	maskedPII, ok := raw.(map[string]string)
+	if !ok || len(maskedPII) == 0 {
+		return chunkStr
+	}
+	rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
+		return p.restorePIIInResponse(frameText, maskedPII)
+	})
+	if !changed {
+		return chunkStr
+	}
+	return rewritten
 }
 
 // effectiveTextUnit returns the batch size to assess at.
