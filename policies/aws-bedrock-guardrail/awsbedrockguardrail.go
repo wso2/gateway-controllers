@@ -2253,6 +2253,10 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 		lastOutput   interface{}
 		lastModified string
 		assessed     bool
+		// Every unit assesses text carried by these same bytes, so every unit's
+		// rewrite decision applies to them. Keeping only the last would drop what
+		// the earlier ones asked for.
+		redactDecisions []interface{}
 	)
 
 	for {
@@ -2286,6 +2290,9 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 		validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
 		respCtx.Metadata[metaKeyAccStreamedContent] = validated + batch
 		lastOutput, lastModified, assessed = output, modified, true
+		if modified != "" {
+			redactDecisions = append(redactDecisions, output)
+		}
 
 		if carry == "" {
 			break
@@ -2297,6 +2304,33 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 		// client.
 		return p.releaseBytes(release, nil, "", respCtx, rp)
 	}
+	// Fold every unit's redaction into the bytes before they go out. releaseBytes
+	// applies one decision, which is correct when there is only one; across
+	// several units a value reported in the first is delivered in the clear
+	// whenever the last reports nothing.
+	if rp.RedactPII && len(redactDecisions) > 0 {
+		rewritten := release
+		for _, decision := range redactDecisions {
+			out, changed, leaked := p.redactedFlush(rewritten, decision, rp)
+			if leaked {
+				slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; discarding the held bytes",
+					"held_bytes", len(release))
+				return policy.TerminateResponseChunk{
+					Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+						nil, rp.ShowAssessment, decision),
+					AnalyticsMetadata: guardrailHitAnalytics(),
+					IsFault:           true,
+					Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
+						nil, true, rp.ShowAssessment, decision),
+				}
+			}
+			if changed {
+				rewritten = out
+			}
+		}
+		return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+	}
+
 	return p.releaseBytes(release, lastOutput, lastModified, respCtx, rp)
 }
 

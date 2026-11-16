@@ -2573,3 +2573,48 @@ func TestStreaming_UnterminatedLineCannotGrowTheHeldBuffer(t *testing.T) {
 		}
 	}
 }
+
+// TestStreaming_EveryAssessedUnitsRedactionIsApplied covers the assessment loop
+// in assessAndRelease, which splits a batch into one-text-unit calls.
+//
+// Each unit assesses a different slice of text, but all of them describe bytes
+// in the same release. Keeping only the last unit's decision means a value
+// reported in the first is delivered in the clear whenever the last reports
+// nothing — which is the common shape, since PII usually appears once and the
+// rest of the response is clean.
+//
+// streamingTextUnitChars: 0 is the configuration that makes this routine: the
+// whole response is assessed at end of stream, so the loop always runs several
+// units for any response longer than one.
+func TestStreaming_EveryAssessedUnitsRedactionIsApplied(t *testing.T) {
+	const pii = "john@example.com"
+	client := &reportsPIIWhenPresentClient{pii: pii}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = true
+		params.StreamingTextUnitChars = 0
+	})
+
+	// The value in the first unit, then 4,000 clean characters after it, so the
+	// last unit the loop assesses reports nothing.
+	chunks := []string{
+		sseEvent("contact " + pii + " now"),
+		sseEvent(strings.Repeat("abcd ", 800)),
+	}
+
+	var delivered string
+	for _, action := range feedStream(t, p, streamCtx(), chunks) {
+		if forward, ok := action.(policy.ForwardResponseChunk); ok {
+			delivered += string(forward.Body)
+		}
+	}
+
+	if client.calls < 2 {
+		t.Fatalf("test needs the per-unit loop to run more than once, got %d calls", client.calls)
+	}
+	if strings.Contains(delivered, pii) {
+		t.Fatalf("a value reported by an earlier unit was delivered unredacted")
+	}
+	if delivered == "" {
+		t.Fatalf("expected the assessed bytes to be delivered")
+	}
+}
