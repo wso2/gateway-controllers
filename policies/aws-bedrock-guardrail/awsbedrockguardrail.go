@@ -2179,7 +2179,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 
 		release, retain, covered := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, boundary)
 
-		action := p.assessBatchAndRelease(batch, release, respCtx, rp, chunk)
+		action := p.assessBatchAndRelease(batch, release, retain, respCtx, rp, chunk)
 		if action.TerminateStream() {
 			return action
 		}
@@ -2293,6 +2293,7 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	batchText string,
 	heldBytes string,
+	retainedBytes string,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 	chunk *policy.StreamBody,
@@ -2319,7 +2320,50 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
 	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batchText
 
+	// The batch boundary generally falls inside a frame, and that frame stays
+	// withheld. Its assessed prefix is covered by THIS decision, but it will be
+	// delivered under a later batch's — and that batch never sees this text, so a
+	// redaction reported here would simply be dropped and the value delivered in
+	// the clear. Fail closed, exactly as releaseBytes does when a reported value
+	// cannot be redacted in place.
+	if rp.RedactPII && retainedBytes != "" && p.reportedValueRemains(retainedBytes, output, rp) {
+		slog.Warn("AWSBedrockGuardrail: a reported value sits in a withheld frame this batch cannot rewrite; discarding the held bytes",
+			"retained_bytes", len(retainedBytes), "chunkIndex", chunk.Index)
+		return policy.TerminateResponseChunk{
+			Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+				nil, rp.ShowAssessment, output),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+			IsFault:           true,
+			Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
+				nil, true, rp.ShowAssessment, output),
+		}
+	}
+
 	return p.releaseBytes(heldBytes, output, modified, respCtx, rp)
+}
+
+// reportedValueRemains reports whether any value this assessment marked for
+// redaction still appears in the given frames' assistant text.
+func (p *AWSBedrockGuardrailPolicy) reportedValueRemains(
+	frames string,
+	output interface{},
+	rp AWSBedrockGuardrailPolicyParams,
+) bool {
+	typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
+	if !ok {
+		return false
+	}
+	matches := redactionMatches(typed)
+	if len(matches) == 0 {
+		return false
+	}
+	joined := extractSSEDeltaContent(frames, rp.StreamingJsonPath)
+	for _, match := range matches {
+		if strings.Contains(joined, match) {
+			return true
+		}
+	}
+	return false
 }
 
 // releaseBytes delivers withheld bytes, applying redaction or placeholder

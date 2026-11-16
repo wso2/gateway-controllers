@@ -2469,3 +2469,74 @@ func TestStreaming_NonSSEBodyIsNeverForwardedBeforeAssessment(t *testing.T) {
 		t.Errorf("PII survived redaction on the non-SSE path")
 	}
 }
+
+// reportsPIIWhenPresentClient reports the entity only when the submitted text
+// actually contains it — how a real guardrail behaves, and what makes the
+// straddling-frame case below observable. A fixed-output mock reports the
+// finding on every call and so hides it.
+type reportsPIIWhenPresentClient struct {
+	pii   string
+	calls int
+}
+
+func (c *reportsPIIWhenPresentClient) ApplyGuardrail(_ context.Context, params *bedrockruntime.ApplyGuardrailInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error) {
+	c.calls++
+	var sent string
+	for _, content := range params.Content {
+		if text, ok := content.(*types.GuardrailContentBlockMemberText); ok {
+			sent += aws.ToString(text.Value.Text)
+		}
+	}
+	if strings.Contains(sent, c.pii) {
+		return makePIIIntervenedOutput(c.pii), nil
+	}
+	return makeNoInterventionOutput(), nil
+}
+
+// TestStreaming_ReportedValueInAWithheldFrameFailsClosed covers the gap between
+// what a batch assesses and what it releases.
+//
+// The batch boundary generally falls inside a frame, and that frame stays
+// withheld. Its assessed prefix belongs to this batch's decision, but it is
+// delivered later under a different batch's — one that never saw the text. A
+// redaction reported for it would be dropped silently and the value delivered in
+// the clear, so the stream must end instead.
+func TestStreaming_ReportedValueInAWithheldFrameFailsClosed(t *testing.T) {
+	const pii = "john@example.com"
+	client := &reportsPIIWhenPresentClient{pii: pii}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.RedactPII = true
+		params.StreamingTextUnitChars = 8000
+	})
+
+	// Three 5,000-character frames against an 8,000-character unit, so the batch
+	// boundary lands inside the second frame — with the reported value in the
+	// assessed part of it, which this batch releases none of.
+	word := "abcd "
+	chunks := []string{
+		sseEvent(strings.Repeat(word, 1000)),
+		sseEvent(pii + " " + strings.Repeat(word, 996)),
+		sseEvent(strings.Repeat(word, 1000)),
+	}
+
+	var delivered string
+	var terminated bool
+	for _, action := range feedStream(t, p, streamCtx(), chunks) {
+		switch v := action.(type) {
+		case policy.ForwardResponseChunk:
+			delivered += string(v.Body)
+		case policy.TerminateResponseChunk:
+			terminated = true
+			if !v.IsFault {
+				t.Errorf("ending a stream over unredactable content is a failure and must declare IsFault")
+			}
+		}
+	}
+
+	if strings.Contains(delivered, pii) {
+		t.Fatalf("a reported value was delivered unredacted from a withheld frame")
+	}
+	if !terminated {
+		t.Fatalf("expected the stream to end rather than deliver the withheld frame under a later decision")
+	}
+}
