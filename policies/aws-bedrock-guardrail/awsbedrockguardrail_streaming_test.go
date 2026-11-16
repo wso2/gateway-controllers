@@ -2781,3 +2781,65 @@ func TestStreaming_ZeroUnitReleasesInPartsPastTheCap(t *testing.T) {
 		t.Fatalf("withheld %d bytes, above the %d limit", len(held), maxHeldFlushBytes)
 	}
 }
+
+// TestStreaming_OverlongPartialLinePassthroughClearsHeldState extends the
+// passthrough case to a stream that had already withheld an event before the
+// oversized line arrived, and that completes the line afterwards.
+//
+// The passthrough branch delivers everything withheld, so the state it came
+// from must be cleared with it. Leaving metaKeyHeldBytes behind made a later
+// flush deliver the earlier event a second time — measured at two copies of the
+// marker below — and a stale pending text or assessed-character count would put
+// the next boundary walk in the wrong place.
+func TestStreaming_OverlongPartialLinePassthroughClearsHeldState(t *testing.T) {
+	const marker = "FIRST-EVENT-MARKER"
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.PassthroughOnError = true
+	})
+	respCtx := streamCtx()
+	respCtx.Metadata[metaKeySSEStream] = true
+
+	var delivered strings.Builder
+	feed := func(b string, idx int, eos bool) {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(b), Index: uint64(idx), EndOfStream: eos,
+		}, map[string]interface{}{})
+		switch v := action.(type) {
+		case policy.ForwardResponseChunk:
+			if v.Body == nil {
+				delivered.WriteString(b)
+			} else {
+				delivered.Write(v.Body)
+			}
+		case policy.TerminateResponseChunk:
+			t.Fatalf("passthroughOnError must not end the stream")
+		}
+	}
+
+	// An ordinary event first, short enough to be withheld rather than released.
+	feed(sseEvent(marker), 0, false)
+	if held, _ := respCtx.Metadata[metaKeyHeldBytes].(string); held == "" {
+		t.Fatalf("test needs the first event withheld, so the passthrough has state to clear")
+	}
+
+	// The oversized line: unassessable, so passthrough releases everything held.
+	feed("data: "+strings.Repeat("x", maxPartialLineBytes+100), 1, false)
+
+	for _, key := range []string{metaKeyHeldBytes, metaKeyPendingText} {
+		if v, _ := respCtx.Metadata[key].(string); v != "" {
+			t.Errorf("%s still holds %d bytes after the passthrough released them", key, len(v))
+		}
+	}
+	if n, _ := respCtx.Metadata[metaKeyAssessedInHeld].(int); n != 0 {
+		t.Errorf("metaKeyAssessedInHeld still counts %d characters of released text", n)
+	}
+
+	// The line completes, then the stream ends.
+	feed(`"}}]}`+"\n\n", 2, false)
+	feed("", 3, true)
+
+	if n := strings.Count(delivered.String(), marker); n != 1 {
+		t.Errorf("the withheld event must be delivered exactly once, got %d copies", n)
+	}
+}
