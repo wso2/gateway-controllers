@@ -1,5 +1,5 @@
 name: oauth2-generator
-version: v0.10.0
+version: v0.10.1
 displayName: OAuth2 Generator
 description: |
   Injects an upstream OAuth2 credential into a request header before
@@ -13,6 +13,7 @@ parameters:
   properties:
     tokenEndpoint:
       type: string
+      format: uri
       x-wso2-policy-advanced-param: false
       minLength: 1
       description: |
@@ -150,6 +151,10 @@ parameters:
       default: "memory"
     proxyURL:
       type: string
+      # A URL the policy dials, checked against the gateway's network access
+      # control on deploy; a marker rather than format: uri, which would reject
+      # the empty default.
+      x-wso2-url: true
       x-wso2-policy-advanced-param: true
       description: |
         Proxy URL for the token-endpoint call. Defaults to the

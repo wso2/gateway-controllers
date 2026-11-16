@@ -1,5 +1,5 @@
 name: opa-policy
-version: v0.2.0
+version: v0.2.1
 description: |
   Validates requests against an Open Policy Agent (OPA) policy engine. The
   gateway extracts a predefined set of request metadata (method, path, headers,
@@ -12,6 +12,7 @@ parameters:
   properties:
     serverUrl:
       type: string
+      format: uri
       x-wso2-policy-advanced-param: false
       description: >-
         OPA server's base data API URL. Sample URL: https://opa-server-host:8181/v1/data.
