@@ -2875,6 +2875,12 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		if params.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: AWS config error, passthrough enabled", "error", err, "isResponse", isResponse)
 			if isResponse {
+				if restored {
+					// Restoration already happened in place, so passing through
+					// without the body would send the placeholder to the client.
+					// The extraction-error branch above does the same.
+					return policy.DownstreamResponseModifications{Body: payload}
+				}
 				return policy.DownstreamResponseModifications{}
 			}
 			return policy.UpstreamRequestModifications{}
@@ -2888,6 +2894,12 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		if params.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: Guardrail API error, passthrough enabled", "error", err, "isResponse", isResponse)
 			if isResponse {
+				if restored {
+					// Restoration already happened in place, so passing through
+					// without the body would send the placeholder to the client.
+					// The extraction-error branch above does the same.
+					return policy.DownstreamResponseModifications{Body: payload}
+				}
 				return policy.DownstreamResponseModifications{}
 			}
 			return policy.UpstreamRequestModifications{}
@@ -2902,6 +2914,12 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		if params.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: Guardrail evaluation error, passthrough enabled", "error", err, "isResponse", isResponse)
 			if isResponse {
+				if restored {
+					// Restoration already happened in place, so passing through
+					// without the body would send the placeholder to the client.
+					// The extraction-error branch above does the same.
+					return policy.DownstreamResponseModifications{Body: payload}
+				}
 				return policy.DownstreamResponseModifications{}
 			}
 			return policy.UpstreamRequestModifications{}

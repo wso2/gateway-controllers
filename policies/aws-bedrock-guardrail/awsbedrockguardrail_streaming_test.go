@@ -2500,3 +2500,75 @@ func TestStreaming_AssessesRestoredTextNotThePlaceholder(t *testing.T) {
 		t.Fatalf("expected the violation on the restored text to end the stream")
 	}
 }
+
+// TestBufferedPath_PassthroughKeepsTheRestoredBody covers every failure that
+// passthroughOnError forgives on a response whose masked value was restored.
+//
+// Restoration happens in place at the top of validatePayload, so returning no
+// body passes the ORIGINAL upstream bytes through and the client is sent
+// "EMAIL_0000" instead of the address it stands for. The extraction-error
+// branch already returned the restored payload; the other three did not.
+//
+// The evaluation-error branch carries the identical fix but has no case here:
+// it fires only on a nil or wrongly-typed assessment, which the AWS SDK does
+// not produce, so reaching it needs a client that returns (nil, nil) — and that
+// panics in evaluateGuardrailResponse before this code is reached.
+func TestBufferedPath_PassthroughKeepsTheRestoredBody(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(*AWSBedrockGuardrailPolicy)
+	}{
+		{
+			name: "AWS config cannot be loaded",
+			setup: func(p *AWSBedrockGuardrailPolicy) {
+				p.loadAWSConfigFunc = func(context.Context, string) (aws.Config, error) {
+					return aws.Config{}, fmt.Errorf("no credentials")
+				}
+			},
+		},
+		{
+			name: "the guardrail cannot be reached",
+			setup: func(p *AWSBedrockGuardrailPolicy) {
+				p.newBedrockClientFunc = func(aws.Config) bedrockGuardrailClient {
+					return &countingBedrockClient{err: fmt.Errorf("bedrock unavailable")}
+				}
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()},
+				func(params *AWSBedrockGuardrailPolicyParams) {
+					params.JsonPath = "$.msg"
+					params.PassthroughOnError = true
+				})
+			tc.setup(p)
+
+			respCtx := &policy.ResponseContext{
+				SharedContext: &policy.SharedContext{Metadata: map[string]interface{}{
+					MetadataKeyPIIEntities: map[string]string{"john@example.com": "EMAIL_0000"},
+				}},
+				ResponseBody: &policy.Body{Content: []byte(`{"msg":"write to EMAIL_0000"}`)},
+			}
+
+			result := p.OnResponseBody(context.Background(), respCtx, map[string]interface{}{})
+			mod, ok := result.(policy.DownstreamResponseModifications)
+			if !ok {
+				t.Fatalf("expected DownstreamResponseModifications, got %T", result)
+			}
+			if mod.StatusCode != nil {
+				t.Fatalf("passthroughOnError must not reject, got status %v", *mod.StatusCode)
+			}
+			if mod.Body == nil {
+				t.Fatalf("passing through without a body sends the placeholder to the client")
+			}
+			if strings.Contains(string(mod.Body), "EMAIL_0000") {
+				t.Errorf("the placeholder reached the client: %q", string(mod.Body))
+			}
+			if !strings.Contains(string(mod.Body), "john@example.com") {
+				t.Errorf("expected the restored value in the body, got %q", string(mod.Body))
+			}
+		})
+	}
+}
