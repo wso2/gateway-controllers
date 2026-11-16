@@ -266,7 +266,9 @@ parameters:
             recommended batch size, and the billing unit, so batching below one
             adds cost without adding protection. Raising it lengthens time to
             first token; lowering it shortens it. Minimum 100, or 0 to assess the
-            whole response when the stream ends.
+            whole response when the stream ends — though a response too large to
+            withhold is assessed and released in parts before then, so streaming
+            is never stalled by its size.
           oneOf:
             - enum: [ 0 ]
             - minimum: 100

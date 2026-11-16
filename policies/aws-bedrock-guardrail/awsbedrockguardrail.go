@@ -1443,19 +1443,30 @@ func (p *AWSBedrockGuardrailPolicy) extractRedactedContent(output *bedrockruntim
 // Shared by the redaction rewrite and the leak check that follows it: the same
 // list that says what to replace is what says whether anything was missed.
 func redactionMatches(output *bedrockruntime.ApplyGuardrailOutput) []string {
-	if output == nil || len(output.Assessments) == 0 || output.Assessments[0].SensitiveInformationPolicy == nil {
+	if output == nil {
 		return nil
 	}
 
+	// Every assessment, not just the first. Bedrock reports one per policy it
+	// evaluated, and the sensitive-information findings can sit in any of them --
+	// hasAnonymizedFinding and the redaction collection both walk them all, so a
+	// value reported in a later assessment was redacted but then missing from the
+	// list the leak check tests against.
 	var matches []string
-	for _, entity := range output.Assessments[0].SensitiveInformationPolicy.PiiEntities {
-		if match := aws.ToString(entity.Match); match != "" {
-			matches = append(matches, match)
+	for _, assessment := range output.Assessments {
+		sip := assessment.SensitiveInformationPolicy
+		if sip == nil {
+			continue
 		}
-	}
-	for _, regex := range output.Assessments[0].SensitiveInformationPolicy.Regexes {
-		if match := aws.ToString(regex.Match); match != "" {
-			matches = append(matches, match)
+		for _, entity := range sip.PiiEntities {
+			if match := aws.ToString(entity.Match); match != "" {
+				matches = append(matches, match)
+			}
+		}
+		for _, regex := range sip.Regexes {
+			if match := aws.ToString(regex.Match); match != "" {
+				matches = append(matches, match)
+			}
 		}
 	}
 
@@ -2153,7 +2164,22 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 
 	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
 	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
-	newText := p.flushText(chunkStr, chunk.EndOfStream, respCtx, rp)
+	newText, unassessable := p.flushText(chunkStr, chunk.EndOfStream, respCtx, rp)
+	if unassessable {
+		// A single data line too large to retain: its text can never be read, so
+		// delivering its bytes would release content no assessment has seen.
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: unassessable line, passthrough enabled", "chunkIndex", chunk.Index)
+			return p.releaseBytes(held+chunkStr, nil, "", respCtx, rp)
+		}
+		return policy.TerminateResponseChunk{
+			Body: p.buildSSEErrorEvent("Response content could not be assessed",
+				nil, rp.ShowAssessment, nil),
+			AnalyticsMetadata: guardrailHitAnalytics(),
+			IsFault:           true,
+			Fault:             checkFailureFault("Response content could not be assessed", true),
+		}
+	}
 	unit := p.effectiveTextUnit()
 
 	// Assess and release everything once the stream ends; there is no later
@@ -2585,7 +2611,7 @@ func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry stri
 		return "", text
 	}
 
-	cut := lastSentenceEnd(runes, unit)
+	cut := lastSentenceEnd(runes, unit, endOfStream)
 	if cut <= 0 {
 		cut = lastWordEnd(runes, unit)
 	}
@@ -2615,7 +2641,7 @@ const maxBoundarySearchRunes = 200
 // That costs a little precision — the batch then ends at a word boundary rather
 // than a sentence — and a word boundary never cuts a value in half, which is
 // what matters here.
-func lastSentenceEnd(runes []rune, limit int) int {
+func lastSentenceEnd(runes []rune, limit int, endOfStream bool) int {
 	floor := limit - maxBoundarySearchRunes
 	if floor < 0 {
 		floor = 0
@@ -2623,7 +2649,17 @@ func lastSentenceEnd(runes []rune, limit int) int {
 	for i := limit - 1; i >= floor; i-- {
 		switch runes[i] {
 		case '.', '!', '?':
-			if i+1 >= len(runes) || isSpaceRune(runes[i+1]) {
+			if i+1 < len(runes) {
+				if isSpaceRune(runes[i+1]) {
+					return i + 1
+				}
+				continue
+			}
+			// Nothing follows it in the text available. Mid-stream that is not
+			// evidence of a sentence end -- the very next flush may continue the
+			// token, which is how "john@example." and "com" became two batches.
+			// Only once the stream has ended does end-of-text mean end-of-sentence.
+			if endOfStream {
 				return i + 1
 			}
 		case '\n':
@@ -2842,33 +2878,36 @@ func splitTrailingPartialLine(s string) (complete, partial string) {
 // before the line completes. The retained fragment is what makes its text
 // assessable, and the frame is whole again by the time the bytes are released.
 //
-// Over maxPartialLineBytes the fragment stops being retained as a fragment: a
-// stream carrying no line terminator would otherwise grow it without limit. Its
-// bytes are still withheld with the rest, so nothing is lost — only the chance
-// to read text out of it.
+// Over maxPartialLineBytes the fragment stops being retained, because a stream
+// carrying no line terminator would otherwise grow it without limit. Dropping it
+// loses the only thing that would have made the line readable: its "data:"
+// prefix and opening brace stay in this flush while the rest arrives in the
+// next, so neither half parses and the line's text is never assessed -- while
+// its bytes are released with everything else. unassessable reports that, and
+// the caller fails closed rather than delivering text no assessment has seen.
 func (p *AWSBedrockGuardrailPolicy) flushText(
 	chunkStr string,
 	endOfStream bool,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
-) string {
+) (text string, unassessable bool) {
 	carried, _ := respCtx.Metadata[metaKeyPartialLine].(string)
 	joined := carried + chunkStr
 
 	if endOfStream {
 		delete(respCtx.Metadata, metaKeyPartialLine)
-		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath), false
 	}
 
 	complete, partial := splitTrailingPartialLine(joined)
 	if len(partial) > maxPartialLineBytes {
-		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit, no longer retaining it",
+		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit; its text cannot be assessed",
 			"partial_bytes", len(partial), "limit", maxPartialLineBytes)
 		delete(respCtx.Metadata, metaKeyPartialLine)
-		return extractSSEDeltaContent(joined, rp.StreamingJsonPath)
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath), true
 	}
 	respCtx.Metadata[metaKeyPartialLine] = partial
-	return extractSSEDeltaContent(complete, rp.StreamingJsonPath)
+	return extractSSEDeltaContent(complete, rp.StreamingJsonPath), false
 }
 
 // isSSEChunk reports whether s looks like SSE framing.

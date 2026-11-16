@@ -1435,13 +1435,45 @@ func TestStreaming_RetainsADataLineSplitAcrossFlushes(t *testing.T) {
 	}
 }
 
-// TestStreaming_DoesNotLoseAnOverlongPartialLine bounds the retained fragment: a
-// stream carrying no line terminator must not grow it without limit. Past the
-// limit it stops being held *as a fragment* and joins the withheld bytes, so it
-// is still delivered once a batch is assessed — bounding memory must not lose
-// bytes the client is owed.
-func TestStreaming_DoesNotLoseAnOverlongPartialLine(t *testing.T) {
+// TestStreaming_OverlongPartialLineIsNotDeliveredUnassessed bounds the retained
+// fragment: a stream carrying no line terminator must not grow it without limit.
+//
+// This reverses what the test here previously asserted. It required the
+// over-limit fragment to still be DELIVERED — "bounding memory must not lose
+// bytes the client is owed" — but dropping the fragment also drops the "data:"
+// prefix and opening brace that made the line parseable, so its text is read by
+// no assessment while its bytes go out. That is unassessed content reaching the
+// client, which is the one thing this policy exists to prevent, so the stream
+// now ends instead. Operators who prefer delivery over the guarantee have
+// passthroughOnError.
+func TestStreaming_OverlongPartialLineIsNotDeliveredUnassessed(t *testing.T) {
 	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[metaKeySSEStream] = true
+
+	oversized := "data: " + strings.Repeat("x", maxPartialLineBytes+100)
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(oversized), EndOfStream: false,
+	}, map[string]interface{}{})
+
+	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got != "" {
+		t.Errorf("an over-limit fragment must not stay held as a fragment, got %d bytes", len(got))
+	}
+	terminate, ok := action.(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("expected the stream to end rather than deliver unassessable bytes, got %T", action)
+	}
+	if !terminate.IsFault {
+		t.Errorf("failing to assess is a failure and must declare IsFault")
+	}
+}
+
+// TestStreaming_OverlongPartialLinePassesThroughWhenConfigured is the other half:
+// passthroughOnError is the documented way to prefer delivery over the
+// guarantee, and it still delivers the bytes.
+func TestStreaming_OverlongPartialLinePassesThroughWhenConfigured(t *testing.T) {
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()},
+		func(params *AWSBedrockGuardrailPolicyParams) { params.PassthroughOnError = true })
 	respCtx := streamCtx()
 	respCtx.Metadata[metaKeySSEStream] = true
 
@@ -1449,21 +1481,17 @@ func TestStreaming_DoesNotLoseAnOverlongPartialLine(t *testing.T) {
 	a1 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
 		Chunk: []byte(oversized), EndOfStream: false,
 	}, map[string]interface{}{})
-
-	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got != "" {
-		t.Errorf("an over-limit fragment must not stay held as a fragment, got %d bytes", len(got))
-	}
-
-	// End of stream releases everything withheld.
 	a2 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
 		Chunk: []byte{}, EndOfStream: true,
 	}, map[string]interface{}{})
 
-	delivered := string(a1.(policy.ForwardResponseChunk).Body) +
-		string(a2.(policy.ForwardResponseChunk).Body)
-	if delivered != oversized {
-		t.Errorf("the fragment must be delivered in full, got %d of %d bytes",
-			len(delivered), len(oversized))
+	f1, ok1 := a1.(policy.ForwardResponseChunk)
+	f2, ok2 := a2.(policy.ForwardResponseChunk)
+	if !ok1 || !ok2 {
+		t.Fatalf("passthroughOnError must not end the stream, got %T and %T", a1, a2)
+	}
+	if delivered := string(f1.Body) + string(f2.Body); delivered != oversized {
+		t.Errorf("the fragment must be delivered in full, got %d of %d bytes", len(delivered), len(oversized))
 	}
 }
 
@@ -2792,5 +2820,159 @@ func TestStreaming_NoCallExceedsOneTextUnit(t *testing.T) {
 			t.Errorf("call %d carried %d characters, above the %d-character text unit",
 				i, chars, DefaultStreamingTextUnitChars)
 		}
+	}
+}
+
+// TestSplitAtTextUnit_EndOfBufferIsNotASentenceEnd covers the boundary rule at
+// the one place it cannot look ahead.
+//
+// A terminator with nothing after it is only a sentence end once the stream has
+// ended. Mid-stream the next flush may continue the token — which is how
+// "john@example." and "com" became two batches, each passing a PII rule the
+// whole value would have failed.
+func TestSplitAtTextUnit_EndOfBufferIsNotASentenceEnd(t *testing.T) {
+	text := "mail me at john@example." // "com" arrives in the next flush
+	unit := len([]rune(text))
+
+	batch, carry := splitAtTextUnit(text, unit, false)
+	if batch == text || carry == "" {
+		t.Errorf("mid-stream, a trailing terminator must not end the batch: batch=%q carry=%q", batch, carry)
+	}
+	if !strings.Contains(carry, "john@example.") {
+		t.Errorf("the value must be carried whole into the next batch, got carry=%q", carry)
+	}
+
+	// Once the stream has ended there is no later flush, so it is a boundary.
+	batch, carry = splitAtTextUnit(text, unit, true)
+	if batch != text || carry != "" {
+		t.Errorf("at end of stream the whole text is the final batch: batch=%q carry=%q", batch, carry)
+	}
+}
+
+// TestRedactionMatches_ReadsEveryAssessment pins that the leak check's match
+// list covers every assessment Bedrock returned, not just the first.
+//
+// hasAnonymizedFinding and the redaction collection both walk them all, so a
+// value reported in a later assessment was redacted but absent from the list
+// redactedFlush tests against — the surviving-value check could not see it.
+func TestRedactionMatches_ReadsEveryAssessment(t *testing.T) {
+	out := &bedrockruntime.ApplyGuardrailOutput{
+		Action: types.GuardrailActionGuardrailIntervened,
+		Assessments: []types.GuardrailAssessment{
+			{}, // the first carries no sensitive-information policy
+			{SensitiveInformationPolicy: &types.GuardrailSensitiveInformationPolicyAssessment{
+				PiiEntities: []types.GuardrailPiiEntityFilter{{
+					Action: types.GuardrailSensitiveInformationPolicyActionAnonymized,
+					Match:  aws.String("john@example.com"),
+					Type:   types.GuardrailPiiEntityTypeEmail,
+				}},
+			}},
+		},
+	}
+
+	matches := redactionMatches(out)
+	if len(matches) != 1 || matches[0] != "john@example.com" {
+		t.Fatalf("expected the value from the second assessment, got %v", matches)
+	}
+}
+
+// TestStreaming_OverLimitLineFailsClosed covers a single data line too large to
+// retain as a fragment.
+//
+// Dropping the fragment loses the "data:" prefix and opening brace that made the
+// line readable: the rest arrives in the next flush, neither half parses, and the
+// line's text is never sent to the guardrail — while its bytes are released with
+// everything else. Measured before this: the marker below reached the client
+// having never been assessed.
+func TestStreaming_OverLimitLineFailsClosed(t *testing.T) {
+	const marker = "SENSITIVE-PAYLOAD-MARKER"
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	feed := func(b string, idx int, eos bool) policy.StreamingResponseAction {
+		return p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(b), Index: uint64(idx), EndOfStream: eos,
+		}, map[string]interface{}{})
+	}
+
+	var delivered strings.Builder
+	var terminated bool
+	collect := func(a policy.StreamingResponseAction, orig string) {
+		switch v := a.(type) {
+		case policy.ForwardResponseChunk:
+			if v.Body == nil {
+				delivered.WriteString(orig)
+			} else {
+				delivered.Write(v.Body)
+			}
+		case policy.TerminateResponseChunk:
+			terminated = true
+			if !v.IsFault {
+				t.Errorf("failing to assess is a failure and must declare IsFault")
+			}
+		}
+	}
+
+	c0 := sseEvent("hello")
+	collect(feed(c0, 0, false), c0)
+
+	// One data line past maxPartialLineBytes, force-flushed with no terminator —
+	// what the engine does at its own accumulator ceiling.
+	c1 := `data: {"choices":[{"delta":{"content":"` + strings.Repeat("x", 70*1024) + marker
+	collect(feed(c1, 1, false), c1)
+
+	c2 := `"}}]}` + "\n\n" + sseEvent("tail")
+	collect(feed(c2, 2, false), c2)
+	collect(feed("", 3, true), "")
+
+	for _, sent := range client.texts {
+		if strings.Contains(sent, marker) {
+			return // it was assessed after all, which is also acceptable
+		}
+	}
+	if strings.Contains(delivered.String(), marker) {
+		t.Fatalf("content was delivered that no assessment ever saw")
+	}
+	if !terminated {
+		t.Fatalf("expected the stream to end rather than deliver unassessable content")
+	}
+}
+
+// TestStreaming_ZeroUnitReleasesInPartsPastTheCap pins the contract for
+// streamingTextUnitChars: 0 on a response too large to withhold.
+//
+// "Assess the whole response at end of stream" cannot hold past the withheld
+// limit without buffering without bound, which is a memory-exhaustion risk, so
+// the cap wins and the response is assessed and released in parts. The parameter
+// description states this; the alternative — terminating a response for being
+// large — would break legitimate long answers.
+func TestStreaming_ZeroUnitReleasesInPartsPastTheCap(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.StreamingTextUnitChars = 0
+	})
+	respCtx := streamCtx()
+
+	frame := sseEvent(strings.Repeat("abcd ", 1000)) // ~5 KB per flush
+	var delivered int
+	for i := 0; i < 70; i++ { // ~350 KB, well past maxHeldFlushBytes
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(frame), Index: uint64(i),
+		}, map[string]interface{}{})
+		if f, ok := action.(policy.ForwardResponseChunk); ok {
+			delivered += len(f.Body)
+		}
+	}
+
+	if client.calls == 0 {
+		t.Fatalf("a response past the withheld limit must be assessed before the stream ends")
+	}
+	if delivered == 0 {
+		t.Fatalf("a response past the withheld limit must be released before the stream ends, or the buffer grows without bound")
+	}
+	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	if len(held) > maxHeldFlushBytes {
+		t.Fatalf("withheld %d bytes, above the %d limit", len(held), maxHeldFlushBytes)
 	}
 }
