@@ -2358,3 +2358,36 @@ func TestStreaming_ReportedValueInAWithheldFrameFailsClosed(t *testing.T) {
 		t.Fatalf("expected the stream to end rather than deliver the withheld frame under a later decision")
 	}
 }
+
+// TestStreaming_UnterminatedLineCannotGrowTheHeldBuffer pins that
+// maxHeldFlushBytes actually bounds the withheld buffer.
+//
+// assessAndRelease retains a trailing incomplete line, because its text is not
+// in the batch. A stream carrying no line terminator has no complete lines, so
+// the whole buffer is the incomplete line — retaining it returns everything the
+// cap had just tried to release, and every later flush adds to it. Before the
+// bound this grew linearly, 100 KB per flush, with no ceiling.
+func TestStreaming_UnterminatedLineCannotGrowTheHeldBuffer(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+
+	// One real event first: the stream is classified as SSE once, and every
+	// later flush is routed on that classification.
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(sseEvent("hello")), Index: 0,
+	}, map[string]interface{}{})
+
+	blob := strings.Repeat("x", 100*1024) // no '\n' anywhere
+	for i := 1; i <= 8; i++ {
+		p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(blob), Index: uint64(i),
+		}, map[string]interface{}{})
+
+		held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+		if len(held) > maxHeldFlushBytes {
+			t.Fatalf("flush %d: withheld %d bytes, above the %d limit — an unterminated line must not defeat the cap",
+				i, len(held), maxHeldFlushBytes)
+		}
+	}
+}

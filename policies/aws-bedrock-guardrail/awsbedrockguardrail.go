@@ -2035,6 +2035,18 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	retain := ""
 	if !chunk.EndOfStream {
 		release, retain = splitTrailingPartialLine(heldBytes)
+		// flushText stops retaining a fragment past maxPartialLineBytes and reads
+		// its text into the batch instead, so beyond that limit these bytes have
+		// been assessed and withholding them protects nothing. It also defeats the
+		// cap this function was called to enforce: a stream carrying no line
+		// terminator has no complete lines to release, so the whole buffer would be
+		// retained and grow again by every later flush. Bounding retention at the
+		// same limit flushText uses keeps the two in agreement.
+		if len(retain) > maxPartialLineBytes {
+			slog.Warn("AWSBedrockGuardrail: incomplete line exceeded the retention limit; releasing it with the batch",
+				"retained_bytes", len(retain), "limit", maxPartialLineBytes)
+			release, retain = heldBytes, ""
+		}
 	}
 
 	respCtx.Metadata[metaKeyPendingText] = ""
