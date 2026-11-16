@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.3.1
+version: v1.3.2
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
