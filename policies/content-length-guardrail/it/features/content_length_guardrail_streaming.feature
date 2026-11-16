@@ -393,7 +393,7 @@ Feature: Content length guardrail policy on streamed responses
       {"x_testbench_reply":{"events":["{\"choices\":[{\"message\":","{\"role\":\"assistant\",\"content\":\"hello\"}}]}"],"contentType":"application/json"}}
       """
     Then the response status code should be 200
-    And the response body should contain "hello"
+    And the JSON response field "choices[0].message.content" should be "hello"
     And the response body should not contain "CONTENT_LENGTH_GUARDRAIL"
 
     When I delete the API "${CTX:apiName}"
