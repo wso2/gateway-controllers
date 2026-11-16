@@ -2258,27 +2258,56 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 	// configured batch, because the withheld-bytes limit bounds the buffer and
 	// not the request. That is the long-context case AWS's guidance says to
 	// chunk.
-	callUnit := DefaultStreamingTextUnitChars
-	remaining := batchText
+	stopAction, decisions, lastOutput, lastModified, assessed := p.assessTextInUnits(
+		batchText, release, respCtx, rp, chunk)
+	if stopAction != nil {
+		if stopAction.TerminateStream() {
+			slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
+				"held_bytes", len(release), "chunkIndex", chunk.Index)
+			return stopAction
+		}
+		// passthroughOnError: this batch was not assessed, but withholding the
+		// bytes indefinitely would stall the stream, so they are released.
+		return p.releaseBytes(release, nil, "", respCtx, rp)
+	}
+	if !assessed {
+		// Framing only -- nothing to assess, but the bytes are still owed to the
+		// client.
+		return p.releaseBytes(release, nil, "", respCtx, rp)
+	}
 
-	var (
-		lastOutput   interface{}
-		lastModified string
-		assessed     bool
-		// Every unit assesses text carried by these same bytes, so every unit's
-		// rewrite decision applies to them. Keeping only the last would drop what
-		// the earlier ones asked for.
-		redactDecisions []interface{}
-	)
+	return p.releaseWithDecisions(release, decisions, lastOutput, lastModified, respCtx, rp)
+}
 
+// assessTextInUnits assesses text one AWS text unit at a time.
+//
+// The configured batch decides when to assess and deliver; it does not decide
+// how much goes into one request. Every call carries at most one text unit,
+// which is the size AWS recommends and which costs exactly the same as sending
+// the batch whole -- input is billed per text unit either way, so splitting is
+// free. Letting the batch size through instead sent one oversized request:
+// measured at 55,199 characters for a very large configured batch, because the
+// withheld-bytes limit bounds the buffer and not the request. That is the
+// long-context case AWS's guidance says to chunk.
+//
+// stopAction is non-nil when the caller must return immediately: a violation,
+// or a failure passthroughOnError does not excuse.
+func (p *AWSBedrockGuardrailPolicy) assessTextInUnits(
+	text string,
+	heldBytes string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) (stopAction policy.StreamingResponseAction, decisions []interface{}, lastOutput interface{}, lastModified string, assessed bool) {
+	remaining := text
 	for {
-		batch, carry := splitAtTextUnit(remaining, callUnit, true)
-		if batch == "" {
+		unitText, carry := splitAtTextUnit(remaining, DefaultStreamingTextUnitChars, true)
+		if unitText == "" {
 			break
 		}
 		remaining = carry
 
-		cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batch, ""))
+		cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(unitText, ""))
 		if cleaned == "" {
 			if carry == "" {
 				break
@@ -2286,64 +2315,58 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 			continue
 		}
 
-		action, output, modified, stop := p.assessStreamBatch(cleaned, release, respCtx, rp, chunk)
+		action, output, modified, stop := p.assessStreamBatch(cleaned, heldBytes, respCtx, rp, chunk)
 		if stop {
-			if action.TerminateStream() {
-				slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
-					"held_bytes", len(release), "chunkIndex", chunk.Index)
-				return action
-			}
-			// passthroughOnError: this batch was not assessed, but withholding
-			// the bytes indefinitely would stall the stream, so they are
-			// released.
-			return p.releaseBytes(release, nil, "", respCtx, rp)
+			return action, nil, nil, "", false
 		}
-
-		validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
-		respCtx.Metadata[metaKeyAccStreamedContent] = validated + batch
 		lastOutput, lastModified, assessed = output, modified, true
+		// Every unit describes bytes in the same release, so every unit's rewrite
+		// decision applies to them. Keeping only the last drops the earlier ones.
 		if modified != "" {
-			redactDecisions = append(redactDecisions, output)
+			decisions = append(decisions, output)
 		}
-
 		if carry == "" {
 			break
 		}
 	}
+	return nil, decisions, lastOutput, lastModified, assessed
+}
 
-	if !assessed {
-		// Framing only — nothing to assess, but the bytes are still owed to the
-		// client.
-		return p.releaseBytes(release, nil, "", respCtx, rp)
+// releaseWithDecisions folds every unit's redaction into the bytes before they
+// go out. releaseBytes applies one decision, which is correct when there is
+// only one; across several units a value reported in the first is delivered in
+// the clear whenever the last reports nothing.
+func (p *AWSBedrockGuardrailPolicy) releaseWithDecisions(
+	heldBytes string,
+	decisions []interface{},
+	lastOutput interface{},
+	lastModified string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) policy.StreamingResponseAction {
+	if !rp.RedactPII || len(decisions) == 0 {
+		return p.releaseBytes(heldBytes, lastOutput, lastModified, respCtx, rp)
 	}
-	// Fold every unit's redaction into the bytes before they go out. releaseBytes
-	// applies one decision, which is correct when there is only one; across
-	// several units a value reported in the first is delivered in the clear
-	// whenever the last reports nothing.
-	if rp.RedactPII && len(redactDecisions) > 0 {
-		rewritten := release
-		for _, decision := range redactDecisions {
-			out, changed, leaked := p.redactedFlush(rewritten, decision, rp)
-			if leaked {
-				slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; discarding the held bytes",
-					"held_bytes", len(release))
-				return policy.TerminateResponseChunk{
-					Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
-						nil, rp.ShowAssessment, decision),
-					AnalyticsMetadata: guardrailHitAnalytics(),
-					IsFault:           true,
-					Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
-						nil, true, rp.ShowAssessment, decision),
-				}
-			}
-			if changed {
-				rewritten = out
+	rewritten := heldBytes
+	for _, decision := range decisions {
+		out, changed, leaked := p.redactedFlush(rewritten, decision, rp)
+		if leaked {
+			slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; discarding the held bytes",
+				"held_bytes", len(heldBytes))
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+					nil, rp.ShowAssessment, decision),
+				AnalyticsMetadata: guardrailHitAnalytics(),
+				IsFault:           true,
+				Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
+					nil, true, rp.ShowAssessment, decision),
 			}
 		}
-		return policy.ForwardResponseChunk{Body: []byte(rewritten)}
+		if changed {
+			rewritten = out
+		}
 	}
-
-	return p.releaseBytes(release, lastOutput, lastModified, respCtx, rp)
+	return policy.ForwardResponseChunk{Body: []byte(rewritten)}
 }
 
 // assessBatchAndRelease assesses one batch and releases the bytes it covers,
@@ -2356,22 +2379,24 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	rp AWSBedrockGuardrailPolicyParams,
 	chunk *policy.StreamBody,
 ) policy.StreamingResponseAction {
-	cleaned := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(batchText, ""))
-	if cleaned == "" {
-		// Framing only — nothing to assess, but the bytes are still owed to the
-		// client.
-		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
-	}
-
-	action, output, modified, stop := p.assessStreamBatch(cleaned, heldBytes, respCtx, rp, chunk)
-	if stop {
-		if action.TerminateStream() {
+	// Every AWS call carries at most one text unit, whatever batch the
+	// attachment configured -- the same rule assessAndRelease follows. Sending
+	// the batch whole put a configured 8,000-character batch into one request.
+	stopAction, decisions, lastOutput, lastModified, assessed := p.assessTextInUnits(
+		batchText, heldBytes, respCtx, rp, chunk)
+	if stopAction != nil {
+		if stopAction.TerminateStream() {
 			slog.Debug("AWSBedrockGuardrail: batch failed before delivery, held bytes discarded",
 				"held_bytes", len(heldBytes), "chunkIndex", chunk.Index)
-			return action
+			return stopAction
 		}
 		// passthroughOnError: the batch was not assessed, but withholding the
 		// bytes indefinitely would stall the stream, so they are released.
+		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
+	}
+	if !assessed {
+		// Framing only -- nothing to assess, but the bytes are still owed to the
+		// client.
 		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
 	}
 
@@ -2379,25 +2404,30 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batchText
 
 	// The batch boundary generally falls inside a frame, and that frame stays
-	// withheld. Its assessed prefix is covered by THIS decision, but it will be
-	// delivered under a later batch's — and that batch never sees this text, so a
+	// withheld. Its assessed prefix is covered by THESE decisions, but it will be
+	// delivered under a later batch's -- and that batch never sees this text, so a
 	// redaction reported here would simply be dropped and the value delivered in
 	// the clear. Fail closed, exactly as releaseBytes does when a reported value
 	// cannot be redacted in place.
-	if rp.RedactPII && retainedBytes != "" && p.reportedValueRemains(retainedBytes, output, rp) {
-		slog.Warn("AWSBedrockGuardrail: a reported value sits in a withheld frame this batch cannot rewrite; discarding the held bytes",
-			"retained_bytes", len(retainedBytes), "chunkIndex", chunk.Index)
-		return policy.TerminateResponseChunk{
-			Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
-				nil, rp.ShowAssessment, output),
-			AnalyticsMetadata: guardrailHitAnalytics(),
-			IsFault:           true,
-			Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
-				nil, true, rp.ShowAssessment, output),
+	if rp.RedactPII && retainedBytes != "" {
+		for _, decision := range decisions {
+			if !p.reportedValueRemains(retainedBytes, decision, rp) {
+				continue
+			}
+			slog.Warn("AWSBedrockGuardrail: a reported value sits in a withheld frame this batch cannot rewrite; discarding the held bytes",
+				"retained_bytes", len(retainedBytes), "chunkIndex", chunk.Index)
+			return policy.TerminateResponseChunk{
+				Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
+					nil, rp.ShowAssessment, decision),
+				AnalyticsMetadata: guardrailHitAnalytics(),
+				IsFault:           true,
+				Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
+					nil, true, rp.ShowAssessment, decision),
+			}
 		}
 	}
 
-	return p.releaseBytes(heldBytes, output, modified, respCtx, rp)
+	return p.releaseWithDecisions(heldBytes, decisions, lastOutput, lastModified, respCtx, rp)
 }
 
 // reportedValueRemains reports whether any value this assessment marked for
