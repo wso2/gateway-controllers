@@ -159,14 +159,19 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		p.responseCfg = cfg
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var tune func(*http.Transport)
 	if skipVerify {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opt-in for dev
+		tune = func(t *http.Transport) {
+			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opt-in for dev
+		}
 	}
-	p.client = &http.Client{
-		Timeout:   p.timeout,
-		Transport: transport,
+	// The request body carries the request/response payload, so a redirect
+	// must never be followed to a different origin.
+	client, err := derivedClient(baseHTTPClient(), p.timeout, tune)
+	if err != nil {
+		return nil, fmt.Errorf("configure HTTP client: %w", err)
 	}
+	p.client = redirectGuardedClient(client)
 
 	return p, nil
 }

@@ -96,7 +96,7 @@ func GetPolicy(
 	params map[string]interface{},
 ) (policy.Policy, error) {
 	p := &IntelligentModelRoutingPolicy{
-		httpClient: &http.Client{Timeout: llmHTTPTimeout},
+		httpClient: newPolicyHTTPClient(llmHTTPTimeout, false),
 	}
 
 	if err := parseParams(params, p); err != nil {

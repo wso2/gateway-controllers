@@ -355,9 +355,9 @@ func (p *URLGuardrailPolicy) checkDNS(target string, timeout int) bool {
 
 // checkURL checks if the URL is reachable via HTTP HEAD request
 func (p *URLGuardrailPolicy) checkURL(target string, timeout int) bool {
-	client := &http.Client{
-		Timeout: time.Duration(timeout) * time.Millisecond,
-	}
+	// Per-call copy of the process-wide client carrying this check's timeout.
+	client := *baseHTTPClient()
+	client.Timeout = time.Duration(timeout) * time.Millisecond
 
 	req, err := http.NewRequest("HEAD", target, nil)
 	if err != nil {

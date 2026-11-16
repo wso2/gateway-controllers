@@ -180,8 +180,6 @@ type JwtAuthPolicy struct {
 	cacheMutex sync.RWMutex
 	cacheStore map[string]*CachedJWKS
 	cacheTTLs  map[string]time.Time
-	httpClient *http.Client
-
 	// tokenCacheMu guards the tokenCache pointer and tokenCacheSize. The SDK cache fixes its
 	// size at construction (no live resize), so a changed cacheMaxSize is applied by swapping
 	// in a new cache. Reads take the RLock and copy the pointer so an in-flight request keeps
@@ -284,9 +282,6 @@ type JWKSKey struct {
 var ins = &JwtAuthPolicy{
 	cacheStore: make(map[string]*CachedJWKS),
 	cacheTTLs:  make(map[string]time.Time),
-	httpClient: &http.Client{
-		Timeout: 5 * time.Second,
-	},
 	tokenCache:     newTokenCache(defaultTokenCacheMaxSize),
 	tokenCacheSize: defaultTokenCacheMaxSize,
 }
@@ -1104,33 +1099,14 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 		)
 	}
 
-	// Create a new HTTP client per request to avoid race conditions on shared state
-	var client *http.Client
-	if remote.tlsConfig != nil {
-		// Create a new client with custom TLS config
-		if debugEnabled() {
-			slog.Debug("JWT Auth Policy: Creating HTTP client with custom TLS config",
-				"uri", remote.URI,
-			)
-		}
-		customTransport := &http.Transport{
-			TLSClientConfig: remote.tlsConfig,
-		}
-		client = &http.Client{
-			Transport: customTransport,
-			Timeout:   fetchTimeout,
-		}
-	} else {
-		// Create a new client with default transport
-		if debugEnabled() {
-			slog.Debug("JWT Auth Policy: Creating HTTP client with default transport",
-				"uri", remote.URI,
-			)
-		}
-		client = &http.Client{
-			Timeout: fetchTimeout,
-		}
+	// Derive a per-call copy of the process-wide client (never mutating it)
+	// carrying this fetch's timeout and, when configured, the endpoint's TLS
+	// settings on a clone of the shared transport.
+	client, err := clientWithTLS(baseHTTPClient(), remote.tlsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
 	}
+	client.Timeout = fetchTimeout
 
 	if debugEnabled() {
 		slog.Debug("JWT Auth Policy: Sending HTTP GET request to JWKS endpoint",

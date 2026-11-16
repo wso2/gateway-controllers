@@ -1013,7 +1013,7 @@ func TestDoTokenRequest_AddsConfiguredHeaders(t *testing.T) {
 	defer server.Close()
 
 	form := url.Values{"grant_type": {GrantTypeClientCredentials}}
-	if _, err := doTokenRequest(context.Background(), server.Client(), server.URL, authStyleInHeader,
+	if _, err := doTokenRequest(context.Background(), func() (*http.Client, error) { return server.Client(), nil }, server.URL, authStyleInHeader,
 		"id", "secret", form, map[string]string{"X-Api-Key": "secret-123"}); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1035,7 +1035,7 @@ func TestDoTokenRequest_IgnoresAuthorizationAndContentTypeOverrides(t *testing.T
 	defer server.Close()
 
 	form := url.Values{"grant_type": {GrantTypeClientCredentials}}
-	if _, err := doTokenRequest(context.Background(), server.Client(), server.URL, authStyleInHeader,
+	if _, err := doTokenRequest(context.Background(), func() (*http.Client, error) { return server.Client(), nil }, server.URL, authStyleInHeader,
 		"real-id", "real-secret", form, map[string]string{
 			"Authorization": "Bearer should-not-apply",
 			"Content-Type":  "application/json",
@@ -1508,7 +1508,7 @@ func TestOnRequestHeaders_PreservesPreviousAuthContext(t *testing.T) {
 	}
 }
 
-// ─── buildTokenEndpointTransport ─────────────────────────────────────────────
+// ─── test helpers ─────────────────────────────────────────────
 
 // generateTestCACert returns a throwaway self-signed cert's PEM content directly - tlsCaCert holds content, not a path.
 func generateTestCACert(t *testing.T) string {
@@ -1530,58 +1530,6 @@ func generateTestCACert(t *testing.T) string {
 		t.Fatalf("failed to create test certificate: %v", err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
-}
-
-func TestBuildTokenEndpointTransport_DefaultsToProxyFromEnvironment(t *testing.T) {
-	transport, err := buildTokenEndpointTransport(oauth2Params{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if transport.Proxy == nil {
-		t.Fatal("expected a default Proxy func (http.ProxyFromEnvironment) to always be set")
-	}
-	if transport.TLSClientConfig != nil {
-		t.Errorf("expected no TLSClientConfig when neither tlsCaCert nor tlsInsecureSkipVerify is set, got %+v", transport.TLSClientConfig)
-	}
-}
-
-func TestBuildTokenEndpointTransport_ExplicitProxyURLOverridesEnvironment(t *testing.T) {
-	transport, err := buildTokenEndpointTransport(oauth2Params{proxyURL: "http://proxy.internal:8080"})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://idp.example.com/token", nil)
-	if err != nil {
-		t.Fatalf("unexpected error building the probe request: %v", err)
-	}
-	got, err := transport.Proxy(req)
-	if err != nil {
-		t.Fatalf("unexpected error resolving proxy: %v", err)
-	}
-	if got == nil || got.Host != "proxy.internal:8080" {
-		t.Errorf("expected the configured proxyURL to be used, got %v", got)
-	}
-}
-
-func TestBuildTokenEndpointTransport_InvalidProxyURL(t *testing.T) {
-	if _, err := buildTokenEndpointTransport(oauth2Params{proxyURL: "://not-a-valid-url"}); err == nil {
-		t.Fatal("expected an error for an invalid proxyURL")
-	}
-}
-
-// A malformed-but-credentialed proxyURL must never leak its userinfo into the returned error - see redactURLCredentials.
-func TestBuildTokenEndpointTransport_InvalidProxyURL_DoesNotLeakCredentials(t *testing.T) {
-	// A control character makes url.Parse fail while the credential-bearing userinfo is still present.
-	_, err := buildTokenEndpointTransport(oauth2Params{proxyURL: "http://secret-user:secret-pass@proxy.internal:8080/\x7f"})
-	if err == nil {
-		t.Fatal("expected an error for an invalid proxyURL")
-	}
-	if strings.Contains(err.Error(), "secret-user") || strings.Contains(err.Error(), "secret-pass") {
-		t.Errorf("expected proxyURL credentials to be redacted from the error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "[REDACTED]") {
-		t.Errorf("expected a [REDACTED] marker in the error, got: %v", err)
-	}
 }
 
 // ─── redactURLCredentials ────────────────────────────────────────────────────
@@ -1632,105 +1580,6 @@ func TestSanitizeEndpointForLogging(t *testing.T) {
 				t.Errorf("sanitizeEndpointForLogging(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
-	}
-}
-
-// Proxy must still be set whenever TLSClientConfig is - jwt-auth/opaque-token-auth both silently dropped proxy support this way.
-func TestBuildTokenEndpointTransport_TLSConfigStillSetsProxy(t *testing.T) {
-	transport, err := buildTokenEndpointTransport(oauth2Params{tlsInsecureSkipVerify: true})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if transport.TLSClientConfig == nil || !transport.TLSClientConfig.InsecureSkipVerify {
-		t.Fatal("expected TLSClientConfig.InsecureSkipVerify to be true")
-	}
-	if transport.Proxy == nil {
-		t.Fatal("expected Proxy to still be set even though a custom TLSClientConfig was built")
-	}
-}
-
-func TestBuildTokenEndpointTransport_InvalidCACertContent(t *testing.T) {
-	if _, err := buildTokenEndpointTransport(oauth2Params{tlsCaCert: "not a valid PEM certificate"}); err == nil {
-		t.Fatal("expected an error for content with no valid PEM certificate in it")
-	}
-}
-
-func TestBuildTokenEndpointTransport_ValidCACertContent(t *testing.T) {
-	transport, err := buildTokenEndpointTransport(oauth2Params{tlsCaCert: generateTestCACert(t)})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if transport.TLSClientConfig == nil || transport.TLSClientConfig.RootCAs == nil {
-		t.Fatal("expected RootCAs to be populated from the CA cert content")
-	}
-}
-
-// tlsCaCert must support a bundle of several concatenated PEM certificates, not just the first.
-func TestBuildTokenEndpointTransport_MultipleCACertsInOneValue(t *testing.T) {
-	bundle := generateTestCACert(t) + generateTestCACert(t)
-	pool, err := parseCACertPool(bundle)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(pool.Subjects()) != 2 { //nolint:staticcheck // Subjects() is deprecated but still the simplest way to assert count in a test
-		t.Errorf("expected both concatenated certificates to be parsed into the pool, got %d", len(pool.Subjects()))
-	}
-}
-
-// ─── getOrCreateTokenEndpointTransport CA cert keying ────────────────────────
-
-// Two configs with different CA cert content must never share a cached Transport built from the wrong trust pool.
-func TestGetOrCreateTokenEndpointTransport_DifferentCACertContent_GetsDifferentTransport(t *testing.T) {
-	p1 := oauth2Params{tlsCaCert: generateTestCACert(t)}
-	p2 := oauth2Params{tlsCaCert: generateTestCACert(t)}
-
-	t1, err := getOrCreateTokenEndpointTransport(p1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	t2, err := getOrCreateTokenEndpointTransport(p2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if t1 == t2 {
-		t.Error("expected two configs with different CA cert content to get different *http.Transport values, not share one")
-	}
-}
-
-// Byte-identical CA cert content must share one Transport, same as proxyURL already does.
-func TestGetOrCreateTokenEndpointTransport_SameCACertContent_SharesTransport(t *testing.T) {
-	cert := generateTestCACert(t)
-	p1 := oauth2Params{tlsCaCert: cert}
-	p2 := oauth2Params{tlsCaCert: cert}
-
-	t1, err := getOrCreateTokenEndpointTransport(p1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	t2, err := getOrCreateTokenEndpointTransport(p2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	if t1 != t2 {
-		t.Error("expected two configs with identical CA cert content to share one *http.Transport")
-	}
-}
-
-func TestGetOrCreateTokenEndpointTransport_SharesTransportForIdenticalConfig(t *testing.T) {
-	p1 := oauth2Params{proxyURL: "http://shared-proxy:8080"}
-	p2 := oauth2Params{proxyURL: "http://shared-proxy:8080"}
-	t1, err := getOrCreateTokenEndpointTransport(p1)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	t2, err := getOrCreateTokenEndpointTransport(p2)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if t1 != t2 {
-		t.Error("expected two configs with identical proxy/TLS settings to share one *http.Transport")
 	}
 }
 

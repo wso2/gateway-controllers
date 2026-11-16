@@ -1,5 +1,5 @@
 name: oauth2-generator
-version: v0.10.1
+version: v0.11.0
 displayName: OAuth2 Generator
 description: |
   Injects an upstream OAuth2 credential into a request header before
@@ -157,8 +157,8 @@ parameters:
       x-wso2-url: true
       x-wso2-policy-advanced-param: true
       description: |
-        Proxy URL for the token-endpoint call. Defaults to the
-        standard HTTP_PROXY/HTTPS_PROXY env vars.
+        Proxy URL for the token-endpoint call. Defaults to the proxy configured
+        for the gateway's outbound HTTP client.
       default: ""
     tlsCaCert:
       type: string

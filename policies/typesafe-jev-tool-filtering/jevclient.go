@@ -122,14 +122,10 @@ func newJevClient(sys systemConfig, timeout time.Duration) *jevClient {
 		model:            sys.Model,
 		timeout:          timeout,
 		maxResponseBytes: sys.MaxResponseBytes,
-		httpClient: &http.Client{
-			// Never follow a redirect: doing so would hand the bearer token
-			// to wherever the redirect points. The 3xx is returned as-is and
-			// refused below as an unexpected status.
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		httpClient:// Never follow a redirect: doing so would hand the bearer token
+		// to wherever the redirect points. The 3xx is returned as-is and
+		// refused below as an unexpected status.
+		newPolicyHTTPClient(0, true),
 	}
 }
 

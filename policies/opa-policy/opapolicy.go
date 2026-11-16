@@ -112,10 +112,20 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		return nil, err
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxConnsPerHost = maxConns
-	transport.MaxIdleConnsPerHost = maxConns
-	transport.MaxIdleConns = maxConns
+	// Keep the per-policy connection limits on a clone of the shared
+	// transport. A redirect is never followed: the request carries the OPA
+	// access key and the request-derived input.
+	client, err := derivedClient(baseHTTPClient(), time.Duration(timeoutSecs)*time.Second, func(t *http.Transport) {
+		t.MaxConnsPerHost = maxConns
+		t.MaxIdleConnsPerHost = maxConns
+		t.MaxIdleConns = maxConns
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configure HTTP client: %w", err)
+	}
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 
 	return &OPAPolicy{
 		requestURL:         buildRequestURL(serverURL, policyName, rule),
@@ -125,13 +135,7 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		additionalProps:    additional,
 		policyName:         policyName,
 		maxResponseSizeCap: maxOPAResponseSize,
-		client: &http.Client{
-			Timeout:   time.Duration(timeoutSecs) * time.Second,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client:             client,
 	}, nil
 }
 

@@ -120,9 +120,7 @@ func GetPolicy(
 	p := &AzureContentSafetyContentModerationPolicy{
 		endpoint: getStringParam(params, "azureContentSafetyEndpoint"),
 		apiKey:   getStringParam(params, "azureContentSafetyKey"),
-		client: &http.Client{
-			Timeout: requestTimeout,
-		},
+		client:   newPolicyHTTPClient(requestTimeout, false),
 	}
 
 	// Extract and parse request parameters if present

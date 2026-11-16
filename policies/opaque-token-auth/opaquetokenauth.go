@@ -97,7 +97,7 @@ type IntrospectionProvider struct {
 	BearerToken   string           // Static bearer token alternative to client credentials
 	TokenTypeHint string           // RFC 7662 token_type_hint (default "access_token")
 	tokenRegexp   *regexp.Regexp   // Compiled TokenPattern; nil when TokenPattern is ""
-	httpTransport *http.Transport  // Reused across requests for TCP connection pooling; nil = DefaultTransport
+	tlsConfig     *tls.Config      // Custom TLS settings (CA pool / skip verify); nil = engine's default
 }
 
 // IntrospectionResult is the RFC 7662 introspection response. Typed fields cover
@@ -373,10 +373,14 @@ func (p *OpaqueTokenAuthPolicy) doIntrospect(ctx context.Context, token string, 
 	}
 	slog.Debug("Opaque Token Auth Policy: Sending introspection request", "provider", provider.Name, "uri", provider.URI, "authMethod", authMethod, "timeout", timeout)
 
-	client := &http.Client{Timeout: timeout}
-	if provider.httpTransport != nil {
-		client.Transport = provider.httpTransport
+	// The request carries client credentials / a bearer token, so a redirect
+	// must never be followed to a different origin.
+	client, err := clientWithTLS(baseHTTPClient(), provider.tlsConfig)
+	if err != nil {
+		return nil, fmt.Errorf("introspection request failed: %w", err)
 	}
+	client = redirectGuardedClient(client)
+	client.Timeout = timeout
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -580,7 +584,7 @@ func parseIntrospectionProviders(params map[string]interface{}) ([]*Introspectio
 			if err != nil {
 				return nil, fmt.Errorf("provider %q: %w", name, err)
 			}
-			provider.httpTransport = &http.Transport{TLSClientConfig: tlsConfig}
+			provider.tlsConfig = tlsConfig
 		}
 
 		providers = append(providers, provider)
