@@ -2414,3 +2414,58 @@ func TestStreaming_CleanStreamDeclaresNoFault(t *testing.T) {
 		}
 	}
 }
+
+// TestStreaming_NonSSEBodyIsNeverForwardedBeforeAssessment guards the invariant
+// that makes the non-SSE path safe for redaction: NeedsMoreResponseData holds a
+// body opening '{' or '[' to end of stream regardless of the flush pacer, so the
+// accumulated body is assessed, and any redaction applied, before a single byte
+// is delivered.
+//
+// Without it the pacer would release at 4 KB and handleNonSSEStreamFlush would
+// mark metaKeyNonSSEForwarded, which drops the rewrite at end of stream — PII
+// the guardrail reported would then reach the client unredacted. A change to
+// looksLikeJSONDocument or to the pacer that reopened that window would fail
+// here rather than in production.
+func TestStreaming_NonSSEBodyIsNeverForwardedBeforeAssessment(t *testing.T) {
+	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.JsonPath = "$.choices[0].message.content"
+		params.RedactPII = true
+	})
+
+	// ~21 KB, five times the pacer, split into chunks well under it.
+	content := strings.Repeat("filler ", 3000) + "mail john@example.com now"
+	body := `{"choices":[{"message":{"content":"` + content + `"}}]}`
+	var chunks []string
+	for i := 0; i < len(body); i += 2048 {
+		end := i + 2048
+		if end > len(body) {
+			end = len(body)
+		}
+		chunks = append(chunks, body[i:end])
+	}
+	if len(chunks) < 5 {
+		t.Fatalf("test needs a body several times the %d-byte pacer, got %d chunks", streamFlushPacerBytes, len(chunks))
+	}
+
+	respCtx := streamCtx()
+	actions := feedStream(t, p, respCtx, chunks)
+
+	if len(actions) != 1 {
+		t.Fatalf("a non-SSE body must be released once, at end of stream; got %d flushes", len(actions))
+	}
+	if forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool); forwarded {
+		t.Fatalf("no non-SSE flush may be delivered before the body has been assessed")
+	}
+
+	forward, ok := actions[0].(policy.ForwardResponseChunk)
+	if !ok {
+		t.Fatalf("redaction must not end the stream, got %T", actions[0])
+	}
+	if forward.Body == nil {
+		t.Fatalf("expected the redacted body to be delivered as a rewrite")
+	}
+	if strings.Contains(string(forward.Body), "john@example.com") {
+		t.Errorf("PII survived redaction on the non-SSE path")
+	}
+}
