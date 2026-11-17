@@ -62,6 +62,35 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
   gomodule: github.com/wso2/gateway-controllers/policies/azure-llm-cost@v1
 ```
 
+### Adding Your Own Pricing
+
+You can add your own pricing details to the pricing file the gateway ships with, [`gateway/configs/llm-pricing/model_prices.json`](https://github.com/wso2/api-platform/blob/main/gateway/configs/llm-pricing/model_prices.json) in the api-platform repository (`configs/llm-pricing/model_prices.json` in the gateway distribution). Docker Compose mounts it at `/etc/policy-engine/llm-pricing/model_prices.json`, the default `pricing_file`. Use it to price a model the file does not carry, or to replace the listed rates with the ones you pay.
+
+This policy reads only the entries whose keys start with `azure/` or `azure_ai/`. Add yours as new keys in the file's top-level object:
+
+```json
+"azure/my-custom-model": {
+  "provider": "azure",
+  "input_cost_per_token": 1e-06,
+  "output_cost_per_token": 4e-06,
+  "cache_read_input_token_cost": 5e-07
+},
+"azure/eu/my-custom-model": {
+  "provider": "azure",
+  "input_cost_per_token": 1.1e-06,
+  "output_cost_per_token": 4.4e-06,
+  "cache_read_input_token_cost": 5.5e-07
+}
+```
+
+- **Key**: `azure/<model>` for the Azure OpenAI catalog and `azure_ai/<model>` for the Azure AI Foundry catalog, searched in the order given under [How It Works](#how-it-works). For a rate that applies to one `region` only, use `azure/<region>/<model>`. `<model>` is the `model` from `modelMappings`, or the name Azure reports for a deployment you have not mapped. Keys are matched without regard to case, but always in full. In the example, a deployment mapped with `region: eu` is priced from `azure/eu/my-custom-model`, and one in any other region from `azure/my-custom-model`.
+- **Rates**: US dollars per single token, so `1e-06` is $1.00 per million tokens. Set `input_cost_per_token` and `output_cost_per_token`; an entry with neither is reported unpriced. The other rates this policy applies, listed under [Features](#features), use the field names the existing entries use, and any other field is ignored.
+- **Rates left out**: Audio and reasoning tokens fall back to the input or output rate. Cache reads and cache writes have no such fallback and are charged nothing, so set `cache_read_input_token_cost` if the model supports prompt caching.
+- **`provider`**: Informational only. The key prefix decides which catalog an entry belongs to.
+- **Existing models**: To change a model's rates, edit its entry rather than adding a second one with the same key.
+
+The file is read once and kept in memory, so restart the gateway runtime after editing it, for example with `docker compose restart gateway-runtime`. If the file is not valid JSON, the policy cannot be created and the error names the file. An entry with a wrongly typed field, such as a rate written as a string, is skipped and a warning names its key.
+
 ## Reference Scenarios
 
 This policy runs in the response phase and should be placed before any cost-consuming policy in the chain. Every scenario below depends on the provider using one of the two Azure templates, `azure-openai` or `azureai-foundry`, since the policy reads that template to decide which catalog applies.

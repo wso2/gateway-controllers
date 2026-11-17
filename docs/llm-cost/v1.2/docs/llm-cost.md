@@ -56,6 +56,29 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
   gomodule: github.com/wso2/gateway-controllers/policies/llm-cost@v1
 ```
 
+### Adding Your Own Pricing
+
+You can add your own pricing details to the pricing file the gateway ships with, [`gateway/configs/llm-pricing/model_prices.json`](https://github.com/wso2/api-platform/blob/main/gateway/configs/llm-pricing/model_prices.json) in the api-platform repository (`configs/llm-pricing/model_prices.json` in the gateway distribution). Docker Compose mounts it at `/etc/policy-engine/llm-pricing/model_prices.json`, the default `pricing_file`. Use it to price a model the file does not carry, or to replace the listed rates with the ones you pay.
+
+Each entry is keyed by model name. Add yours as a new key in the file's top-level object:
+
+```json
+"my-org-llm": {
+  "provider": "openai",
+  "input_cost_per_token": 1e-06,
+  "output_cost_per_token": 4e-06,
+  "cache_read_input_token_cost": 2.5e-07
+}
+```
+
+- **Key**: The model name the policy reads from the response or request, written in lowercase. The name is lowercased before the lookup but keys are not, so a key with an uppercase letter never matches. Matching is on the whole key, so a dated snapshot such as `my-org-llm-2026-01-01` needs a key of its own.
+- **Rates**: US dollars per single token, so `1e-06` is $1.00 per million tokens. Set at least `input_cost_per_token` and `output_cost_per_token`. For cache, reasoning, audio, large-context, or service-tier rates, use the field names the existing entries use.
+- **Rates left out**: Reasoning, audio, and image tokens fall back to the input or output rate. Cache reads and cache writes have no such fallback and are charged nothing, so set `cache_read_input_token_cost` if the provider reports cached tokens.
+- **`provider`**: Selects the calculator that adds charges which are not token counts, such as web search. Use the same value as the provider's other entries, for example `openai`, `anthropic`, `gemini`, `mistral`, or `bedrock`. Any other value, or none, prices tokens only.
+- **Existing models**: To change a model's rates, edit its entry rather than adding a second one with the same key.
+
+The file is read once and kept in memory, so restart the gateway runtime after editing it, for example with `docker compose restart gateway-runtime`. If the file is not valid JSON, the policy cannot be created and the error names the file. An entry with a wrongly typed field, such as a rate written as a string, is skipped and a warning names its key.
+
 ### Template Fields Used
 
 The shipped templates already declare everything below. This section matters when you are writing a template for a provider of your own. A template covers extraction and per-token pricing on its own; a charge that is not a token count, or a multiplier applied to the total, additionally needs a calculator in the policy.
@@ -276,6 +299,6 @@ Analytics separately receives the same cost together with the model and the thre
 ## Notes
 
 - A route with no `LlmProviderTemplate` cannot be priced. The cost is reported as `0.0000000000` with status `not_calculated`, and a warning is logged.
-- The same applies when the model is missing from the pricing file. The warning names what was looked for, and the request still goes through.
+- The same applies when the model is missing from the pricing file. The warning names what was looked for, and the request still goes through. To price it, add an entry as described in [Adding Your Own Pricing](#adding-your-own-pricing).
 - The pricing file is read once and kept for the life of the process, so a restart is needed after editing it.
 - A billing tier the policy does not recognise, or one the model has no special rate for, is charged at the standard rate. This is normal and is not treated as a failure.
