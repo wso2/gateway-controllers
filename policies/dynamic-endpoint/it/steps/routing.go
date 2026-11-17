@@ -37,14 +37,64 @@ func (s *Steps) registerRouting(sc *godog.ScenarioContext) {
 	sc.Step(`^the response should be served by the "(backend|echo)" testbench service$`, s.servedBy)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the JSON field "([^"]*)" is "([^"]*)"$`,
 		s.sendUntilJSONField)
+	sc.Step(`^I send (\d+) "([^"]*)" requests to "([^"]*)" and every response should have the JSON field "([^"]*)" equal to "([^"]*)"(?: and be served by the "(backend|echo)" testbench service)?$`,
+		s.sendRepeatedAndCheckEach)
 	sc.Step(`^the JSON response field "([^"]*)", if present, should start with "([^"]*)"$`, s.fieldStartsWithIfPresent)
+}
+
+// sendRepeatedAndCheckEach sends a request n times, without retrying, and checks every answer.
+// The shared repeated-send step keeps only the last response for the steps that follow, so
+// nine stale answers followed by one correct one would pass it. A scenario that must show every
+// request reached the new upstream needs each response checked, and this step does that.
+func (s *Steps) sendRepeatedAndCheckEach(ctx context.Context, n int, method, path, field, want, service string) error {
+	if n <= 0 {
+		return fmt.Errorf("the request count must be positive, got %d", n)
+	}
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	expected, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	target, err := s.base.GatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	headers := s.base.ScenarioHeaders(ctx)
+	host := s.base.RequestHost(ctx)
+
+	for i := 1; i <= n; i++ {
+		resp, err := s.client.Do(ctx, httpx.Request{
+			Method: strings.ToUpper(method), URL: target, Headers: headers, Host: host,
+		}, 0, 0)
+		if err != nil {
+			return fmt.Errorf("request %d of %d: %w", i, n, err)
+		}
+		if !resp.Succeeded() {
+			return fmt.Errorf("request %d of %d was not successful: %s", i, n, resp.Describe())
+		}
+		got, present := jsonField(resp.Body, field)
+		if !present || got != expected {
+			return fmt.Errorf("request %d of %d: JSON field %q is %q (present: %t), want %q: %s",
+				i, n, field, got, present, expected, resp.Describe())
+		}
+		if service != "" {
+			if err := checkServedBy(service, resp); err != nil {
+				return fmt.Errorf("request %d of %d: %w", i, n, err)
+			}
+		}
+	}
+	return nil
 }
 
 // fieldStartsWithIfPresent checks where a reflected request came from without requiring the
 // request to have been answered. A request the gateway refuses or does not route has no such
-// field, which is a fine outcome for an attack that must not reach another upstream; a request
-// that is answered must carry the expected prefix. Asserting the absence of a word instead
-// would trip over the attacker's own text, which the reflecting upstream echoes back.
+// field, which is a fine outcome for an attack that must not reach another upstream. A request
+// that is answered (2xx) must carry the field with the expected prefix: an answer that does not
+// say where it came from proves nothing. Asserting the absence of a word instead would trip
+// over the attacker's own text, which the reflecting upstream echoes back.
 func (s *Steps) fieldStartsWithIfPresent(ctx context.Context, field, prefix string) error {
 	resp, err := httpx.Published(ctx)
 	if err != nil {
@@ -56,6 +106,10 @@ func (s *Steps) fieldStartsWithIfPresent(ctx context.Context, field, prefix stri
 	}
 	got, present := jsonField(resp.Body, field)
 	if !present {
+		if resp.Succeeded() {
+			return fmt.Errorf("the request was answered, but JSON field %q is absent, so it cannot be traced to %q: %s",
+				field, expected, resp.Describe())
+		}
 		return nil
 	}
 	if !strings.HasPrefix(got, expected) {
@@ -105,6 +159,10 @@ func (s *Steps) servedBy(ctx context.Context, service string) error {
 	if err != nil {
 		return err
 	}
+	return checkServedBy(service, resp)
+}
+
+func checkServedBy(service string, resp *httpx.Response) error {
 	var doc map[string]any
 	if err := json.Unmarshal(resp.Body, &doc); err != nil {
 		return fmt.Errorf("response is not a JSON object: %w (%s)", err, resp.Describe())

@@ -235,7 +235,11 @@ func TestBackgroundTrafficLifecycle(t *testing.T) {
 
 	require.NoError(t, steps.startBackgroundTraffic(ctx, "GET", "/probe", "probe"))
 	require.ErrorContains(t, steps.startBackgroundTraffic(ctx, "GET", "/probe", "probe"), "already running")
-	require.Eventually(t, func() bool { return hits.Load() >= 3 }, 5*time.Second, 20*time.Millisecond)
+	// hits counts requests the server received; stopping on it could cancel the third request
+	// before the probe records it. Wait for the recorded samples instead.
+	require.Eventually(t, func() bool {
+		return steps.backgroundTrafficAtLeastSuccesses(ctx, "probe", 3) == nil
+	}, 5*time.Second, 20*time.Millisecond)
 	require.NoError(t, steps.stopBackgroundTraffic(ctx, "probe"))
 
 	require.NoError(t, steps.backgroundTrafficAtLeastAttempts(ctx, "probe", 3))
@@ -290,10 +294,61 @@ func TestFieldStartsWithIfPresent(t *testing.T) {
 
 	require.NoError(t, steps.fieldStartsWithIfPresent(publish(200, `{"path":"/public/x"}`), "path", "/public/"))
 	require.NoError(t, steps.fieldStartsWithIfPresent(publish(404, `{"error":"Not Found"}`), "path", "/public/"))
-	require.NoError(t, steps.fieldStartsWithIfPresent(publish(200, `not json`), "path", "/public/"))
+	// An answered request that cannot be traced to the upstream fails; a refused one may lack the field.
+	require.ErrorContains(t, steps.fieldStartsWithIfPresent(publish(200, `{}`), "path", "/public/"), "is absent")
+	require.ErrorContains(t, steps.fieldStartsWithIfPresent(publish(200, `not json`), "path", "/public/"), "is absent")
+	require.NoError(t, steps.fieldStartsWithIfPresent(publish(403, `not json`), "path", "/public/"))
 
 	// The attacker's own text echoed after the prefix is fine; a different prefix is not.
 	require.NoError(t, steps.fieldStartsWithIfPresent(publish(200, `{"path":"/public/../../internal"}`), "path", "/public/"))
 	err := steps.fieldStartsWithIfPresent(publish(200, `{"path":"/internal/probe"}`), "path", "/public/")
 	require.ErrorContains(t, err, "does not start with")
+}
+
+func TestSendRepeatedAndCheckEach(t *testing.T) {
+	var calls atomic.Int32
+	// The tenth request is the only one answered by another upstream: checking the last
+	// response alone would pass, so every response must be checked.
+	steps := newStepsWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) <= 9 {
+			writeJSON(w, http.StatusOK, `{"path":"/old/probe","url":"/x"}`)
+			return
+		}
+		writeJSON(w, http.StatusOK, `{"path":"/new/probe","url":"/x"}`)
+	})
+	ctx := newScenarioContext()
+
+	err := steps.sendRepeatedAndCheckEach(ctx, 10, "GET", "/probe", "path", "/new/probe", "echo")
+	require.ErrorContains(t, err, "request 1 of 10")
+	require.ErrorContains(t, err, `"/old/probe"`)
+
+	calls.Store(100)
+	require.NoError(t, steps.sendRepeatedAndCheckEach(ctx, 10, "GET", "/probe", "path", "/new/probe", "echo"))
+	// Served by the other testbench service: the echo body has a "url", the backend body has none.
+	require.ErrorContains(t, steps.sendRepeatedAndCheckEach(ctx, 2, "GET", "/probe", "path", "/new/probe", "backend"),
+		"expected the backend service")
+	require.NoError(t, steps.sendRepeatedAndCheckEach(ctx, 2, "GET", "/probe", "path", "/new/probe", ""))
+	require.ErrorContains(t, steps.sendRepeatedAndCheckEach(ctx, 0, "GET", "/probe", "path", "/new/probe", ""), "must be positive")
+}
+
+func TestSendRepeatedAndCheckEachRejectsAnUnsuccessfulResponse(t *testing.T) {
+	steps := newStepsWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusServiceUnavailable, `{"path":"/new/probe"}`)
+	})
+	err := steps.sendRepeatedAndCheckEach(newScenarioContext(), 3, "GET", "/probe", "path", "/new/probe", "")
+	require.ErrorContains(t, err, "request 1 of 3 was not successful")
+}
+
+func TestWaitForBackgroundAttempts(t *testing.T) {
+	steps := newStepsWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, `{"path":"/aaa/probe"}`)
+	})
+	ctx := newScenarioContext()
+	require.NoError(t, steps.startBackgroundTraffic(ctx, "GET", "/probe", "probe"))
+	t.Cleanup(func() { steps.stopAllBackgroundTraffic(ctx) })
+
+	require.NoError(t, steps.waitForBackgroundAttempts(ctx, "probe", 3))
+	require.NoError(t, steps.stopBackgroundTraffic(ctx, "probe"))
+	require.NoError(t, steps.backgroundTrafficAtLeastAttempts(ctx, "probe", 3))
+	require.ErrorContains(t, steps.waitForBackgroundAttempts(ctx, "missing", 1), "no background traffic probe")
 }

@@ -36,12 +36,16 @@ import (
 
 const (
 	backgroundTrafficInterval = 100 * time.Millisecond
+	// backgroundAttemptsWait bounds the wait for a probe to record the attempts a scenario needs.
+	backgroundAttemptsWait = 30 * time.Second
 
 	keyBackgroundProbes = "dynamicEndpointBackgroundTraffic"
 )
 
 func (s *Steps) registerBackgroundTraffic(sc *godog.ScenarioContext) {
 	sc.Step(`^I start background "([^"]*)" traffic to "([^"]*)" as "([^"]*)"$`, s.startBackgroundTraffic)
+	sc.Step(`^I wait until background traffic "([^"]*)" has recorded at least (\d+) attempts$`,
+		s.waitForBackgroundAttempts)
 	sc.Step(`^I stop background traffic "([^"]*)"$`, s.stopBackgroundTraffic)
 	sc.Step(`^background traffic "([^"]*)" should have recorded at least (\d+) attempts$`,
 		s.backgroundTrafficAtLeastAttempts)
@@ -195,6 +199,34 @@ func (s *Steps) stopAllBackgroundTraffic(ctx context.Context) {
 	}
 	for name := range probes {
 		delete(probes, name)
+	}
+}
+
+// waitForBackgroundAttempts holds a scenario until the probe has recorded enough attempts, so the
+// number of samples does not depend on how quickly the steps before it finished. It is bounded:
+// a probe that cannot record the attempts in time fails the step with the count it reached.
+func (s *Steps) waitForBackgroundAttempts(ctx context.Context, name string, minimum int) error {
+	probe, err := namedProbe(ctx, name)
+	if err != nil {
+		return err
+	}
+	deadline := time.NewTimer(backgroundAttemptsWait)
+	defer deadline.Stop()
+	ticker := time.NewTicker(backgroundTrafficInterval)
+	defer ticker.Stop()
+	for {
+		got := len(probe.snapshot())
+		if got >= minimum {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("waiting for background traffic %q to record %d attempts: %w", name, minimum, ctx.Err())
+		case <-deadline.C:
+			return fmt.Errorf("background traffic %q recorded %d attempts within %s, want at least %d",
+				name, got, backgroundAttemptsWait, minimum)
+		case <-ticker.C:
+		}
 	}
 }
 

@@ -59,9 +59,7 @@ Feature: Dynamic endpoint configuration changes on a deployed API
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/v1.0/l11/probe" until the JSON field "path" is "/bbb/l11/probe"
     Then the response should be served by the "echo" testbench service
-    When I send 10 "GET" requests to "${CTX:apiContext}/v1.0/l11/probe"
-    Then the response should be served by the "echo" testbench service
-    And the JSON response field "path" should be "/bbb/l11/probe"
+    When I send 10 "GET" requests to "${CTX:apiContext}/v1.0/l11/probe" and every response should have the JSON field "path" equal to "/bbb/l11/probe" and be served by the "echo" testbench service
 
   @de-12
   Scenario: Adding and removing the policy changes routing without a gateway restart
@@ -192,6 +190,4 @@ Feature: Dynamic endpoint configuration changes on a deployed API
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/v1.0/l25/probe" until the JSON field "path" is "/second/l25/probe"
     Then the response should be served by the "echo" testbench service
-    When I send 10 "GET" requests to "${CTX:apiContext}/v1.0/l25/probe"
-    Then the JSON response field "path" should be "/second/l25/probe"
-    And the response body should not contain "/first"
+    When I send 10 "GET" requests to "${CTX:apiContext}/v1.0/l25/probe" and every response should have the JSON field "path" equal to "/second/l25/probe" and be served by the "echo" testbench service
