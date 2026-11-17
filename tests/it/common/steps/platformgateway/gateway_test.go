@@ -1322,6 +1322,23 @@ func TestControllerResourceKindsHaveCleanupKinds(t *testing.T) {
 	require.False(t, ok)
 }
 
+// A gateway-wide Backend is created through its own collection, swept by the management API, and
+// swept after every API: the gateway refuses to delete a Backend a deployed API names as a fixed
+// target.
+func TestBackendResourceKindIsSweptAfterAPIs(t *testing.T) {
+	backend, ok := resourceKinds["Backend"]
+	require.True(t, ok, "the Backend step kind is registered")
+	require.Equal(t, "Backend", backend.declared)
+	require.Equal(t, "/backends", backend.collection)
+
+	kind, ok := cleanupKindForCollection(backend.collection)
+	require.True(t, ok)
+	require.Equal(t, KindBackend, kind)
+	require.Equal(t, "/backends", managementCollections[KindBackend])
+	require.Greater(t, KindBackend.Order, cleanup.KindAPI.Order)
+	require.Less(t, KindBackend.Order, cleanup.KindGateway.Order)
+}
+
 // agentTestBase is a Base whose data plane is one test server.
 type agentTestBase struct {
 	url     string
