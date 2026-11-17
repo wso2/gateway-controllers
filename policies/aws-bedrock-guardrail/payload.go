@@ -137,8 +137,8 @@ func encodeJSON(doc interface{}) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// sseEvent is one event of a Server-Sent Events stream.
-type sseEvent struct {
+// payloadEvent is one event of a Server-Sent Events stream.
+type payloadEvent struct {
 	lines []string
 	doc   interface{}
 	dirty bool
@@ -170,13 +170,13 @@ func normalizeLineEndings(payload []byte) string {
 func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*extractedPayload, error) {
 	normalized := normalizeLineEndings(payload)
 
-	var events []*sseEvent
-	current := &sseEvent{}
+	var events []*payloadEvent
+	current := &payloadEvent{}
 	for _, line := range strings.Split(normalized, "\n") {
 		if line == "" {
 			if len(current.lines) > 0 {
 				events = append(events, current)
-				current = &sseEvent{}
+				current = &payloadEvent{}
 			}
 			continue
 		}

@@ -13,14 +13,18 @@ import (
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
+// TestAWSBedrockGuardrailPolicy_Mode covers the instance no flow is configured
+// on. GetPolicy rejects that shape, so this only pins that an instance which
+// validates nothing asks the kernel for nothing — the configured shapes are in
+// TestMode_FollowsConfiguration.
 func TestAWSBedrockGuardrailPolicy_Mode(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 	got := p.Mode()
 	want := policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
-		RequestBodyMode:    policy.BodyModeBuffer,
+		RequestBodyMode:    policy.BodyModeSkip,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   policy.BodyModeSkip,
 	}
 	if got != want {
 		t.Fatalf("unexpected mode: got %+v, want %+v", got, want)
@@ -187,12 +191,12 @@ func TestEvaluateGuardrailResponse_BasicActions(t *testing.T) {
 	p := &AWSBedrockGuardrailPolicy{}
 	metadata := map[string]interface{}{}
 
-	violation, replacements, err := p.evaluateGuardrailResponse(nil, false, true, metadata)
-	if !violation || replacements != nil || err == nil {
-		t.Fatalf("expected invalid response error, got violation=%v replacements=%v err=%v", violation, replacements, err)
+	violation, modified, err := p.evaluateGuardrailResponse(nil, "hello", false, true, metadata)
+	if !violation || modified != "" || err == nil {
+		t.Fatalf("expected invalid response error, got violation=%v modified=%q err=%v", violation, modified, err)
 	}
 
-	violation, _, err = p.evaluateGuardrailResponse("bad-type", false, true, metadata)
+	violation, modified, err = p.evaluateGuardrailResponse("bad-type", "hello", false, true, metadata)
 	if !violation || err == nil {
 		t.Fatalf("expected invalid output type error, got violation=%v err=%v", violation, err)
 	}
@@ -201,16 +205,16 @@ func TestEvaluateGuardrailResponse_BasicActions(t *testing.T) {
 		Action:      types.GuardrailActionNone,
 		Assessments: []types.GuardrailAssessment{},
 	}
-	violation, replacements, err = p.evaluateGuardrailResponse(noViolationOutput, false, true, metadata)
-	if violation || len(replacements) != 0 || err != nil {
-		t.Fatalf("expected no violation for action NONE, got violation=%v replacements=%v err=%v", violation, replacements, err)
+	violation, modified, err = p.evaluateGuardrailResponse(noViolationOutput, "hello", false, true, metadata)
+	if violation || modified != "" || err != nil {
+		t.Fatalf("expected no violation for action NONE, got violation=%v modified=%q err=%v", violation, modified, err)
 	}
 
 	unexpectedOutput := &bedrockruntime.ApplyGuardrailOutput{
 		Action:      types.GuardrailAction("UNKNOWN"),
 		Assessments: []types.GuardrailAssessment{},
 	}
-	violation, _, err = p.evaluateGuardrailResponse(unexpectedOutput, false, true, metadata)
+	violation, modified, err = p.evaluateGuardrailResponse(unexpectedOutput, "hello", false, true, metadata)
 	if !violation || err == nil {
 		t.Fatalf("expected unexpected action error, got violation=%v err=%v", violation, err)
 	}
@@ -223,29 +227,29 @@ func TestEvaluateGuardrailResponse_InterventionPaths(t *testing.T) {
 		Action:      types.GuardrailActionGuardrailIntervened,
 		Assessments: []types.GuardrailAssessment{},
 	}
-	violation, replacements, err := p.evaluateGuardrailResponse(noPIIOutput, false, true, map[string]interface{}{})
-	if !violation || len(replacements) != 0 || err != nil {
-		t.Fatalf("expected violation for non-PII intervention, got violation=%v replacements=%v err=%v", violation, replacements, err)
+	violation, modified, err := p.evaluateGuardrailResponse(noPIIOutput, "hello", false, true, map[string]interface{}{})
+	if !violation || modified != "" || err != nil {
+		t.Fatalf("expected violation for non-PII intervention, got violation=%v modified=%q err=%v", violation, modified, err)
 	}
 
 	original := "contact john@example.com"
 	output := makePIIIntervenedOutput("john@example.com")
 	metadata := map[string]interface{}{}
 
-	violation, replacements, err = p.evaluateGuardrailResponse(output, true, true, metadata)
+	violation, modified, err = p.evaluateGuardrailResponse(output, original, true, true, metadata)
 	if violation || err != nil {
 		t.Fatalf("expected redact path to pass with modified content, got violation=%v err=%v", violation, err)
 	}
-	if modified := applyPIIReplacements(original, replacements); !strings.Contains(modified, "*****") {
+	if !strings.Contains(modified, "*****") {
 		t.Fatalf("expected redacted content, got: %q", modified)
 	}
 
 	metadata = map[string]interface{}{}
-	violation, replacements, err = p.evaluateGuardrailResponse(output, false, true, metadata)
+	violation, modified, err = p.evaluateGuardrailResponse(output, original, false, true, metadata)
 	if violation || err != nil {
 		t.Fatalf("expected masking path to pass, got violation=%v err=%v", violation, err)
 	}
-	if modified := applyPIIReplacements(original, replacements); modified == original || !strings.Contains(modified, "EMAIL_0000") {
+	if modified == original || !strings.Contains(modified, "EMAIL_0000") {
 		t.Fatalf("expected masked placeholder in content, got: %q", modified)
 	}
 
@@ -254,13 +258,9 @@ func TestEvaluateGuardrailResponse_InterventionPaths(t *testing.T) {
 		t.Fatalf("expected metadata to include original->placeholder mapping, got: %#v", metadata[MetadataKeyPIIEntities])
 	}
 
-	// Response phase: PII from the upstream is masked with its type, not passed through.
-	violation, replacements, err = p.evaluateGuardrailResponse(output, false, false, metadata)
-	if violation || err != nil {
-		t.Fatalf("expected response masking path to pass, got violation=%v err=%v", violation, err)
-	}
-	if modified := applyPIIReplacements(original, replacements); modified != "contact {EMAIL}" {
-		t.Fatalf("expected response PII to be masked, got: %q", modified)
+	violation, modified, err = p.evaluateGuardrailResponse(output, original, false, false, metadata)
+	if violation || modified != "" || err != nil {
+		t.Fatalf("expected response masking path to return no-op, got violation=%v modified=%q err=%v", violation, modified, err)
 	}
 }
 
@@ -339,31 +339,33 @@ func TestExtractPayloadEventStreamWithoutJSONRPC(t *testing.T) {
 	}
 }
 
-// withPassingBedrock wires a mocked Bedrock that reports no intervention.
-func withPassingBedrock(p *AWSBedrockGuardrailPolicy) *AWSBedrockGuardrailPolicy {
-	mockClient := &mockBedrockClient{
-		output: &bedrockruntime.ApplyGuardrailOutput{Action: types.GuardrailActionNone},
-	}
-	p.loadAWSConfigFunc = func(_ context.Context, _ string) (aws.Config, error) {
-		return aws.Config{}, nil
-	}
-	p.newBedrockClientFunc = func(_ aws.Config) bedrockGuardrailClient {
-		return mockClient
-	}
-	return p
-}
-
 func TestValidatePayload_EarlyAndErrorPaths(t *testing.T) {
-	p := withPassingBedrock(&AWSBedrockGuardrailPolicy{})
+	p := &AWSBedrockGuardrailPolicy{}
 
-	// Response restoration happens after the response passes the guardrail.
+	// A restored response is assessed and then delivered. It used to return here
+	// without being assessed at all, so the guardrail never saw a response whose
+	// request had masked something.
+	assessed := &AWSBedrockGuardrailPolicy{
+		region:           "us-east-1",
+		guardrailID:      "gr-123",
+		guardrailVersion: "DRAFT",
+		loadAWSConfigFunc: func(_ context.Context, _ string) (aws.Config, error) {
+			return aws.Config{}, nil
+		},
+		newBedrockClientFunc: func(_ aws.Config) bedrockGuardrailClient {
+			return &mockBedrockClient{output: &bedrockruntime.ApplyGuardrailOutput{
+				Action: types.GuardrailActionNone,
+			}}
+		},
+	}
 	metadata := map[string]interface{}{
 		MetadataKeyPIIEntities: map[string]string{
 			"alice@example.com": "EMAIL_0000",
 		},
 	}
-	restored := p.validatePayload([]byte(`{"msg":"EMAIL_0000"}`), AWSBedrockGuardrailPolicyParams{
+	restored := assessed.validatePayload([]byte(`{"msg":"EMAIL_0000"}`), AWSBedrockGuardrailPolicyParams{
 		RedactPII: false,
+		JsonPath:  "$.msg",
 	}, true, metadata)
 	respMod, ok := restored.(policy.DownstreamResponseModifications)
 	if !ok {
@@ -571,13 +573,27 @@ func TestOnResponse_DisabledResponseFlow_ReturnsNoOp(t *testing.T) {
 }
 
 func TestOnResponse_RestoreAndBlockPaths(t *testing.T) {
-	restorePolicy := withPassingBedrock(&AWSBedrockGuardrailPolicy{
+	restorePolicy := &AWSBedrockGuardrailPolicy{
+		region:            "us-east-1",
+		guardrailID:       "gr-123",
+		guardrailVersion:  "DRAFT",
 		hasResponseParams: true,
 		responseParams: AWSBedrockGuardrailPolicyParams{
 			Enabled:   true,
 			RedactPII: false,
+			JsonPath:  "$.msg",
 		},
-	})
+		loadAWSConfigFunc: func(_ context.Context, _ string) (aws.Config, error) {
+			return aws.Config{}, nil
+		},
+		// The restored response is assessed now, so the assessment has to be
+		// mocked; it used to be returned before any AWS call.
+		newBedrockClientFunc: func(_ aws.Config) bedrockGuardrailClient {
+			return &mockBedrockClient{output: &bedrockruntime.ApplyGuardrailOutput{
+				Action: types.GuardrailActionNone,
+			}}
+		},
+	}
 
 	restoreCtx := &policy.ResponseContext{
 		SharedContext: &policy.SharedContext{

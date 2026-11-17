@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": -32602,
+      "message": "Missing MCP tools name"
+    },
+    "id": 43,
+    "jsonrpc": "2.0"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}

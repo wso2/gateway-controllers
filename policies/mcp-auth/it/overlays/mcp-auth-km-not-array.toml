@@ -1,0 +1,25 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# MAN #32: the gateway configured with keymanagers that is not a list. mcp-auth then refuses to build the
+# protected-resource metadata for every proxy (500).
+[policy_configurations.jwtauth_v1]
+keymanagers = "mock-jwks"
+
+[policy_configurations.mcpauth_v1]
+gatewayurl = "https://mcp-e2e-gatewayurl.example.com:7777"

@@ -1324,8 +1324,8 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	sc.Step(`^the "([^"]*)" service logs should contain "([^"]*)"$`, g.serviceLogsContain)
 	sc.Step(`^the "([^"]*)" service logs should not contain "([^"]*)"$`, g.serviceLogsNotContain)
 	sc.Step(`^the "([^"]*)" service logs should have exactly (\d+) lines? containing:$`, g.serviceLogLinesCount)
-	sc.Step(`^the "([^"]*)" service log event containing "([^"]*)" should not contain "([^"]*)"$`,
-		g.serviceLogEventExcludes)
+	sc.Step(`^the "([^"]*)" service log event containing "([^"]*)" should( not)? contain "([^"]*)"$`,
+		g.serviceLogEvent)
 	sc.Step(`^I send a "([^"]*)" request to the "([^"]*)" service at "([^"]*)" until lazy resource "([^"]*)" has display name "([^"]*)"$`,
 		g.serviceRequestUntilLazyDisplayName)
 	sc.Step(`^I send a "([^"]*)" request to the "([^"]*)" service at "([^"]*)" until provider template mapping "([^"]*)" maps to template "([^"]*)"$`,
@@ -1815,6 +1815,9 @@ var serviceEndpoints = map[string]struct {
 	"jev-tls": {component: "testbench", endpoint: "jev-tls"},
 	// The scripted MCP server, addressed like jev: a scenario names its own partition.
 	"mcp-scripted": {component: "testbench", endpoint: "mcp-scripted"},
+	// The stateless MCP server (port 3009), addressed directly so a scenario can compare what
+	// the gateway serves with what the server itself serves.
+	"mcp": {component: "testbench", endpoint: "mcp"},
 	// Metrics live on a DIFFERENT compose service from the one tests normally address —
 	// controller metrics on the controller, policy-engine metrics on the runtime — which the
 	// component contract resolves via Endpoint.Service. No base path: a scrape is not an API.
@@ -2166,81 +2169,111 @@ func (g *Gateway) serviceRequestUntilBodyNotContains(
 	return err
 }
 
-// serviceLogsContain waits until a service log contains the supplied marker.
-func (g *Gateway) serviceLogsContain(ctx context.Context, service, marker string) error {
-	return g.assertServiceLogs(ctx, service, marker, true)
-}
-
-// serviceLogsNotContain waits until a service log no longer contains the supplied marker.
-func (g *Gateway) serviceLogsNotContain(ctx context.Context, service, marker string) error {
-	stack, _, err := g.topo.ServiceControl(service)
+// serviceLogsContain waits until the service log contains text, and fails if it never does.
+func (g *Gateway) serviceLogsContain(ctx context.Context, service, text string) error {
+	text, err := expandLogText(ctx, text)
 	if err != nil {
 		return err
-	}
-	logs := stack.Logs(ctx)
-	if strings.Contains(logs, marker) {
-		return fmt.Errorf("service %q logs unexpectedly contain %q", service, marker)
-	}
-	return nil
-}
-
-// serviceLogEventExcludes waits for the event identified by marker and checks the
-// exclusion against that event rather than the complete historical log.
-func (g *Gateway) serviceLogEventExcludes(ctx context.Context, service, marker, excluded string) error {
-	if strings.TrimSpace(marker) == "" || strings.TrimSpace(excluded) == "" {
-		return fmt.Errorf("service log event marker and excluded text must not be empty")
-	}
-	stack, _, err := g.topo.ServiceControl(service)
-	if err != nil {
-		return err
-	}
-	last := ""
-	_, err = retry.Until(ctx, retry.Options{Interval: 200 * time.Millisecond}, func(ctx context.Context) (string, error) {
-		last = stack.Logs(ctx)
-		return last, nil
-	}, func(logs string) bool {
-		for _, line := range strings.Split(logs, "\n") {
-			if strings.Contains(line, marker) {
-				return !strings.Contains(line, excluded)
-			}
-		}
-		return false
-	})
-	if err != nil {
-		return fmt.Errorf("waiting for log event containing %q without %q: %w; last logs: %s",
-			marker, excluded, err, truncateLog(last))
-	}
-	return nil
-}
-
-func (g *Gateway) assertServiceLogs(ctx context.Context, service, marker string, wantPresent bool) error {
-	if strings.TrimSpace(marker) == "" {
-		return fmt.Errorf("service log marker must not be empty")
 	}
 	stack, resolved, err := g.topo.ServiceControl(service)
 	if err != nil {
 		return err
 	}
-	last := ""
-	_, err = retry.Until(ctx, retry.Options{Interval: 200 * time.Millisecond}, func(ctx context.Context) (string, error) {
-		last = stack.Logs(ctx)
-		return last, nil
-	}, func(logs string) bool {
-		present := strings.Contains(logs, marker)
-		if wantPresent {
-			return present
-		}
-		return !present
-	})
+	return awaitLogs(ctx, stack.Logs, func(logs string) bool { return strings.Contains(logs, text) },
+		fmt.Sprintf("%s logs for service %q to contain %q", resolved, service, text))
+}
+
+// serviceLogsNotContain checks the service log as it stands. A log only grows, so absence is
+// checked once rather than waited for.
+func (g *Gateway) serviceLogsNotContain(ctx context.Context, service, text string) error {
+	text, err := expandLogText(ctx, text)
 	if err != nil {
-		state := "present"
-		if !wantPresent {
-			state = "absent"
-		}
-		return fmt.Errorf("waiting for %s logs for service %q to become %s: %w; last logs: %s",
-			resolved, service, state, err, truncateLog(last))
+		return err
+	}
+	stack, _, err := g.topo.ServiceControl(service)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(stack.Logs(ctx), text) {
+		return fmt.Errorf("service %q logs unexpectedly contain %q", service, text)
 	}
 	return nil
+}
+
+// serviceLogEvent waits for a log line containing marker. "should contain" passes once any such
+// line also contains text; "should not contain" checks the first such line, the event the marker
+// identifies, so a line another logger writes later with the same marker does not count.
+func (g *Gateway) serviceLogEvent(ctx context.Context, service, marker, negation, text string) error {
+	marker, err := expandLogText(ctx, marker)
+	if err != nil {
+		return err
+	}
+	text, err = expandLogText(ctx, text)
+	if err != nil {
+		return err
+	}
+	stack, resolved, err := g.topo.ServiceControl(service)
+	if err != nil {
+		return err
+	}
+	return awaitLogEvent(ctx, stack.Logs, marker, text, negation == "",
+		fmt.Sprintf("%s logs for service %q", resolved, service))
+}
+
+// awaitLogEvent waits for a line of read's log containing marker. With want, it waits until one
+// such line also contains text; without, it fails if the first such line contains text.
+func awaitLogEvent(
+	ctx context.Context, read func(context.Context) string, marker, text string, want bool, where string,
+) error {
+	var events []string
+	accept := func(logs string) bool {
+		events = linesContainingAll(logs, []string{marker})
+		if !want {
+			return len(events) > 0
+		}
+		return slices.ContainsFunc(events, func(line string) bool { return strings.Contains(line, text) })
+	}
+	what := fmt.Sprintf("%s to hold an event containing %q", where, marker)
+	if want {
+		what = fmt.Sprintf("%s to hold an event containing %q and %q", where, marker, text)
+	}
+	if err := awaitLogs(ctx, read, accept, what); err != nil {
+		return err
+	}
+	if !want && strings.Contains(events[0], text) {
+		return fmt.Errorf("%s: the event containing %q also contains %q: %s",
+			where, marker, text, truncateLog(events[0]))
+	}
+	return nil
+}
+
+// awaitLogs polls read until accept holds. It fails when accept never held, which a bare
+// retry.Until does not report; the failure shows the end of the last log read.
+func awaitLogs(ctx context.Context, read func(context.Context) string, accept func(string) bool, what string) error {
+	return retry.Await(ctx, retry.Options{Interval: 200 * time.Millisecond, Fast: true},
+		func(ctx context.Context) (logSnapshot, error) { return logSnapshot(read(ctx)), nil },
+		func(logs logSnapshot) bool { return accept(string(logs)) },
+		"waiting for "+what)
+}
+
+// logSnapshot is one read of a service log. Describe keeps a failure message to the log's end,
+// where a missing line would have been written.
+type logSnapshot string
+
+// Describe returns the end of the log.
+func (l logSnapshot) Describe() string { return truncateLog(string(l)) }
+
+// expandLogText resolves ${CTX:...} and ${UNIQUE:...} placeholders in a log step's text, which
+// must not be blank once resolved.
+func expandLogText(ctx context.Context, text string) (string, error) {
+	resolved, err := stepscommon.Expand(ctx, text)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(resolved) == "" {
+		return "", fmt.Errorf("service log text %q must not be blank", text)
+	}
+	return resolved, nil
 }
 
 // logCountSettle is how long serviceLogLinesCount keeps reading after the count is reached, so a

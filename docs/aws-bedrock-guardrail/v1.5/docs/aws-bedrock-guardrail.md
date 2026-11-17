@@ -23,6 +23,7 @@ Every setting can be configured per policy attachment or gateway-wide. An attach
 - **Gateway-level allowlists**: Operators can restrict which regions, guardrails, roles, and credential modes attachments may select
 - **JSONPath support**: Extract and validate specific fields within JSON payloads, with wildcards and every string inside a selected object
 - **MCP support**: Validates MCP tool calls and tool results, including Server-Sent Events (Streamable HTTP) responses
+- **Streaming responses**: Validates streamed LLM responses (`stream: true`) a text unit at a time, so tokens still reach the client incrementally
 - **Separate request/response configuration**: Independent configuration for request and response phases
 - **Response status code selection**: Validate only responses with the configured upstream status codes, so provider error responses reach the client unchanged
 
@@ -167,6 +168,8 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
 | `applicableStatusCodes` | string | No | – | Comma-separated upstream response status codes and inclusive ranges to validate, such as `"200-299,422"`. Codes must be between `100` and `599`, and a range must not start after it ends. Responses with any other status code are passed through to the client unchanged. If not set, every response is validated. |
+| `streamingJsonPath` | string | No | `"$.choices[0].delta.content"` | JSONPath locating the assistant text inside one streamed event of an LLM response. Separate from `jsonPath` because a streamed response carries its text under a different field than a buffered one. The default suits the OpenAI streaming format, which is also what `openai-to-bedrock-transformer` emits. See [Streaming responses](#streaming-responses). |
+| `streamingTextUnitChars` | integer | No | `1000` | How many characters of streamed response text to assess at a time. Each batch is withheld until assessed. `1000` is Amazon's text unit and billing unit. Lower values give earlier first tokens but more `ApplyGuardrail` calls and a longer total time; `0` assesses the whole response when the stream ends. Minimum `100`. |
 
 #### JSONPath Support
 
@@ -205,6 +208,23 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
 - name: aws-bedrock-guardrail
   gomodule: github.com/wso2/gateway-controllers/policies/aws-bedrock-guardrail@v1
 ```
+
+#### Streaming responses
+
+A response flow on an LLM route can be streamed. With `stream: true`, the policy assesses the response a text unit at a time instead of holding it whole:
+
+- Assistant text is read from each event with `streamingJsonPath` and collected into batches of `streamingTextUnitChars` characters, cut at a sentence or word boundary.
+- Each batch is withheld until `ApplyGuardrail` has assessed it, so no unassessed text reaches the client. The first text therefore arrives after about one text unit has been generated and assessed; the rest of the response follows in batches.
+- A violation found mid-stream cannot become HTTP `422`, because the `200` status and headers have already been sent. The stream ends with a final event carrying the guardrail error instead, and the termination is reported as a fault. Text delivered before the violating batch stays delivered. An API that must never deliver any text before the whole response is assessed should not stream.
+- A response whose body is a single JSON document arriving over chunked transfer is accumulated whole and answered with `422` as before.
+
+Only an attachment whose response flow is enabled takes part in streaming. A request-only attachment does not hold the response back, and an attachment with neither flow enabled is skipped entirely.
+
+When another policy on the route requires the whole response body, the gateway buffers the route and a streamed response reaches this policy whole. It is still read event by event with `streamingJsonPath`, and is assessed and delivered as a whole.
+
+Place this policy before `openai-to-bedrock-transformer` in the policy list. Response policies run in reverse order, so the transformer has already turned Bedrock's event stream into OpenAI Server-Sent Events by the time this policy reads it.
+
+Known limitation: in masking mode, a request placeholder such as `EMAIL_0000` is restored one event at a time. When the model splits a placeholder across two events, it can reach the client as the placeholder rather than the original value. Non-streamed responses are not affected.
 
 ## Reference Scenarios
 
@@ -523,11 +543,11 @@ With this configuration, an upstream `403` is returned to the client as is, whil
 #### Response Phase
 
 1. **Status check**: When `applicableStatusCodes` is set, a response whose upstream status code is not listed is passed through unchanged and the remaining steps are skipped. A response with an unknown status code is always validated.
-2. **Content extraction**: Extracts content using `jsonPath` from a JSON body or from each event of a Server-Sent Events body, or uses the entire payload.
-3. **Guardrail evaluation**: Validates the response content through the guardrail, before any placeholder is restored.
-4. **Violation handling**: Blocks and returns HTTP `422` when any finding has the action `BLOCKED`.
-5. **PII masking**: PII that the guardrail anonymizes in the response is replaced with its type in braces, such as `{EMAIL}` (or `*****` with `redactPII: true`). This covers PII that the upstream adds, such as an MCP tool result.
-6. **PII restoration**: In masking mode, restores the request's placeholders with the original values when mappings are available from request metadata.
+2. **PII restoration**: In masking mode, restores the request's placeholders with the original values when mappings are available from request metadata. The restored text is what the guardrail assesses, because it is what the client receives.
+3. **Content extraction**: Extracts content using `jsonPath` from a JSON body or from each event of an MCP Server-Sent Events body, using `streamingJsonPath` for a streamed LLM response, or uses the entire payload.
+4. **Guardrail evaluation**: Validates the response content through the guardrail.
+5. **Violation handling**: Blocks and returns HTTP `422` (or ends a stream) when any finding has the action `BLOCKED`.
+6. **PII masking**: PII that the guardrail anonymizes in the response is replaced with its type in braces, such as `{EMAIL}` (or `*****` with `redactPII: true`). This covers PII that the upstream adds, such as an LLM answer or an MCP tool result. A value the request masked and this phase restored is not masked again.
 7. **Error Strategy**: Applies `passthroughOnError` behavior for extraction errors and Bedrock API failures.
 
 #### Credential resolution
@@ -536,7 +556,7 @@ The credentials provider is built **once**, when the policy attachment is create
 
 #### PII Handling Modes
 
-- **Masking mode (`redactPII: false`)**: In the request, PII entities are replaced with placeholders such as `EMAIL_0001`, `PHONE_0002`, restorable in the response phase. In the response, new PII is replaced with its type, such as `{EMAIL}`, and is not restored.
+- **Masking mode (`redactPII: false`)**: In the request, PII entities are replaced with placeholders such as `EMAIL_0001`, `PHONE_0002`, restorable in the response phase. In the response, new PII is replaced with its type, such as `{EMAIL}`, and is not restored. A value the request masked is restored, not replaced with its type.
 - **Redaction mode (`redactPII: true`)**: PII entities are permanently replaced with `*****`.
 
 ## Notes
@@ -547,7 +567,7 @@ The credentials provider is built **once**, when the policy attachment is create
 - PII masking with restoration stores the mapping between original and masked values in request metadata.
 - Content modifications (PII masking) are forwarded upstream if no blocking violation occurs.
 - Request and response phases are validated independently when both are configured.
-- A guardrail intervention is masked only when every finding is `ANONYMIZED`. Any `BLOCKED` finding blocks the content, and an intervention with no finding the policy can identify is blocked.
+- A guardrail intervention is masked only when every finding is `ANONYMIZED`. Any `BLOCKED` finding blocks the content, and an intervention with no finding the policy can identify, or an `ANONYMIZED` finding with no matched text to mask, is blocked.
 - Keep `showAssessment` set to `false` in production. The assessment tells the caller which filter matched, which helps an attacker tune a bypass.
 - Credential material is never written to logs. The session name, not the credentials, is what identifies the gateway in the target account's CloudTrail.
 

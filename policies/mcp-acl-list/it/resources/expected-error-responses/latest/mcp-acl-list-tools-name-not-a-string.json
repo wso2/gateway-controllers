@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": -32600,
+      "message": "Request body has a member of the wrong type"
+    },
+    "id": null,
+    "jsonrpc": "2.0"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}
