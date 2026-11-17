@@ -155,11 +155,11 @@ systemParameters:
                 description: RFC 7662 token_type_hint sent with the introspection request.
               certificatePath:
                 type: string
-                description: Optional path to a CA certificate file for validating a self-signed introspection endpoint (e.g., /etc/certs/ca.pem).
+                description: Optional path to a CA certificate file for validating a self-signed introspection endpoint (e.g., /etc/certs/ca.pem). Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure TLS roots and client certificates under [policy_engine.http_client].
               skipTlsVerify:
                 type: boolean
                 default: false
-                description: If true, skip TLS certificate verification for the introspection endpoint. Use with caution, only for testing or trusted internal endpoints.
+                description: If true, skip TLS certificate verification for the introspection endpoint. Use with caution, only for testing or trusted internal endpoints. Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure TLS roots and client certificates under [policy_engine.http_client].
       "wso2/defaultValue": "${config.policy_configurations.opaquetokenauth_v1.introspectionproviders}"
 
     introspectionCacheTtl:

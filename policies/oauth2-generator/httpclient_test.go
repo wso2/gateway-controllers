@@ -18,9 +18,16 @@
 package oauth2generator
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/pem"
-	"net"
+	"log/slog"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,21 +38,38 @@ import (
 	"github.com/wso2/api-platform/sdk/core/utils"
 )
 
-// installSharedClient installs a counting shared client for the test and
+// engineLikeTransport mimics httpkit: the shared client's transport is a
+// wrapper around an *http.Transport, never a bare one.
+type engineLikeTransport struct {
+	calls atomic.Int32
+	next  http.RoundTripper
+}
+
+func (e *engineLikeTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	e.calls.Add(1)
+	return e.next.RoundTrip(r)
+}
+
+// installSharedClient installs an engine-like shared client for the test and
 // restores the nil default afterwards.
-func installSharedClient(t *testing.T) (*http.Client, *atomic.Int32) {
+func installSharedClient(t *testing.T) (*http.Client, *engineLikeTransport) {
 	t.Helper()
-	var dials atomic.Int32
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		dials.Add(1)
-		return (&net.Dialer{}).DialContext(ctx, network, addr)
-	}
-	client := &http.Client{Transport: transport, Timeout: 42 * time.Second}
+	inner := http.DefaultTransport.(*http.Transport).Clone()
+	inner.Proxy = nil
+	rt := &engineLikeTransport{next: inner}
+	client := &http.Client{Transport: rt, Timeout: 42 * time.Second}
 	utils.SetSharedHTTPClient(client)
 	t.Cleanup(func() { utils.SetSharedHTTPClient(nil) })
-	return client, &dials
+	return client, rt
+}
+
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func serverCAPEM(srv *httptest.Server) string {
@@ -67,7 +91,7 @@ func get(t *testing.T, client *http.Client, url string) error {
 }
 
 func TestOutboundClient_UsesSharedClientWithoutMutatingIt(t *testing.T) {
-	shared, dials := installSharedClient(t)
+	shared, rt := installSharedClient(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 
@@ -78,8 +102,8 @@ func TestOutboundClient_UsesSharedClientWithoutMutatingIt(t *testing.T) {
 	if client == shared {
 		t.Fatal("expected a copy of the shared client, not the shared client itself")
 	}
-	if client.Transport != shared.Transport {
-		t.Error("expected the shared transport to be reused when no override is configured")
+	if client.Transport != http.RoundTripper(rt) {
+		t.Error("expected the shared transport to be reused")
 	}
 	if client.Timeout != 7*time.Second || shared.Timeout != 42*time.Second {
 		t.Errorf("timeout must apply to the copy only, got copy=%v shared=%v", client.Timeout, shared.Timeout)
@@ -87,8 +111,19 @@ func TestOutboundClient_UsesSharedClientWithoutMutatingIt(t *testing.T) {
 	if err := get(t, client, srv.URL); err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
-	if dials.Load() == 0 {
-		t.Error("expected the request to dial through the shared client's transport")
+	if rt.calls.Load() == 0 {
+		t.Error("expected the request to go through the shared client's transport")
+	}
+}
+
+func TestOutboundClient_SharedClientIgnoresOverrides(t *testing.T) {
+	shared, rt := installSharedClient(t)
+	client, err := outboundClient(outboundOptions{proxyURL: "http://proxy.internal:8080", tlsCACert: "x", insecure: true}, time.Second)
+	if err != nil {
+		t.Fatalf("overrides must not error with the shared client: %v", err)
+	}
+	if client.Transport != http.RoundTripper(rt) || shared.Transport != http.RoundTripper(rt) {
+		t.Fatal("shared transport must be used untouched")
 	}
 }
 
@@ -106,8 +141,8 @@ func TestOutboundClient_NoSharedClient_UsesFallback(t *testing.T) {
 	}
 }
 
-func TestOutboundClient_CustomCAApplies_AndKeepsDialGuard(t *testing.T) {
-	shared, dials := installSharedClient(t)
+func TestOutboundClient_Fallback_CustomCAApplies(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 
@@ -118,8 +153,6 @@ func TestOutboundClient_CustomCAApplies_AndKeepsDialGuard(t *testing.T) {
 	if err := get(t, plain, srv.URL); err == nil {
 		t.Fatal("expected an untrusted-certificate failure without the custom CA")
 	}
-
-	before := dials.Load()
 	withCA, err := outboundClient(outboundOptions{tlsCACert: serverCAPEM(srv)}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -127,16 +160,28 @@ func TestOutboundClient_CustomCAApplies_AndKeepsDialGuard(t *testing.T) {
 	if err := get(t, withCA, srv.URL); err != nil {
 		t.Fatalf("expected the custom CA to be trusted: %v", err)
 	}
-	if dials.Load() <= before {
-		t.Error("expected the derived transport to keep the shared client's dial hook")
-	}
-	if cfg := shared.Transport.(*http.Transport).TLSClientConfig; cfg != nil && (cfg.RootCAs != nil || cfg.InsecureSkipVerify) {
-		t.Error("the shared transport must not be mutated")
+	if cfg := fallbackHTTPClient().Transport.(*http.Transport).TLSClientConfig; cfg != nil {
+		t.Error("the fallback transport must not be mutated")
 	}
 }
 
-func TestOutboundClient_InsecureSkipVerifyApplies(t *testing.T) {
-	installSharedClient(t)
+func TestOutboundClient_Fallback_WrongCAFails(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	// A valid PEM that did not sign the server certificate.
+	other, _ := x509ForTest(t)
+	client, err := outboundClient(outboundOptions{tlsCACert: other}, 5*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if err := get(t, client, srv.URL); err == nil {
+		t.Fatal("expected failure with a CA that did not sign the server")
+	}
+}
+
+func TestOutboundClient_Fallback_InsecureSkipVerifyApplies(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer srv.Close()
 	client, err := outboundClient(outboundOptions{insecure: true}, 5*time.Second)
@@ -148,21 +193,28 @@ func TestOutboundClient_InsecureSkipVerifyApplies(t *testing.T) {
 	}
 }
 
-func TestOutboundClient_ProxyOverrideApplies(t *testing.T) {
-	installSharedClient(t)
-	client, err := outboundClient(outboundOptions{proxyURL: "http://proxy.internal:8080"}, time.Second)
+func TestOutboundClient_Fallback_ProxyRoutesThroughProxy(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
+	var viaProxy atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		viaProxy.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer proxy.Close()
+	client, err := outboundClient(outboundOptions{proxyURL: proxy.URL}, 5*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	req, _ := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://idp.example.com/token", nil)
-	got, err := client.Transport.(*http.Transport).Proxy(req)
-	if err != nil || got == nil || got.Host != "proxy.internal:8080" {
-		t.Errorf("expected the configured proxy, got %v (err %v)", got, err)
+	if err := get(t, client, "http://idp.invalid/token"); err != nil {
+		t.Fatalf("request through the proxy failed: %v", err)
+	}
+	if viaProxy.Load() != 1 {
+		t.Fatalf("expected the request to reach the proxy, got %d", viaProxy.Load())
 	}
 }
 
-func TestOutboundClient_DerivedTransportIsCachedPerOptions(t *testing.T) {
-	installSharedClient(t)
+func TestOutboundClient_Fallback_DerivedTransportIsCachedPerOptions(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
 	a, _ := outboundClient(outboundOptions{proxyURL: "http://p1:8080"}, time.Second)
 	b, _ := outboundClient(outboundOptions{proxyURL: "http://p1:8080"}, 2*time.Second)
 	c, _ := outboundClient(outboundOptions{proxyURL: "http://p2:8080"}, time.Second)
@@ -171,21 +223,6 @@ func TestOutboundClient_DerivedTransportIsCachedPerOptions(t *testing.T) {
 	}
 	if a.Transport == c.Transport {
 		t.Error("different overrides must not share a transport")
-	}
-}
-
-type roundTripperFunc func(*http.Request) (*http.Response, error)
-
-func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
-
-func TestOutboundClient_NonHTTPTransportWithOverride_Errors(t *testing.T) {
-	utils.SetSharedHTTPClient(&http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, nil })})
-	t.Cleanup(func() { utils.SetSharedHTTPClient(nil) })
-	if _, err := outboundClient(outboundOptions{insecure: true}, time.Second); err == nil {
-		t.Fatal("expected an error rather than silently dropping the TLS override")
-	}
-	if _, err := outboundClient(outboundOptions{}, time.Second); err != nil {
-		t.Fatalf("no override requested, expected no error: %v", err)
 	}
 }
 
@@ -230,8 +267,42 @@ func TestRedirectGuardedClient_RefusesCrossOriginRedirect(t *testing.T) {
 	}
 }
 
-func TestBuildTokenSource_UsesSharedClient_AndCustomTLS(t *testing.T) {
-	_, dials := installSharedClient(t)
+func TestBuildTokenSource_SharedClientWithOverridesWorksAndWarnsOnce(t *testing.T) {
+	_, rt := installSharedClient(t)
+	logs := captureSlog(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"at","token_type":"Bearer","expires_in":0}`))
+	}))
+	defer srv.Close()
+
+	const secretProxy = "http://proxy-user:proxy-pass@proxy.internal:8080"
+	src, err := buildTokenSource(oauth2Params{
+		grantType: GrantTypeClientCredentials, tokenEndpoint: srv.URL, clientID: "c", clientSecret: "s",
+		tokenRequestTimeout: 5 * time.Second, proxyURL: secretProxy, tlsInsecureSkipVerify: true,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		tok, err := src.Token(context.Background())
+		if err != nil || tok.AccessToken != "at" {
+			t.Fatalf("expected a token via the shared client, got %v (err %v)", tok, err)
+		}
+	}
+	if rt.calls.Load() == 0 {
+		t.Error("expected the call to go through the shared client")
+	}
+	out := logs.String()
+	if n := strings.Count(out, "are ignored because the gateway's shared HTTP client is in use"); n != 1 {
+		t.Fatalf("expected exactly one warning, got %d: %s", n, out)
+	}
+	if strings.Contains(out, "proxy-pass") || strings.Contains(out, "proxy.internal") {
+		t.Error("warning must not include setting values")
+	}
+}
+
+func TestBuildTokenSource_Fallback_CustomTLS(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"access_token":"at","token_type":"Bearer","expires_in":3600}`))
 	}))
@@ -246,10 +317,7 @@ func TestBuildTokenSource_UsesSharedClient_AndCustomTLS(t *testing.T) {
 	}
 	tok, err := src.Token(context.Background())
 	if err != nil || tok.AccessToken != "at" {
-		t.Fatalf("expected a token via the shared client with the custom CA, got %v (err %v)", tok, err)
-	}
-	if dials.Load() == 0 {
-		t.Error("expected the call to go through the shared client's dial hook")
+		t.Fatalf("expected a token with the custom CA on the fallback client, got %v (err %v)", tok, err)
 	}
 }
 
@@ -257,4 +325,19 @@ func TestBuildTokenSource_InvalidTransportConfig(t *testing.T) {
 	if _, err := buildTokenSource(oauth2Params{grantType: GrantTypeClientCredentials, tlsCaCert: "not pem"}); err == nil {
 		t.Fatal("expected an error for an invalid CA bundle")
 	}
+}
+
+// x509ForTest returns a PEM CA certificate unrelated to any test server.
+func x509ForTest(t *testing.T) (string, error) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "unrelated"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})), nil
 }

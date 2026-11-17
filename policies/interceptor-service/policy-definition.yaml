@@ -60,7 +60,7 @@ parameters:
     tlsSkipVerify:
       type: boolean
       x-wso2-policy-advanced-param: true
-      description: Skip TLS verification for the interceptor service (dev only).
+      description: Skip TLS verification for the interceptor service (dev only). Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure TLS roots and client certificates under [policy_engine.http_client].
       default: false
   required:
     - endpoint

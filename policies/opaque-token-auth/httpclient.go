@@ -19,7 +19,6 @@ package opaquetokenauth
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -61,18 +60,10 @@ func fallbackHTTPClient() *http.Client {
 	return fallbackClient
 }
 
-// baseHTTPClient returns the process-wide outbound client
-// (sdk/core/utils.SharedHTTPClient), which the policy engine configures with
-// its own pooling, timeouts, proxy and dial-time SSRF guard. When the engine
-// has not installed one yet it logs a warning and returns fallbackHTTPClient.
-// The returned client may be shared with other policies: callers must treat it
-// as read-only and derive a copy for any per-policy change.
-func baseHTTPClient() *http.Client {
-	if client := utils.SharedHTTPClient(); client != nil {
-		return client
-	}
-	slog.Warn("Opaque Token Auth Policy: shared HTTP client not configured, using fallback client")
-	return fallbackHTTPClient()
+// sharedClientInstalled reports whether the gateway's shared outbound HTTP
+// client (sdk/core/utils.SharedHTTPClient) is in use.
+func sharedClientInstalled() bool {
+	return utils.SharedHTTPClient() != nil
 }
 
 type tlsTransportKey struct {
@@ -80,25 +71,27 @@ type tlsTransportKey struct {
 	base *http.Transport
 }
 
-// tlsTransports caches the per-TLS-config transport clones so connections to
-// an endpoint with custom TLS are pooled across calls instead of a fresh
-// transport being built per request.
+// tlsTransports caches the per-TLS-config transport clones of the fallback
+// transport so connections are pooled across calls.
 var tlsTransports sync.Map
 
-// clientWithTLS returns a shallow copy of base (never mutating it) that uses
-// cfg for TLS. The transport is a clone of base's, so the engine's dial-time
-// guard, proxy and pooling settings are preserved and only TLSClientConfig is
-// overridden. A nil cfg returns a plain copy. It fails if base's transport
-// cannot be cloned, rather than silently dropping the TLS setting.
-func clientWithTLS(base *http.Client, cfg *tls.Config) (*http.Client, error) {
-	derived := *base
+// clientWithTLS returns a shallow copy of the outbound client (never mutating
+// it). With the gateway's shared client installed the copy uses the shared
+// transport untouched: TLS roots, client certificates and pooling belong to
+// [policy_engine.http_client], so cfg is ignored. On the fallback client a
+// non-nil cfg is applied to a cached clone of the fallback's own transport.
+func clientWithTLS(cfg *tls.Config) *http.Client {
+	if shared := utils.SharedHTTPClient(); shared != nil {
+		derived := *shared
+		return &derived
+	}
+	slog.Warn("Opaque Token Auth Policy: shared HTTP client not configured, using fallback client")
+	fb := fallbackHTTPClient()
+	derived := *fb
 	if cfg == nil {
-		return &derived, nil
+		return &derived
 	}
-	bt, ok := base.Transport.(*http.Transport)
-	if !ok || bt == nil {
-		return nil, errors.New("outbound HTTP client transport does not support TLS overrides")
-	}
+	bt := fb.Transport.(*http.Transport)
 	key := tlsTransportKey{cfg: cfg, base: bt}
 	cached, ok := tlsTransports.Load(key)
 	if !ok {
@@ -107,7 +100,7 @@ func clientWithTLS(base *http.Client, cfg *tls.Config) (*http.Client, error) {
 		cached, _ = tlsTransports.LoadOrStore(key, clone)
 	}
 	derived.Transport = cached.(*http.Transport)
-	return &derived, nil
+	return &derived
 }
 
 // redirectGuardedClient returns a shallow copy of client — never mutating

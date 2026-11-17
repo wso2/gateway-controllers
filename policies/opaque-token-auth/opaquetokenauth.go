@@ -375,11 +375,7 @@ func (p *OpaqueTokenAuthPolicy) doIntrospect(ctx context.Context, token string, 
 
 	// The request carries client credentials / a bearer token, so a redirect
 	// must never be followed to a different origin.
-	client, err := clientWithTLS(baseHTTPClient(), provider.tlsConfig)
-	if err != nil {
-		return nil, fmt.Errorf("introspection request failed: %w", err)
-	}
-	client = redirectGuardedClient(client)
+	client := redirectGuardedClient(clientWithTLS(provider.tlsConfig))
 	client.Timeout = timeout
 
 	resp, err := client.Do(req)
@@ -585,6 +581,10 @@ func parseIntrospectionProviders(params map[string]interface{}) ([]*Introspectio
 				return nil, fmt.Errorf("provider %q: %w", name, err)
 			}
 			provider.tlsConfig = tlsConfig
+			if sharedClientInstalled() {
+				slog.Warn("Opaque Token Auth Policy: introspection skipTlsVerify/certificatePath is ignored because the gateway's shared HTTP client is in use; configure TLS roots and client certificates in [policy_engine.http_client]",
+					"provider", name)
+			}
 		}
 
 		providers = append(providers, provider)

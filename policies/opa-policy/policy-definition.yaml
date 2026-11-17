@@ -61,7 +61,7 @@ parameters:
     maxOpenConnections:
       type: integer
       x-wso2-policy-advanced-param: true
-      description: Maximum number of open HTTP connections between the gateway and the OPA server.
+      description: Maximum number of open HTTP connections between the gateway and the OPA server. Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure connection pooling under [policy_engine.http_client].
       minimum: 1
       maximum: 999
       default: 500

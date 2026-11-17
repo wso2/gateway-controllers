@@ -157,22 +157,28 @@ parameters:
       x-wso2-url: true
       x-wso2-policy-advanced-param: true
       description: |
-        Proxy URL for the token-endpoint call. Defaults to the proxy configured
-        for the gateway's outbound HTTP client.
+        Proxy URL for the token-endpoint call. Takes effect only when the
+        gateway runs without its shared outbound HTTP client; otherwise the
+        proxy is the one configured under [policy_engine.http_client].
       default: ""
     tlsCaCert:
       type: string
       x-wso2-policy-advanced-param: true
       description: |
         PEM CA certificate to trust for the token endpoint's TLS
-        connection. Reference a stored secret, not a raw value.
+        connection. Reference a stored secret, not a raw value. Takes effect
+        only when the gateway runs without its shared outbound HTTP client;
+        otherwise configure TLS roots and client certificates under
+        [policy_engine.http_client].
       default: ""
     tlsInsecureSkipVerify:
       type: boolean
       x-wso2-policy-advanced-param: true
       description: |
         Disables TLS certificate verification for the token endpoint.
-        Non-production only.
+        Non-production only. Takes effect only when the gateway runs without
+        its shared outbound HTTP client; otherwise configure TLS roots and
+        client certificates under [policy_engine.http_client].
       default: false
   oneOf:
     - required: ["tokenEndpoint", "clientId", "clientSecret"]

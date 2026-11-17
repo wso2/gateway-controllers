@@ -17,23 +17,31 @@
 package jwtauth
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
-	"net"
+	"crypto/x509"
+	"encoding/pem"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/wso2/api-platform/sdk/core/utils"
 )
 
-type countingRoundTripper struct {
+// engineLikeRoundTripper mimics httpkit: the shared client's transport is a
+// wrapper around an *http.Transport, never a bare one.
+type engineLikeRoundTripper struct {
 	calls atomic.Int32
 	next  http.RoundTripper
 }
 
-func (c *countingRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+func (c *engineLikeRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	c.calls.Add(1)
 	return c.next.RoundTrip(r)
 }
@@ -44,57 +52,84 @@ func installSharedClient(t *testing.T, c *http.Client) {
 	t.Cleanup(func() { utils.SetSharedHTTPClient(nil) })
 }
 
-func TestBaseHTTPClient_FallbackWhenNoSharedClient(t *testing.T) {
-	utils.SetSharedHTTPClient(nil)
-	if baseHTTPClient() != fallbackHTTPClient() {
-		t.Fatal("expected fallback client when no shared client is installed")
-	}
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
-func TestClientWithTLS_OverridesTLSOnCloneAndKeepsDialGuard(t *testing.T) {
-	var dials atomic.Int32
-	baseTransport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dials.Add(1)
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
+func keyManagerParams(jwksURI string, extra map[string]interface{}) map[string]interface{} {
+	params := newRemoteParams(jwksURI)
+	remote := params["keyManagers"].([]interface{})[0].(map[string]interface{})["jwks"].(map[string]interface{})["remote"].(map[string]interface{})
+	for k, v := range extra {
+		remote[k] = v
 	}
-	base := &http.Client{Transport: baseTransport}
+	params["jwksFetchTimeout"] = "5s"
+	return params
+}
+
+func pemOf(srv *httptest.Server) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+}
+
+func TestClientWithTLS_FallbackAppliesTLSOnClone(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 	defer srv.Close()
 
-	// Without the override the self-signed server must be rejected.
-	if resp, err := base.Get(srv.URL); err == nil {
+	if resp, err := clientWithTLS(nil).Get(srv.URL); err == nil {
 		resp.Body.Close()
-		t.Fatal("expected certificate error on the unmodified base client")
+		t.Fatal("expected certificate error without the TLS override")
 	}
-	dials.Store(0)
-
-	client, err := clientWithTLS(base, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test
-	if err != nil {
-		t.Fatalf("clientWithTLS: %v", err)
-	}
+	client := clientWithTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test
 	resp, err := client.Get(srv.URL)
 	if err != nil {
-		t.Fatalf("expected TLS override to apply: %v", err)
+		t.Fatalf("expected skip-verify to apply on the fallback client: %v", err)
 	}
 	resp.Body.Close()
-	if dials.Load() == 0 {
-		t.Fatal("derived client did not go through the base transport's DialContext")
-	}
-	if baseTransport.TLSClientConfig != nil || base.Transport != http.RoundTripper(baseTransport) {
-		t.Fatal("shared base client was mutated")
+	if fallbackHTTPClient().Transport.(*http.Transport).TLSClientConfig != nil {
+		t.Fatal("fallback transport was mutated")
 	}
 }
 
-func TestClientWithTLS_ErrorsWhenTransportCannotBeCloned(t *testing.T) {
-	base := &http.Client{Transport: &countingRoundTripper{next: http.DefaultTransport}}
-	if _, err := clientWithTLS(base, &tls.Config{MinVersion: tls.VersionTLS12}); err == nil {
-		t.Fatal("expected an error rather than silently dropping the TLS setting")
+func TestClientWithTLS_FallbackWrongCAFails(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	pool := x509.NewCertPool() // trusts nothing
+	resp, err := clientWithTLS(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}).Get(srv.URL)
+	if err == nil {
+		resp.Body.Close()
+		t.Fatal("expected failure with the wrong CA")
+	}
+	ok, err := clientWithTLS(&tls.Config{RootCAs: srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs, MinVersion: tls.VersionTLS12}).Get(srv.URL)
+	if err != nil {
+		t.Fatalf("expected the right CA to succeed: %v", err)
+	}
+	ok.Body.Close()
+}
+
+func TestSharedClient_UsedAsIsAndNotMutated(t *testing.T) {
+	rt := &engineLikeRoundTripper{next: http.DefaultTransport}
+	shared := &http.Client{Transport: rt}
+	installSharedClient(t, shared)
+
+	got := clientWithTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test
+	if got == shared {
+		t.Fatal("expected a copy of the shared client")
+	}
+	if got.Transport != http.RoundTripper(rt) {
+		t.Fatal("shared transport must be used untouched")
+	}
+	if shared.Transport != http.RoundTripper(rt) || shared.Timeout != 0 {
+		t.Fatal("shared client was mutated")
 	}
 }
 
-func TestJWKSFetch_UsesSharedHTTPClient(t *testing.T) {
+func TestJWKSFetch_SharedClientWithSkipTLSVerifyWorksAndWarnsOnce(t *testing.T) {
 	resetJWTAuthSingletonCache(t)
 	privateKey, publicKey := generateTestKeys(t)
 	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -102,16 +137,74 @@ func TestJWKSFetch_UsesSharedHTTPClient(t *testing.T) {
 	}))
 	defer jwksServer.Close()
 
-	rt := &countingRoundTripper{next: http.DefaultTransport}
-	installSharedClient(t, &http.Client{Transport: rt})
+	rt := &engineLikeRoundTripper{next: http.DefaultTransport}
+	shared := &http.Client{Transport: rt}
+	installSharedClient(t, shared)
+	logs := captureSlog(t)
 
-	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params := keyManagerParams(jwksServer.URL+"/jwks.json", map[string]interface{}{"skipTlsVerify": true})
 	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user-123", "iss": "https://issuer.example.com"})
 	p := mustGetPolicy(t, params)
 	ctx := createMockRequestHeaderContext(authHeader("Authorization", "Bearer", token))
 	action := p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params)
 	assertAuthSuccess(t, ctx, action)
+	// A second request must not warn again.
+	ctx = createMockRequestHeaderContext(authHeader("Authorization", "Bearer", token))
+	p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params)
+
 	if rt.calls.Load() == 0 {
 		t.Fatal("JWKS fetch did not go through the shared HTTP client")
 	}
+	if n := strings.Count(logs.String(), "is ignored because the gateway's shared HTTP client is in use"); n != 1 {
+		t.Fatalf("expected exactly one ignored-setting warning, got %d: %s", n, logs.String())
+	}
+	if shared.Transport != http.RoundTripper(rt) {
+		t.Fatal("shared client was mutated")
+	}
+}
+
+func TestJWKSFetch_SharedClientWithCertificatePathWorks(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJWKSResponse(t, w, publicKey, "test-kid")
+	}))
+	defer jwksServer.Close()
+
+	certPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(certPath, pemOf(jwksServer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The shared client trusts the server (engine-level TLS root).
+	rt := &engineLikeRoundTripper{next: jwksServer.Client().Transport}
+	installSharedClient(t, &http.Client{Transport: rt})
+	logs := captureSlog(t)
+
+	params := keyManagerParams(jwksServer.URL+"/jwks.json", map[string]interface{}{"certificatePath": certPath})
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user-123", "iss": "https://issuer.example.com"})
+	p := mustGetPolicy(t, params)
+	ctx := createMockRequestHeaderContext(authHeader("Authorization", "Bearer", token))
+	assertAuthSuccess(t, ctx, p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params))
+	if !strings.Contains(logs.String(), "ignored because the gateway's shared HTTP client is in use") {
+		t.Fatalf("expected the ignored-setting warning: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), certPath) {
+		t.Fatal("warning must not include the setting value")
+	}
+}
+
+func TestJWKSFetch_FallbackAppliesSkipTLSVerify(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+	utils.SetSharedHTTPClient(nil)
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJWKSResponse(t, w, publicKey, "test-kid")
+	}))
+	defer jwksServer.Close()
+
+	params := keyManagerParams(jwksServer.URL+"/jwks.json", map[string]interface{}{"skipTlsVerify": true})
+	token := createTestToken(t, privateKey, map[string]interface{}{"sub": "user-123", "iss": "https://issuer.example.com"})
+	p := mustGetPolicy(t, params)
+	ctx := createMockRequestHeaderContext(authHeader("Authorization", "Bearer", token))
+	assertAuthSuccess(t, ctx, p.(*JwtAuthPolicy).OnRequestHeaders(context.Background(), ctx, params))
 }

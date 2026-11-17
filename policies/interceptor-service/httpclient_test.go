@@ -17,14 +17,15 @@
 package interceptorservice
 
 import (
+	"bytes"
 	"context"
-	"net"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
-	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 	"github.com/wso2/api-platform/sdk/core/utils"
 )
 
@@ -59,22 +60,54 @@ func TestInterceptor_UsesSharedHTTPClient(t *testing.T) {
 	}
 }
 
-func TestInterceptor_SkipVerifyAppliesOnCloneAndKeepsDialGuard(t *testing.T) {
-	var dials atomic.Int32
-	baseTransport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dials.Add(1)
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
-	}
-	installSharedClient(t, &http.Client{Transport: baseTransport})
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func newTLSInterceptor(t *testing.T) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeReply(t, w, map[string]interface{}{})
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestInterceptor_SharedClientWithSkipVerifyWorksAndWarnsOnce(t *testing.T) {
+	srv := newTLSInterceptor(t)
+	// Engine-like client: wrapped transport that already trusts the server.
+	rt := &countingRoundTripper{next: srv.Client().Transport}
+	shared := &http.Client{Transport: rt}
+	installSharedClient(t, shared)
+	logs := captureSlog(t)
+
+	p := mustGetPolicy(t, map[string]interface{}{"endpoint": srv.URL, "tlsSkipVerify": true, "request": map[string]interface{}{}})
+	for i := 0; i < 2; i++ {
+		if _, err := p.callInterceptor(context.Background(), srv.URL, map[string]interface{}{}); err != nil {
+			t.Fatalf("call through the shared client failed: %v", err)
+		}
+	}
+	if rt.calls.Load() != 2 {
+		t.Fatalf("expected both calls through the shared client, got %d", rt.calls.Load())
+	}
+	if n := strings.Count(logs.String(), "tlsSkipVerify is ignored because the gateway's shared HTTP client is in use"); n != 1 {
+		t.Fatalf("expected exactly one warning, got %d: %s", n, logs.String())
+	}
+	if shared.Transport != http.RoundTripper(rt) || shared.Timeout != 0 {
+		t.Fatal("shared client was mutated")
+	}
+}
+
+func TestInterceptor_FallbackAppliesSkipVerify(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
+	srv := newTLSInterceptor(t)
 
 	reachable := func(skip bool) bool {
-		dials.Store(0)
 		p := mustGetPolicy(t, map[string]interface{}{"endpoint": srv.URL, "tlsSkipVerify": skip, "request": map[string]interface{}{}})
 		_, err := p.callInterceptor(context.Background(), srv.URL, map[string]interface{}{})
 		return err == nil
@@ -83,21 +116,10 @@ func TestInterceptor_SkipVerifyAppliesOnCloneAndKeepsDialGuard(t *testing.T) {
 		t.Fatal("expected a certificate error without tlsSkipVerify")
 	}
 	if !reachable(true) {
-		t.Fatal("expected tlsSkipVerify to apply")
+		t.Fatal("expected tlsSkipVerify to apply on the fallback client")
 	}
-	if dials.Load() == 0 {
-		t.Fatal("derived client did not use the shared transport's DialContext")
-	}
-	if baseTransport.TLSClientConfig != nil {
-		t.Fatal("shared transport was mutated")
-	}
-}
-
-func TestInterceptor_SkipVerifyWithUnclonableTransportFails(t *testing.T) {
-	installSharedClient(t, &http.Client{Transport: &countingRoundTripper{next: http.DefaultTransport}})
-	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"endpoint": "http://example.invalid", "tlsSkipVerify": true, "request": map[string]interface{}{}})
-	if err == nil {
-		t.Fatal("expected an error rather than silently dropping tlsSkipVerify")
+	if fallbackHTTPClient().Transport.(*http.Transport).TLSClientConfig != nil {
+		t.Fatal("fallback transport was mutated")
 	}
 }
 

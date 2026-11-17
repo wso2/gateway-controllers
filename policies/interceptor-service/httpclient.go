@@ -18,7 +18,6 @@
 package interceptorservice
 
 import (
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -60,38 +59,34 @@ func fallbackHTTPClient() *http.Client {
 	return fallbackClient
 }
 
-// baseHTTPClient returns the process-wide outbound client
-// (sdk/core/utils.SharedHTTPClient), which the policy engine configures with
-// its own pooling, timeouts, proxy and dial-time SSRF guard. When the engine
-// has not installed one yet it logs a warning and returns fallbackHTTPClient.
-// The returned client may be shared with other policies: callers must treat it
-// as read-only and derive a copy for any per-policy change.
-func baseHTTPClient() *http.Client {
-	if client := utils.SharedHTTPClient(); client != nil {
-		return client
-	}
-	slog.Warn("Interceptor Service Policy: shared HTTP client not configured, using fallback client")
-	return fallbackHTTPClient()
+// sharedClientInstalled reports whether the gateway's shared outbound HTTP
+// client is in use.
+func sharedClientInstalled() bool {
+	return utils.SharedHTTPClient() != nil
 }
 
-// derivedClient returns a shallow copy of base (never mutating it) with the
-// given per-policy timeout. When tune is non-nil the copy gets a clone of
-// base's transport that tune adjusts, so the engine's dial-time guard, proxy
-// and pooling settings are preserved. It fails if base's transport cannot be
-// cloned, rather than silently dropping the requested setting.
-func derivedClient(base *http.Client, timeout time.Duration, tune func(*http.Transport)) (*http.Client, error) {
-	derived := *base
+// derivedClient returns a shallow copy of the outbound client (never mutating
+// it) with the given per-policy timeout. With the gateway's shared client
+// installed (sdk/core/utils.SharedHTTPClient) the transport is used untouched
+// and tune is ignored: TLS roots, client certificates and pooling belong to
+// [policy_engine.http_client]. On the fallback client a non-nil tune adjusts a
+// clone of the fallback's own transport.
+func derivedClient(timeout time.Duration, tune func(*http.Transport)) *http.Client {
+	if shared := utils.SharedHTTPClient(); shared != nil {
+		derived := *shared
+		derived.Timeout = timeout
+		return &derived
+	}
+	slog.Warn("Interceptor Service Policy: shared HTTP client not configured, using fallback client")
+	fb := fallbackHTTPClient()
+	derived := *fb
 	derived.Timeout = timeout
 	if tune != nil {
-		bt, ok := base.Transport.(*http.Transport)
-		if !ok || bt == nil {
-			return nil, errors.New("outbound HTTP client transport does not support per-policy overrides")
-		}
-		clone := bt.Clone()
+		clone := fb.Transport.(*http.Transport).Clone()
 		tune(clone)
 		derived.Transport = clone
 	}
-	return &derived, nil
+	return &derived
 }
 
 // redirectGuardedClient returns a shallow copy of client — never mutating

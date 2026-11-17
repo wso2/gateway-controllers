@@ -17,11 +17,13 @@
 package opaquetokenauth
 
 import (
-	"context"
+	"bytes"
 	"crypto/tls"
-	"net"
+	"crypto/x509"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -44,53 +46,93 @@ func installSharedClient(t *testing.T, c *http.Client) {
 	t.Cleanup(func() { utils.SetSharedHTTPClient(nil) })
 }
 
-func TestBaseHTTPClient_FallbackWhenNoSharedClient(t *testing.T) {
-	utils.SetSharedHTTPClient(nil)
-	if baseHTTPClient() != fallbackHTTPClient() {
-		t.Fatal("expected fallback client when no shared client is installed")
-	}
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
-func TestClientWithTLS_OverridesTLSOnCloneAndKeepsDialGuard(t *testing.T) {
-	var dials atomic.Int32
-	baseTransport := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dials.Add(1)
-			return (&net.Dialer{}).DialContext(ctx, network, addr)
-		},
-	}
-	base := &http.Client{Transport: baseTransport}
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer srv.Close()
+func newTLSServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	s := httptest.NewTLSServer(activeResponder(map[string]interface{}{"active": true, "sub": "u"}))
+	t.Cleanup(s.Close)
+	return s
+}
 
-	// Without the override the self-signed server must be rejected.
-	if resp, err := base.Get(srv.URL); err == nil {
+func TestClientWithTLS_FallbackAppliesTLSOnClone(t *testing.T) {
+	utils.SetSharedHTTPClient(nil)
+	srv := newTLSServer(t)
+
+	if resp, err := clientWithTLS(nil).Get(srv.URL); err == nil {
 		resp.Body.Close()
-		t.Fatal("expected certificate error on the unmodified base client")
+		t.Fatal("expected certificate error without the TLS override")
 	}
-	dials.Store(0)
-
-	client, err := clientWithTLS(base, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test
+	resp, err := clientWithTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}).Get(srv.URL) //nolint:gosec // test
 	if err != nil {
-		t.Fatalf("clientWithTLS: %v", err)
-	}
-	resp, err := client.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("expected TLS override to apply: %v", err)
+		t.Fatalf("expected skip-verify to apply on the fallback client: %v", err)
 	}
 	resp.Body.Close()
-	if dials.Load() == 0 {
-		t.Fatal("derived client did not go through the base transport's DialContext")
+	if fallbackHTTPClient().Transport.(*http.Transport).TLSClientConfig != nil {
+		t.Fatal("fallback transport was mutated")
 	}
-	if baseTransport.TLSClientConfig != nil || base.Transport != http.RoundTripper(baseTransport) {
-		t.Fatal("shared base client was mutated")
+	if resp, err := clientWithTLS(&tls.Config{RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12}).Get(srv.URL); err == nil {
+		resp.Body.Close()
+		t.Fatal("expected failure with a CA pool that does not trust the server")
 	}
 }
 
-func TestClientWithTLS_ErrorsWhenTransportCannotBeCloned(t *testing.T) {
-	base := &http.Client{Transport: &countingRoundTripper{next: http.DefaultTransport}}
-	if _, err := clientWithTLS(base, &tls.Config{MinVersion: tls.VersionTLS12}); err == nil {
-		t.Fatal("expected an error rather than silently dropping the TLS setting")
+func TestSharedClient_UsedAsIsAndNotMutated(t *testing.T) {
+	rt := &countingRoundTripper{next: http.DefaultTransport}
+	shared := &http.Client{Transport: rt}
+	installSharedClient(t, shared)
+
+	got := clientWithTLS(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // test
+	if got == shared || got.Transport != http.RoundTripper(rt) {
+		t.Fatal("expected a copy of the shared client with its transport untouched")
+	}
+	if shared.Transport != http.RoundTripper(rt) || shared.Timeout != 0 {
+		t.Fatal("shared client was mutated")
+	}
+}
+
+func TestIntrospection_SharedClientWithTLSSettingsWorksAndWarns(t *testing.T) {
+	for name, extra := range map[string]map[string]interface{}{
+		"skipTlsVerify":   {"skipTlsVerify": true},
+		"certificatePath": {"certificatePath": ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newTLSServer(t)
+			if name == "certificatePath" {
+				extra["certificatePath"] = writeCertPEM(t, srv.Certificate())
+			}
+			// The engine-level client trusts the server and wraps the transport.
+			rt := &countingRoundTripper{next: srv.Client().Transport}
+			shared := &http.Client{Transport: rt}
+			installSharedClient(t, shared)
+			logs := captureSlog(t)
+
+			p := newPolicy()
+			reqCtx, action := execute(t, p, baseParams(provider("idp", srv.URL, extra)), bearerHeader("opaque-abc"))
+			assertSuccess(t, reqCtx, action)
+			reqCtx, action = execute(t, p, baseParams(provider("idp", srv.URL, extra)), bearerHeader("opaque-abc"))
+			assertSuccess(t, reqCtx, action)
+
+			if rt.calls.Load() == 0 {
+				t.Fatal("introspection did not go through the shared HTTP client")
+			}
+			if n := strings.Count(logs.String(), "is ignored because the gateway's shared HTTP client is in use"); n != 1 {
+				t.Fatalf("expected exactly one warning, got %d: %s", n, logs.String())
+			}
+			if v, _ := extra["certificatePath"].(string); v != "" && strings.Contains(logs.String(), v) {
+				t.Fatal("warning must not include the setting value")
+			}
+			if shared.Transport != http.RoundTripper(rt) {
+				t.Fatal("shared client was mutated")
+			}
+		})
 	}
 }
 

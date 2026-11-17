@@ -1100,12 +1100,9 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 	}
 
 	// Derive a per-call copy of the process-wide client (never mutating it)
-	// carrying this fetch's timeout and, when configured, the endpoint's TLS
-	// settings on a clone of the shared transport.
-	client, err := clientWithTLS(baseHTTPClient(), remote.tlsConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch JWKS: %w", err)
-	}
+	// carrying this fetch's timeout. The endpoint's TLS settings apply only on
+	// the fallback client; the shared client is used as is.
+	client := clientWithTLS(remote.tlsConfig)
 	client.Timeout = fetchTimeout
 
 	if debugEnabled() {
@@ -2509,6 +2506,10 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 									)
 								}
 								remoteJWKS.tlsConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+							}
+							if remoteJWKS.tlsConfig != nil && sharedClientInstalled() {
+								slog.Warn("JWT Auth Policy: remote JWKS skipTlsVerify/certificatePath is ignored because the gateway's shared HTTP client is in use; configure TLS roots and client certificates in [policy_engine.http_client]",
+									"keyManager", name)
 							}
 							jwksConfig.Remote = remoteJWKS
 						}

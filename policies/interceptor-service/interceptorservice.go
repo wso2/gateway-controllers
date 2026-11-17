@@ -167,11 +167,10 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 	}
 	// The request body carries the request/response payload, so a redirect
 	// must never be followed to a different origin.
-	client, err := derivedClient(baseHTTPClient(), p.timeout, tune)
-	if err != nil {
-		return nil, fmt.Errorf("configure HTTP client: %w", err)
+	if skipVerify && sharedClientInstalled() {
+		slog.Warn("Interceptor Service Policy: tlsSkipVerify is ignored because the gateway's shared HTTP client is in use; configure TLS roots and client certificates in [policy_engine.http_client]")
 	}
-	p.client = redirectGuardedClient(client)
+	p.client = redirectGuardedClient(derivedClient(p.timeout, tune))
 
 	return p, nil
 }

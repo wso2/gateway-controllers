@@ -62,19 +62,15 @@ func fallbackHTTPClient() *http.Client {
 	return fallbackClient
 }
 
-// baseHTTPClient returns the process-wide utils.SharedHTTPClient(), or the
-// fallback client (with a warning) when the engine has not installed one yet.
-// The result must never be mutated: callers copy it.
-func baseHTTPClient() *http.Client {
-	if client := utils.SharedHTTPClient(); client != nil {
-		return client
-	}
-	slog.Warn("OAuth2 policy: shared HTTP client not configured, using fallback client")
-	return fallbackHTTPClient()
+// sharedClientInstalled reports whether the gateway's shared outbound HTTP
+// client (sdk/core/utils.SharedHTTPClient) is in use.
+func sharedClientInstalled() bool {
+	return utils.SharedHTTPClient() != nil
 }
 
-// outboundOptions are the per-policy transport overrides applied on top of the
-// shared client. It is comparable so it can key the derived-transport cache.
+// outboundOptions are the per-policy transport overrides. They are applied only
+// on the fallback client; with the gateway's shared client installed they are
+// ignored. It is comparable so it can key the derived-transport cache.
 type outboundOptions struct {
 	proxyURL  string
 	tlsCACert string
@@ -126,30 +122,27 @@ type derivedTransportKey struct {
 // of building a fresh transport each time.
 var derivedTransports = newKeyedSingleton[derivedTransportKey, *http.Transport]()
 
-// outboundClient returns a copy of the shared (or fallback) client with the
-// policy's timeout and, when opts asks for them, its own proxy / TLS settings.
-// Overrides are applied to a clone of the base *http.Transport, which keeps the
-// engine's dial-time guard (DialContext); the shared client itself is never
-// mutated. It errors rather than silently dropping a TLS or proxy setting when
-// the base transport cannot be cloned.
+// outboundClient returns a copy of the outbound client with the policy's
+// timeout. With the gateway's shared client installed the transport is used
+// untouched and opts are ignored: proxy, TLS roots and pooling belong to
+// [policy_engine.http_client]. On the fallback client, opts are applied to a
+// cached clone of the fallback's own *http.Transport, so connections are still
+// pooled. Neither the shared nor the fallback client is mutated.
 func outboundClient(opts outboundOptions, timeout time.Duration) (*http.Client, error) {
-	client := *baseHTTPClient()
+	if shared := utils.SharedHTTPClient(); shared != nil {
+		client := *shared
+		client.Timeout = timeout
+		return &client, nil
+	}
+	slog.Warn("OAuth2 policy: shared HTTP client not configured, using fallback client")
+	fb := fallbackHTTPClient()
+	client := *fb
 	client.Timeout = timeout
 	if !opts.needsOverride() {
 		return &client, nil
 	}
 
-	var base *http.Transport
-	switch t := client.Transport.(type) {
-	case *http.Transport:
-		base = t
-	case nil:
-		base, _ = http.DefaultTransport.(*http.Transport)
-	}
-	if base == nil {
-		return nil, fmt.Errorf("outbound HTTP client transport does not support TLS or proxy overrides")
-	}
-
+	base := fb.Transport.(*http.Transport)
 	transport, _, err := derivedTransports.getOrCreate(derivedTransportKey{base: base, opts: opts}, func() (*http.Transport, error) {
 		proxy, tlsConfig, err := opts.parse()
 		if err != nil {

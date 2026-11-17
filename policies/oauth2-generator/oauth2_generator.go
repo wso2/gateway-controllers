@@ -537,6 +537,9 @@ func buildTokenSource(p oauth2Params) (TokenSource, error) {
 	if err := opts.validate(); err != nil {
 		return nil, fmt.Errorf("invalid token endpoint transport config: %w", err)
 	}
+	if opts.needsOverride() && sharedClientInstalled() {
+		slog.Warn("OAuth2Generator: proxyURL/tlsCaCert/tlsInsecureSkipVerify are ignored because the gateway's shared HTTP client is in use; configure proxy, TLS roots and client certificates in [policy_engine.http_client]")
+	}
 	// The request body/header carries the client secret (and password), so a redirect to another
 	// origin must never be followed. The client is resolved per request so it tracks the
 	// engine's shared client; its transport clone is cached, so connections are still pooled.
