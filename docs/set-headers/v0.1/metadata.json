@@ -2,7 +2,7 @@
   "name": "set-headers",
   "displayName": "Set Headers",
   "version": "0.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Transformation",
     "WebSub",

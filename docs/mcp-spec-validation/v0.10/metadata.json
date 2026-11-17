@@ -2,7 +2,7 @@
   "name": "mcp-spec-validation",
   "displayName": "MCP Spec Validation",
   "version": "0.10",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "MCP",
     "Security"

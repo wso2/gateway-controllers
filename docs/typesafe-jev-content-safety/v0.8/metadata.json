@@ -2,7 +2,7 @@
   "name": "typesafe-jev-content-safety",
   "displayName": "TypeSafe Jev Content Safety",
   "version": "0.8",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

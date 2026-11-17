@@ -2,7 +2,7 @@
   "name": "advanced-ratelimit",
   "displayName": "Rate Limit - Advanced",
   "version": "0.3",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI"

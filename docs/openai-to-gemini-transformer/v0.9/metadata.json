@@ -2,7 +2,7 @@
   "name": "openai-to-gemini-transformer",
   "displayName": "OpenAI to Gemini Transformer",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI",
     "LLM Transformation"

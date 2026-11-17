@@ -2,7 +2,7 @@
   "name": "nvidia-nemoguard-content-safety",
   "displayName": "NeMo Guard Content Safety",
   "version": "0.10",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

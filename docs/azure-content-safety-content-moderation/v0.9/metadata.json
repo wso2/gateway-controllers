@@ -2,7 +2,7 @@
   "name": "azure-content-safety-content-moderation",
   "displayName": "Azure Content Safety Content Moderation",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

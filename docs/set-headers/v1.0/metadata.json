@@ -2,7 +2,7 @@
   "name": "set-headers",
   "displayName": "Set Headers",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Transformation",
     "MCP",

@@ -2,7 +2,7 @@
   "name": "sentence-count-guardrail",
   "displayName": "Sentence Count Guardrail",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

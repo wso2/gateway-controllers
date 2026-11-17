@@ -2,7 +2,7 @@
   "name": "pii-masking-regex",
   "displayName": "PII Masking Regex",
   "version": "0.2",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

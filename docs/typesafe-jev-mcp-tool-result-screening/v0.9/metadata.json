@@ -2,7 +2,7 @@
   "name": "typesafe-jev-mcp-tool-result-screening",
   "displayName": "TypeSafe Jev MCP Tool Result Screening",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "MCP",
     "Security"

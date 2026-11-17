@@ -2,7 +2,7 @@
   "name": "opaque-token-auth",
   "displayName": "Opaque Token Auth",
   "version": "1.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI"

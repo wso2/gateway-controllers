@@ -2,7 +2,7 @@
   "name": "jwt-auth",
   "displayName": "JWT Auth",
   "version": "0.8",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI",

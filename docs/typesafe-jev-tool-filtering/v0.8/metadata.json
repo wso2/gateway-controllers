@@ -2,7 +2,7 @@
   "name": "typesafe-jev-tool-filtering",
   "displayName": "TypeSafe Jev Tool Filtering",
   "version": "0.8",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI",
     "Transformation"

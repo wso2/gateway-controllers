@@ -2,7 +2,7 @@
   "name": "log-message",
   "displayName": "Log Message",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Logging",
     "Analytics & Monitoring",

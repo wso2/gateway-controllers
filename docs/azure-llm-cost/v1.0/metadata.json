@@ -2,7 +2,7 @@
   "name": "azure-llm-cost",
   "displayName": "Azure LLM Cost",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI"
   ],
