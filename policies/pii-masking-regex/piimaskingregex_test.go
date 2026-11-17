@@ -125,8 +125,8 @@ func TestPIIMaskingRegexPolicy_GetPolicy_DefaultsAndBuiltins(t *testing.T) {
 		"ssn":   true,
 	})
 
-	if got := p.params.JsonPath; got != "$.messages[-1].content" {
-		t.Fatalf("expected default jsonPath '$.messages[-1].content', got %q", got)
+	if got := p.params.JsonPath; got != "$" {
+		t.Fatalf("expected default jsonPath '$', got %q", got)
 	}
 	if p.params.RedactPII {
 		t.Fatalf("expected default redactPII=false")
@@ -398,4 +398,139 @@ func mustGetLastMessageContent(t *testing.T, payload map[string]interface{}) str
 	}
 
 	return content
+}
+
+// conversation is the second turn of a chat as an agent sends it: the system prompt, the history,
+// then the newest message. The email is in an earlier turn, and the newest message is content parts.
+const conversation = `{"model":"gpt-4o-mini","messages":[
+  {"role":"system","content":"You are a helpdesk assistant."},
+  {"role":"user","content":"My email is alice.chen@acmecorp.com"},
+  {"role":"assistant","content":"Noted, alice.chen@acmecorp.com."},
+  {"role":"user","content":[{"type":"text","text":"Please cc bob@example.org"}]}]}`
+
+func TestPIIMaskingRegexPolicy_OnRequest_DefaultMasksEveryTurn(t *testing.T) {
+	p := mustGetPIIPolicy(t, map[string]interface{}{"email": true})
+
+	ctx := piiRequestContext(conversation)
+	mods := mustPIIRequestMods(t, p.OnRequestBody(context.Background(), ctx, nil))
+	for _, email := range []string{"alice.chen@acmecorp.com", "bob@example.org"} {
+		if strings.Contains(string(mods.Body), email) {
+			t.Fatalf("%q reached the upstream unmasked: %s", email, mods.Body)
+		}
+	}
+	if !json.Valid(mods.Body) {
+		t.Fatalf("expected valid JSON, got %s", mods.Body)
+	}
+}
+
+func TestPIIMaskingRegexPolicy_OnRequest_WildcardMasksEveryMessage(t *testing.T) {
+	p := mustGetPIIPolicy(t, map[string]interface{}{"email": true, "jsonPath": "$.messages[*].content"})
+
+	ctx := piiRequestContext(`{"messages":[
+	  {"role":"user","content":"I am alice.chen@acmecorp.com"},
+	  {"role":"assistant","tool_calls":[{"id":"c1","type":"function","function":{"name":"lookup","arguments":"{}"}}]},
+	  {"role":"tool","tool_call_id":"c1","content":"record for bob@example.org"},
+	  {"role":"user","content":"Again, I am alice.chen@acmecorp.com"}]}`)
+	mods := mustPIIRequestMods(t, p.OnRequestBody(context.Background(), ctx, nil))
+
+	out := decodeJSONMapPII(t, mods.Body)
+	messages := out["messages"].([]interface{})
+	first := messages[0].(map[string]interface{})["content"].(string)
+	tool := messages[2].(map[string]interface{})["content"].(string)
+	last := messages[3].(map[string]interface{})["content"].(string)
+	if first != "I am [EMAIL_0000]" || last != "Again, I am [EMAIL_0000]" {
+		t.Fatalf("the same email must get the same placeholder in every message, got %q and %q", first, last)
+	}
+	if tool != "record for [EMAIL_0001]" {
+		t.Fatalf("a different email must get a different placeholder, got %q", tool)
+	}
+	if _, ok := messages[1].(map[string]interface{})["tool_calls"]; !ok {
+		t.Fatalf("a message without content must be left as it is, got %v", messages[1])
+	}
+	mapping := ctx.Metadata[MetadataKeyPIIEntities].(map[string]string)
+	if len(mapping) != 2 || mapping["alice.chen@acmecorp.com"] != "[EMAIL_0000]" || mapping["bob@example.org"] != "[EMAIL_0001]" {
+		t.Fatalf("expected both emails recorded for restoration, got %v", mapping)
+	}
+
+	// The response restores both originals.
+	respCtx := &policy.ResponseContext{
+		SharedContext: ctx.SharedContext,
+		ResponseBody: &policy.Body{
+			Content: []byte(`{"choices":[{"message":{"content":"[EMAIL_0000] and [EMAIL_0001]"}}]}`),
+			Present: true,
+		},
+	}
+	resp, ok := p.OnResponseBody(context.Background(), respCtx, nil).(policy.DownstreamResponseModifications)
+	if !ok || !strings.Contains(string(resp.Body), "alice.chen@acmecorp.com and bob@example.org") {
+		t.Fatalf("expected both placeholders restored, got %s", resp.Body)
+	}
+}
+
+func TestPIIMaskingRegexPolicy_OnRequest_WildcardRedact(t *testing.T) {
+	p := mustGetPIIPolicy(t, map[string]interface{}{"email": true, "jsonPath": "$.messages[*].content", "redactPII": true})
+
+	ctx := piiRequestContext(`{"messages":[{"content":"a.user@example.com"},{"content":"b.user@example.com"}]}`)
+	mods := mustPIIRequestMods(t, p.OnRequestBody(context.Background(), ctx, nil))
+	if strings.Count(string(mods.Body), "*****") != 2 || strings.Contains(string(mods.Body), "@example.com") {
+		t.Fatalf("expected every message redacted, got %s", mods.Body)
+	}
+	if _, exists := ctx.Metadata[MetadataKeyPIIEntities]; exists {
+		t.Fatalf("did not expect metadata mapping in redact mode")
+	}
+}
+
+func TestPIIMaskingRegexPolicy_OnRequest_NestedWildcardMasksContentParts(t *testing.T) {
+	p := mustGetPIIPolicy(t, map[string]interface{}{"email": true, "jsonPath": "$.messages[*].content[*].text"})
+
+	ctx := piiRequestContext(`{"messages":[
+	  {"role":"system","content":"no parts here"},
+	  {"role":"user","content":[{"type":"text","text":"I am alice.chen@acmecorp.com"},{"type":"text","text":"cc bob@example.org"}]}]}`)
+	mods := mustPIIRequestMods(t, p.OnRequestBody(context.Background(), ctx, nil))
+	if strings.Contains(string(mods.Body), "@") {
+		t.Fatalf("expected every text part masked, got %s", mods.Body)
+	}
+	if !strings.Contains(string(mods.Body), `"content":"no parts here"`) {
+		t.Fatalf("a message whose content is not an array must be left as it is, got %s", mods.Body)
+	}
+}
+
+func TestPIIMaskingRegexPolicy_OnRequest_WildcardWithoutTheArrayIsRejected(t *testing.T) {
+	tests := map[string]struct {
+		body    string
+		message string
+	}{
+		"missing array": {`{"input":"a.user@example.com"}`, "error extracting value from JSONPath: key not found: messages"},
+		"not an array":  {`{"messages":"a.user@example.com"}`, "error extracting value from JSONPath: not an array: messages"},
+		"invalid JSON":  {`not json a.user@example.com`, "error extracting value from JSONPath: invalid character"},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			p := mustGetPIIPolicy(t, map[string]interface{}{"email": true, "jsonPath": "$.messages[*].content"})
+			resp, ok := p.OnRequestBody(context.Background(), piiRequestContext(tt.body), nil).(policy.ImmediateResponse)
+			if !ok || resp.StatusCode != APIMInternalErrorCode {
+				t.Fatalf("expected a 500 rejection, got %T", resp)
+			}
+			if !strings.Contains(string(resp.Body), tt.message) {
+				t.Fatalf("expected %q in %s", tt.message, resp.Body)
+			}
+		})
+	}
+}
+
+func TestExpandWildcardPaths(t *testing.T) {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(`{"messages":[{"content":[{"text":"a"}]},{"content":"b"},{"content":[{"text":"c"},{"text":"d"}]}]}`), &data); err != nil {
+		t.Fatal(err)
+	}
+	got, err := expandWildcardPaths(data, "$.messages[*].content[*].text", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"$.messages[0].content[0].text", "$.messages[2].content[0].text", "$.messages[2].content[1].text"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	if got, _ := expandWildcardPaths(data, "$.messages[1].content", true); len(got) != 1 || got[0] != "$.messages[1].content" {
+		t.Fatalf("a path without a wildcard must be returned as it is, got %v", got)
+	}
 }
