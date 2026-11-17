@@ -31,6 +31,7 @@ Feature: Dynamic endpoint combined with other policies
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
     And I split the URL "${CTX:captureUpstream}" into origin "captureOrigin" and base path "captureBasePath"
 
+  @de-16
   Scenario: Authentication, rate limiting and header policies run in order with dynamic-endpoint
     Given I generate a unique value from "dynamic-chain" and store it as "apiName"
     And I generate a unique API context from "/dynamic-chain" and store it as "apiContext"
@@ -74,6 +75,7 @@ Feature: Dynamic endpoint combined with other policies
     And I send a "GET" request to "${CTX:apiContext}/v1.0/s16/secured"
     Then the response status code should be 401
 
+  @de-34
   Scenario: A request rejected by authentication never reaches the selected upstream
     Given I generate a unique value from "dynamic-auth-first" and store it as "apiName"
     And I generate a unique API context from "/dynamic-auth-first" and store it as "apiContext"
@@ -109,6 +111,7 @@ Feature: Dynamic endpoint combined with other policies
     When I send a "GET" request to the "capture" service at "/test/captured?path=/s34/protected" until status 200
     Then the response body should contain "attempt=valid"
 
+  @de-35
   Scenario: A request refused by rate limiting never reaches the selected upstream
     Given I generate a unique value from "dynamic-limit-first" and store it as "apiName"
     And I generate a unique API context from "/dynamic-limit-first" and store it as "apiContext"

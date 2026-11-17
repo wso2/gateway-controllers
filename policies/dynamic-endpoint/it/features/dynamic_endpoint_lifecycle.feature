@@ -26,6 +26,7 @@ Feature: Dynamic endpoint configuration changes on a deployed API
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  @de-11
   Scenario: Changing targetUpstream and redeploying routes new requests to the new upstream only
     Given I generate a unique value from "dynamic-change-target" and store it as "apiName"
     And I generate a unique API context from "/dynamic-change-target" and store it as "apiContext"
@@ -62,6 +63,7 @@ Feature: Dynamic endpoint configuration changes on a deployed API
     Then the response should be served by the "echo" testbench service
     And the JSON response field "path" should be "/bbb/l11/probe"
 
+  @de-12
   Scenario: Adding and removing the policy changes routing without a gateway restart
     Given I generate a unique value from "dynamic-add-remove" and store it as "apiName"
     And I generate a unique API context from "/dynamic-add-remove" and store it as "apiContext"
@@ -106,6 +108,7 @@ Feature: Dynamic endpoint configuration changes on a deployed API
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/v1.0/l12/probe" until the JSON field "path" is "/l12/probe"
 
+  @de-13
   Scenario: Changing the url or base path of the named upstream is picked up without changing the policy
     Given I generate a unique value from "dynamic-change-definition" and store it as "apiName"
     And I generate a unique API context from "/dynamic-change-definition" and store it as "apiContext"
@@ -152,6 +155,7 @@ Feature: Dynamic endpoint configuration changes on a deployed API
     And I send a "GET" request to "${CTX:apiContext}/v1.0/l13/probe" until the JSON field "url" is "/two/l13/probe"
     Then the response should be served by the "echo" testbench service
 
+  @de-25
   Scenario: An API deleted and recreated with different upstream definitions uses only the new ones
     Given I generate a unique value from "dynamic-recreate" and store it as "apiName"
     And I generate a unique API context from "/dynamic-recreate" and store it as "apiContext"

@@ -26,6 +26,7 @@ Feature: Dynamic endpoint routing across gateway restarts
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  @de-14
   Scenario Outline: Routing to named upstreams is restored after the <service> restarts
     Given I generate a unique value from "dynamic-restart" and store it as "apiName"
     And I generate a unique API context from "/dynamic-restart" and store it as "apiContext"

@@ -42,6 +42,8 @@ type fakeBase struct {
 
 func (f fakeBase) GatewayURL(path string) (string, error) { return f.url + path, nil }
 
+func (f fakeBase) GatewayURLAt(_, path string) (string, error) { return f.url + path, nil }
+
 func (f fakeBase) ScenarioHeaders(context.Context) map[string]string { return f.headers }
 
 func (f fakeBase) RequestHost(context.Context) string { return "" }
@@ -54,7 +56,7 @@ func newStepsWithServer(t *testing.T, handler http.HandlerFunc) *Steps {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	steps := newSteps(fakeBase{url: server.URL})
+	steps := newSteps(fakeBase{url: server.URL}, nil)
 	steps.client = httpx.NewClient(httpx.Options{Timeout: 5 * time.Second})
 	steps.funnel = httpx.NewFunnel(steps.client, 0, 0)
 	return steps
@@ -110,7 +112,7 @@ func TestJSONField(t *testing.T) {
 }
 
 func TestServedBy(t *testing.T) {
-	steps := newSteps(fakeBase{})
+	steps := newSteps(fakeBase{}, nil)
 	publish := func(body string) context.Context {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, http.StatusOK, body)
@@ -134,7 +136,7 @@ func TestServedBy(t *testing.T) {
 
 func TestSplitURL(t *testing.T) {
 	ctx := newScenarioContext()
-	steps := newSteps(fakeBase{})
+	steps := newSteps(fakeBase{}, nil)
 
 	require.NoError(t, steps.splitURL(ctx, "http://testbench:3010/dynamic-endpoint/", "origin", "basePath"))
 	origin, _ := tcontext.Get(ctx, "origin")
@@ -186,7 +188,7 @@ func TestSendConcurrentRoutesChecksEveryResponse(t *testing.T) {
 }
 
 func TestSendConcurrentRoutesRejectsBadInput(t *testing.T) {
-	steps := newSteps(fakeBase{})
+	steps := newSteps(fakeBase{}, nil)
 	ctx := newScenarioContext()
 
 	require.ErrorContains(t, steps.sendConcurrentRoutes(ctx, 0, table(t, []string{"GET", "/a", "path", "/a"})), "between 1 and")
@@ -273,7 +275,7 @@ func TestBackgroundTrafficKeepsScenarioHeadersFromTheStart(t *testing.T) {
 }
 
 func TestFieldStartsWithIfPresent(t *testing.T) {
-	steps := newSteps(fakeBase{})
+	steps := newSteps(fakeBase{}, nil)
 	publish := func(status int, body string) context.Context {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			writeJSON(w, status, body)

@@ -27,6 +27,7 @@ Feature: Dynamic endpoint under concurrent and sustained traffic
     And I authenticate using basic auth as "admin"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
 
+  @de-22
   Scenario: Concurrent requests to operations with different upstreams are never mixed up
     Given I generate a unique value from "dynamic-concurrent" and store it as "apiName"
     And I generate a unique API context from "/dynamic-concurrent" and store it as "apiContext"
@@ -54,6 +55,7 @@ Feature: Dynamic endpoint under concurrent and sustained traffic
       | GET | ${CTX:apiContext}/v1.0/k22/plain | path | /k22/plain     |
     Then every concurrent response should have matched its expectation
 
+  @de-23
   Scenario: High-volume traffic to a selected upstream keeps routing to it
     Given I generate a unique value from "dynamic-volume" and store it as "apiName"
     And I generate a unique API context from "/dynamic-volume" and store it as "apiContext"
@@ -75,6 +77,7 @@ Feature: Dynamic endpoint under concurrent and sustained traffic
     Then every concurrent response should have matched its expectation
     When I send a "GET" request to the "capture" service at "/test/captured?path=/k23/probe" until status 204
 
+  @de-38
   Scenario: Rapid changes of targetUpstream under traffic only ever reach upstreams of a valid configuration
     Given I generate a unique value from "dynamic-rapid" and store it as "apiName"
     And I generate a unique API context from "/dynamic-rapid" and store it as "apiContext"

@@ -28,6 +28,7 @@ Feature: Dynamic endpoint with an unavailable upstream
     And I authenticate using basic auth as "admin"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
 
+  @de-20
   Scenario: The selected upstream is unavailable and the request does not switch to the main upstream
     Given I generate a unique value from "dynamic-down" and store it as "apiName"
     And I generate a unique API context from "/dynamic-down" and store it as "apiContext"
@@ -53,6 +54,7 @@ Feature: Dynamic endpoint with an unavailable upstream
     Then the response status code should be 200
     And the JSON response field "path" should be "/s20/plain"
 
+  @de-21
   Scenario: The main upstream is unavailable and an operation selecting another upstream still works
     Given I generate a unique value from "dynamic-main-down" and store it as "apiName"
     And I generate a unique API context from "/dynamic-main-down" and store it as "apiContext"

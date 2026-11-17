@@ -26,6 +26,7 @@ Feature: Dynamic endpoint routing
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  @de-1 @de-3
   Scenario: Operation routed to a named upstream definition while others use the default upstream
     Given I generate a unique value from "dynamic-operation" and store it as "apiName1"
     And I generate a unique API context from "/dynamic-operation" and store it as "apiContext1"
@@ -53,6 +54,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/ping"
 
+  @de-2 @de-5
   Scenario: Different operations route to upstreams with different base paths
     Given I generate a unique value from "dynamic-base-paths" and store it as "apiName2"
     And I generate a unique API context from "/dynamic-base-paths" and store it as "apiContext2"
@@ -86,6 +88,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/extras"
 
+  @de-9
   Scenario: Deploy fails when targetUpstream is omitted
     Given I generate a unique value from "dynamic-missing-target" and store it as "apiName3"
     And I generate a unique API context from "/dynamic-missing-target" and store it as "apiContext3"
@@ -102,6 +105,7 @@ Feature: Dynamic endpoint routing
     And the JSON response field "status" should be "error"
     And the response body should contain "targetUpstream"
 
+  @de-1
   Scenario: Dynamic-endpoint policy applies on the sandbox vhost
     Given I generate a unique value from "dynamic-sandbox-operation" and store it as "apiName4"
     And I generate a unique API context from "/dynamic-sandbox-operation" and store it as "apiContext4"
@@ -136,6 +140,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/alternate/whoami"
 
+  @de-4
   Scenario: API-level dynamic-endpoint policy applies on the sandbox vhost
     Given I generate a unique value from "dynamic-sandbox-api-policy" and store it as "apiName5"
     And I generate a unique API context from "/dynamic-sandbox-api-policy" and store it as "apiContext5"
@@ -171,6 +176,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/alternate/ping"
 
+  @de-3
   Scenario: Sandbox operation without the policy falls back to the sandbox upstream
     Given I generate a unique value from "dynamic-sandbox-fallback" and store it as "apiName6"
     And I generate a unique API context from "/dynamic-sandbox-fallback" and store it as "apiContext6"
@@ -205,6 +211,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/sandbox/ping"
 
+  @de-17
   Scenario: Dynamic-endpoint combined with a path-rewrite policy on the same operation
     Given I generate a unique value from "dynamic-rewrite" and store it as "apiName7"
     And I generate a unique API context from "/dynamic-rewrite" and store it as "apiContext7"
@@ -226,6 +233,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/alternate/rewritten"
 
+  @de-17
   Scenario: Dynamic-endpoint and a path-rewrite policy combined on the sandbox vhost
     Given I generate a unique value from "dynamic-sandbox-rewrite" and store it as "apiName8"
     And I generate a unique API context from "/dynamic-sandbox-rewrite" and store it as "apiContext8"
@@ -253,6 +261,7 @@ Feature: Dynamic endpoint routing
     And the response should be valid JSON
     And the JSON response field "path" should be "/alternate/rewritten"
 
+  @de-6
   Scenario: Operation routed to an upstream definition with several weighted upstreams
     Given I generate a unique value from "dynamic-weighted" and store it as "apiName9"
     And I generate a unique API context from "/dynamic-weighted" and store it as "apiContext9"
@@ -282,6 +291,7 @@ Feature: Dynamic endpoint routing
     Then the response should be successful
     And the JSON response field "path" should be "/ping"
 
+  @de-18
   Scenario: The request reaches the selected upstream with its method, headers and body unchanged
     Given I generate a unique value from "dynamic-passthrough-request" and store it as "apiName10"
     And I generate a unique API context from "/dynamic-passthrough-request" and store it as "apiContext10"
@@ -319,6 +329,7 @@ Feature: Dynamic endpoint routing
     And the response should contain echoed header "X-Trace-Id" with value "trace-0123456789"
     And the response should contain echoed header "X-Custom-Header" with value "custom-value"
 
+  @de-19
   Scenario: The response of the selected upstream reaches the client unchanged
     Given I generate a unique value from "dynamic-passthrough-response" and store it as "apiName11"
     And I generate a unique API context from "/dynamic-passthrough-response" and store it as "apiContext11"

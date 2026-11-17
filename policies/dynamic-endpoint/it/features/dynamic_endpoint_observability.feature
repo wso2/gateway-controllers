@@ -28,6 +28,7 @@ Feature: Dynamic endpoint routing leaves no credentials in logs or analytics
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  @de-36
   Scenario: Routing to an upstream does not expose credentials in logs or analytics
     Given I generate a unique value from "dynamic-sec-observe" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-observe" and store it as "apiContext"

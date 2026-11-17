@@ -38,6 +38,7 @@ const requestTimeout = 30 * time.Second
 // requestBase is the part of the shared request steps these steps build on.
 type requestBase interface {
 	GatewayURL(path string) (string, error)
+	GatewayURLAt(ordinalWord, path string) (string, error)
 	ScenarioHeaders(ctx context.Context) map[string]string
 	RequestHost(ctx context.Context) string
 }
@@ -45,24 +46,29 @@ type requestBase interface {
 // Steps carries what the policy's own steps share.
 type Steps struct {
 	base   requestBase
+	topo   *frameworkruntime.Topology
 	client *httpx.Client
 	funnel *httpx.Funnel
+
+	controlPlane controlPlane
 }
 
-func newSteps(base requestBase) *Steps {
+func newSteps(base requestBase, topo *frameworkruntime.Topology) *Steps {
 	client := httpx.NewClient(httpx.Options{Timeout: requestTimeout, MaxRetries: 3, RetryDelay: 2 * time.Second})
 	return &Steps{
 		base:   base,
+		topo:   topo,
 		client: client,
 		funnel: httpx.NewFunnel(client, 3, 2*time.Second),
 	}
 }
 
 // Register binds the policy's own steps to the scenario.
-func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, _ *frameworkruntime.Topology) {
-	s := newSteps(base)
+func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, topo *frameworkruntime.Topology) {
+	s := newSteps(base, topo)
 	s.registerRouting(sc)
 	s.registerConcurrentRoutes(sc)
 	s.registerBackgroundTraffic(sc)
 	s.registerURLHelpers(sc)
+	s.registerControlPlane(sc)
 }

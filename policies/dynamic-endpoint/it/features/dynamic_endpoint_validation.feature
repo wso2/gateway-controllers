@@ -30,6 +30,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
     And I authenticate using basic auth as "admin"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
 
+  @de-7
   Scenario: A targetUpstream that names no upstream definition does not fall back to the main upstream
     Given I generate a unique value from "dynamic-unknown" and store it as "apiName"
     And I generate a unique API context from "/dynamic-unknown" and store it as "apiContext"
@@ -49,6 +50,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
     Then the response body should not contain "/unknown/probe"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/unknown/probe" until status 204
 
+  @de-8
   Scenario: The upstream definition name must match exactly, including its case
     Given I generate a unique value from "dynamic-case" and store it as "apiName"
     And I generate a unique API context from "/dynamic-case" and store it as "apiContext"
@@ -71,6 +73,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
     Then the response body should not contain "/case/wrong"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/case/wrong" until status 204
 
+  @de-9
   Scenario: An empty targetUpstream leaves the routing unchanged
     Given I generate a unique value from "dynamic-empty" and store it as "apiName"
     And I generate a unique API context from "/dynamic-empty" and store it as "apiContext"
@@ -89,6 +92,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
     And I send a "GET" request to "${CTX:apiContext}/v1.0/empty/probe" until status 200
     Then the JSON response field "path" should be "/empty/probe"
 
+  @de-10
   Scenario Outline: Deploy is rejected when the policy parameters are invalid (<case>)
     Given I generate a unique value from "dynamic-bad-params" and store it as "apiName"
     And I generate a unique API context from "/dynamic-bad-params" and store it as "apiContext"
@@ -112,6 +116,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
       | object            | {"targetUpstream":{"name":"alt-upstream"}}                    |
       | unknown parameter | {"targetUpstream":"alt-upstream","fallback":"main"}           |
 
+  @de-10
   Scenario: Deploy is rejected for a policy version that does not exist
     Given I generate a unique value from "dynamic-bad-version" and store it as "apiName"
     And I generate a unique API context from "/dynamic-bad-version" and store it as "apiContext"
@@ -128,6 +133,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
     And the response should be valid JSON
     And the JSON response field "status" should be "error"
 
+  @de-24
   Scenario: Renaming the upstream definition a policy refers to makes the route fail instead of reaching another backend
     Given I generate a unique value from "dynamic-rename" and store it as "apiName"
     And I generate a unique API context from "/dynamic-rename" and store it as "apiContext"
@@ -164,6 +170,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
     Then the response body should not contain "/renamed/probe"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/renamed/probe" until status 204
 
+  @de-37
   Scenario Outline: A malformed upstream name never falls back to the main upstream (<case>)
     Given I generate a unique value from "dynamic-malformed" and store it as "apiName"
     And I generate a unique API context from "/dynamic-malformed" and store it as "apiContext"
@@ -191,6 +198,7 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
 
   # Known failure on gateway 1.2.0: without an upstream definition the route is bound to the main
   # cluster, the policy's selection is ignored, and the request is answered by the main upstream.
+  @known-issue @de-37
   Scenario: A targetUpstream without any upstream definition does not fall back to the main upstream
     Given I generate a unique value from "dynamic-no-definitions" and store it as "apiName"
     And I generate a unique API context from "/dynamic-no-definitions" and store it as "apiContext"

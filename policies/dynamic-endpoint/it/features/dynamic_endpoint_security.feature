@@ -32,6 +32,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
     And I authenticate using basic auth as "admin"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
 
+  @de-26
   Scenario: A query parameter cannot override the configured upstream
     Given I generate a unique value from "dynamic-sec-query" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-query" and store it as "apiContext"
@@ -55,6 +56,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
     And the JSON response field "query" should contain "targetUpstream=internal"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/s26/probe" until status 204
 
+  @de-27
   Scenario: Request headers cannot select another upstream
     Given I generate a unique value from "dynamic-sec-headers" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-headers" and store it as "apiContext"
@@ -87,6 +89,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
     Then the response status code should be 200
     And the JSON response field "path" should be "/s27/plain"
 
+  @de-28
   Scenario: A URL supplied in a header, query, path or body is never used as an endpoint
     Given I generate a unique value from "dynamic-sec-url" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-url" and store it as "apiContext"
@@ -124,6 +127,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
     And the response should contain echoed header "Host" containing "testbench"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/s28/probe" until status 204
 
+  @de-29
   Scenario Outline: Internal and loopback addresses in request input cannot redirect the request (<target>)
     Given I generate a unique value from "dynamic-sec-ssrf" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-ssrf" and store it as "apiContext"
@@ -153,6 +157,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
       | 169.254.169.254       | ssrf-meta   |
       | http://testbench:3002 | ssrf-echo   |
 
+  @de-30
   Scenario: Only an authenticated administrator can introduce or change an upstream definition
     Given I generate a unique value from "dynamic-sec-admin" and store it as "apiName"
     And I generate a unique value from "dynamic-sec-admin-rejected" and store it as "rejectedApiName"
@@ -201,6 +206,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
     When I send a "GET" request to "${CTX:apiContext}/v1.0/s30/probe" until status 503
     And I send a "GET" request to "${CTX:rejectedContext}/v1.0/s30/probe" until status 404
 
+  @de-31
   Scenario Outline: Encoded and traversal path values cannot select another upstream definition (<case>)
     Given I generate a unique value from "dynamic-sec-path" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-path" and store it as "apiContext"
@@ -229,6 +235,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
       | doubled slash         | /s31//internal/probe                           |
       | encoded null          | /s31/probe%00/internal                         |
 
+  @de-32
   Scenario: A spoofed Host header does not change the selected upstream
     Given I generate a unique value from "dynamic-sec-host" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-host" and store it as "apiContext"
@@ -254,6 +261,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
     And the response body should not contain "args"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/s32/probe" until status 204
 
+  @de-33
   Scenario: A spoofed Host header does not redirect traffic when Host Rewrite is combined with the policy
     Given I generate a unique value from "dynamic-sec-rewrite-host" and store it as "apiName"
     And I generate a unique API context from "/dynamic-sec-rewrite-host" and store it as "apiContext"
@@ -264,6 +272,7 @@ Feature: Dynamic endpoint upstream selection cannot be influenced by the client
       | spec.version             | v1.0                               |
       | spec.context             | ${CTX:apiContext}/$version         |
       | spec.upstream.main.url   | ${CTX:captureUpstream}             |
+      | spec.upstream.main.hostRewrite | manual                       |
       | spec.upstreamDefinitions | [{"name":"public","basePath":"/public","upstreams":[{"url":"http://testbench:3000"}]},{"name":"internal","basePath":"/internal","upstreams":[{"url":"http://testbench:3002"}]}] |
       | spec.operations          | [{"method":"GET","path":"/s33/baseline","policies":[{"name":"host-rewrite","version":"v1","params":{"host":"rewritten.example.com"}}]},{"method":"GET","path":"/s33/probe","policies":[{"name":"host-rewrite","version":"v1","params":{"host":"rewritten.example.com"}},{"name":"dynamic-endpoint","version":"v1","params":{"targetUpstream":"public"}}]}] |
     Then the response should be successful

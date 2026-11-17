@@ -19,6 +19,18 @@
 # The integration suite of the dynamic-endpoint policy. Feature paths are relative to this
 # directory. Give a runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a
 # gateway release newer than the oldest one tested.
+#
+# Every runner requires gateway-version>=1.2.0 and is skipped on gateway 1.1.0. The policy itself
+# did not change between the two releases (v1.0.1 is the same), but the gateway 1.1.0 does not
+# apply the base path of the selected upstream definition: the policy engine looked the base path
+# up under the wrong key, so it always missed and defaulted to "/", and a request to a named
+# upstream reached it as "/whoami" instead of "/alternate/whoami". The gateway fixes below landed
+# after the 1.1.0 release (api-platform repository, available from 1.2.0):
+#   - 7cff05d2f  fix(policy-engine): resolve upstream base path for dynamic routing
+#   - d4322992c  feat(controller)!: take upstreamDefinitions base path from basePath
+#   - 30a24d2b7  fix(gateway): dynamic-endpoint double path prefix on sandbox vhost
+#   - 6e79649c7  fix(gateway): preserve selected upstream across request phases
+# Drop the tags when the oldest gateway under test includes these fixes.
 
 suite: dynamic-endpoint
 
@@ -47,7 +59,7 @@ blocks:
         features:
           - features/dynamic_endpoint.feature
       - name: dynamic-endpoint-validation
-        tags: "gateway-version>=1.2.0"
+        tags: "gateway-version>=1.2.0;~@known-issue"
         features:
           - features/dynamic_endpoint_validation.feature
       - name: dynamic-endpoint-composition
@@ -102,3 +114,23 @@ blocks:
         tags: "gateway-version>=1.2.0"
         features:
           - features/dynamic_endpoint_observability.feature
+
+  # The API and its named upstreams reach each gateway through the control plane (platform-api),
+  # so this block boots one with two gateways. Unlike the other blocks it needs a platform-api
+  # that carries upstreamDefinitions through to the gateway.
+  - name: dynamic-endpoint-multigateway
+    parallel: 1
+    components:
+      - name: platform-api
+        version: latest
+        db: sqlite
+      - name: platform-gateway
+        dependsOn: [platform-api]
+        replicas: 2
+        db: sqlite
+      - name: testbench
+    runners:
+      - name: dynamic-endpoint-multigateway
+        tags: "gateway-version>=1.2.0;~@known-issue"
+        features:
+          - features/dynamic_endpoint_multigateway.feature
