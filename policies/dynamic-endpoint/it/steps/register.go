@@ -22,10 +22,47 @@
 package steps
 
 import (
+	"context"
+	"time"
+
 	"github.com/cucumber/godog"
 
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
+	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
+
+	sharedsteps "github.com/wso2/gateway-controllers/tests/it/common/steps"
 )
 
+const requestTimeout = 30 * time.Second
+
+// requestBase is the part of the shared request steps these steps build on.
+type requestBase interface {
+	GatewayURL(path string) (string, error)
+	ScenarioHeaders(ctx context.Context) map[string]string
+	RequestHost(ctx context.Context) string
+}
+
+// Steps carries what the policy's own steps share.
+type Steps struct {
+	base   requestBase
+	client *httpx.Client
+	funnel *httpx.Funnel
+}
+
+func newSteps(base requestBase) *Steps {
+	client := httpx.NewClient(httpx.Options{Timeout: requestTimeout, MaxRetries: 3, RetryDelay: 2 * time.Second})
+	return &Steps{
+		base:   base,
+		client: client,
+		funnel: httpx.NewFunnel(client, 3, 2*time.Second),
+	}
+}
+
 // Register binds the policy's own steps to the scenario.
-func Register(_ *godog.ScenarioContext, _ *frameworkruntime.Topology) {}
+func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, _ *frameworkruntime.Topology) {
+	s := newSteps(base)
+	s.registerRouting(sc)
+	s.registerConcurrentRoutes(sc)
+	s.registerBackgroundTraffic(sc)
+	s.registerURLHelpers(sc)
+}

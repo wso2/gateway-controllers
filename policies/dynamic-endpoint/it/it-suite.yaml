@@ -46,3 +46,59 @@ blocks:
         tags: "gateway-version>=1.2.0"
         features:
           - features/dynamic_endpoint.feature
+      - name: dynamic-endpoint-validation
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_validation.feature
+      - name: dynamic-endpoint-composition
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_composition.feature
+      - name: dynamic-endpoint-resilience
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_resilience.feature
+      - name: dynamic-endpoint-concurrency
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_concurrency.feature
+      - name: dynamic-endpoint-security
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_security.feature
+      - name: dynamic-endpoint-lifecycle
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_lifecycle.feature
+
+  # The restart runner restarts the block's gateway, which would interrupt any runner sharing it.
+  - name: dynamic-endpoint-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: dynamic-endpoint-restart
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_restart.feature
+
+  # The runner resets and reads the block's shared analytics collector, so no other runner may
+  # send traffic through the same gateway meanwhile. The overlay restores the gateway's default
+  # of capturing no headers for analytics, which the scenario relies on to show that a
+  # credential is not recorded.
+  - name: dynamic-endpoint-observability
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+        overlay: overlays/default-header-capture.toml
+      - name: testbench
+    runners:
+      - name: dynamic-endpoint-observability
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/dynamic_endpoint_observability.feature

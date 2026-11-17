@@ -4,6 +4,7 @@ go 1.26.5
 
 require (
 	github.com/cucumber/godog v0.16.0
+	github.com/stretchr/testify v1.12.1
 	github.com/wso2/gateway-controllers/tests/it v0.0.0
 )
 
@@ -120,7 +121,6 @@ require (
 	github.com/skratchdot/open-golang v0.0.0-20200116055534-eef842397966 // indirect
 	github.com/spf13/cobra v1.10.2 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/stretchr/testify v1.12.1 // indirect
 	github.com/testcontainers/testcontainers-go v0.44.0 // indirect
 	github.com/testcontainers/testcontainers-go/modules/compose v0.44.0 // indirect
 	github.com/tilt-dev/fsnotify v1.4.8-0.20220602155310-fff9c274a375 // indirect
