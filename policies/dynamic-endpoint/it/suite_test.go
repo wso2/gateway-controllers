@@ -27,7 +27,12 @@ import (
 	"github.com/wso2/gateway-controllers/policies/dynamic-endpoint/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register, Companions: []string{"request-rewrite"}}
+// The companions are the policies the scenarios chain with dynamic-endpoint. A gateway built by
+// make it already contains every policy; these matter only to a suite run directly with go test.
+var config = suite.Config{
+	RegisterWithBase: steps.Register,
+	Companions:       []string{"request-rewrite", "api-key-auth", "basic-ratelimit"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
