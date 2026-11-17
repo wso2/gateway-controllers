@@ -181,11 +181,9 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            JSONPath expression selecting the content to validate. Supports [n], [-1], [*] and .* .
-            When it selects an object or array, every string inside it is validated.
-            For MCP tool calls, use "$.params.arguments". A JSON-RPC message the path does not
-            apply to (an MCP initialize, tools/list or notification) passes without a check.
-            If empty, the whole payload is validated.
+            JSONPath to the content to validate; supports [n], [-1], [*] and .*. Every string
+            under a selected object or array is validated. MCP tool calls: "$.params.arguments".
+            Empty validates the whole payload.
           default: "$.messages[-1].content"
         redactPII:
           type: boolean
@@ -222,14 +220,10 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            JSONPath expression selecting the content to validate. Supports [n], [-1], [*] and .* .
-            When it selects an object or array, every string inside it is validated.
-            For MCP tool results, use "$.result.content[*].text"; an MCP Server-Sent Events
-            response is read event by event with this path. If empty, the whole payload is validated.
-            A streamed LLM response reaching the buffered path — which happens when
-            another policy on the route requires the whole body — is read as
-            Server-Sent Events with streamingJsonPath instead, since this path
-            addresses a non-streamed shape and cannot match one.
+            JSONPath to the content to validate; supports [n], [-1], [*] and .*. Every string
+            under a selected object or array is validated. MCP tool results:
+            "$.result.content[*].text". Empty validates the whole payload. Streamed LLM
+            responses use streamingJsonPath instead.
           default: "$.choices[0].message.content"
         passthroughOnError:
           type: boolean
