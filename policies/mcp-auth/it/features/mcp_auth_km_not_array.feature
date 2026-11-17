@@ -51,9 +51,12 @@ Feature: mcp-auth with keymanagers that is not a list
       | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"]}}] |
     Then the resource creation response should indicate successful deployment
 
-    # Polling until 500 waits until the proxy's routes are live.
+    # Polling an empty POST until 401 waits until the routes and the policy chain are live: only the
+    # policy answers 401. A 500 cannot be polled for, because the policy engine answers 500 while it
+    # waits for the chain.
     When I clear all headers
-    And I send a "GET" request to "${CTX:mcpContext}/.well-known/oauth-protected-resource" until status 500
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    And I send a "GET" request to "${CTX:mcpContext}/.well-known/oauth-protected-resource"
     Then the response should match the expected error response "mcp-auth-key-managers-not-array"
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
