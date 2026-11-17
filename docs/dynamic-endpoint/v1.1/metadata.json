@@ -1,0 +1,10 @@
+{
+  "name": "dynamic-endpoint",
+  "displayName": "Dynamic Endpoint",
+  "version": "1.1",
+  "provider": "Choreo Labs",
+  "categories": [
+    "Transformation"
+  ],
+  "description": "Routes requests to an upstream chosen at request time: a fixed target named by targetUpstream (one of the API's upstream definitions or, failing that, a gateway-wide Backend), or the gateway-wide Backend a CEL expression names from the request context (headers, path, metadata, API, route or authenticated claims).\nBackends are added and changed on the gateway without editing or redeploying the APIs that route to them; a Backend that an API names in targetUpstream, without an upstream definition of that name, is removed after that API stops naming it."
+}
