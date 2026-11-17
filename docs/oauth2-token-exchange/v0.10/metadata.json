@@ -2,7 +2,7 @@
   "name": "oauth2-token-exchange",
   "displayName": "OAuth2 Token Exchange",
   "version": "0.10",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security"
   ],

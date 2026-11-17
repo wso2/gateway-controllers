@@ -2,7 +2,7 @@
   "name": "granite-guardian-prompt-injection",
   "displayName": "Granite Guardian Prompt Injection",
   "version": "0.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

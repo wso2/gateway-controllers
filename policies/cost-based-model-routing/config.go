@@ -23,6 +23,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/wso2/gateway-controllers/policies/advanced-ratelimit/redistls"
 )
 
 const (
@@ -86,6 +88,10 @@ type redisConfig struct {
 	ReadTimeout       time.Duration
 	WriteTimeout      time.Duration
 	PoolSize          int
+	TLS               redistls.Config
+	// TLSFingerprint identifies the loaded TLS settings ("" = plaintext). It is set by
+	// newBudgetStore once the TLS files have been read, and feeds the storage cache key.
+	TLSFingerprint string
 }
 
 type localConfig struct {
@@ -211,6 +217,14 @@ func parseConfig(params map[string]interface{}) (config, error) {
 		ReadTimeout:       getDurationParam(params, "redis.readTimeout", 3*time.Second),
 		WriteTimeout:      getDurationParam(params, "redis.writeTimeout", 3*time.Second),
 		PoolSize:          getIntParam(params, "redis.poolSize", 0),
+		TLS: redistls.Config{
+			Enabled:            getBoolParam(params, "redis.tls.enabled", false),
+			CAFile:             getStringParam(params, "redis.tls.caFile", ""),
+			ServerName:         getStringParam(params, "redis.tls.serverName", ""),
+			InsecureSkipVerify: getBoolParam(params, "redis.tls.insecureSkipVerify", false),
+			CertFile:           getStringParam(params, "redis.tls.certFile", ""),
+			KeyFile:            getStringParam(params, "redis.tls.keyFile", ""),
+		},
 	}
 	result.MemoryCleanupInterval = getDurationParam(params, "memory.cleanupInterval", 5*time.Minute)
 	result.Local = localConfig{
@@ -607,6 +621,17 @@ func getIntParam(params map[string]interface{}, key string, defaultVal int) int 
 	}
 	if value, err := integerValue(raw); err == nil {
 		return int(value)
+	}
+	return defaultVal
+}
+
+func getBoolParam(params map[string]interface{}, key string, defaultVal bool) bool {
+	raw, ok := nestedParam(params, key)
+	if !ok {
+		return defaultVal
+	}
+	if value, ok := raw.(bool); ok {
+		return value
 	}
 	return defaultVal
 }

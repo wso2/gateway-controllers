@@ -137,6 +137,18 @@ func newBudgetStore(cfg config, route costRoute, metadata policy.PolicyMetadata)
 	}
 
 	if cfg.Backend == "redis" || cfg.Backend == "redis-local-async" {
+		// A TLS misconfiguration (unreadable CA file, mismatched key pair) is an
+		// operator error, not Redis being unavailable, so it fails regardless of
+		// redis.failureMode.
+		tlsConfig, tlsFingerprint, err := cfg.Redis.TLS.Build()
+		if err != nil {
+			return nil, err
+		}
+		cfg.Redis.TLSFingerprint = tlsFingerprint
+		if cfg.Redis.TLS.Enabled && cfg.Redis.TLS.InsecureSkipVerify {
+			slog.Warn("CostBasedModelRouting: Redis TLS certificate verification is disabled (redis.tls.insecureSkipVerify); do not use this in production",
+				"route", metadata.RouteName, "addr", fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port))
+		}
 		client, created, pingErr := getOrCreateRedisClient(&redis.Options{
 			Addr:         fmt.Sprintf("%s:%d", cfg.Redis.Host, cfg.Redis.Port),
 			Username:     cfg.Redis.Username,
@@ -146,7 +158,8 @@ func newBudgetStore(cfg config, route costRoute, metadata policy.PolicyMetadata)
 			ReadTimeout:  cfg.Redis.ReadTimeout,
 			WriteTimeout: cfg.Redis.WriteTimeout,
 			PoolSize:     cfg.Redis.PoolSize,
-		}, cfg.Redis.ConnectionTimeout)
+			TLSConfig:    tlsConfig,
+		}, tlsFingerprint, cfg.Redis.ConnectionTimeout)
 		// Fail fast only when this call created the client and it could not
 		// connect; a reused client is assumed healthy because go-redis
 		// reconnects lazily.
@@ -428,6 +441,8 @@ func cacheKeyFor(cfg config, args ...interface{}) string {
 		builder.WriteString(cfg.Redis.WriteTimeout.String())
 		builder.WriteString("|redis-pool-size=")
 		builder.WriteString(strconv.Itoa(cfg.Redis.PoolSize))
+		builder.WriteString("|redis-tls=")
+		builder.WriteString(cfg.Redis.TLSFingerprint)
 		builder.WriteString("|local=")
 		builder.WriteString(cfg.Local.SyncInterval.String())
 		builder.WriteString(",")
@@ -465,6 +480,9 @@ type redisConnKey struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	poolSize     int
+	// tlsFingerprint identifies the TLS settings (see redistls.Config.Build); "" = plaintext.
+	// A *tls.Config is not comparable, so the key carries its fingerprint instead.
+	tlsFingerprint string
 }
 
 // redisClients is the process-wide registry of shared Redis clients. Without it
@@ -487,8 +505,9 @@ func hashRedisPassword(password string) string {
 // connection settings, creating (and pinging once) it on first use. created
 // reports whether this call created the client; pingErr is non-nil only when
 // created and the initial ping failed. The client is registered and returned
-// even on ping failure because go-redis reconnects lazily.
-func getOrCreateRedisClient(opts *redis.Options, pingTimeout time.Duration) (client *redis.Client, created bool, pingErr error) {
+// even on ping failure because go-redis reconnects lazily. tlsFingerprint must
+// identify opts.TLSConfig ("" when it is nil).
+func getOrCreateRedisClient(opts *redis.Options, tlsFingerprint string, pingTimeout time.Duration) (client *redis.Client, created bool, pingErr error) {
 	key := redisConnKey{
 		addr:         opts.Addr,
 		username:     opts.Username,
@@ -498,6 +517,8 @@ func getOrCreateRedisClient(opts *redis.Options, pingTimeout time.Duration) (cli
 		readTimeout:  opts.ReadTimeout,
 		writeTimeout: opts.WriteTimeout,
 		poolSize:     opts.PoolSize,
+
+		tlsFingerprint: tlsFingerprint,
 	}
 
 	redisClients.mu.Lock()

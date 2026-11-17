@@ -2,7 +2,7 @@
   "name": "error-response-formatter",
   "displayName": "Error Response Formatter",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Transformation"
   ],

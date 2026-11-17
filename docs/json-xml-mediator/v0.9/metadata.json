@@ -2,7 +2,7 @@
   "name": "json-xml-mediator",
   "displayName": "JSON/XML Mediator",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Transformation"
   ],

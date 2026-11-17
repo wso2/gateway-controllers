@@ -35,7 +35,7 @@ defaults:
 
 blocks:
   - name: content-length-guardrail
-    parallel: 1
+    parallel: 4
     components:
       - name: platform-gateway
         db:
@@ -45,3 +45,22 @@ blocks:
       - name: content-length-guardrail
         features:
           - features/content_length_guardrail.feature
+      - name: content-length-guardrail-streaming
+        tags: "~@known-issue"
+        features:
+          - features/content_length_guardrail_streaming.feature
+      - name: content-length-guardrail-measurement
+        features:
+          - features/content_length_guardrail_measurement.feature
+      - name: content-length-guardrail-configuration
+        features:
+          - features/content_length_guardrail_configuration.feature
+      - name: content-length-guardrail-violations
+        features:
+          - features/content_length_guardrail_violations.feature
+      - name: content-length-guardrail-invalid-settings
+        features:
+          - features/content_length_guardrail_invalid_settings.feature
+      - name: content-length-guardrail-validation
+        features:
+          - features/content_length_guardrail_validation.feature

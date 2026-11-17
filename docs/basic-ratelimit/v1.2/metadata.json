@@ -2,7 +2,7 @@
   "name": "basic-ratelimit",
   "displayName": "Rate Limit - Basic",
   "version": "1.2",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI"

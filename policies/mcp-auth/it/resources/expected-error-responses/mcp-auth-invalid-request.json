@@ -1,0 +1,15 @@
+{
+  "body": {
+    "error": {
+      "code": -32600,
+      "data": "Invalid MCP request format",
+      "message": "Invalid Request"
+    },
+    "id": null,
+    "jsonrpc": "2.0"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}

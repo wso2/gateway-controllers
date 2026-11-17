@@ -2,7 +2,7 @@
   "name": "oauth2-generator",
   "displayName": "OAuth2 Generator",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI"

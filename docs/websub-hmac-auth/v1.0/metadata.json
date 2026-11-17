@@ -2,7 +2,7 @@
   "name": "websub-hmac-auth",
   "displayName": "WebSub HMAC Auth",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "WebSub"

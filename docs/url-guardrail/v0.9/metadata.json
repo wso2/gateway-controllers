@@ -2,7 +2,7 @@
   "name": "url-guardrail",
   "displayName": "URL Guardrail",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

@@ -2,7 +2,7 @@
   "name": "request-rewrite",
   "displayName": "Request Rewrite",
   "version": "0.2",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Transformation"
   ],

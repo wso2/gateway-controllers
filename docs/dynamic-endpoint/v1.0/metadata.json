@@ -2,7 +2,7 @@
   "name": "dynamic-endpoint",
   "displayName": "Dynamic Endpoint",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Transformation"
   ],

@@ -2,7 +2,7 @@
   "name": "semantic-prompt-guard",
   "displayName": "Semantic Prompt Guard",
   "version": "0.8",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

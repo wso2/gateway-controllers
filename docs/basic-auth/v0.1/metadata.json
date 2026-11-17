@@ -2,7 +2,7 @@
   "name": "basic-auth",
   "displayName": "Basic Auth",
   "version": "0.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI",

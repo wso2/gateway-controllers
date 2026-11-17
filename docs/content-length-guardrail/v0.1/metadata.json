@@ -2,7 +2,7 @@
   "name": "content-length-guardrail",
   "displayName": "Content Length Guardrail",
   "version": "0.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"
