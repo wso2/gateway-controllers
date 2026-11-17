@@ -2,7 +2,7 @@
   "name": "backend-jwt",
   "displayName": "Backend JWT",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security"
   ],

@@ -2,7 +2,7 @@
   "name": "model-round-robin",
   "displayName": "Model Round Robin",
   "version": "1.2",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI"
   ],

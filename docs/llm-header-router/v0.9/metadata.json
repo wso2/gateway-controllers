@@ -2,7 +2,7 @@
   "name": "llm-header-router",
   "displayName": "LLM Header Router",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI"
   ],

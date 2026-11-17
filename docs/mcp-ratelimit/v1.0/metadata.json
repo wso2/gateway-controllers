@@ -2,7 +2,7 @@
   "name": "mcp-ratelimit",
   "displayName": "MCP Rate Limit",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "MCP",
     "Security"

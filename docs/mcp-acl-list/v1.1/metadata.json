@@ -2,7 +2,7 @@
   "name": "mcp-acl-list",
   "displayName": "MCP Access Control",
   "version": "1.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "MCP"
   ],

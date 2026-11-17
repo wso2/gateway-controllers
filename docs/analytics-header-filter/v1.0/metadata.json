@@ -2,7 +2,7 @@
   "name": "analytics-header-filter",
   "displayName": "Analytics Header Filter",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Logging",
     "Analytics & Monitoring"

@@ -2,7 +2,7 @@
   "name": "model-weighted-round-robin",
   "displayName": "Model Weighted Round Robin",
   "version": "0.9",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI"
   ],

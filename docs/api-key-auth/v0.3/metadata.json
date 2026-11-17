@@ -2,7 +2,7 @@
   "name": "api-key-auth",
   "displayName": "API Key Auth",
   "version": "0.3",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI",

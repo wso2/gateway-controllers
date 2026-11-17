@@ -2,7 +2,7 @@
   "name": "regex-guardrail",
   "displayName": "Regex Guardrail",
   "version": "0.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"

@@ -2,7 +2,7 @@
   "name": "aws-authentication",
   "displayName": "AWS Authentication",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Security",
     "AI"

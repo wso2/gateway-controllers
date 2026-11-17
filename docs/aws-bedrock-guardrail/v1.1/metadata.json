@@ -2,7 +2,7 @@
   "name": "aws-bedrock-guardrail",
   "displayName": "AWS Bedrock Guardrail",
   "version": "1.1",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
     "AI"
