@@ -114,8 +114,9 @@ parameters:
           x-wso2-policy-advanced-param: false
           description: |
             Session name used when assuming the role. This is what appears in
-            the target account's CloudTrail, so prefer a value identifying this
-            API. Defaults to "bedrock-guardrail-session".
+            the target account's CloudTrail. Defaults to
+            "wso2-gw-<apiName>[-<apiVersion>]" derived from the API, or
+            "bedrock-guardrail-session" when the API has neither.
           pattern: "^[\\w+=,.@-]{2,64}$"
         awsAccessKeyID:
           type: string

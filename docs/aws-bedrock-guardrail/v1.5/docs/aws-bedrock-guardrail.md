@@ -121,7 +121,7 @@ Therefore "self-contained" applies strictly only to `iam-user-access-key`. The o
 
 Two consequences worth internalising:
 
-- A stale field left behind by an edit will not fail a deployment, but it will not do anything either. **Read `authenticationType` to determine which identity an attachment uses — not which fields are present.**
+- A stale field left behind by an edit does not change which identity is used, and it is not otherwise read. Its format is still checked, though: a malformed `awsRoleARN` or `awsRoleRegion` fails the deployment even under an `authenticationType` that does not use it. **Read `authenticationType` to determine which identity an attachment uses — not which fields are present.**
 - Fields a mode *requires* are still enforced. `sts-assume-role` without `awsRoleARN`, or `iam-user-access-key` without a key and secret, is rejected at deploy time.
 
 | Parameter | Type | Required | Default | Description |
@@ -130,7 +130,7 @@ Two consequences worth internalising:
 | `awsRoleARN` | string | Conditional | – | Required for `sts-assume-role`. Optional for `irsa` — falls back to the `AWS_ROLE_ARN` environment variable. |
 | `awsRoleRegion` | string | No | effective `region` | AWS region whose STS endpoint is used for the assumption. |
 | `awsRoleExternalID` | string | No | – | External ID required by the target role's trust policy. Used only by `sts-assume-role` — `irsa` calls `AssumeRoleWithWebIdentity`, which has no external-ID parameter, so a value set there is ignored. |
-| `awsRoleSessionName` | string | No | `bedrock-guardrail-session` | Session name used when assuming the role. This is what appears in the target account's CloudTrail, so prefer a value identifying this API. |
+| `awsRoleSessionName` | string | No | `wso2-gw-<apiName>[-<apiVersion>]`; `bedrock-guardrail-session` when the API has neither | Session name used when assuming the role. This is what appears in the target account's CloudTrail. The default is derived from the API the policy is attached to (characters STS does not allow become `-`, truncated to 64 characters). |
 | `awsAccessKeyID` | string | Conditional | – | Required for `iam-user-access-key`. Optional base credential for `sts-assume-role`. |
 | `awsSecretAccessKey` | string | Conditional | – | Required for `iam-user-access-key`. |
 | `awsSessionToken` | string | No | – | Only meaningful when the key/secret pair is already temporary. |
@@ -214,7 +214,7 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
 A response flow on an LLM route can be streamed. With `stream: true`, the policy assesses the response a text unit at a time instead of holding it whole:
 
 - Assistant text is read from each event with `streamingJsonPath` and collected into batches of `streamingTextUnitChars` characters, cut at a sentence or word boundary.
-- Each batch is withheld until `ApplyGuardrail` has assessed it, so no unassessed text reaches the client. The first text therefore arrives after about one text unit has been generated and assessed; the rest of the response follows in batches.
+- Each batch is withheld until `ApplyGuardrail` has assessed it, so no unassessed text reaches the client. The exception is `passthroughOnError: true`: a batch whose assessment fails is released unassessed rather than stalling the stream. The first text therefore arrives after about one text unit has been generated and assessed; the rest of the response follows in batches.
 - A violation found mid-stream cannot become HTTP `422`, because the `200` status and headers have already been sent. The stream ends with a final event carrying the guardrail error instead, and the termination is reported as a fault. Text delivered before the violating batch stays delivered. An API that must never deliver any text before the whole response is assessed should not stream.
 - A response whose body is a single JSON document arriving over chunked transfer is accumulated whole and answered with `422` as before.
 
@@ -511,6 +511,8 @@ spec:
 A tool call or tool result that triggers a blocking guardrail policy returns HTTP `422`. PII that the guardrail anonymizes in a tool result is replaced with its type in braces, such as `{EMAIL}`.
 
 The policy applies to every message on the route, not only `tools/call`. Messages such as `initialize`, `tools/list` and notifications have no `params.arguments` or tool result text, so they have nothing to validate and pass unchanged, without a Bedrock call. See [MCP routes](#mcp-routes).
+
+Gateway compatibility: use gateway 1.2.0 or later on MCP routes whose server answers with Server-Sent Events. On gateway 1.1.0 such a response returns HTTP `500` with an empty body when response validation is enabled, because that gateway processes MCP responses as buffered while running the streaming handler. JSON responses are not affected.
 
 ### Example 9: Validating only successful responses
 

@@ -215,6 +215,9 @@ Feature: AWS Bedrock guardrail policy on MCP routes
     And I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
 
+  # Gateway 1.1.0 returns 500 for an SSE response on an MCP route with a
+  # streaming-capable response policy; fixed in gateway 1.2.0.
+  @sse-response
   Scenario: A Server-Sent Events tool result is checked and keeps its events
     Given I generate a unique resource name from "bedrock-mcp-resp-sse" and store it as "mcpName"
     And I generate a unique value from "bedrock-mcp-resp-sse" and store it as "mcpDisplayName"
@@ -263,6 +266,9 @@ Feature: AWS Bedrock guardrail policy on MCP routes
     And I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
 
+  # Gateway 1.1.0 returns 500 for an SSE response on an MCP route with a
+  # streaming-capable response policy; fixed in gateway 1.2.0.
+  @sse-response
   Scenario: Violating content in a Server-Sent Events tool result is blocked
     Given I generate a unique resource name from "bedrock-mcp-resp-sse-block" and store it as "mcpName"
     And I generate a unique value from "bedrock-mcp-resp-sse-block" and store it as "mcpDisplayName"

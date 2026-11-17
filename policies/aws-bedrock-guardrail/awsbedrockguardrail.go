@@ -1383,12 +1383,22 @@ type piiReplacement struct {
 	replacement string
 }
 
-// applyPIIReplacements applies the replacements to one piece of text.
+// applyPIIReplacements applies the replacements to one piece of text in a single
+// pass over the original, so text one replacement inserts (EMAIL_0000) is never
+// matched by another (0000). Where two values start at the same position, the
+// earlier replacement wins, which piiReplacements orders longest first.
 func applyPIIReplacements(content string, replacements []piiReplacement) string {
-	for _, r := range replacements {
-		content = strings.ReplaceAll(content, r.match, r.replacement)
+	if len(replacements) == 0 {
+		return content
 	}
-	return content
+	pairs := make([]string, 0, 2*len(replacements))
+	for _, r := range replacements {
+		if r.match == "" {
+			continue
+		}
+		pairs = append(pairs, r.match, r.replacement)
+	}
+	return strings.NewReplacer(pairs...).Replace(content)
 }
 
 // piiReplacements lists the values to replace in content that passed with
@@ -2511,10 +2521,13 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	// delivered under a later batch's -- and that batch never sees this text, so a
 	// redaction reported here would simply be dropped and the value delivered in
 	// the clear. Fail closed, exactly as releaseBytes does when a reported value
-	// cannot be redacted in place.
+	// cannot be redacted in place. The same applies to a value that starts in the
+	// released frames and ends in the withheld one: neither part contains it
+	// whole, so neither rewrite would find it.
 	if retainedBytes != "" {
 		for _, decision := range decisions {
-			if !p.reportedValueRemains(retainedBytes, decision, rp, respCtx.Metadata) {
+			if !p.reportedValueRemains(retainedBytes, decision, rp, respCtx.Metadata) &&
+				!p.reportedValueSpans(heldBytes, retainedBytes, decision, rp, respCtx.Metadata) {
 				continue
 			}
 			slog.Warn("AWSBedrockGuardrail: a reported value sits in a withheld frame this batch cannot rewrite; discarding the held bytes",
@@ -2549,6 +2562,48 @@ func (p *AWSBedrockGuardrailPolicy) reportedValueRemains(
 	for _, r := range rewrites {
 		if strings.Contains(joined, r.match) {
 			return true
+		}
+	}
+	return false
+}
+
+// reportedValueSpans reports whether a value this assessment marked for
+// replacement starts in the released frames and ends in the retained ones.
+func (p *AWSBedrockGuardrailPolicy) reportedValueSpans(
+	released, retained string,
+	output interface{},
+	rp AWSBedrockGuardrailPolicyParams,
+	metadata map[string]interface{},
+) bool {
+	if released == "" || retained == "" {
+		return false
+	}
+	rewrites := p.responseRewrites(output, rp, metadata)
+	if len(rewrites) == 0 {
+		return false
+	}
+	head := extractSSEDeltaContent(released, rp.StreamingJsonPath)
+	joined := head + extractSSEDeltaContent(retained, rp.StreamingJsonPath)
+	boundary := len(head)
+	for _, r := range rewrites {
+		if r.match == "" {
+			continue
+		}
+		// Only an occurrence starting inside the last len(match)-1 bytes of the
+		// released text can cross the boundary.
+		from := boundary - len(r.match) + 1
+		if from < 0 {
+			from = 0
+		}
+		for i := from; i < boundary; {
+			idx := strings.Index(joined[i:], r.match)
+			if idx < 0 || i+idx >= boundary {
+				break
+			}
+			if i+idx+len(r.match) > boundary {
+				return true
+			}
+			i += idx + 1
 		}
 	}
 	return false
@@ -3300,9 +3355,11 @@ func restoredBody(payload []byte, restored bool) []byte {
 
 // sseCarriesJSONRPC reports whether any event of an SSE body is a JSON-RPC
 // message — an MCP Streamable HTTP response rather than an LLM token stream.
+// An event's data lines are joined first, as the SSE specification does, so a
+// message split over several data lines is still recognised.
 func sseCarriesJSONRPC(payload []byte) bool {
-	for _, line := range strings.Split(normalizeLineEndings(payload), "\n") {
-		data, ok := dataLineValue(line)
+	for _, event := range splitEvents(payload) {
+		data, ok := eventData(event.lines)
 		if !ok {
 			continue
 		}

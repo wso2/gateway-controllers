@@ -167,12 +167,11 @@ func normalizeLineEndings(payload []byte) string {
 	return strings.ReplaceAll(strings.ReplaceAll(string(payload), "\r\n", "\n"), "\r", "\n")
 }
 
-func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*extractedPayload, error) {
-	normalized := normalizeLineEndings(payload)
-
+// splitEvents splits a Server-Sent Events body into its events at blank lines.
+func splitEvents(payload []byte) []*payloadEvent {
 	var events []*payloadEvent
 	current := &payloadEvent{}
-	for _, line := range strings.Split(normalized, "\n") {
+	for _, line := range strings.Split(normalizeLineEndings(payload), "\n") {
 		if line == "" {
 			if len(current.lines) > 0 {
 				events = append(events, current)
@@ -185,6 +184,11 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 	if len(current.lines) > 0 {
 		events = append(events, current)
 	}
+	return events
+}
+
+func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*extractedPayload, error) {
+	events := splitEvents(payload)
 
 	var segments []*textSegment
 	matched := false

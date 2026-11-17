@@ -297,3 +297,54 @@ func TestStreaming_RestoredValueIsNotMaskedAgain(t *testing.T) {
 		t.Fatalf("expected the restored email, got %q", delivered)
 	}
 }
+
+// Replacements run in one pass over the original text, so a later value never
+// rewrites the placeholder an earlier one inserted.
+func TestApplyPIIReplacements_DoesNotRewriteInsertedPlaceholders(t *testing.T) {
+	got := applyPIIReplacements("mail john@example.com, pin 0000", []piiReplacement{
+		{match: "john@example.com", replacement: "EMAIL_0000"},
+		{match: "0000", replacement: "PIN_0001"},
+	})
+	if got != "mail EMAIL_0000, pin PIN_0001" {
+		t.Fatalf("expected each value replaced once, got %q", got)
+	}
+}
+
+// A reported value that starts in the released frames and ends in the withheld
+// one is in neither part whole, so neither rewrite would find it.
+func TestReportedValueSpans_DetectsValueAcrossTheReleaseBoundary(t *testing.T) {
+	p := streamingPolicy(nil, nil)
+	rp := p.responseParams
+	output := makePIIIntervenedOutput("john@example.com")
+
+	if !p.reportedValueSpans(sseEvent("Mail john@exa"), sseEvent("mple.com now"), output, rp, map[string]interface{}{}) {
+		t.Fatalf("expected a value split across the boundary to be detected")
+	}
+	if p.reportedValueSpans(sseEvent("Mail john@example.com"), sseEvent(" now"), output, rp, map[string]interface{}{}) {
+		t.Fatalf("a value wholly inside the released frames is rewritten there, not a span")
+	}
+	if p.reportedValueSpans(sseEvent("Mail "), sseEvent("john@example.com now"), output, rp, map[string]interface{}{}) {
+		t.Fatalf("a value wholly inside the retained frame is not a span")
+	}
+}
+
+// A JSON-RPC message split over several data lines is still an MCP event: the
+// lines are joined before it is classified, so it is not mistaken for an LLM
+// token stream and passed unassessed.
+func TestResponse_MultiLineJSONRPCEventIsAssessed(t *testing.T) {
+	client := &countingBedrockClient{output: awsKeyBlockedOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.JsonPath = "$.result.content[*].text"
+	})
+
+	body := "event: message\n" +
+		"data: {\"jsonrpc\":\"2.0\",\"id\":2,\n" +
+		"data: \"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Key: AKIAIOSFODNN7EXAMPLE\"}]}}\n\n"
+	if !sseCarriesJSONRPC([]byte(body)) {
+		t.Fatalf("expected the multi-line event to be classified as JSON-RPC")
+	}
+	expectGuardrailBlock(t, 200, sendResponse(p, map[string]interface{}{}, body))
+	if client.calls != 1 {
+		t.Fatalf("expected the tool result to be assessed once, got %d calls", client.calls)
+	}
+}
