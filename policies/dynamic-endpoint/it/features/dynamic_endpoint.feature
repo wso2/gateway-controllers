@@ -89,7 +89,7 @@ Feature: Dynamic endpoint routing
     And the JSON response field "path" should be "/extras"
 
   @de-9
-  Scenario: Deploy fails when targetUpstream is omitted
+  Scenario: Deploy fails when no target is set
     Given I generate a unique value from "dynamic-missing-target" and store it as "apiName3"
     And I generate a unique API context from "/dynamic-missing-target" and store it as "apiContext3"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -356,3 +356,267 @@ Feature: Dynamic endpoint routing
     When I send a "GET" request to "${CTX:apiContext11}/v1.0/whoami?statusCode=404"
     Then the response status code should be 404
     And the JSON response field "path" should be "/alternate/whoami"
+
+  Scenario: An expression without a selector, or a selector without an expression, is rejected at deploy
+    Given I generate a unique value from "global-backend-invalid" and store it as "apiName12"
+    And I generate a unique API context from "/global-backend-invalid" and store it as "apiContext12"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName12}                     |
+      | spec.displayName       | Global-Backend-No-Selector-API     |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext12}/$version         |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.operations        | [{"method":"GET","path":"/items","policies":[{"name":"dynamic-endpoint","version":"v1","params":{"backendExpression":"request.Headers['x-backend'][0]"}}]}] |
+    Then the response status code should be 400
+    And the response body should contain "Has a dependency on backendSelector"
+
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName12}                     |
+      | spec.displayName       | Global-Backend-Selector-Only-API   |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext12}/$version         |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.upstreamDefinitions | [{"name":"alt-upstream","upstreams":[{"url":"http://testbench:3000"}]}] |
+      | spec.operations        | [{"method":"GET","path":"/items","policies":[{"name":"dynamic-endpoint","version":"v1","params":{"targetUpstream":"alt-upstream","backendSelector":{}}}]}] |
+    Then the response status code should be 400
+    And the response body should contain "Has a dependency on backendExpression"
+
+
+  Scenario: A backendExpression reading a request header selects a gateway-wide Backend, and a new Backend needs no API change
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "global-backend-header" and store it as "apiName13"
+    And I generate a unique API context from "/global-backend-header" and store it as "apiContext13"
+    And I generate a unique resource name from "team" and store it as "team13"
+    And I generate a unique resource name from "ep-a" and store it as "backendA13"
+    And I generate a unique resource name from "ep-b" and store it as "backendB13"
+    And I generate a unique resource name from "ep-x" and store it as "backendX13"
+    When I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendA13}                  |
+      | metadata.labels | {"team":"${CTX:team13}"}            |
+      | spec.basePath   | /tenant-a                           |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    When I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendX13}                  |
+      | metadata.labels | {"team":"outsider-${CTX:team13}"}   |
+      | spec.basePath   | /outsider                           |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName13}                    |
+      | spec.displayName       | Global-Backend-Header-API          |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext13}/$version        |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.policies          | [{"name":"dynamic-endpoint","version":"v1","params":{"backendExpression":"request.Headers['x-backend'][0]","backendSelector":{"matchLabels":{"team":"${CTX:team13}"}}}},{"name":"remove-headers","version":"v1","params":{"request":{"headers":[{"name":"x-backend"}]}}}] |
+      | spec.operations        | [{"method":"GET","path":"/items"}]  |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items" until status 200
+
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items"
+    Then the response should be successful
+    And the JSON response field "path" should be "/items"
+
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendA13}"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items" until status 200
+    Then the response should be successful
+    And the JSON response field "path" should be "/tenant-a/items"
+    And the response should not contain echoed header "x-backend"
+
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendX13}"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items"
+    Then the response status code should be 400
+    And the response body should contain "The requested backend is not available for this API."
+
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendB13}"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items"
+    Then the response status code should be 400
+    And the response body should contain "The requested backend is not available for this API."
+
+    When I clear all headers
+    And I set header "x-backend" to "Not_A_Backend"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items"
+    Then the response status code should be 400
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendB13}                  |
+      | metadata.labels | {"team":"${CTX:team13}"}            |
+      | spec.basePath   | /tenant-b                           |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendB13}"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items" until status 200
+    Then the JSON response field "path" should be "/tenant-b/items"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I update Backend "${CTX:backendB13}" from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendB13}                  |
+      | metadata.labels | {"team":"${CTX:team13}"}            |
+      | spec.basePath   | /tenant-b-v2                        |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response should be successful
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendB13}"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items" until the response body contains "/tenant-b-v2/items" with body:
+      """
+      {}
+      """
+    Then the response should be successful
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the Backend "${CTX:backendB13}"
+    Then the response should be successful
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendB13}"
+    And I send a "GET" request to "${CTX:apiContext13}/v1.0/items" until status 400
+    Then the response body should contain "The requested backend is not available for this API."
+
+
+  Scenario: A targetUpstream naming a Backend answers 503 until it exists, and the Backend cannot be deleted while named
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "global-backend-fixed" and store it as "apiName14"
+    And I generate a unique API context from "/global-backend-fixed" and store it as "apiContext14"
+    And I generate a unique resource name from "ep-fixed" and store it as "backendF14"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName14}                    |
+      | spec.displayName       | Global-Backend-Fixed-API           |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext14}/$version        |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.operations        | [{"method":"GET","path":"/items","policies":[{"name":"dynamic-endpoint","version":"v1","params":{"targetUpstream":"${CTX:backendF14}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext14}/v1.0/items" until status 503
+    And the response header "x-error-id" should exist
+
+    When I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendF14}                  |
+      | metadata.labels | {"team":"fixed"}                    |
+      | spec.basePath   | /fixed                              |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    And I send a "GET" request to "${CTX:apiContext14}/v1.0/items" until status 200
+    And the JSON response field "path" should be "/fixed/items"
+
+    When I delete the Backend "${CTX:backendF14}"
+    Then the response status code should be 409
+    And the response body should contain "${CTX:apiName14}"
+
+
+  Scenario: A request whose expression yields no value is rejected or falls back, as configured per operation
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "global-backend-missing" and store it as "apiName15"
+    And I generate a unique API context from "/global-backend-missing" and store it as "apiContext15"
+    And I generate a unique resource name from "ep-sel" and store it as "backendS15"
+    When I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendS15}                  |
+      | spec.basePath   | /selected                           |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName15}                    |
+      | spec.displayName       | Global-Backend-Missing-Value-API  |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext15}/$version        |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.upstreamDefinitions | [{"name":"alt-upstream","basePath":"/alternate","upstreams":[{"url":"http://testbench:3000"}]}] |
+      | spec.operations        | [{"method":"GET","path":"/strict","policies":[{"name":"dynamic-endpoint","version":"v1","params":{"backendExpression":"request.Headers['x-backend'][0]","backendSelector":{},"onMissingValue":"reject"}}]},{"method":"GET","path":"/lenient","policies":[{"name":"dynamic-endpoint","version":"v1","params":{"backendExpression":"request.Headers['x-backend'][0]","backendSelector":{},"targetUpstream":"alt-upstream"}}]}] |
+    Then the response should be successful
+
+    # Wait until the Backend is selectable, so the 400 below can only come from the missing value.
+    When I clear all headers
+    And I set header "x-backend" to "${CTX:backendS15}"
+    And I send a "GET" request to "${CTX:apiContext15}/v1.0/strict" until status 200
+    Then the JSON response field "path" should be "/selected/strict"
+
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext15}/v1.0/strict"
+    Then the response status code should be 400
+
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext15}/v1.0/lenient"
+    Then the response should be successful
+    And the JSON response field "path" should be "/alternate/lenient"
+
+
+  Scenario: A backendExpression can read request context other than headers
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "global-backend-query" and store it as "apiName16"
+    And I generate a unique API context from "/global-backend-query" and store it as "apiContext16"
+    And I generate a unique resource name from "ep-q" and store it as "backendQ16"
+    When I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendQ16}                   |
+      | spec.basePath   | /from-query                         |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName16}                    |
+      | spec.displayName       | Global-Backend-Query-API            |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext16}/$version        |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.policies          | [{"name":"dynamic-endpoint","version":"v1","params":{"backendExpression":"request.Path.split('route-to=')[1].split('&')[0]","backendSelector":{}}}] |
+      | spec.operations        | [{"method":"GET","path":"/items"}]  |
+    Then the response should be successful
+
+    # The query-bearing request is the one that needs the Backend, so it is what waits for it.
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext16}/v1.0/items?route-to=${CTX:backendQ16}&page=2" until status 200
+    Then the JSON response field "path" should be "/from-query/items"
+
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext16}/v1.0/items?page=2"
+    Then the response should be successful
+    And the JSON response field "path" should be "/items"
+
+
+  Scenario: An API's own upstream definition takes precedence over a Backend of the same name
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "global-backend-shadow" and store it as "apiName17"
+    And I generate a unique API context from "/global-backend-shadow" and store it as "apiContext17"
+    And I generate a unique resource name from "ep-shadow" and store it as "backendS17"
+    When I create Backend from "resources/templates/backend.yaml" with values:
+      | apiVersion      | ${CTX:backendSpecVersion}           |
+      | name            | ${CTX:backendS17}                   |
+      | spec.basePath   | /shared                             |
+      | spec.endpoints  | [{"url":"http://testbench:3000"}]   |
+    Then the response status code should be 201
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}          |
+      | name                   | ${CTX:apiName17}                    |
+      | spec.displayName       | Global-Backend-Shadow-API           |
+      | spec.version           | v1.0                                |
+      | spec.context           | ${CTX:apiContext17}/$version        |
+      | spec.upstream.main.url | http://testbench:3000               |
+      | spec.upstreamDefinitions | [{"name":"${CTX:backendS17}","basePath":"/own","upstreams":[{"url":"http://testbench:3000"}]}] |
+      | spec.operations        | [{"method":"GET","path":"/items","policies":[{"name":"dynamic-endpoint","version":"v1","params":{"targetUpstream":"${CTX:backendS17}"}}]}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext17}/v1.0/items" until status 200
+    And the JSON response field "path" should be "/own/items"
+
+    When I delete the Backend "${CTX:backendS17}"
+    Then the response status code should be 200
+    And I send a "GET" request to "${CTX:apiContext17}/v1.0/items"
+    Then the response should be successful
+    And the JSON response field "path" should be "/own/items"

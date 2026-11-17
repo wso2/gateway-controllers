@@ -39,7 +39,16 @@ var managementCollections = map[cleanup.Kind]string{
 	cleanup.KindAgent:               "/agents",
 	cleanup.KindCertificate:         certificatesCollection,
 	cleanup.KindSecret:              "/secrets",
+	KindBackend:                     "/backends",
 }
+
+// KindBackend is a gateway-wide Backend (kind: Backend). The gateway refuses to delete one
+// while a deployed API names it as a fixed target, so the sweep removes every API first; and a
+// Backend's tls block can name a certificate, which the gateway refuses to delete while it is
+// named, so the Backend goes before the certificates (cleanup.KindCertificate, order 80). The
+// framework version this module pins has no Backend kind; wso2/api-platform#4265 adds
+// cleanup.KindBackend with the same name and order, so switch to it when that release is pinned.
+var KindBackend = cleanup.Kind{Name: "backend", Order: 79}
 
 // RegisterDeleters registers how the cleanup sweep deletes each resource kind a gateway
 // scenario creates, through the management API of the topology's platform-gateway. A resource

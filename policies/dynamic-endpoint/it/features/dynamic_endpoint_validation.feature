@@ -196,11 +196,14 @@ Feature: Dynamic endpoint configuration validation and unknown upstream names
       | path traversal     | ../alt-upstream   | malformed-traversal |
       | trailing character | alt-upstream;     | malformed-trailing  |
 
-  # Known failure on gateway 1.2.0: without an upstream definition the route is bound to the main
-  # cluster, the policy's selection is ignored, and the request is answered by the main upstream.
-  @known-issue @de-37
+  # Fails on gateway 1.2.0: without an upstream definition the route is bound to the main cluster,
+  # the policy's selection is ignored, and the request is answered by the main upstream. Fixed with
+  # dynamic-endpoint v1.1 on later gateways: a targetUpstream the API does not define names a
+  # gateway-wide Backend, so the route reads its cluster per request and fails closed with 503.
+  @de-37
   Scenario: A targetUpstream without any upstream definition does not fall back to the main upstream
-    Given I generate a unique value from "dynamic-no-definitions" and store it as "apiName"
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "dynamic-no-definitions" and store it as "apiName"
     And I generate a unique API context from "/dynamic-no-definitions" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion               | ${CTX:gatewaySpecVersion}          |

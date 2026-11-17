@@ -291,6 +291,7 @@ func TestCanonicalResourceTemplates(t *testing.T) {
 	// Platform Gateway templates own the gateway resource envelope.
 	gatewayKinds := map[string]string{
 		"agent.yaml":                 "Agent",
+		"backend.yaml":               "Backend",
 		"graphql-api.yaml":           "GraphQLApi",
 		"llm-provider-template.yaml": "LlmProviderTemplate",
 		"llm-provider.yaml":          "LlmProvider",
