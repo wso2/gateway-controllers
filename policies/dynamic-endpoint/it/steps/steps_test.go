@@ -352,3 +352,23 @@ func TestWaitForBackgroundAttempts(t *testing.T) {
 	require.NoError(t, steps.backgroundTrafficAtLeastAttempts(ctx, "probe", 3))
 	require.ErrorContains(t, steps.waitForBackgroundAttempts(ctx, "missing", 1), "no background traffic probe")
 }
+
+func TestWaitForBackgroundSuccessesHoldsUntilTheSuccessesArrive(t *testing.T) {
+	var calls atomic.Int32
+	steps := newStepsWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) <= 5 {
+			writeJSON(w, http.StatusServiceUnavailable, `{}`)
+			return
+		}
+		writeJSON(w, http.StatusOK, `{"path":"/aaa/probe"}`)
+	})
+	ctx := newScenarioContext()
+	require.NoError(t, steps.startBackgroundTraffic(ctx, "GET", "/probe", "probe"))
+	t.Cleanup(func() { steps.stopAllBackgroundTraffic(ctx) })
+
+	require.NoError(t, steps.waitForBackgroundAttempts(ctx, "probe", 3))
+	require.NoError(t, steps.waitForBackgroundSuccesses(ctx, "probe", 4))
+	require.NoError(t, steps.stopBackgroundTraffic(ctx, "probe"))
+	require.NoError(t, steps.backgroundTrafficAtLeastSuccesses(ctx, "probe", 4))
+	require.ErrorContains(t, steps.waitForBackgroundSuccesses(ctx, "missing", 1), "no background traffic probe")
+}

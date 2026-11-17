@@ -150,6 +150,7 @@ Feature: Dynamic endpoint under concurrent and sustained traffic
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/v1.0/r38/probe" until the JSON field "path" is "/bbb/r38/probe"
     And I wait until background traffic "rapid" has recorded at least 20 attempts
+    And I wait until background traffic "rapid" has received at least 10 successful responses
     And I stop background traffic "rapid"
     Then background traffic "rapid" should have recorded at least 20 attempts
     And background traffic "rapid" should have received at least 10 successful responses
