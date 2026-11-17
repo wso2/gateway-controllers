@@ -50,6 +50,16 @@ blocks:
       - name: aws-bedrock-guardrail
         features:
           - features/aws_bedrock_guardrail_error_compatibility.feature
+      - name: aws-bedrock-guardrail-mcp
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/aws_bedrock_guardrail_mcp.feature
+      # Gateway 1.1.0 runs an MCP route's SSE response through the streaming
+      # handler while Envoy delivers it buffered, and returns 500.
+      - name: aws-bedrock-guardrail-mcp-legacy
+        tags: "gateway-version<1.2.0;~@sse-response"
+        features:
+          - features/aws_bedrock_guardrail_mcp.feature
   - name: aws-bedrock-guardrail-default
     parallel: 1
     components:

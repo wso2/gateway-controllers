@@ -278,32 +278,64 @@ func TestRestorePIIInResponse(t *testing.T) {
 	}
 }
 
-func TestUpdatePayloadWithMaskedContent(t *testing.T) {
-	p := &AWSBedrockGuardrailPolicy{}
+func TestExtractPayloadRebuild(t *testing.T) {
+	maskAll := func(t *testing.T, payload []byte, jsonPath string) []byte {
+		t.Helper()
+		extracted, err := extractPayload(payload, jsonPath)
+		if err != nil {
+			t.Fatalf("extractPayload(%q) returned an unexpected error: %v", jsonPath, err)
+		}
+		for _, segment := range extracted.segments {
+			segment.set("*****")
+		}
+		rebuilt, err := extracted.rebuild()
+		if err != nil {
+			t.Fatalf("rebuild returned an unexpected error: %v", err)
+		}
+		return rebuilt
+	}
 
-	if got := string(p.updatePayloadWithMaskedContent([]byte(`ignored`), "a", "b", "")); got != "b" {
+	if got := string(maskAll(t, []byte(`ignored`), "")); got != "*****" {
 		t.Fatalf("expected direct replacement when jsonPath is empty, got: %q", got)
 	}
 
-	original := []byte(`{"message":"hello","nested":{"text":"hello"}}`)
-	updated := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text")
-
+	updated := maskAll(t, []byte(`{"message":"hello","nested":{"text":"hello"}}`), "$.nested.text")
 	var payload map[string]interface{}
 	if err := json.Unmarshal(updated, &payload); err != nil {
 		t.Fatalf("failed to unmarshal updated payload: %v", err)
 	}
 	nested := payload["nested"].(map[string]interface{})
-	if nested["text"] != "*****" {
-		t.Fatalf("expected nested.text to be updated, got: %#v", nested["text"])
+	if nested["text"] != "*****" || payload["message"] != "hello" {
+		t.Fatalf("expected only nested.text to be updated, got: %s", string(updated))
 	}
 
-	invalidJSON := []byte(`{"message":`)
-	if got := p.updatePayloadWithMaskedContent(invalidJSON, "x", "y", "$.message"); string(got) != string(invalidJSON) {
-		t.Fatalf("expected original payload on invalid JSON")
+	if _, err := extractPayload([]byte(`{"message":`), "$.message"); err == nil {
+		t.Fatalf("expected an error on invalid JSON")
 	}
 
-	if got := p.updatePayloadWithMaskedContent(original, "hello", "*****", "$.nested.text.value"); string(got) != string(original) {
-		t.Fatalf("expected original payload on invalid JSONPath")
+	if _, err := extractPayload([]byte(`{"nested":{"text":"hello"}}`), "$.nested.text.value"); err == nil {
+		t.Fatalf("expected an error on a JSONPath that matches nothing")
+	}
+}
+
+// An event stream passes unchecked only when it carries JSON-RPC messages the path does not
+// apply to. A stream with no JSON event has nothing vouching for it, so it must be an error.
+func TestExtractPayloadEventStreamWithoutJSONRPC(t *testing.T) {
+	const path = "$.result.content[*].text"
+
+	notification := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n"
+	if _, err := extractPayload([]byte(notification), path); err != nil {
+		t.Fatalf("a stream of JSON-RPC messages the path does not match should pass, got: %v", err)
+	}
+
+	for name, body := range map[string]string{
+		"only a DONE marker": "data: [DONE]\n\n",
+		"comments only":      ": keep-alive\n\n",
+		"empty events":       "event: message\n\n",
+	} {
+		if _, err := extractPayload([]byte(body), path); err == nil {
+			t.Fatalf("%s: expected an error, the stream has no JSON-RPC message to vouch for it", name)
+		}
 	}
 }
 
