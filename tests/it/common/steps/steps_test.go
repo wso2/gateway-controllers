@@ -1008,3 +1008,54 @@ func TestSendConcurrentAlternatingRejectsInvalidInput(t *testing.T) {
 	require.ErrorContains(t, (&Base{}).sendConcurrentAlternating(ctx, 2, "GET", "/p", " ", table),
 		"header name is required")
 }
+
+func TestSendOverHTTP2ReturnsTheHTTP2Response(t *testing.T) {
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Key", r.Header.Get("API-Key"))
+		w.Header().Set("X-Seen-Authority", r.Host)
+		w.Header().Set("X-Seen-Proto", r.Proto)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	server.Config.Protocols = &protocols
+	server.Start()
+	t.Cleanup(server.Close)
+
+	resp, err := sendOverHTTP2(context.Background(), "GET", server.URL+"/probe", "spoofed.example",
+		map[string]string{"API-Key": "k1"})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.Equal(t, "k1", resp.Headers.Get("X-Seen-Key"))
+	require.Equal(t, "spoofed.example", resp.Headers.Get("X-Seen-Authority"))
+	require.Equal(t, "HTTP/2.0", resp.Headers.Get("X-Seen-Proto"))
+	require.Equal(t, `{"ok":false}`, string(resp.Body))
+	require.Equal(t, "GET", resp.Method)
+}
+
+func TestSendOverHTTP2FailsAgainstAServerThatDoesNotSpeakHTTP2(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	// The h2c client cannot talk to an HTTP/1-only server, so the request itself fails.
+	_, err := sendOverHTTP2(context.Background(), "GET", server.URL+"/probe", "", nil)
+	require.ErrorContains(t, err, "over HTTP/2")
+}
+
+func TestRequireHTTP2RejectsAnHTTP1Response(t *testing.T) {
+	require.NoError(t, requireHTTP2(&http.Response{ProtoMajor: 2, Proto: "HTTP/2.0"}, "GET", "http://gw/p"))
+	err := requireHTTP2(&http.Response{ProtoMajor: 1, Proto: "HTTP/1.1"}, "GET", "http://gw/p")
+	require.ErrorContains(t, err, `expected an HTTP/2 response from GET http://gw/p, got protocol "HTTP/1.1"`)
+}
+
+func TestReadLimitedBodyRejectsAnOversizedBody(t *testing.T) {
+	body, err := readLimitedBody(strings.NewReader("small"))
+	require.NoError(t, err)
+	require.Equal(t, "small", string(body))
+
+	_, err = readLimitedBody(strings.NewReader(strings.Repeat("x", maxHTTP2ResponseBodyBytes+1)))
+	require.ErrorContains(t, err, "byte limit")
+}

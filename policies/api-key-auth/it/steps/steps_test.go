@@ -137,35 +137,6 @@ func TestSendRequestExpectingRejectionFailsOnATimeout(t *testing.T) {
 	require.NotContains(t, err.Error(), "expected the gateway to reject the request")
 }
 
-func TestSendRequestOverHTTP2PublishesTheHTTP2Response(t *testing.T) {
-	var protocols http.Protocols
-	protocols.SetUnencryptedHTTP2(true)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Seen-Key", r.Header.Get("API-Key"))
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	server.Config.Protocols = &protocols
-	server.Start()
-	t.Cleanup(server.Close)
-
-	steps := newSteps(fakeBase{url: server.URL, headers: map[string]string{"API-Key": "k1"}}, nil)
-	ctx := newScenarioContext()
-
-	require.NoError(t, steps.sendRequestOverHTTP2(ctx, "get", "/probe"))
-	resp, err := httpx.Published(ctx)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
-	require.Equal(t, "k1", resp.Headers.Get("X-Seen-Key"))
-}
-
-func TestSendRequestOverHTTP2RejectsAServerThatDoesNotSpeakHTTP2(t *testing.T) {
-	steps := newStepsWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	err := steps.sendRequestOverHTTP2(newScenarioContext(), "GET", "/probe")
-	require.ErrorContains(t, err, "HTTP/2")
-}
-
 func TestConcurrentCyclingRowsParsesValuesAndAbsentMarker(t *testing.T) {
 	ctx := newScenarioContext()
 	require.NoError(t, tcontext.Set(ctx, "k1", "secret-value"))

@@ -34,6 +34,8 @@ defaults:
     propagation: 60s
 
 blocks:
+  # Runners stay one at a time: the restart runner restarts the block's gateway, which would
+  # interrupt the others.
   - name: host-rewrite
     parallel: 1
     components:
@@ -41,7 +43,15 @@ blocks:
         db:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
+      # The TLS backends the HTTPS upstream scenario connects to.
+      - name: tls-backend
     runners:
       - name: host-rewrite
         features:
           - features/host_rewrite.feature
+      - name: host-rewrite-validation
+        features:
+          - features/host_rewrite_validation.feature
+      - name: host-rewrite-restart
+        features:
+          - features/host_rewrite_restart.feature
