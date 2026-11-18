@@ -39,8 +39,8 @@ const (
 	// maxBackgroundResponses bounds what one probe keeps, so a probe left running cannot grow
 	// without limit.
 	maxBackgroundResponses = 3000
-	// backgroundCountWait bounds how long a count check waits for a running probe.
-	backgroundCountWait = 30 * time.Second
+	// backgroundEchoWait bounds how long an echo check waits for a running probe.
+	backgroundEchoWait = 30 * time.Second
 
 	keyBackgroundRequests = "hostRewriteBackgroundRequests"
 )
@@ -48,12 +48,10 @@ const (
 func (s *Steps) registerBackgroundRequests(sc *godog.ScenarioContext) {
 	sc.Step(`^I start background "([^"]*)" requests to "([^"]*)" as "([^"]*)"$`, s.startBackgroundRequests)
 	sc.Step(`^I stop background requests "([^"]*)"$`, s.stopBackgroundRequests)
-	sc.Step(`^background requests "([^"]*)" should have recorded at least (\d+) responses$`,
-		s.backgroundRequestsAtLeast)
 	sc.Step(`^every background response of "([^"]*)" should be successful with JSON field "([^"]*)" set to one of:$`,
 		s.everyBackgroundResponseIsOneOf)
-	sc.Step(`^background requests "([^"]*)" should have seen at least (\d+) different values of JSON field "([^"]*)"$`,
-		s.backgroundRequestsSawValues)
+	sc.Step(`^background requests "([^"]*)" should eventually echo "([^"]*)" in JSON field "([^"]*)"$`,
+		s.backgroundRequestsEventuallyEcho)
 
 	sc.After(func(ctx context.Context, _ *godog.Scenario, _ error) (context.Context, error) {
 		stopAllBackgroundRequests(ctx)
@@ -227,31 +225,6 @@ func (s *Steps) stopBackgroundRequests(ctx context.Context, name string) error {
 	return nil
 }
 
-// backgroundRequestsAtLeast waits, while the probe still runs, until it has recorded n
-// responses, so the check does not depend on how fast the gateway applies a change. A stopped
-// probe is judged at once.
-func (s *Steps) backgroundRequestsAtLeast(ctx context.Context, name string, n int) error {
-	probe, err := namedBackgroundProbe(ctx, name)
-	if err != nil {
-		return err
-	}
-	deadline := time.Now().Add(backgroundCountWait)
-	for {
-		got := len(probe.snapshot())
-		if got >= n {
-			return nil
-		}
-		if !probe.running() || time.Now().After(deadline) {
-			return fmt.Errorf("background requests %q recorded %d responses, want at least %d", name, got, n)
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backgroundRequestInterval / 2):
-		}
-	}
-}
-
 func (s *Steps) everyBackgroundResponseIsOneOf(ctx context.Context, name, field string, table *godog.Table) error {
 	cells, err := tableCells(table, 1)
 	if err != nil {
@@ -277,17 +250,45 @@ func (s *Steps) everyBackgroundResponseIsOneOfValues(ctx context.Context, name, 
 	return checkEveryResponseIsOneOf(probe.snapshot(), strings.TrimSpace(field), allowed)
 }
 
-func (s *Steps) backgroundRequestsSawValues(ctx context.Context, name string, n int, field string) error {
+// backgroundRequestsEventuallyEcho waits, while the probe still runs, until one of its successful
+// responses carries want in the JSON field. It waits on the probe's own responses, not on fresh
+// requests, so the probe is known to have seen the value before the scenario stops it.
+func (s *Steps) backgroundRequestsEventuallyEcho(ctx context.Context, name, want, field string) error {
 	probe, err := namedBackgroundProbe(ctx, name)
 	if err != nil {
 		return err
 	}
-	seen := distinctValues(probe.snapshot(), strings.TrimSpace(field))
-	if len(seen) < n {
-		return fmt.Errorf("background requests %q saw %d different values of %s (%s), want at least %d",
-			name, len(seen), field, strings.Join(seen, ", "), n)
+	want, err = stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
 	}
-	return nil
+	field = strings.TrimSpace(field)
+	deadline := time.Now().Add(backgroundEchoWait)
+	for {
+		if echoed(probe.snapshot(), field, want) {
+			return nil
+		}
+		if !probe.running() || time.Now().After(deadline) {
+			seen := distinctValues(probe.snapshot(), field)
+			return fmt.Errorf("background requests %q never echoed %s %q; values seen: %s",
+				name, field, want, strings.Join(seen, ", "))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backgroundRequestInterval / 2):
+		}
+	}
+}
+
+// echoed reports whether a successful response carries want in the JSON field.
+func echoed(responses []backgroundResponse, field, want string) bool {
+	for _, value := range distinctValues(responses, field) {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 // allowedValues reads one-cell rows of values, expanding stored values.

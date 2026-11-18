@@ -247,13 +247,9 @@ func TestBackgroundRequestsRecordAndCheckResponses(t *testing.T) {
 	require.NoError(t, steps.stopBackgroundRequests(ctx, "traffic"))
 	require.Zero(t, wrongRequest.Load(), "every request carries the method, request host and scenario headers")
 
-	require.NoError(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 6))
-	require.ErrorContains(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 100000), "want at least")
 	require.NoError(t, steps.everyBackgroundResponseIsOneOfValues(ctx, "traffic", "headers.Host", valueTable("v1.example", "v2.example")))
 	require.ErrorContains(t, steps.everyBackgroundResponseIsOneOfValues(ctx, "traffic", "headers.Host", valueTable("v1.example")),
 		`headers.Host is "v2.example"`)
-	require.NoError(t, steps.backgroundRequestsSawValues(ctx, "traffic", 2, "headers.Host"))
-	require.ErrorContains(t, steps.backgroundRequestsSawValues(ctx, "traffic", 3, "headers.Host"), "saw 2 different values")
 	require.ErrorContains(t, steps.stopBackgroundRequests(ctx, "other"), "no background requests named")
 }
 
@@ -284,20 +280,6 @@ func TestTableCellsRejectsAMissingTable(t *testing.T) {
 	require.ErrorContains(t, err, "a table is required")
 }
 
-func TestBackgroundRequestsAtLeastWaitsWhileTheProbeRuns(t *testing.T) {
-	server := echoServer(t, func(string) string { return "v1.example" })
-	steps := newSteps(fakeBase{url: server.URL})
-	ctx := newScenarioContext()
-	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
-
-	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
-	// Called at once, before any response is recorded: it must wait for them.
-	require.NoError(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 3))
-	require.NoError(t, steps.stopBackgroundRequests(ctx, "traffic"))
-	// A stopped probe is judged at once.
-	require.ErrorContains(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 100000), "want at least")
-}
-
 func TestEveryBackgroundResponseFailsWhenResponsesWereDropped(t *testing.T) {
 	steps := newSteps(fakeBase{url: "http://unused"})
 	ctx := newScenarioContext()
@@ -313,4 +295,32 @@ func TestEveryBackgroundResponseFailsWhenResponsesWereDropped(t *testing.T) {
 
 	err = steps.everyBackgroundResponseIsOneOfValues(ctx, "full", "headers.Host", valueTable("v1.example"))
 	require.ErrorContains(t, err, "dropped 1 responses")
+}
+
+func TestBackgroundRequestsEventuallyEchoWaitsForTheValue(t *testing.T) {
+	var calls atomic.Int32
+	server := echoServer(t, func(string) string {
+		if calls.Add(1) > 5 {
+			return "v3.example"
+		}
+		return "v1.example"
+	})
+	steps := newSteps(fakeBase{url: server.URL})
+	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
+
+	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
+	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v1.example", "headers.Host"))
+	// The value only appears after the fifth response: the step must wait for it.
+	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v3.example", "headers.Host"))
+	require.NoError(t, steps.stopBackgroundRequests(ctx, "traffic"))
+
+	err := steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v9.example", "headers.Host")
+	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"; values seen: v1.example, v3.example`)
+}
+
+func TestEchoedIgnoresFailedResponses(t *testing.T) {
+	responses := []backgroundResponse{{status: 503, body: hostBody("v3.example")}, {status: 200, body: hostBody("v1.example")}}
+	require.True(t, echoed(responses, "headers.Host", "v1.example"))
+	require.False(t, echoed(responses, "headers.Host", "v3.example"))
 }
