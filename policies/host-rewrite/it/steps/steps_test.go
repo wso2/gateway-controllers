@@ -114,22 +114,19 @@ func TestCheckEchoedField(t *testing.T) {
 
 func TestSendConcurrentAlternatingPathsPassesWhenEveryResponseMatches(t *testing.T) {
 	var calls, sawHost atomic.Int32
-	server := echoServer(t, func(path string) string {
-		calls.Add(1)
-		if path == "/a" {
-			return "a.example"
-		}
-		return "b.example"
-	})
 	// The request host and scenario headers reach every request.
-	server.Config.Handler = func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Host == "client.example" && r.Header.Get("X-Test") == "1" {
-				sawHost.Add(1)
-			}
-			next.ServeHTTP(w, r)
-		})
-	}(server.Config.Handler)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Host == "client.example" && r.Header.Get("X-Test") == "1" {
+			sawHost.Add(1)
+		}
+		host := "b.example"
+		if r.URL.Path == "/a" {
+			host = "a.example"
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"headers": map[string]any{"Host": host}})
+	}))
+	t.Cleanup(server.Close)
 
 	steps := newSteps(fakeBase{url: server.URL, headers: map[string]string{"X-Test": "1"}, host: "client.example"})
 	err := steps.sendConcurrentAlternating(newScenarioContext(), 40, "get", "headers.Host",
@@ -240,10 +237,13 @@ func TestBackgroundRequestsRecordAndCheckResponses(t *testing.T) {
 	t.Cleanup(server.Close)
 	steps := newSteps(fakeBase{url: server.URL, headers: map[string]string{"X-Test": "1"}, host: "client.example"})
 	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) }) // runs before server.Close, even if a check fails
 
 	require.NoError(t, steps.startBackgroundRequests(ctx, "post", "/probe", "traffic"))
 	require.ErrorContains(t, steps.startBackgroundRequests(ctx, "post", "/probe", "traffic"), "already running")
-	require.Eventually(t, func() bool { return calls.Load() >= 6 }, 5*time.Second, 20*time.Millisecond)
+	probe, err := namedBackgroundProbe(ctx, "traffic")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { return len(probe.snapshot()) >= 6 }, 5*time.Second, 20*time.Millisecond)
 	require.NoError(t, steps.stopBackgroundRequests(ctx, "traffic"))
 	require.Zero(t, wrongRequest.Load(), "every request carries the method, request host and scenario headers")
 
@@ -266,6 +266,7 @@ func TestStopAllBackgroundRequestsStopsEveryProbe(t *testing.T) {
 	t.Cleanup(server.Close)
 	steps := newSteps(fakeBase{url: server.URL})
 	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
 	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/a", "one"))
 	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/b", "two"))
 	require.Eventually(t, func() bool { return calls.Load() >= 2 }, 5*time.Second, 20*time.Millisecond)
@@ -281,4 +282,35 @@ func TestStopAllBackgroundRequestsStopsEveryProbe(t *testing.T) {
 func TestTableCellsRejectsAMissingTable(t *testing.T) {
 	_, err := tableCells(nil, 2)
 	require.ErrorContains(t, err, "a table is required")
+}
+
+func TestBackgroundRequestsAtLeastWaitsWhileTheProbeRuns(t *testing.T) {
+	server := echoServer(t, func(string) string { return "v1.example" })
+	steps := newSteps(fakeBase{url: server.URL})
+	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
+
+	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
+	// Called at once, before any response is recorded: it must wait for them.
+	require.NoError(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 3))
+	require.NoError(t, steps.stopBackgroundRequests(ctx, "traffic"))
+	// A stopped probe is judged at once.
+	require.ErrorContains(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 100000), "want at least")
+}
+
+func TestEveryBackgroundResponseFailsWhenResponsesWereDropped(t *testing.T) {
+	steps := newSteps(fakeBase{url: "http://unused"})
+	ctx := newScenarioContext()
+	probes, err := backgroundProbes(ctx)
+	require.NoError(t, err)
+	done := make(chan struct{})
+	close(done)
+	probe := &backgroundProbe{cancel: func() {}, done: done}
+	for range maxBackgroundResponses + 1 {
+		probe.record(backgroundResponse{status: 200, body: hostBody("v1.example")})
+	}
+	probes["full"] = probe
+
+	err = steps.everyBackgroundResponseIsOneOfValues(ctx, "full", "headers.Host", valueTable("v1.example"))
+	require.ErrorContains(t, err, "dropped 1 responses")
 }

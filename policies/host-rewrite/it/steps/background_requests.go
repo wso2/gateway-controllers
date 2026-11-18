@@ -39,6 +39,8 @@ const (
 	// maxBackgroundResponses bounds what one probe keeps, so a probe left running cannot grow
 	// without limit.
 	maxBackgroundResponses = 3000
+	// backgroundCountWait bounds how long a count check waits for a running probe.
+	backgroundCountWait = 30 * time.Second
 
 	keyBackgroundRequests = "hostRewriteBackgroundRequests"
 )
@@ -73,6 +75,9 @@ type backgroundProbe struct {
 
 	mu        sync.Mutex
 	responses []backgroundResponse
+	// dropped counts responses not kept because the probe was full; any makes the record
+	// incomplete, so the "every response" check fails rather than pass on what it kept.
+	dropped int
 }
 
 func (p *backgroundProbe) record(r backgroundResponse) {
@@ -80,6 +85,24 @@ func (p *backgroundProbe) record(r backgroundResponse) {
 	defer p.mu.Unlock()
 	if len(p.responses) < maxBackgroundResponses {
 		p.responses = append(p.responses, r)
+		return
+	}
+	p.dropped++
+}
+
+func (p *backgroundProbe) droppedCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dropped
+}
+
+// running reports whether the probe is still sending requests.
+func (p *backgroundProbe) running() bool {
+	select {
+	case <-p.done:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -169,8 +192,8 @@ func (s *Steps) runBackgroundRequests(ctx context.Context, probe *backgroundProb
 			req := request
 			req.Headers = copyHeaders(request.Headers)
 			resp, err := s.client.Do(ctx, req, 0, 0)
-			if ctx.Err() != nil {
-				return // stopped while this request was in flight; it says nothing about the gateway
+			if err != nil && ctx.Err() != nil {
+				return // the request was cut short by stopping the probe; it says nothing about the gateway
 			}
 			r := backgroundResponse{}
 			if err != nil {
@@ -178,7 +201,7 @@ func (s *Steps) runBackgroundRequests(ctx context.Context, probe *backgroundProb
 			} else if resp != nil {
 				r.status, r.body = resp.StatusCode, resp.Body
 			}
-			probe.record(r)
+			probe.record(r) // a response that completed is kept, even if the probe stopped meanwhile
 		}
 	}
 }
@@ -204,15 +227,29 @@ func (s *Steps) stopBackgroundRequests(ctx context.Context, name string) error {
 	return nil
 }
 
+// backgroundRequestsAtLeast waits, while the probe still runs, until it has recorded n
+// responses, so the check does not depend on how fast the gateway applies a change. A stopped
+// probe is judged at once.
 func (s *Steps) backgroundRequestsAtLeast(ctx context.Context, name string, n int) error {
 	probe, err := namedBackgroundProbe(ctx, name)
 	if err != nil {
 		return err
 	}
-	if got := len(probe.snapshot()); got < n {
-		return fmt.Errorf("background requests %q recorded %d responses, want at least %d", name, got, n)
+	deadline := time.Now().Add(backgroundCountWait)
+	for {
+		got := len(probe.snapshot())
+		if got >= n {
+			return nil
+		}
+		if !probe.running() || time.Now().After(deadline) {
+			return fmt.Errorf("background requests %q recorded %d responses, want at least %d", name, got, n)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backgroundRequestInterval / 2):
+		}
 	}
-	return nil
 }
 
 func (s *Steps) everyBackgroundResponseIsOneOf(ctx context.Context, name, field string, table *godog.Table) error {
@@ -232,6 +269,10 @@ func (s *Steps) everyBackgroundResponseIsOneOfValues(ctx context.Context, name, 
 	allowed, err := allowedValues(ctx, cells)
 	if err != nil {
 		return err
+	}
+	if dropped := probe.droppedCount(); dropped > 0 {
+		return fmt.Errorf("background requests %q dropped %d responses past the %d it keeps, so not every response can be checked",
+			name, dropped, maxBackgroundResponses)
 	}
 	return checkEveryResponseIsOneOf(probe.snapshot(), strings.TrimSpace(field), allowed)
 }

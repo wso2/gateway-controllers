@@ -155,6 +155,8 @@ func (s *Steps) sendConcurrentAlternating(ctx context.Context, n int, method, fi
 	method = strings.ToUpper(method)
 	headers := s.base.ScenarioHeaders(ctx)
 	host := s.base.RequestHost(ctx)
+	// None of these responses is published; clear the last one so no later assertion reads it.
+	httpx.ClearPublished(ctx)
 
 	failures := make([]string, n)
 	sem := make(chan struct{}, min(n, maxInFlight))
