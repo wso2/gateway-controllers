@@ -274,8 +274,8 @@ apply to, so it needs no `NO_PROXY` entry.
    Every route and API with the same authentication type, client ID and tenant shares one
    credential, and the Azure Identity SDK caches its tokens by scope.
    - A cached token is returned straight away until it is due for refresh: once Entra ID's
-     `refresh_in` hint passes (half its lifetime for a managed identity token valid for more than
-     2 hours), or 5 minutes before it expires.
+     `refresh_in` hint passes, or 5 minutes before it expires. A managed identity token is cached
+     without a hint unless its endpoint sends one, so it is refreshed only in its last 5 minutes.
    - The first request that needs a token that is due fetches a new one, and other requests for
      the same identity wait for it. If a refresh after the hint fails, the cached token stays in
      use; in a token's last 5 minutes, a failed refresh fails the request.
@@ -290,7 +290,8 @@ apply to, so it needs no `NO_PROXY` entry.
    IMDS, `http://169.254.169.254/metadata/identity/oauth2/token`, with `api-version=2018-02-01`,
    the scope's resource (the scope without `/.default`), `client_id` when `clientId` is set, and
    the `Metadata: true` header. Network errors, `404`, `410`, `429` and `5xx` are retried up to
-   four times, waiting about 1, 2, 4 and 4 seconds.
+   four times, waiting about 1, 3, 4 and 4 seconds, so only three retries fit the default
+   `tokenRequestTimeout` of 10 seconds.
 
    With `container-apps`, a token request is one `GET` to `IDENTITY_ENDPOINT`, with
    `api-version=2019-08-01`, the scope's resource, `client_id` when `clientId` is set, and the
