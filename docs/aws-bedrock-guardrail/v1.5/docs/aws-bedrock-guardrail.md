@@ -1,11 +1,11 @@
 ---
 title: "Overview"
 ---
-# AWS Bedrock Guardrail
+# Amazon Bedrock Guardrails
 
 ## Overview
 
-The AWS Bedrock Guardrail policy validates request or response body content against AWS Bedrock Guardrails, which provide enterprise-grade content filtering, topic detection, word filtering, and PII (Personally Identifiable Information) detection and masking. This guardrail enables you to enforce content safety policies consistently across your LLM applications using AWS Bedrock's managed guardrail service.
+The Amazon Bedrock Guardrails policy validates request or response body content against Amazon Bedrock Guardrails, which provide enterprise-grade content filtering, topic detection, word filtering, and PII (Personally Identifiable Information) detection and masking. This guardrail enables you to enforce content safety policies consistently across your LLM applications using Amazon Bedrock Guardrails, the managed guardrail capability of Amazon Bedrock.
 
 Every setting can be configured per policy attachment or gateway-wide. An attachment can select its own guardrail, its own region, and its own AWS identity — so a single gateway can enforce different content policies for different APIs, including guardrails that live in different AWS accounts.
 
@@ -37,8 +37,8 @@ The policy uses a two-level configuration. The guardrail identity and AWS creden
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `region` | string | Yes* | AWS region where the Bedrock Guardrail is located (e.g. `us-east-1`). *Required unless every attachment sets its own. |
-| `guardrailID` | string | Yes* | Default AWS Bedrock Guardrail identifier. *Required unless every attachment sets its own. |
+| `region` | string | Yes* | AWS region where the Amazon Bedrock guardrail is located (e.g. `us-east-1`). *Required unless every attachment sets its own. |
+| `guardrailID` | string | Yes* | Default Amazon Bedrock guardrail identifier. *Required unless every attachment sets its own. |
 | `guardrailVersion` | string | Yes* | Default guardrail version (e.g. `DRAFT`, `1`). *Required unless every attachment sets its own. |
 | `awsAccessKeyID` | string | No | AWS access key ID for the gateway's own identity. If omitted, the default AWS credential chain is used. |
 | `awsSecretAccessKey` | string | No | AWS secret access key paired with `awsAccessKeyID`. |
@@ -156,8 +156,8 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 | `enabled` | boolean | No | `true` | Enables validation for the request flow. |
 | `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression selecting the request content to validate. When it selects an object or array, every string inside it is validated. If empty, validates the entire payload as a string. See [JSONPath Support](#jsonpath-support). |
 | `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with `*****` (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows the request to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows the request to proceed when the Amazon Bedrock Guardrails API call fails. If `false`, blocks on API errors. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from Amazon Bedrock Guardrails in error responses. |
 
 #### Response Configuration
 
@@ -165,8 +165,8 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `false` | Enables validation for the response flow. |
 | `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression selecting the response content to validate. When it selects an object or array, every string inside it is validated. For a Server-Sent Events response, it is applied to the JSON in each event. If empty, validates the entire payload as a string. See [JSONPath Support](#jsonpath-support). |
-| `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the AWS Bedrock Guardrail API call fails. If `false`, blocks on API errors. |
-| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from AWS Bedrock Guardrail in error responses. |
+| `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the Amazon Bedrock Guardrails API call fails. If `false`, blocks on API errors. |
+| `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from Amazon Bedrock Guardrails in error responses. |
 | `applicableStatusCodes` | string | No | – | Comma-separated upstream response status codes and inclusive ranges to validate, such as `"200-299,422"`. Codes must be between `100` and `599`, and a range must not start after it ends. Responses with any other status code are passed through to the client unchanged. If not set, every response is validated. |
 | `streamingJsonPath` | string | No | `"$.choices[0].delta.content"` | JSONPath locating the assistant text inside one streamed event of an LLM response. Separate from `jsonPath` because a streamed response carries its text under a different field than a buffered one. The default suits the OpenAI streaming format, which is also what `openai-to-bedrock-transformer` emits. See [Streaming responses](#streaming-responses). |
 | `streamingTextUnitChars` | integer | No | `1000` | How many characters of streamed response text to assess at a time. Each batch is withheld until assessed. `1000` is Amazon's text unit and billing unit. Lower values give earlier first tokens but more `ApplyGuardrail` calls and a longer total time; `0` assesses the whole response when the stream ends. Minimum `100`. |
@@ -238,7 +238,7 @@ kind: LlmProvider
 metadata:
   name: bedrock-guardrail-provider
 spec:
-  displayName: AWS Bedrock Guardrail Provider
+  displayName: Amazon Bedrock Guardrails Provider
   version: v1.0
   template: openai
   context: /openai
@@ -563,7 +563,7 @@ The credentials provider is built **once**, when the policy attachment is create
 
 ## Notes
 
-- The guardrail must exist in AWS Bedrock before use, in the region the attachment selects. Cross-region calls are not supported: a guardrail in `eu-west-1` is not reachable from a `us-east-1` client.
+- The guardrail must exist in Amazon Bedrock before use, in the region the attachment selects. Cross-region calls are not supported: a guardrail in `eu-west-1` is not reachable from a `us-east-1` client.
 - Guardrail version `DRAFT` is useful for testing. Use numbered versions for production.
 - The IAM identity used must have `bedrock:ApplyGuardrail` on the target guardrail.
 - PII masking with restoration stores the mapping between original and masked values in request metadata.
