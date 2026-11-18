@@ -488,6 +488,62 @@ func TestPoliciesWithTheSameIdentityShareOneToken(t *testing.T) {
 	}
 }
 
+// A route that leaves clientId and tenantId to the webhook's AZURE_* variables and a route that
+// names the same identity use one identity, so they share its token.
+func TestAWorkloadIdentityNamedOrLeftToTheEnvironmentSharesOneToken(t *testing.T) {
+	setWorkloadIdentityEnv(t, "federated-token")
+	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+
+	for _, params := range []map[string]interface{}{
+		{"authenticationType": "workload-identity"},
+		{"authenticationType": "workload-identity", "clientId": testClientID},
+		{"authenticationType": "workload-identity", "tenantId": testTenantID},
+		{"authenticationType": "workload-identity", "clientId": testClientID, "tenantId": testTenantID},
+	} {
+		p := mustGetPolicy(t, params)
+		requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+	}
+	if n := len(f.tokenRequests()); n != 1 {
+		t.Fatalf("token requests = %d, want 1 (four routes, one identity)", n)
+	}
+}
+
+// AZURE_CLIENT_ID names the federated identity, which need not be assigned to the host, so a host's
+// identity without clientId stays the host's default even where AZURE_CLIENT_ID is set.
+func TestAHostsIdentityWithoutClientIDIgnoresAzureClientID(t *testing.T) {
+	for _, tt := range []struct {
+		authenticationType string
+		respond            func(resource string) map[string]any
+		containerApps      bool
+	}{
+		{"managed-identity", func(resource string) map[string]any { return imdsToken("tok-1", resource) }, false},
+		{"container-apps", func(resource string) map[string]any { return containerAppsToken("tok-1", resource, testClientID) }, true},
+	} {
+		t.Run(tt.authenticationType, func(t *testing.T) {
+			setWorkloadIdentityEnv(t, "federated-token")
+			scope := uniqueScope(t)
+			f := useFakeAzure(t, answer(http.StatusOK, tt.respond(strings.TrimSuffix(scope, "/.default"))))
+			if tt.containerApps {
+				setContainerAppsEnv(t)
+			}
+
+			p := mustGetPolicy(t, map[string]interface{}{"authenticationType": tt.authenticationType, "scope": scope})
+			requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+
+			reqs := f.tokenRequests()
+			if len(reqs) != 1 {
+				t.Fatalf("token requests = %d, want 1", len(reqs))
+			}
+			if q := reqs[0].url.Query(); q.Has("client_id") {
+				t.Fatalf("query = %v, want no client_id for the host's default identity", q)
+			}
+			if p.credentialID() != hostDefaultCredentialID {
+				t.Fatalf("credential ID = %q, want %q", p.credentialID(), hostDefaultCredentialID)
+			}
+		})
+	}
+}
+
 func TestWorkloadAndManagedIdentitiesDoNotShareTokens(t *testing.T) {
 	setWorkloadIdentityEnv(t, "federated-token")
 	f := useFakeAzure(t, func(_ context.Context, r tokenRequest) (int, any) {

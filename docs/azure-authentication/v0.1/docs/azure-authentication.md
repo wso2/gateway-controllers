@@ -272,7 +272,8 @@ apply to, so it needs no `NO_PROXY` entry.
 1. **Request header phase**: the policy only sets a header, so it never buffers the request body.
 2. The policy asks its identity's credential for a token, waiting at most `tokenRequestTimeout`.
    Every route and API with the same authentication type, client ID and tenant shares one
-   credential, and the Azure Identity SDK caches its tokens by scope.
+   credential, whether a `workload-identity` route sets them or leaves them to `AZURE_CLIENT_ID`
+   and `AZURE_TENANT_ID`, and the Azure Identity SDK caches its tokens by scope.
    - A cached token is returned straight away until it is due for refresh: once Entra ID's
      `refresh_in` hint passes, or 5 minutes before it expires. A managed identity token is cached
      without a hint unless its endpoint sends one, so it is refreshed only in its last 5 minutes.

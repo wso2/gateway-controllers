@@ -105,6 +105,13 @@ func GetPolicy(metadata policy.PolicyMetadata, rawParams map[string]interface{})
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
+	if p.kind.usesTenant {
+		// The credential would fall back to the AZURE_* variables itself. Resolving them first
+		// gives a route that leaves them out and a route that names the same identity one
+		// credential, and gives the AuthContext and the log the identity in use.
+		p.clientID = cmp.Or(p.clientID, os.Getenv("AZURE_CLIENT_ID"))
+		p.tenantID = cmp.Or(p.tenantID, os.Getenv("AZURE_TENANT_ID"))
+	}
 	cred, err := credentials.get(identity{authenticationType: p.kind.name, clientID: p.clientID, tenantID: p.tenantID})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", p.kind.unavailable, err)
@@ -113,17 +120,12 @@ func GetPolicy(metadata policy.PolicyMetadata, rawParams map[string]interface{})
 	pol := &Policy{
 		kind:        p.kind,
 		scope:       p.scope,
+		tenantID:    p.tenantID,
 		clientID:    p.clientID,
 		headerName:  p.headerName,
 		valuePrefix: p.valuePrefix,
 		timeout:     p.tokenRequestTimeout,
 		credential:  cred,
-	}
-	if p.kind.usesTenant {
-		// The credential falls back to the AZURE_* variables; resolve them the same way for the
-		// AuthContext and the log.
-		pol.clientID = cmp.Or(p.clientID, os.Getenv("AZURE_CLIENT_ID"))
-		pol.tenantID = cmp.Or(p.tenantID, os.Getenv("AZURE_TENANT_ID"))
 	}
 
 	slog.Debug("AzureAuthentication: policy initialized", append(append([]any{
