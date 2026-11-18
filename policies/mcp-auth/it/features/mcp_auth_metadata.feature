@@ -69,6 +69,9 @@ Feature: mcp-auth protected-resource metadata
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
     Then the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     # The metadata answers without a token.
     When I clear all headers
@@ -128,6 +131,9 @@ Feature: mcp-auth protected-resource metadata
     # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://expected-issuer.com" and store it as "otherToken"
     And I set header "Authorization" to "Bearer ${CTX:otherToken}"
@@ -230,6 +236,9 @@ Feature: mcp-auth protected-resource metadata
       """
     Then the response header "WWW-Authenticate" should contain "mcp:read mcp:write"
     And the response should match the expected error response "mcp-auth-required-scopes-challenge"
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     # The metadata lists both scopes in scopes_supported, after every key manager's issuer.
     When I clear all headers

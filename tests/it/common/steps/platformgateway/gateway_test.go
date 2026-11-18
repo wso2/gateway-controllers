@@ -4208,3 +4208,130 @@ func TestAwaitLogEventWithoutTextChecksTheFirstLineWithTheMarker(t *testing.T) {
 	require.ErrorContains(t, err, `to hold an event containing "included-request"`,
 		"a missing event must fail, not pass for want of anything to check")
 }
+
+// routeDumpJSON builds a dynamic_route_configs dump with the given routes in one virtual host.
+func routeDumpJSON(routes ...string) string {
+	routes = append(routes, `{"name":"no-api-found","match":{"prefix":"/"},"direct_response":{"status":404}}`)
+	return `{"configs":[{"route_config":{"name":"shared_route_config","virtual_hosts":[{"name":"*","routes":[` +
+		strings.Join(routes, ",") + `]}]}}]}`
+}
+
+func parseRouteDump(t *testing.T, raw string) envoyRouteDump {
+	t.Helper()
+	var dump envoyRouteDump
+	require.NoError(t, json.Unmarshal([]byte(raw), &dump))
+	return dump
+}
+
+// routeClusters must read each path match Envoy uses, collect the clusters of every matching
+// route once, and fail for a matching route that has no named cluster to wait for.
+func TestRouteClustersMatchesEnvoyPathShapes(t *testing.T) {
+	dump := parseRouteDump(t, routeDumpJSON(
+		`{"match":{"safe_regex":{"regex":"^/ctx-1/mcp/?$"},"headers":[{"name":":method"}]},"route":{"cluster":"upstream_main_testbench_3021"}}`,
+		`{"match":{"safe_regex":{"regex":"^/ctx-1/mcp/?$"}},"route":{"cluster":"upstream_main_testbench_3021"}}`,
+		`{"match":{"path":"/exact"},"route":{"cluster":"exact_cluster"}}`,
+		`{"match":{"prefix":"/pre/"},"route":{"weighted_clusters":{"clusters":[{"name":"a"},{"name":"b"}]}}}`,
+		`{"match":{"path_separated_prefix":"/sep"},"route":{"cluster":"sep_cluster"}}`,
+		`{"match":{"path":"/fixed"},"direct_response":{"status":200}}`,
+		`{"match":{"path":"/per-request"},"route":{"cluster_header":"x-cluster"}}`,
+		`{"name":"no-api-found","match":{"prefix":"/"},"direct_response":{"status":404}}`,
+	))
+	for path, want := range map[string][]string{
+		"/ctx-1/mcp":  {"upstream_main_testbench_3021"},
+		"/ctx-1/mcp/": {"upstream_main_testbench_3021"},
+		"/exact":      {"exact_cluster"},
+		"/pre/x":      {"a", "b"},
+		"/sep":        {"sep_cluster"},
+		"/sep/x":      {"sep_cluster"},
+	} {
+		clusters, matched, err := routeClusters(dump, path)
+		require.NoError(t, err, path)
+		require.True(t, matched, path)
+		require.Equal(t, want, clusters, path)
+	}
+	// The catch-all no-api-found route and other routes Envoy answers itself never count.
+	for _, path := range []string{"/ctx-1/mcpx", "/ctx-10/mcp", "/separate", "/exact/x", "/fixed"} {
+		_, matched, err := routeClusters(dump, path)
+		require.NoError(t, err, path)
+		require.False(t, matched, "a regex or exact path must match the whole path: %s", path)
+	}
+	_, _, err := routeClusters(dump, "/per-request")
+	require.ErrorContains(t, err, "picks its cluster per request")
+}
+
+// upstreamReadiness tolerates every state that propagation ends, and passes only when each of
+// the route's clusters is active and none is warming.
+func TestUpstreamReadiness(t *testing.T) {
+	c := []string{"upstream_main_testbench_3021"}
+	for name, err := range map[string]error{
+		"no route":   upstreamReadiness("/p", nil, false, nil, nil),
+		"warming":    upstreamReadiness("/p", c, true, c, c),
+		"not active": upstreamReadiness("/p", c, true, nil, []string{"other"}),
+	} {
+		require.Error(t, err, name)
+		require.True(t, retry.IsTransient(err), "%s must be polled through, not fail the wait", name)
+	}
+	require.NoError(t, upstreamReadiness("/p", c, true, nil, c))
+}
+
+// awaitUpstreamForwarding must poll Envoy's admin endpoint through no route, a warming cluster and
+// a cluster not yet active, pass once the cluster is active, and send nothing to the data plane.
+func TestAwaitUpstreamForwardingWaitsForAWarmCluster(t *testing.T) {
+	const route = `{"match":{"safe_regex":{"regex":"^/ctx-1/mcp/?$"}},"route":{"cluster":"upstream_main_testbench_3021"}}`
+	const cluster = `{"configs":[{"cluster":{"name":"upstream_main_testbench_3021"}}]}`
+	var routeReads atomic.Int32
+	var other atomic.Int32
+	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/config_dump" {
+			other.Add(1)
+			w.WriteHeader(http.StatusTeapot)
+			return
+		}
+		stage := routeReads.Load()
+		switch r.URL.Query().Get("resource") {
+		case "dynamic_route_configs":
+			stage = routeReads.Add(1)
+			if stage == 1 {
+				_, _ = w.Write([]byte(routeDumpJSON()))
+				return
+			}
+			_, _ = w.Write([]byte(routeDumpJSON(route)))
+		case "dynamic_warming_clusters":
+			if stage == 2 {
+				_, _ = w.Write([]byte(cluster))
+				return
+			}
+			_, _ = w.Write([]byte(`{}`))
+		case "dynamic_active_clusters":
+			if stage <= 3 {
+				_, _ = w.Write([]byte(`{}`))
+				return
+			}
+			_, _ = w.Write([]byte(cluster))
+		default:
+			other.Add(1)
+			w.WriteHeader(http.StatusTeapot)
+		}
+	})
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	require.NoError(t, tcontext.Set(ctx, "mcpContext", "/ctx-1"))
+
+	require.NoError(t, g.awaitUpstreamForwarding(ctx, "${CTX:mcpContext}/mcp?x=1"))
+	require.Equal(t, int32(4), routeReads.Load(), "no route, warming, not active, then ready")
+	require.Zero(t, other.Load(), "the wait reads only Envoy's config dump")
+	_, err := httpx.Published(ctx)
+	require.Error(t, err, "the wait publishes no response, so the scenario's next check is unaffected")
+}
+
+// A forwarding route whose cluster cannot be known in advance fails the wait at once instead of
+// timing out.
+func TestAwaitUpstreamForwardingFailsFastForARouteWithoutAKnownCluster(t *testing.T) {
+	fake := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(routeDumpJSON(`{"match":{"path":"/per-request"},"route":{"cluster_header":"x-cluster"}}`)))
+	})
+	g, ctx := mtlsGatewayUnderTest(t, fake, nil)
+	start := time.Now()
+	require.ErrorContains(t, g.awaitUpstreamForwarding(ctx, "/per-request"), "picks its cluster per request")
+	require.Less(t, time.Since(start), 5*time.Second)
+	require.Error(t, g.awaitUpstreamForwarding(ctx, "${CTX:missing}"))
+}
