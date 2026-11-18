@@ -264,6 +264,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I generate a unique API context from "([^"]*)" and store it as "([^"]*)"$`,
 		b.generateUniqueContext)
 	sc.Step(`^I send a "([^"]*)" request( over HTTPS)? to "([^"]*)"$`, b.sendRequestOnListener)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" over HTTP/2$`, b.sendRequestOverHTTP2)
 	sc.Step(`^I send (\d+) "([^"]*)" requests to "([^"]*)"$`, b.sendRepeated)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" alternating the "([^"]*)" header:$`,
 		b.sendConcurrentAlternating)
