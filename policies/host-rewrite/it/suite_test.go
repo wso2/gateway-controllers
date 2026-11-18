@@ -27,7 +27,11 @@ import (
 	"github.com/wso2/gateway-controllers/policies/host-rewrite/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// The scenarios chain dynamic-endpoint, request-rewrite and basic-ratelimit with the policy.
+var config = suite.Config{
+	RegisterWithBase: steps.Register,
+	Companions:       []string{"dynamic-endpoint", "request-rewrite", "basic-ratelimit"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
