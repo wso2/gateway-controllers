@@ -1068,7 +1068,8 @@ Feature: Host rewrite routing
 
   # Requests run every 100 ms in the background while the host changes twice, back to back.
   # Each must get one of the configured hosts, never the client's, and the last one wins. The
-  # traffic is kept running until it has itself received the first and the last host.
+  # traffic is kept running until it has itself received the first and the last host, and at
+  # least one request must be answered while the last update rolls out.
   Scenario: Rapidly update the Host Rewrite value while traffic is active
     Given I generate a unique value from "hr-rapid" and store it as "apiName"
     And I generate a unique API context from "/hr-rapid" and store it as "apiContext"
@@ -1109,7 +1110,7 @@ Feature: Host rewrite routing
       | spec.operations                | [{"method":"POST","path":"/probe","policies":[{"name":"host-rewrite","version":"v1","params":{"host":"hr-rapid-v3.example"}}]}] |
     Then the API update response should indicate successful deployment
 
-    Then background requests "traffic" should eventually echo "hr-rapid-v3.example" in JSON field "headers.Host"
+    Then background requests "traffic" should answer during the rollout and then echo "hr-rapid-v3.example" in JSON field "headers.Host"
     When I stop background requests "traffic"
     Then every background response of "traffic" should be successful with JSON field "headers.Host" set to one of:
       | hr-rapid-v1.example |

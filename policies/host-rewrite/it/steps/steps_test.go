@@ -284,17 +284,13 @@ func TestTableCellsRejectsAMissingTable(t *testing.T) {
 func TestEveryBackgroundResponseFailsWhenResponsesWereDropped(t *testing.T) {
 	steps := newSteps(fakeBase{url: "http://unused"})
 	ctx := newScenarioContext()
-	probes, err := backgroundProbes(ctx)
-	require.NoError(t, err)
-	done := make(chan struct{})
-	close(done)
-	probe := &backgroundProbe{cancel: func() {}, done: done}
-	for range maxBackgroundResponses + 1 {
-		probe.record(backgroundResponse{status: 200, body: hostBody("v1.example")})
+	hosts := make([]string, maxBackgroundResponses+1)
+	for i := range hosts {
+		hosts[i] = "v1.example"
 	}
-	probes["full"] = probe
+	stoppedProbe(t, ctx, "full", hosts...)
 
-	err = steps.everyBackgroundResponseIsOneOfValues(ctx, "full", "headers.Host", valueTable("v1.example"))
+	err := steps.everyBackgroundResponseIsOneOfValues(ctx, "full", "headers.Host", valueTable("v1.example"))
 	require.ErrorContains(t, err, "dropped 1 responses")
 }
 
@@ -365,21 +361,91 @@ func TestStoppingAProbeMidResponseRecordsNoFailure(t *testing.T) {
 func TestBackgroundRequestsEventuallyEchoFindsAValueOfAStoppedProbe(t *testing.T) {
 	steps := newSteps(fakeBase{url: "http://unused"})
 	ctx := newScenarioContext()
+	stoppedProbe(t, ctx, "stopped", "v3.example")
+
+	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "stopped", "v3.example", "headers.Host"))
+	err := steps.backgroundRequestsEventuallyEcho(ctx, "stopped", "v9.example", "headers.Host")
+	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"; values seen: v3.example`)
+}
+
+func TestFirstEchoIgnoresFailedResponses(t *testing.T) {
+	responses := []backgroundResponse{
+		{status: 503, body: hostBody("v3.example")}, {err: "boom"},
+		{status: 200, body: hostBody("v1.example")}, {status: 200, body: hostBody("v3.example")},
+	}
+	require.Equal(t, 2, firstEcho(responses, "headers.Host", "v1.example"))
+	require.Equal(t, 3, firstEcho(responses, "headers.Host", "v3.example"))
+	require.Equal(t, -1, firstEcho(responses, "headers.Host", "v9.example"))
+}
+
+// stoppedProbe registers, under name, a stopped probe that recorded the given hosts in order.
+func stoppedProbe(t *testing.T, ctx context.Context, name string, hosts ...string) {
+	t.Helper()
 	probes, err := backgroundProbes(ctx)
 	require.NoError(t, err)
 	done := make(chan struct{})
 	close(done)
 	probe := &backgroundProbe{cancel: func() {}, done: done}
-	probe.record(backgroundResponse{status: 200, body: hostBody("v3.example")})
-	probes["stopped"] = probe
-
-	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "stopped", "v3.example", "headers.Host"))
-	err = steps.backgroundRequestsEventuallyEcho(ctx, "stopped", "v9.example", "headers.Host")
-	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"; values seen: v3.example`)
+	for _, host := range hosts {
+		probe.record(backgroundResponse{status: 200, body: hostBody(host)})
+	}
+	probes[name] = probe
 }
 
-func TestEchoedIgnoresFailedResponses(t *testing.T) {
-	responses := []backgroundResponse{{status: 503, body: hostBody("v3.example")}, {status: 200, body: hostBody("v1.example")}}
-	require.True(t, echoed(responses, "headers.Host", "v1.example"))
-	require.False(t, echoed(responses, "headers.Host", "v3.example"))
+func TestAnswerDuringRolloutPassesWhenARequestIsAnsweredBeforeTheNewValue(t *testing.T) {
+	var calls atomic.Int32
+	server := echoServer(t, func(string) string {
+		if calls.Add(1) > 5 {
+			return "v3.example"
+		}
+		return "v1.example"
+	})
+	steps := newSteps(fakeBase{url: server.URL})
+	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
+
+	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
+	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v1.example", "headers.Host"))
+	// v3 appears only from the sixth response, so some responses come after the step begins and before it.
+	require.NoError(t, steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host"))
+}
+
+func TestAnswerDuringRolloutFailsWhenTheNewValueWasAlreadyServed(t *testing.T) {
+	steps := newSteps(fakeBase{url: "http://unused"})
+	ctx := newScenarioContext()
+	stoppedProbe(t, ctx, "traffic", "v1.example", "v3.example")
+
+	err := steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host")
+	require.ErrorContains(t, err, `no request of background requests "traffic" was answered before headers.Host "v3.example" took effect`)
+	require.ErrorContains(t, err, "within one request interval")
+
+	err = steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v9.example", "headers.Host")
+	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"`)
+}
+
+func TestAnswerDuringRolloutFailsWhenTheFirstNewResponseCarriesTheValue(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		host := "v1.example"
+		if calls.Add(1) > 1 {
+			<-release // hold the second request until the step has begun
+			host = "v3.example"
+		}
+		_, _ = w.Write(hostBody(host))
+	}))
+	t.Cleanup(server.Close)
+	steps := newSteps(fakeBase{url: server.URL})
+	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
+
+	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
+	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v1.example", "headers.Host"))
+	require.Eventually(t, func() bool { return calls.Load() >= 2 }, 5*time.Second, 10*time.Millisecond)
+	go func() {
+		time.Sleep(backgroundRequestInterval)
+		close(release) // from here every response carries v3
+	}()
+	err := steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host")
+	require.ErrorContains(t, err, "within one request interval")
 }
