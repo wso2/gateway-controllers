@@ -76,8 +76,10 @@ var (
 	credentials = newCredentialRegistry()
 )
 
-// identity selects a credential. An empty clientID means AZURE_CLIENT_ID for workload-identity and
-// the host's default identity for managed-identity; an empty tenantID means AZURE_TENANT_ID.
+// identity selects a credential. GetPolicy resolves AZURE_CLIENT_ID and AZURE_TENANT_ID into it for
+// workload-identity, so that an identity has one key whether a route names it or not; an empty
+// clientID there means neither is set. For a host's identity an empty clientID means its default
+// identity.
 type identity struct {
 	authenticationType string
 	clientID           string
