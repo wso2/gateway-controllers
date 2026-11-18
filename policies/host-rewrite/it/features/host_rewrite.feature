@@ -357,7 +357,7 @@ Feature: Host rewrite routing
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/v1.0/echo" until status 404
+    And I send a "POST" request to "${CTX:apiContext}/v1.0/echo" until status 404
 
   # With hostRewrite manual and no policy, the upstream gets the client's Host.
   Scenario: Add and remove Host Rewrite from a deployed API
@@ -419,7 +419,7 @@ Feature: Host rewrite routing
     And I authenticate using basic auth as "admin"
     And I delete the API "${CTX:apiName}"
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/v1.0/echo" until status 404
+    And I send a "POST" request to "${CTX:apiContext}/v1.0/echo" until status 404
 
   # Gateway 1.1.0 sends the request to the selected upstream without its base path, so the
   # dynamic endpoint scenarios run on 1.2.0 and later.
@@ -1111,9 +1111,9 @@ Feature: Host rewrite routing
       """
       {}
       """
-    And I stop background requests "traffic"
     Then background requests "traffic" should have recorded at least 10 responses
-    And every background response of "traffic" should be successful with JSON field "headers.Host" set to one of:
+    When I stop background requests "traffic"
+    Then every background response of "traffic" should be successful with JSON field "headers.Host" set to one of:
       | hr-rapid-v1.example |
       | hr-rapid-v2.example |
       | hr-rapid-v3.example |

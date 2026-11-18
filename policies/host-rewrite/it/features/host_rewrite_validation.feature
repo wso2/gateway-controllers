@@ -79,10 +79,10 @@ Feature: Host rewrite policy validation
     Then the response status should be 404
 
     Examples:
-      | case            | host                              | expected                                         |
-      | underscore      | "hr_bad.example"                  | Does not match pattern                           |
-      | URL with path   | "evil.example/path"               | Does not match pattern                           |
-      | CRLF            | "hr.example\u000d\u000aX-Injected: 1" | Does not match pattern                     |
+      | case            | host                                 | expected                                        |
+      | underscore      | "hr_bad.example"                     | Does not match pattern                          |
+      | URL with path   | "evil.example/path"                  | Does not match pattern                          |
+      | CRLF            | "hr.example\u000d\u000aevil.example" | Does not match pattern                          |
       | longer than 255 | "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" | String length must be less than or equal to 255 |
-      | integer         | 8080                              | Invalid type. Expected: string, given: integer   |
-      | array           | ["hr.example"]                    | Invalid type. Expected: string, given: array     |
+      | integer         | 8080                                 | Invalid type. Expected: string, given: integer  |
+      | array           | ["hr.example"]                       | Invalid type. Expected: string, given: array    |

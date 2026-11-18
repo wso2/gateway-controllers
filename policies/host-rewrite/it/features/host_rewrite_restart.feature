@@ -49,10 +49,8 @@ Feature: Host rewrite policy across gateway restarts
     And I clear all headers
     And I authenticate using basic auth as "admin"
     And I wait for the gateway controller health endpoint
-    And I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until the response body contains "hr-restart-runtime.example" with body:
-      """
-      {}
-      """
+    And I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until status 200
+    Then the JSON response field "headers.Host" should be "hr-restart-runtime.example"
     When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "hr-restart-runtime.example"
@@ -78,6 +76,7 @@ Feature: Host rewrite policy across gateway restarts
       | spec.operations                | [{"method":"POST","path":"/probe","policies":[{"name":"host-rewrite","version":"v1","params":{"host":"hr-restart-controller.example"}}]}] |
     Then the resource creation response should indicate successful deployment
     And I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until status 200
+    Then the JSON response field "headers.Host" should be "hr-restart-controller.example"
 
     When I restart the "gateway-controller" service
     And I clear all headers
@@ -87,10 +86,8 @@ Feature: Host rewrite policy across gateway restarts
     And I clear all headers
     And I authenticate using basic auth as "admin"
     And I wait for the gateway controller health endpoint
-    And I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until the response body contains "hr-restart-controller.example" with body:
-      """
-      {}
-      """
+    And I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until status 200
+    Then the JSON response field "headers.Host" should be "hr-restart-controller.example"
     When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "hr-restart-controller.example"
