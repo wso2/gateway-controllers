@@ -20,6 +20,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -190,7 +191,7 @@ func (s *Steps) runBackgroundRequests(ctx context.Context, probe *backgroundProb
 			req := request
 			req.Headers = copyHeaders(request.Headers)
 			resp, err := s.client.Do(ctx, req, 0, 0)
-			if err != nil && ctx.Err() != nil {
+			if stoppedByProbe(ctx, err) {
 				return // the request was cut short by stopping the probe; it says nothing about the gateway
 			}
 			r := backgroundResponse{}
@@ -202,6 +203,13 @@ func (s *Steps) runBackgroundRequests(ctx context.Context, probe *backgroundProb
 			probe.record(r) // a response that completed is kept, even if the probe stopped meanwhile
 		}
 	}
+}
+
+// stoppedByProbe reports whether err comes from stopping the probe: the probe is stopped and the
+// error wraps its cancellation. Any other error is the gateway's, even one that arrives as the
+// probe stops, and is recorded.
+func stoppedByProbe(ctx context.Context, err error) bool {
+	return err != nil && ctx.Err() != nil && errors.Is(err, context.Canceled)
 }
 
 func namedBackgroundProbe(ctx context.Context, name string) (*backgroundProbe, error) {
@@ -265,13 +273,16 @@ func (s *Steps) backgroundRequestsEventuallyEcho(ctx context.Context, name, want
 	field = strings.TrimSpace(field)
 	deadline := time.Now().Add(backgroundEchoWait)
 	for {
-		if echoed(probe.snapshot(), field, want) {
+		// Decide whether this is the last look before reading the responses, so the last look
+		// covers every response recorded before the probe stopped or the wait ran out.
+		last := !probe.running() || time.Now().After(deadline)
+		responses := probe.snapshot()
+		if echoed(responses, field, want) {
 			return nil
 		}
-		if !probe.running() || time.Now().After(deadline) {
-			seen := distinctValues(probe.snapshot(), field)
+		if last {
 			return fmt.Errorf("background requests %q never echoed %s %q; values seen: %s",
-				name, field, want, strings.Join(seen, ", "))
+				name, field, want, strings.Join(distinctValues(responses, field), ", "))
 		}
 		select {
 		case <-ctx.Done():

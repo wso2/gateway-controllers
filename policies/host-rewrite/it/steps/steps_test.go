@@ -22,6 +22,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -317,6 +318,64 @@ func TestBackgroundRequestsEventuallyEchoWaitsForTheValue(t *testing.T) {
 
 	err := steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v9.example", "headers.Host")
 	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"; values seen: v1.example, v3.example`)
+}
+
+func TestStoppedByProbeKeepsErrorsTheStopDidNotCause(t *testing.T) {
+	live := context.Background()
+	stopped, cancel := context.WithCancel(context.Background())
+	cancel()
+	canceledRequest := fmt.Errorf("httpx: GET /probe: %w", context.Canceled)
+
+	require.True(t, stoppedByProbe(stopped, canceledRequest))
+	require.False(t, stoppedByProbe(stopped, errors.New("connection reset by peer")),
+		"an error the stop did not cause is recorded, even after the stop")
+	require.False(t, stoppedByProbe(live, canceledRequest), "a running probe records every error")
+	require.False(t, stoppedByProbe(stopped, nil))
+}
+
+func TestStoppingAProbeMidResponseRecordsNoFailure(t *testing.T) {
+	started := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"headers":`))
+		w.(http.Flusher).Flush()
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-r.Context().Done() // hold the body open until the client goes away
+	}))
+	t.Cleanup(server.Close)
+	steps := newSteps(fakeBase{url: server.URL})
+	ctx := newScenarioContext()
+	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
+
+	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the probe sent no request")
+	}
+	require.NoError(t, steps.stopBackgroundRequests(ctx, "traffic"))
+	probe, err := namedBackgroundProbe(ctx, "traffic")
+	require.NoError(t, err)
+	require.Empty(t, probe.snapshot(), "a body read cut short by the stop is not a gateway failure")
+}
+
+func TestBackgroundRequestsEventuallyEchoFindsAValueOfAStoppedProbe(t *testing.T) {
+	steps := newSteps(fakeBase{url: "http://unused"})
+	ctx := newScenarioContext()
+	probes, err := backgroundProbes(ctx)
+	require.NoError(t, err)
+	done := make(chan struct{})
+	close(done)
+	probe := &backgroundProbe{cancel: func() {}, done: done}
+	probe.record(backgroundResponse{status: 200, body: hostBody("v3.example")})
+	probes["stopped"] = probe
+
+	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "stopped", "v3.example", "headers.Host"))
+	err = steps.backgroundRequestsEventuallyEcho(ctx, "stopped", "v9.example", "headers.Host")
+	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"; values seen: v3.example`)
 }
 
 func TestEchoedIgnoresFailedResponses(t *testing.T) {
