@@ -73,20 +73,41 @@ type pathExpectation struct {
 	want string
 }
 
-func pathExpectations(ctx context.Context, table *godog.Table) ([]pathExpectation, error) {
+// tableCells returns a Gherkin table's rows as plain strings, requiring width cells in each.
+func tableCells(table *godog.Table, width int) ([][]string, error) {
 	if table == nil || len(table.Rows) == 0 {
+		return nil, fmt.Errorf("a table is required")
+	}
+	rows := make([][]string, 0, len(table.Rows))
+	for i, row := range table.Rows {
+		if row == nil || len(row.Cells) != width {
+			return nil, fmt.Errorf("table row %d must contain exactly %d cell(s)", i+1, width)
+		}
+		cells := make([]string, width)
+		for j, cell := range row.Cells {
+			cells[j] = cell.Value
+		}
+		rows = append(rows, cells)
+	}
+	return rows, nil
+}
+
+// pathExpectations reads rows of a path and the value its response must echo, expanding
+// stored values.
+func pathExpectations(ctx context.Context, cells [][]string) ([]pathExpectation, error) {
+	if len(cells) == 0 {
 		return nil, fmt.Errorf("a table of paths and expected values is required")
 	}
-	rows := make([]pathExpectation, 0, len(table.Rows))
-	for i, row := range table.Rows {
-		if row == nil || len(row.Cells) != 2 {
+	rows := make([]pathExpectation, 0, len(cells))
+	for i, row := range cells {
+		if len(row) != 2 {
 			return nil, fmt.Errorf("table row %d must contain exactly two cells", i+1)
 		}
-		path, err := stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[0].Value))
+		path, err := stepscommon.Expand(ctx, strings.TrimSpace(row[0]))
 		if err != nil {
 			return nil, err
 		}
-		want, err := stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[1].Value))
+		want, err := stepscommon.Expand(ctx, strings.TrimSpace(row[1]))
 		if err != nil {
 			return nil, err
 		}
@@ -105,6 +126,15 @@ func pathExpectations(ctx context.Context, table *godog.Table) ([]pathExpectatio
 func (s *Steps) sendConcurrentAlternatingPaths(
 	ctx context.Context, n int, method, field string, table *godog.Table,
 ) error {
+	cells, err := tableCells(table, 2)
+	if err != nil {
+		return err
+	}
+	return s.sendConcurrentAlternating(ctx, n, method, field, cells)
+}
+
+// sendConcurrentAlternating is sendConcurrentAlternatingPaths on table rows already read.
+func (s *Steps) sendConcurrentAlternating(ctx context.Context, n int, method, field string, cells [][]string) error {
 	if n <= 0 || n > maxConcurrentRequests {
 		return fmt.Errorf("the concurrent request count must be between 1 and %d, got %d", maxConcurrentRequests, n)
 	}
@@ -112,7 +142,7 @@ func (s *Steps) sendConcurrentAlternatingPaths(
 	if field == "" {
 		return fmt.Errorf("a JSON field is required")
 	}
-	rows, err := pathExpectations(ctx, table)
+	rows, err := pathExpectations(ctx, cells)
 	if err != nil {
 		return err
 	}

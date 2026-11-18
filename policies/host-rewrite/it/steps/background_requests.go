@@ -216,11 +216,20 @@ func (s *Steps) backgroundRequestsAtLeast(ctx context.Context, name string, n in
 }
 
 func (s *Steps) everyBackgroundResponseIsOneOf(ctx context.Context, name, field string, table *godog.Table) error {
+	cells, err := tableCells(table, 1)
+	if err != nil {
+		return err
+	}
+	return s.everyBackgroundResponseIsOneOfValues(ctx, name, field, cells)
+}
+
+// everyBackgroundResponseIsOneOfValues is everyBackgroundResponseIsOneOf on table rows already read.
+func (s *Steps) everyBackgroundResponseIsOneOfValues(ctx context.Context, name, field string, cells [][]string) error {
 	probe, err := namedBackgroundProbe(ctx, name)
 	if err != nil {
 		return err
 	}
-	allowed, err := allowedValues(ctx, table)
+	allowed, err := allowedValues(ctx, cells)
 	if err != nil {
 		return err
 	}
@@ -240,17 +249,17 @@ func (s *Steps) backgroundRequestsSawValues(ctx context.Context, name string, n 
 	return nil
 }
 
-// allowedValues reads a one-column table of values, expanding stored values.
-func allowedValues(ctx context.Context, table *godog.Table) (map[string]bool, error) {
-	if table == nil || len(table.Rows) == 0 {
+// allowedValues reads one-cell rows of values, expanding stored values.
+func allowedValues(ctx context.Context, cells [][]string) (map[string]bool, error) {
+	if len(cells) == 0 {
 		return nil, fmt.Errorf("a table of allowed values is required")
 	}
 	allowed := map[string]bool{}
-	for i, row := range table.Rows {
-		if row == nil || len(row.Cells) != 1 {
+	for i, row := range cells {
+		if len(row) != 1 {
 			return nil, fmt.Errorf("allowed values row %d must contain exactly one cell", i+1)
 		}
-		value, err := stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[0].Value))
+		value, err := stepscommon.Expand(ctx, strings.TrimSpace(row[0]))
 		if err != nil {
 			return nil, err
 		}

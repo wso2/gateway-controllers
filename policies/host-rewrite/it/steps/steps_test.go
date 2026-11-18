@@ -28,8 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cucumber/godog"
-	messages "github.com/cucumber/messages/go/v34"
 	"github.com/stretchr/testify/require"
 
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
@@ -52,14 +50,13 @@ func newScenarioContext() context.Context {
 	return tcontext.WithLocal(context.Background(), tcontext.NewLocal("test-runner"))
 }
 
-func table(rows ...[2]string) *godog.Table {
-	t := &godog.Table{}
+// table returns two-cell rows, as tableCells reads them from a Gherkin table.
+func table(rows ...[2]string) [][]string {
+	out := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		t.Rows = append(t.Rows, &messages.PickleTableRow{Cells: []*messages.PickleTableCell{
-			{Value: row[0]}, {Value: row[1]},
-		}})
+		out = append(out, []string{row[0], row[1]})
 	}
-	return t
+	return out
 }
 
 // echoServer answers each path with {"headers":{"Host": <host for that path>}}.
@@ -135,7 +132,7 @@ func TestSendConcurrentAlternatingPathsPassesWhenEveryResponseMatches(t *testing
 	}(server.Config.Handler)
 
 	steps := newSteps(fakeBase{url: server.URL, headers: map[string]string{"X-Test": "1"}, host: "client.example"})
-	err := steps.sendConcurrentAlternatingPaths(newScenarioContext(), 40, "get", "headers.Host",
+	err := steps.sendConcurrentAlternating(newScenarioContext(), 40, "get", "headers.Host",
 		table([2]string{"/a", "a.example"}, [2]string{"/b", "b.example"}))
 	require.NoError(t, err)
 	require.Equal(t, int32(40), calls.Load())
@@ -154,7 +151,7 @@ func TestSendConcurrentAlternatingPathsReportsALeakedValue(t *testing.T) {
 		return "b.example"
 	})
 	steps := newSteps(fakeBase{url: server.URL})
-	err := steps.sendConcurrentAlternatingPaths(newScenarioContext(), 20, "GET", "headers.Host",
+	err := steps.sendConcurrentAlternating(newScenarioContext(), 20, "GET", "headers.Host",
 		table([2]string{"/a", "a.example"}, [2]string{"/b", "b.example"}))
 	require.ErrorContains(t, err, "1 of 20 concurrent requests")
 	require.ErrorContains(t, err, `/b: headers.Host is "a.example", want "b.example"`)
@@ -164,9 +161,9 @@ func TestSendConcurrentAlternatingPathsRejectsBadInput(t *testing.T) {
 	steps := newSteps(fakeBase{url: "http://unused"})
 	ctx := newScenarioContext()
 	rows := table([2]string{"/a", "a.example"})
-	require.ErrorContains(t, steps.sendConcurrentAlternatingPaths(ctx, 0, "GET", "headers.Host", rows), "between 1 and")
-	require.ErrorContains(t, steps.sendConcurrentAlternatingPaths(ctx, maxConcurrentRequests+1, "GET", "headers.Host", rows), "between 1 and")
-	require.ErrorContains(t, steps.sendConcurrentAlternatingPaths(ctx, 1, "GET", " ", rows), "JSON field is required")
+	require.ErrorContains(t, steps.sendConcurrentAlternating(ctx, 0, "GET", "headers.Host", rows), "between 1 and")
+	require.ErrorContains(t, steps.sendConcurrentAlternating(ctx, maxConcurrentRequests+1, "GET", "headers.Host", rows), "between 1 and")
+	require.ErrorContains(t, steps.sendConcurrentAlternating(ctx, 1, "GET", " ", rows), "JSON field is required")
 }
 
 func TestSummarizeFailuresCapsTheReasons(t *testing.T) {
@@ -177,12 +174,13 @@ func TestSummarizeFailuresCapsTheReasons(t *testing.T) {
 	require.NotContains(t, err.Error(), "r6")
 }
 
-func valueTable(values ...string) *godog.Table {
-	t := &godog.Table{}
+// valueTable returns one-cell rows, as tableCells reads them from a Gherkin table.
+func valueTable(values ...string) [][]string {
+	out := make([][]string, 0, len(values))
 	for _, v := range values {
-		t.Rows = append(t.Rows, &messages.PickleTableRow{Cells: []*messages.PickleTableCell{{Value: v}}})
+		out = append(out, []string{v})
 	}
-	return t
+	return out
 }
 
 func hostBody(host string) []byte {
@@ -251,8 +249,8 @@ func TestBackgroundRequestsRecordAndCheckResponses(t *testing.T) {
 
 	require.NoError(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 6))
 	require.ErrorContains(t, steps.backgroundRequestsAtLeast(ctx, "traffic", 100000), "want at least")
-	require.NoError(t, steps.everyBackgroundResponseIsOneOf(ctx, "traffic", "headers.Host", valueTable("v1.example", "v2.example")))
-	require.ErrorContains(t, steps.everyBackgroundResponseIsOneOf(ctx, "traffic", "headers.Host", valueTable("v1.example")),
+	require.NoError(t, steps.everyBackgroundResponseIsOneOfValues(ctx, "traffic", "headers.Host", valueTable("v1.example", "v2.example")))
+	require.ErrorContains(t, steps.everyBackgroundResponseIsOneOfValues(ctx, "traffic", "headers.Host", valueTable("v1.example")),
 		`headers.Host is "v2.example"`)
 	require.NoError(t, steps.backgroundRequestsSawValues(ctx, "traffic", 2, "headers.Host"))
 	require.ErrorContains(t, steps.backgroundRequestsSawValues(ctx, "traffic", 3, "headers.Host"), "saw 2 different values")
@@ -278,4 +276,9 @@ func TestStopAllBackgroundRequestsStopsEveryProbe(t *testing.T) {
 	require.Equal(t, after, calls.Load(), "no request is sent after the probes are stopped")
 	_, err := namedBackgroundProbe(ctx, "one")
 	require.ErrorContains(t, err, "no background requests named")
+}
+
+func TestTableCellsRejectsAMissingTable(t *testing.T) {
+	_, err := tableCells(nil, 2)
+	require.ErrorContains(t, err, "a table is required")
 }
