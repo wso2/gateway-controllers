@@ -282,12 +282,17 @@ func (s *Steps) backgroundRequestsAnswerDuringRolloutThenEcho(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	before := len(probe.snapshot())
+	return answeredDuringRollout(ctx, probe, name, want, field, len(probe.snapshot()))
+}
+
+// answeredDuringRollout waits until the probe echoes want, then fails unless at least one
+// response was recorded after the first baseline responses and before the first one carrying want.
+func answeredDuringRollout(ctx context.Context, probe *backgroundProbe, name, want, field string, baseline int) error {
 	first, want, err := waitForBackgroundEcho(ctx, probe, name, want, field)
 	if err != nil {
 		return err
 	}
-	if first <= before {
+	if first <= baseline {
 		return fmt.Errorf("no request of background requests %q was answered before %s %q took effect: "+
 			"the rollout finished within one request interval (%s), so the scenario did not exercise it",
 			name, strings.TrimSpace(field), want, backgroundRequestInterval)

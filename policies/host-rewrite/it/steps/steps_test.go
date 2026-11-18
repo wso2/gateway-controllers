@@ -392,60 +392,43 @@ func stoppedProbe(t *testing.T, ctx context.Context, name string, hosts ...strin
 	probes[name] = probe
 }
 
-func TestAnswerDuringRolloutPassesWhenARequestIsAnsweredBeforeTheNewValue(t *testing.T) {
-	var calls atomic.Int32
-	server := echoServer(t, func(string) string {
-		if calls.Add(1) > 5 {
-			return "v3.example"
-		}
-		return "v1.example"
-	})
-	steps := newSteps(fakeBase{url: server.URL})
+func TestAnsweredDuringRolloutNeedsAResponseBetweenTheBaselineAndTheNewValue(t *testing.T) {
 	ctx := newScenarioContext()
-	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
-
-	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
-	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v1.example", "headers.Host"))
-	// v3 appears only from the sixth response, so some responses come after the step begins and before it.
-	require.NoError(t, steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host"))
+	cases := []struct {
+		name     string
+		hosts    []string
+		baseline int
+		wantErr  string
+	}{
+		{name: "an old-value response after the baseline, then the new value", hosts: []string{"v1.example", "v1.example", "v3.example"}, baseline: 1},
+		{name: "the first response after the baseline carries the new value", hosts: []string{"v1.example", "v3.example"}, baseline: 1,
+			wantErr: "within one request interval"},
+		{name: "the new value was served before the baseline", hosts: []string{"v1.example", "v3.example", "v3.example"}, baseline: 2,
+			wantErr: "within one request interval"},
+		{name: "the new value is never served", hosts: []string{"v1.example", "v1.example"}, baseline: 1,
+			wantErr: `never echoed headers.Host "v3.example"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stoppedProbe(t, ctx, "traffic", tc.hosts...)
+			probe, err := namedBackgroundProbe(ctx, "traffic")
+			require.NoError(t, err)
+			err = answeredDuringRollout(ctx, probe, "traffic", "v3.example", "headers.Host", tc.baseline)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.ErrorContains(t, err, tc.wantErr)
+		})
+	}
 }
 
-func TestAnswerDuringRolloutFailsWhenTheNewValueWasAlreadyServed(t *testing.T) {
+func TestAnswerDuringRolloutTakesItsBaselineWhenTheStepBegins(t *testing.T) {
 	steps := newSteps(fakeBase{url: "http://unused"})
 	ctx := newScenarioContext()
+	// Both responses were recorded before the step began, so none can show an overlap.
 	stoppedProbe(t, ctx, "traffic", "v1.example", "v3.example")
 
 	err := steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host")
 	require.ErrorContains(t, err, `no request of background requests "traffic" was answered before headers.Host "v3.example" took effect`)
-	require.ErrorContains(t, err, "within one request interval")
-
-	err = steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v9.example", "headers.Host")
-	require.ErrorContains(t, err, `never echoed headers.Host "v9.example"`)
-}
-
-func TestAnswerDuringRolloutFailsWhenTheFirstNewResponseCarriesTheValue(t *testing.T) {
-	var calls atomic.Int32
-	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		host := "v1.example"
-		if calls.Add(1) > 1 {
-			<-release // hold the second request until the step has begun
-			host = "v3.example"
-		}
-		_, _ = w.Write(hostBody(host))
-	}))
-	t.Cleanup(server.Close)
-	steps := newSteps(fakeBase{url: server.URL})
-	ctx := newScenarioContext()
-	t.Cleanup(func() { stopAllBackgroundRequests(ctx) })
-
-	require.NoError(t, steps.startBackgroundRequests(ctx, "GET", "/probe", "traffic"))
-	require.NoError(t, steps.backgroundRequestsEventuallyEcho(ctx, "traffic", "v1.example", "headers.Host"))
-	require.Eventually(t, func() bool { return calls.Load() >= 2 }, 5*time.Second, 10*time.Millisecond)
-	go func() {
-		time.Sleep(backgroundRequestInterval)
-		close(release) // from here every response carries v3
-	}()
-	err := steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host")
-	require.ErrorContains(t, err, "within one request interval")
 }
