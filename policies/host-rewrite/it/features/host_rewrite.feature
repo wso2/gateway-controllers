@@ -26,7 +26,6 @@ Feature: Host rewrite routing
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
-
   Scenario: Host rewrite sets the Host header on upstream request
     Given I generate a unique value from "host-rewrite-1" and store it as "apiName1"
     And I generate a unique API context from "/host-rewrite-1" and store it as "apiContext1"
@@ -45,6 +44,9 @@ Feature: Host rewrite routing
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "example-updated.com"
 
+    When I delete the API "${CTX:apiName1}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext1}/v1.0/test" until status 404
 
   Scenario: Host rewrite with port number
     Given I generate a unique value from "host-rewrite-2" and store it as "apiName2"
@@ -64,6 +66,9 @@ Feature: Host rewrite routing
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "backend.example.com:8080"
 
+    When I delete the API "${CTX:apiName2}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext2}/v1.0/test" until status 404
 
   Scenario: Host rewrite at API level applies to all operations
     Given I generate a unique value from "host-rewrite-3" and store it as "apiName3"
@@ -87,6 +92,9 @@ Feature: Host rewrite routing
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "api-level.example.com"
 
+    When I delete the API "${CTX:apiName3}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext3}/v1.0/test1" until status 404
 
   Scenario: Host rewrite without hostRewrite manual should not work
     Given I generate a unique value from "host-rewrite-4" and store it as "apiName4"
@@ -105,6 +113,9 @@ Feature: Host rewrite routing
     Then the response status code should be 200
     And the JSON response field "headers.Host" should contain "testbench"
 
+    When I delete the API "${CTX:apiName4}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext4}/v1.0/test" until status 404
 
   Scenario: Operation-level policy overrides API-level policy
     Given I generate a unique value from "host-rewrite-5" and store it as "apiName5"
@@ -128,14 +139,17 @@ Feature: Host rewrite routing
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "operation-level.example.com"
 
+    When I delete the API "${CTX:apiName5}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext5}/v1.0/default" until status 404
 
-  Scenario: Host rewrite works with different HTTP methods
+  Scenario: Configure different Host Rewrite values for different operations
     Given I generate a unique value from "host-rewrite-6" and store it as "apiName6"
     And I generate a unique API context from "/host-rewrite-6" and store it as "apiContext6"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion            | ${CTX:gatewaySpecVersion}                                      |
       | name                  | ${CTX:apiName6}                                               |
-      | spec.displayName      | Host Rewrite HTTP Methods                                     |
+      | spec.displayName      | Host Rewrite Different Operations                             |
       | spec.version          | v1.0                                                          |
       | spec.context          | ${CTX:apiContext6}/$version                                   |
       | spec.upstream.main.url| http://testbench:3002/anything                                |
@@ -155,3 +169,7 @@ Feature: Host rewrite routing
       """
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "put.example.com"
+
+    When I delete the API "${CTX:apiName6}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext6}/v1.0/test" until status 404
