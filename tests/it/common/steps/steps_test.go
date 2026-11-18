@@ -1034,14 +1034,21 @@ func TestSendOverHTTP2ReturnsTheHTTP2Response(t *testing.T) {
 	require.Equal(t, "GET", resp.Method)
 }
 
-func TestSendOverHTTP2RejectsAServerThatDoesNotSpeakHTTP2(t *testing.T) {
+func TestSendOverHTTP2FailsAgainstAServerThatDoesNotSpeakHTTP2(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(server.Close)
 
+	// The h2c client cannot talk to an HTTP/1-only server, so the request itself fails.
 	_, err := sendOverHTTP2(context.Background(), "GET", server.URL+"/probe", "", nil)
-	require.ErrorContains(t, err, "HTTP/2")
+	require.ErrorContains(t, err, "over HTTP/2")
+}
+
+func TestRequireHTTP2RejectsAnHTTP1Response(t *testing.T) {
+	require.NoError(t, requireHTTP2(&http.Response{ProtoMajor: 2, Proto: "HTTP/2.0"}, "GET", "http://gw/p"))
+	err := requireHTTP2(&http.Response{ProtoMajor: 1, Proto: "HTTP/1.1"}, "GET", "http://gw/p")
+	require.ErrorContains(t, err, `expected an HTTP/2 response from GET http://gw/p, got protocol "HTTP/1.1"`)
 }
 
 func TestReadLimitedBodyRejectsAnOversizedBody(t *testing.T) {

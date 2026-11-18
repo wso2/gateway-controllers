@@ -97,8 +97,8 @@ func sendOverHTTP2(
 			method, target, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.ProtoMajor != 2 {
-		return nil, fmt.Errorf("expected an HTTP/2 response from %s %s, got protocol %q", method, target, resp.Proto)
+	if err := requireHTTP2(resp, method, target); err != nil {
+		return nil, err
 	}
 	body, err := readLimitedBody(resp.Body)
 	if err != nil {
@@ -112,6 +112,14 @@ func sendOverHTTP2(
 		URL:        target,
 		Elapsed:    time.Since(started),
 	}, nil
+}
+
+// requireHTTP2 fails unless the response came over HTTP/2.
+func requireHTTP2(resp *http.Response, method, target string) error {
+	if resp.ProtoMajor != 2 {
+		return fmt.Errorf("expected an HTTP/2 response from %s %s, got protocol %q", method, target, resp.Proto)
+	}
+	return nil
 }
 
 // readLimitedBody reads a response body, failing when it exceeds maxHTTP2ResponseBodyBytes.
