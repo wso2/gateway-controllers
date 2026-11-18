@@ -42,8 +42,10 @@ import (
 const rejectionCacheFor = 2 * time.Second
 
 var (
-	// Retries that fit the default 10 s tokenRequestTimeout. Managed identity retries the codes the
-	// SDK lists for IMDS (404, 410, 429 and 5xx); Entra ID retries azcore's defaults.
+	// Entra ID's two retries fit the default 10 s tokenRequestTimeout. Managed identity waits about
+	// 1, 3, 4 and 4 s, so three of its retries fit 10 s and all four fit a longer timeout. On IMDS it
+	// retries the codes the SDK lists for IMDS (404, 410, 429 and 5xx); Entra ID and other managed
+	// identity endpoints retry azcore's defaults.
 	entraRetry   = azpolicy.RetryOptions{MaxRetries: 2, RetryDelay: 200 * time.Millisecond, MaxRetryDelay: 2 * time.Second}
 	managedRetry = azpolicy.RetryOptions{MaxRetries: 4, RetryDelay: time.Second, MaxRetryDelay: 4 * time.Second}
 
