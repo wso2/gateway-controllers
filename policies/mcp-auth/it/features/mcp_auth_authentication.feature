@@ -70,6 +70,9 @@ Feature: mcp-auth authentication of MCP requests
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     # MAN #7: with a valid token, initialize reaches the backend and the backend issues a session.
     When I clear all headers
@@ -199,6 +202,9 @@ Feature: mcp-auth authentication of MCP requests
 
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "<issuer>" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -249,6 +255,9 @@ Feature: mcp-auth authentication of MCP requests
     And I send a "<method>" request to "${CTX:mcpContext}/mcp" until status 401
     Then the response header "WWW-Authenticate" should contain "${CTX:mcpContext}/.well-known/oauth-protected-resource"
     And the response header "x-envoy-upstream-service-time" should not exist
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
     Then the response status code should be <namedStatus>
@@ -300,6 +309,9 @@ Feature: mcp-auth authentication of MCP requests
 
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -365,6 +377,9 @@ Feature: mcp-auth authentication of MCP requests
 
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I mint a JWT token from the testbench OIDC provider expiring in 3600 seconds and store it as "goodToken" with claims:
       """
@@ -432,6 +447,9 @@ Feature: mcp-auth authentication of MCP requests
 
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"

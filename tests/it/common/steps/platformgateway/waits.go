@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/cucumber/godog"
@@ -148,6 +149,184 @@ func (g *Gateway) sendUntilRouteAnswers(ctx context.Context, method, path string
 		})
 }
 
+// envoyRouteDump is the part of Envoy's dynamic_route_configs dump that says where a path goes.
+type envoyRouteDump struct {
+	Configs []struct {
+		RouteConfig struct {
+			VirtualHosts []struct {
+				Routes []envoyRoute `json:"routes"`
+			} `json:"virtual_hosts"`
+		} `json:"route_config"`
+	} `json:"configs"`
+}
+
+type envoyRoute struct {
+	Match struct {
+		Prefix              string `json:"prefix"`
+		Path                string `json:"path"`
+		PathSeparatedPrefix string `json:"path_separated_prefix"`
+		SafeRegex           struct {
+			Regex string `json:"regex"`
+		} `json:"safe_regex"`
+	} `json:"match"`
+	Route *struct {
+		Cluster          string `json:"cluster"`
+		ClusterHeader    string `json:"cluster_header"`
+		WeightedClusters *struct {
+			Clusters []struct {
+				Name string `json:"name"`
+			} `json:"clusters"`
+		} `json:"weighted_clusters"`
+	} `json:"route"`
+}
+
+// matches reports whether the route's path match takes path. Header and method matchers are
+// ignored, so every route that could serve the path counts.
+func (r envoyRoute) matches(path string) (bool, error) {
+	m := r.Match
+	switch {
+	case m.Path != "":
+		return path == m.Path, nil
+	case m.SafeRegex.Regex != "":
+		re, err := regexp.Compile(`^(?:` + m.SafeRegex.Regex + `)$`)
+		if err != nil {
+			return false, fmt.Errorf("Envoy route regex %q: %w", m.SafeRegex.Regex, err)
+		}
+		return re.MatchString(path), nil
+	case m.PathSeparatedPrefix != "":
+		p := m.PathSeparatedPrefix
+		return path == p || strings.HasPrefix(path, p+"/"), nil
+	case m.Prefix != "":
+		return strings.HasPrefix(path, m.Prefix), nil
+	default:
+		return false, nil
+	}
+}
+
+// routeClusters returns the clusters of every forwarding route that serves path, sorted, and
+// reports whether any forwarding route matched. Routes Envoy answers itself are skipped: the
+// gateway's health routes and its catch-all "no-api-found" route, whose prefix "/" matches every
+// path and answers the no-route 404 until an API's own route exists. A forwarding route that
+// picks its cluster per request fails, since its cluster cannot be known in advance.
+func routeClusters(dump envoyRouteDump, path string) ([]string, bool, error) {
+	clusters := map[string]bool{}
+	matched := false
+	for _, config := range dump.Configs {
+		for _, host := range config.RouteConfig.VirtualHosts {
+			for _, route := range host.Routes {
+				if route.Route == nil {
+					continue
+				}
+				ok, err := route.matches(path)
+				if err != nil {
+					return nil, false, err
+				}
+				if !ok {
+					continue
+				}
+				matched = true
+				switch {
+				case route.Route.Cluster != "":
+					clusters[route.Route.Cluster] = true
+				case route.Route.WeightedClusters != nil && len(route.Route.WeightedClusters.Clusters) > 0:
+					for _, c := range route.Route.WeightedClusters.Clusters {
+						clusters[c.Name] = true
+					}
+				default:
+					return nil, true, fmt.Errorf("the Envoy route for %s picks its cluster per request, so it cannot be checked", path)
+				}
+			}
+		}
+	}
+	return sortedKeys(clusters), matched, nil
+}
+
+// upstreamReadiness decides, from the route's clusters and Envoy's warming and active cluster
+// lists, whether a request on the route would reach its upstream. Every in-between state is
+// tolerated: no route yet, a cluster still warming, or a cluster not yet added.
+func upstreamReadiness(path string, clusters []string, matched bool, warming, active []string) error {
+	if !matched {
+		return tolerated("Envoy has no route that forwards %s yet", path)
+	}
+	isWarming := map[string]bool{}
+	for _, name := range warming {
+		isWarming[name] = true
+	}
+	isActive := map[string]bool{}
+	for _, name := range active {
+		isActive[name] = true
+	}
+	for _, name := range clusters {
+		if isWarming[name] {
+			return tolerated("the upstream cluster %s of %s is still warming", name, path)
+		}
+		if !isActive[name] {
+			return tolerated("the upstream cluster %s of %s is not active yet", name, path)
+		}
+	}
+	return nil
+}
+
+// envoyActiveClusters lists the names of the dynamic clusters Envoy is using.
+func (g *Gateway) envoyActiveClusters(ctx context.Context) ([]string, error) {
+	var dump struct {
+		Configs []struct {
+			Cluster struct {
+				Name string `json:"name"`
+			} `json:"cluster"`
+		} `json:"configs"`
+	}
+	if err := g.readJSON(ctx, "envoy-admin", "/config_dump?resource=dynamic_active_clusters", &dump); err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(dump.Configs))
+	for _, c := range dump.Configs {
+		names = append(names, c.Cluster.Name)
+	}
+	return names, nil
+}
+
+// awaitUpstreamForwarding waits until Envoy would forward a request on path to a warm upstream,
+// reading only Envoy's admin endpoint, so it sends nothing to the route or its backend. A policy's
+// own rejection (an authenticating policy's 401) proves the route and its policy chain are live,
+// but it is answered before the upstream, so it says nothing about the upstream cluster. Each
+// backend address has one cluster, which Envoy drops when the last API using it is deleted and
+// warms again when the next one is created; until it is warm, a forwarded request gets Envoy's
+// 503 with an empty body.
+func (g *Gateway) awaitUpstreamForwarding(ctx context.Context, path string) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	if i := strings.IndexByte(resolved, '?'); i >= 0 {
+		resolved = resolved[:i]
+	}
+	return awaitReadState(ctx, fmt.Sprintf("waiting for Envoy to forward %s to a warm upstream", resolved),
+		func(ctx context.Context) error {
+			var routes envoyRouteDump
+			if err := g.readJSON(ctx, "envoy-admin", "/config_dump?resource=dynamic_route_configs", &routes); err != nil {
+				return err
+			}
+			clusters, matched, err := routeClusters(routes, resolved)
+			if err != nil {
+				return err
+			}
+			if !matched {
+				return upstreamReadiness(resolved, nil, false, nil, nil)
+			}
+			warming, err := g.envoyWarmingClusters(ctx)
+			if err != nil {
+				return err
+			}
+			active, err := g.envoyActiveClusters(ctx)
+			if err != nil {
+				return err
+			}
+			return upstreamReadiness(resolved, clusters, true, warming, active)
+		})
+}
+
 func (g *Gateway) registerWaitSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the route answers (\d+)$`, g.sendUntilRouteAnswers)
+	sc.Step(`^I wait until the router can forward "([^"]*)" to its upstream$`, g.awaitUpstreamForwarding)
 }

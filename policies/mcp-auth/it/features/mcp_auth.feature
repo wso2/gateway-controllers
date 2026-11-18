@@ -93,6 +93,9 @@ Feature: MCP proxies protected by mcp-auth
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -164,6 +167,9 @@ Feature: MCP proxies protected by mcp-auth
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "email=alice@example.com" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -203,6 +209,9 @@ Feature: MCP proxies protected by mcp-auth
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -241,6 +250,9 @@ Feature: MCP proxies protected by mcp-auth
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -280,6 +292,9 @@ Feature: MCP proxies protected by mcp-auth
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"
@@ -320,6 +335,9 @@ Feature: MCP proxies protected by mcp-auth
       """
       {"jsonrpc":"2.0","id":0,"method":"tools/call","params":{"name":"add","arguments":{"a":1,"b":2},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"warmup","version":"1.0.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
     # No basic-auth header is restored here: this route authenticates with mcp-auth, and a
     # Basic credential on the data path would be read as a bearer token and rejected, making
     # the exempt call below fail for a reason that has nothing to do with the exception list.
