@@ -67,6 +67,13 @@ type backgroundResponse struct {
 	status int
 	body   []byte
 	err    string
+	// answered is when the request completed, with a response or an error.
+	answered time.Time
+}
+
+// successful reports whether the request got a 2xx response.
+func (r backgroundResponse) successful() bool {
+	return r.err == "" && r.status >= 200 && r.status < 300
 }
 
 // backgroundProbe sends requests until it is stopped and records every response.
@@ -193,10 +200,11 @@ func (s *Steps) runBackgroundRequests(ctx context.Context, probe *backgroundProb
 			req := request
 			req.Headers = copyHeaders(request.Headers)
 			resp, err := s.client.Do(ctx, req, 0, 0)
+			answered := time.Now()
 			if stoppedByProbe(ctx, err) {
 				return // the request was cut short by stopping the probe; it says nothing about the gateway
 			}
-			r := backgroundResponse{}
+			r := backgroundResponse{answered: answered}
 			if err != nil {
 				r.err = err.Error()
 			} else if resp != nil {
@@ -268,12 +276,12 @@ func (s *Steps) backgroundRequestsEventuallyEcho(ctx context.Context, name, want
 	if err != nil {
 		return err
 	}
-	_, _, err = waitForBackgroundEcho(ctx, probe, name, want, field)
+	_, _, _, err = waitForBackgroundEcho(ctx, probe, name, want, field)
 	return err
 }
 
 // backgroundRequestsAnswerDuringRolloutThenEcho is backgroundRequestsEventuallyEcho for the step
-// right after an update. It also fails unless the probe got at least one response after the step
+// right after an update. It also fails unless a request got a successful response after the step
 // began and before the first response carrying want, so some request was answered while the
 // update rolled out. Without one, the rollout finished within one request interval and the
 // scenario did not exercise it.
@@ -282,32 +290,36 @@ func (s *Steps) backgroundRequestsAnswerDuringRolloutThenEcho(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	return answeredDuringRollout(ctx, probe, name, want, field, len(probe.snapshot()))
+	return answeredDuringRollout(ctx, probe, name, want, field, time.Now())
 }
 
-// answeredDuringRollout waits until the probe echoes want, then fails unless at least one
-// response was recorded after the first baseline responses and before the first one carrying want.
-func answeredDuringRollout(ctx context.Context, probe *backgroundProbe, name, want, field string, baseline int) error {
-	first, want, err := waitForBackgroundEcho(ctx, probe, name, want, field)
+// answeredDuringRollout waits until the probe echoes want, then fails unless a request completed
+// after since with a successful response, before the first response carrying want. It goes by
+// when each request completed, not by when the probe recorded it.
+func answeredDuringRollout(ctx context.Context, probe *backgroundProbe, name, want, field string, since time.Time) error {
+	responses, first, want, err := waitForBackgroundEcho(ctx, probe, name, want, field)
 	if err != nil {
 		return err
 	}
-	if first <= baseline {
-		return fmt.Errorf("no request of background requests %q was answered before %s %q took effect: "+
-			"the rollout finished within one request interval (%s), so the scenario did not exercise it",
-			name, strings.TrimSpace(field), want, backgroundRequestInterval)
+	for _, r := range responses[:first] {
+		if r.successful() && r.answered.After(since) {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("no request of background requests %q got a successful response before %s %q took effect: "+
+		"the rollout finished within one request interval (%s), so the scenario did not exercise it",
+		name, strings.TrimSpace(field), want, backgroundRequestInterval)
 }
 
 // waitForBackgroundEcho waits, while the probe still runs, until one of its successful responses
-// carries want in the JSON field, and returns that response's position and the expanded want.
+// carries want in the JSON field. It returns the responses it found it in, that response's
+// position and the expanded want.
 func waitForBackgroundEcho(
 	ctx context.Context, probe *backgroundProbe, name, want, field string,
-) (int, string, error) {
+) ([]backgroundResponse, int, string, error) {
 	want, err := stepscommon.Expand(ctx, want)
 	if err != nil {
-		return 0, "", err
+		return nil, 0, "", err
 	}
 	field = strings.TrimSpace(field)
 	deadline := time.Now().Add(backgroundEchoWait)
@@ -317,15 +329,15 @@ func waitForBackgroundEcho(
 		last := !probe.running() || time.Now().After(deadline)
 		responses := probe.snapshot()
 		if first := firstEcho(responses, field, want); first >= 0 {
-			return first, want, nil
+			return responses, first, want, nil
 		}
 		if last {
-			return 0, want, fmt.Errorf("background requests %q never echoed %s %q; values seen: %s",
+			return nil, 0, want, fmt.Errorf("background requests %q never echoed %s %q; values seen: %s",
 				name, field, want, strings.Join(distinctValues(responses, field), ", "))
 		}
 		select {
 		case <-ctx.Done():
-			return 0, want, ctx.Err()
+			return nil, 0, want, ctx.Err()
 		case <-time.After(backgroundRequestInterval / 2):
 		}
 	}
@@ -335,7 +347,7 @@ func waitForBackgroundEcho(
 // JSON field, or -1 when none does.
 func firstEcho(responses []backgroundResponse, field, want string) int {
 	for i, r := range responses {
-		if r.err != "" || r.status < 200 || r.status >= 300 {
+		if !r.successful() {
 			continue
 		}
 		if got, err := jsonField(r.body, field); err == nil && got == want {
@@ -409,7 +421,7 @@ func distinctValues(responses []backgroundResponse, field string) []string {
 	seen := map[string]bool{}
 	var order []string
 	for _, r := range responses {
-		if r.err != "" || r.status < 200 || r.status >= 300 {
+		if !r.successful() {
 			continue
 		}
 		got, err := jsonField(r.body, field)

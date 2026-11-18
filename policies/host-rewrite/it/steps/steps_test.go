@@ -387,33 +387,52 @@ func stoppedProbe(t *testing.T, ctx context.Context, name string, hosts ...strin
 	close(done)
 	probe := &backgroundProbe{cancel: func() {}, done: done}
 	for _, host := range hosts {
-		probe.record(backgroundResponse{status: 200, body: hostBody(host)})
+		probe.record(backgroundResponse{status: 200, body: hostBody(host), answered: time.Now()})
 	}
 	probes[name] = probe
 }
 
-func TestAnsweredDuringRolloutNeedsAResponseBetweenTheBaselineAndTheNewValue(t *testing.T) {
+func TestAnsweredDuringRolloutNeedsASuccessfulResponseAfterTheStepBegan(t *testing.T) {
 	ctx := newScenarioContext()
+	start := time.Now()
+	at := func(ms int) time.Time { return start.Add(time.Duration(ms) * time.Millisecond) }
+	ok := func(host string, ms int) backgroundResponse {
+		return backgroundResponse{status: 200, body: hostBody(host), answered: at(ms)}
+	}
+	since := at(20) // the step began here
 	cases := []struct {
-		name     string
-		hosts    []string
-		baseline int
-		wantErr  string
+		name      string
+		responses []backgroundResponse
+		wantErr   string
 	}{
-		{name: "an old-value response after the baseline, then the new value", hosts: []string{"v1.example", "v1.example", "v3.example"}, baseline: 1},
-		{name: "the first response after the baseline carries the new value", hosts: []string{"v1.example", "v3.example"}, baseline: 1,
-			wantErr: "within one request interval"},
-		{name: "the new value was served before the baseline", hosts: []string{"v1.example", "v3.example", "v3.example"}, baseline: 2,
-			wantErr: "within one request interval"},
-		{name: "the new value is never served", hosts: []string{"v1.example", "v1.example"}, baseline: 1,
-			wantErr: `never echoed headers.Host "v3.example"`},
+		{name: "an old-value response after the step began, then the new value",
+			responses: []backgroundResponse{ok("v1.example", 10), ok("v1.example", 30), ok("v3.example", 40)}},
+		{name: "the first response after the step began carries the new value",
+			responses: []backgroundResponse{ok("v1.example", 10), ok("v3.example", 30)}, wantErr: "within one request interval"},
+		{name: "the new value was served before the step began",
+			responses: []backgroundResponse{ok("v1.example", 10), ok("v3.example", 15), ok("v3.example", 30)},
+			wantErr:   "within one request interval"},
+		{name: "a response recorded after the step began but answered before it does not count",
+			responses: []backgroundResponse{ok("v1.example", 10), ok("v2.example", 19), ok("v3.example", 30)},
+			wantErr:   "within one request interval"},
+		{name: "a transport error after the step began does not count",
+			responses: []backgroundResponse{ok("v1.example", 10), {err: "connection reset", answered: at(30)}, ok("v3.example", 40)},
+			wantErr:   "got a successful response"},
+		{name: "an error status after the step began does not count",
+			responses: []backgroundResponse{ok("v1.example", 10), {status: 503, answered: at(30)}, ok("v3.example", 40)},
+			wantErr:   "got a successful response"},
+		{name: "the new value is never served",
+			responses: []backgroundResponse{ok("v1.example", 10), ok("v1.example", 30)}, wantErr: `never echoed headers.Host "v3.example"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			stoppedProbe(t, ctx, "traffic", tc.hosts...)
-			probe, err := namedBackgroundProbe(ctx, "traffic")
-			require.NoError(t, err)
-			err = answeredDuringRollout(ctx, probe, "traffic", "v3.example", "headers.Host", tc.baseline)
+			done := make(chan struct{})
+			close(done)
+			probe := &backgroundProbe{cancel: func() {}, done: done}
+			for _, r := range tc.responses {
+				probe.record(r)
+			}
+			err := answeredDuringRollout(ctx, probe, "traffic", "v3.example", "headers.Host", since)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
@@ -426,9 +445,10 @@ func TestAnsweredDuringRolloutNeedsAResponseBetweenTheBaselineAndTheNewValue(t *
 func TestAnswerDuringRolloutTakesItsBaselineWhenTheStepBegins(t *testing.T) {
 	steps := newSteps(fakeBase{url: "http://unused"})
 	ctx := newScenarioContext()
-	// Both responses were recorded before the step began, so none can show an overlap.
+	// Both requests were answered before the step began, so neither can show an overlap.
 	stoppedProbe(t, ctx, "traffic", "v1.example", "v3.example")
 
 	err := steps.backgroundRequestsAnswerDuringRolloutThenEcho(ctx, "traffic", "v3.example", "headers.Host")
-	require.ErrorContains(t, err, `no request of background requests "traffic" was answered before headers.Host "v3.example" took effect`)
+	require.ErrorContains(t, err,
+		`no request of background requests "traffic" got a successful response before headers.Host "v3.example" took effect`)
 }
