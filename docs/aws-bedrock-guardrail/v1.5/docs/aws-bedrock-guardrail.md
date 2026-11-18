@@ -38,7 +38,7 @@ The policy uses a two-level configuration. The guardrail identity and AWS creden
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
 | `region` | string | Yes* | AWS region where the Amazon Bedrock guardrail is located (e.g. `us-east-1`). *Required unless every attachment sets its own. |
-| `guardrailID` | string | Yes* | Default Amazon Bedrock Guardrails guardrail identifier. *Required unless every attachment sets its own. |
+| `guardrailID` | string | Yes* | Default Amazon Bedrock guardrail identifier. *Required unless every attachment sets its own. |
 | `guardrailVersion` | string | Yes* | Default guardrail version (e.g. `DRAFT`, `1`). *Required unless every attachment sets its own. |
 | `awsAccessKeyID` | string | No | AWS access key ID for the gateway's own identity. If omitted, the default AWS credential chain is used. |
 | `awsSecretAccessKey` | string | No | AWS secret access key paired with `awsAccessKeyID`. |
