@@ -1,0 +1,318 @@
+/*
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+ *
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package steps
+
+import (
+	"context"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/cucumber/godog"
+
+	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
+	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
+
+	stepscommon "github.com/wso2/gateway-controllers/tests/it/common/steps/common"
+)
+
+const (
+	// backgroundRequestInterval is the pause between two background requests.
+	backgroundRequestInterval = 100 * time.Millisecond
+	// maxBackgroundResponses bounds what one probe keeps, so a probe left running cannot grow
+	// without limit.
+	maxBackgroundResponses = 3000
+
+	keyBackgroundRequests = "hostRewriteBackgroundRequests"
+)
+
+func (s *Steps) registerBackgroundRequests(sc *godog.ScenarioContext) {
+	sc.Step(`^I start background "([^"]*)" requests to "([^"]*)" as "([^"]*)"$`, s.startBackgroundRequests)
+	sc.Step(`^I stop background requests "([^"]*)"$`, s.stopBackgroundRequests)
+	sc.Step(`^background requests "([^"]*)" should have recorded at least (\d+) responses$`,
+		s.backgroundRequestsAtLeast)
+	sc.Step(`^every background response of "([^"]*)" should be successful with JSON field "([^"]*)" set to one of:$`,
+		s.everyBackgroundResponseIsOneOf)
+	sc.Step(`^background requests "([^"]*)" should have seen at least (\d+) different values of JSON field "([^"]*)"$`,
+		s.backgroundRequestsSawValues)
+
+	sc.After(func(ctx context.Context, _ *godog.Scenario, _ error) (context.Context, error) {
+		stopAllBackgroundRequests(ctx)
+		return ctx, nil
+	})
+}
+
+// backgroundResponse is one recorded response; status 0 marks a request that got no response.
+type backgroundResponse struct {
+	status int
+	body   []byte
+	err    string
+}
+
+// backgroundProbe sends requests until it is stopped and records every response.
+type backgroundProbe struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	mu        sync.Mutex
+	responses []backgroundResponse
+}
+
+func (p *backgroundProbe) record(r backgroundResponse) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.responses) < maxBackgroundResponses {
+		p.responses = append(p.responses, r)
+	}
+}
+
+func (p *backgroundProbe) snapshot() []backgroundResponse {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]backgroundResponse(nil), p.responses...)
+}
+
+func (p *backgroundProbe) stop() {
+	p.cancel()
+	<-p.done
+}
+
+func backgroundProbes(ctx context.Context) (map[string]*backgroundProbe, error) {
+	if stored, ok := tcontext.Get(ctx, keyBackgroundRequests); ok {
+		probes, ok := stored.(map[string]*backgroundProbe)
+		if !ok {
+			return nil, fmt.Errorf("background requests have an unexpected type %T", stored)
+		}
+		return probes, nil
+	}
+	probes := map[string]*backgroundProbe{}
+	if err := tcontext.Set(ctx, keyBackgroundRequests, probes); err != nil {
+		return nil, err
+	}
+	return probes, nil
+}
+
+// stopAllBackgroundRequests stops every probe of the scenario and forgets them, so none
+// outlives the scenario that started it.
+func stopAllBackgroundRequests(ctx context.Context) {
+	stored, ok := tcontext.Get(ctx, keyBackgroundRequests)
+	if !ok {
+		return
+	}
+	if probes, ok := stored.(map[string]*backgroundProbe); ok {
+		for _, probe := range probes {
+			probe.stop()
+		}
+	}
+	tcontext.Remove(ctx, keyBackgroundRequests)
+}
+
+// startBackgroundRequests sends the request every backgroundRequestInterval, with the
+// scenario's headers and request host as they are now, until the probe is stopped.
+func (s *Steps) startBackgroundRequests(ctx context.Context, method, path, name string) error {
+	resolvedPath, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("background requests need a name")
+	}
+	target, err := s.base.GatewayURL(resolvedPath)
+	if err != nil {
+		return err
+	}
+	probes, err := backgroundProbes(ctx)
+	if err != nil {
+		return err
+	}
+	if _, exists := probes[name]; exists {
+		return fmt.Errorf("background requests %q are already running", name)
+	}
+	request := httpx.Request{
+		Method: strings.ToUpper(method), URL: target, Headers: copyHeaders(s.base.ScenarioHeaders(ctx)),
+		Host: s.base.RequestHost(ctx),
+	}
+	probeCtx, cancel := context.WithCancel(context.Background())
+	probe := &backgroundProbe{cancel: cancel, done: make(chan struct{})}
+	go s.runBackgroundRequests(probeCtx, probe, request)
+	probes[name] = probe
+	return nil
+}
+
+func (s *Steps) runBackgroundRequests(ctx context.Context, probe *backgroundProbe, request httpx.Request) {
+	defer close(probe.done)
+	ticker := time.NewTicker(backgroundRequestInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			req := request
+			req.Headers = copyHeaders(request.Headers)
+			resp, err := s.client.Do(ctx, req, 0, 0)
+			if ctx.Err() != nil {
+				return // stopped while this request was in flight; it says nothing about the gateway
+			}
+			r := backgroundResponse{}
+			if err != nil {
+				r.err = err.Error()
+			} else if resp != nil {
+				r.status, r.body = resp.StatusCode, resp.Body
+			}
+			probe.record(r)
+		}
+	}
+}
+
+func namedBackgroundProbe(ctx context.Context, name string) (*backgroundProbe, error) {
+	probes, err := backgroundProbes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	probe, ok := probes[strings.TrimSpace(name)]
+	if !ok {
+		return nil, fmt.Errorf("no background requests named %q were started in this scenario", name)
+	}
+	return probe, nil
+}
+
+func (s *Steps) stopBackgroundRequests(ctx context.Context, name string) error {
+	probe, err := namedBackgroundProbe(ctx, name)
+	if err != nil {
+		return err
+	}
+	probe.stop()
+	return nil
+}
+
+func (s *Steps) backgroundRequestsAtLeast(ctx context.Context, name string, n int) error {
+	probe, err := namedBackgroundProbe(ctx, name)
+	if err != nil {
+		return err
+	}
+	if got := len(probe.snapshot()); got < n {
+		return fmt.Errorf("background requests %q recorded %d responses, want at least %d", name, got, n)
+	}
+	return nil
+}
+
+func (s *Steps) everyBackgroundResponseIsOneOf(ctx context.Context, name, field string, table *godog.Table) error {
+	probe, err := namedBackgroundProbe(ctx, name)
+	if err != nil {
+		return err
+	}
+	allowed, err := allowedValues(ctx, table)
+	if err != nil {
+		return err
+	}
+	return checkEveryResponseIsOneOf(probe.snapshot(), strings.TrimSpace(field), allowed)
+}
+
+func (s *Steps) backgroundRequestsSawValues(ctx context.Context, name string, n int, field string) error {
+	probe, err := namedBackgroundProbe(ctx, name)
+	if err != nil {
+		return err
+	}
+	seen := distinctValues(probe.snapshot(), strings.TrimSpace(field))
+	if len(seen) < n {
+		return fmt.Errorf("background requests %q saw %d different values of %s (%s), want at least %d",
+			name, len(seen), field, strings.Join(seen, ", "), n)
+	}
+	return nil
+}
+
+// allowedValues reads a one-column table of values, expanding stored values.
+func allowedValues(ctx context.Context, table *godog.Table) (map[string]bool, error) {
+	if table == nil || len(table.Rows) == 0 {
+		return nil, fmt.Errorf("a table of allowed values is required")
+	}
+	allowed := map[string]bool{}
+	for i, row := range table.Rows {
+		if row == nil || len(row.Cells) != 1 {
+			return nil, fmt.Errorf("allowed values row %d must contain exactly one cell", i+1)
+		}
+		value, err := stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[0].Value))
+		if err != nil {
+			return nil, err
+		}
+		allowed[value] = true
+	}
+	return allowed, nil
+}
+
+// checkEveryResponseIsOneOf fails when no response was recorded, or when any response is not
+// 2xx or carries a field value outside allowed. The failure names how many responses were off
+// and the first few.
+func checkEveryResponseIsOneOf(responses []backgroundResponse, field string, allowed map[string]bool) error {
+	if len(responses) == 0 {
+		return fmt.Errorf("no background response was recorded")
+	}
+	var problems []string
+	count := 0
+	for i, r := range responses {
+		problem := ""
+		switch {
+		case r.err != "":
+			problem = fmt.Sprintf("request %d failed: %s", i+1, r.err)
+		case r.status < 200 || r.status >= 300:
+			problem = fmt.Sprintf("request %d got status %d", i+1, r.status)
+		default:
+			got, err := jsonField(r.body, field)
+			if err != nil {
+				problem = fmt.Sprintf("request %d: %v", i+1, err)
+			} else if !allowed[got] {
+				problem = fmt.Sprintf("request %d: %s is %q", i+1, field, got)
+			}
+		}
+		if problem == "" {
+			continue
+		}
+		count++
+		if len(problems) < maxReportedMismatches {
+			problems = append(problems, problem)
+		}
+	}
+	if count == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d of %d background responses were not successful with an allowed %s: %s",
+		count, len(responses), field, strings.Join(problems, "; "))
+}
+
+// distinctValues returns the different values of field among the successful responses, in the
+// order they first appeared.
+func distinctValues(responses []backgroundResponse, field string) []string {
+	seen := map[string]bool{}
+	var order []string
+	for _, r := range responses {
+		if r.err != "" || r.status < 200 || r.status >= 300 {
+			continue
+		}
+		got, err := jsonField(r.body, field)
+		if err != nil || seen[got] {
+			continue
+		}
+		seen[got] = true
+		order = append(order, got)
+	}
+	return order
+}

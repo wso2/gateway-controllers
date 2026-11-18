@@ -1066,7 +1066,8 @@ Feature: Host rewrite routing
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/v1.0/probe" until status 404
 
-  # Each update is followed at once by a request, without waiting for it to take effect.
+  # Requests run every 100 ms in the background while the host changes twice, back to back.
+  # Each must get one of the configured hosts, never the client's, and the last one wins.
   Scenario: Rapidly update the Host Rewrite value while traffic is active
     Given I generate a unique value from "hr-rapid" and store it as "apiName"
     And I generate a unique API context from "/hr-rapid" and store it as "apiContext"
@@ -1083,6 +1084,7 @@ Feature: Host rewrite routing
     And I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until status 200
 
     When I set request host to "client-37.example"
+    And I start background "POST" requests to "${CTX:apiContext}/v1.0/probe" as "traffic"
     And I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
       | apiVersion                     | ${CTX:gatewaySpecVersion} |
       | name                           | ${CTX:apiName} |
@@ -1093,10 +1095,6 @@ Feature: Host rewrite routing
       | spec.upstream.main.hostRewrite | manual |
       | spec.operations                | [{"method":"POST","path":"/probe","policies":[{"name":"host-rewrite","version":"v1","params":{"host":"hr-rapid-v2.example"}}]}] |
     Then the API update response should indicate successful deployment
-
-    When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
-    Then the response status code should be 200
-    And the JSON response field "headers.Host" should contain "hr-rapid-v"
 
     When I update API "${CTX:apiName}" from "resources/templates/rest-api.yaml" with values:
       | apiVersion                     | ${CTX:gatewaySpecVersion} |
@@ -1109,23 +1107,21 @@ Feature: Host rewrite routing
       | spec.operations                | [{"method":"POST","path":"/probe","policies":[{"name":"host-rewrite","version":"v1","params":{"host":"hr-rapid-v3.example"}}]}] |
     Then the API update response should indicate successful deployment
 
-    When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
-    Then the response status code should be 200
-    And the JSON response field "headers.Host" should contain "hr-rapid-v"
-
     When I send a "POST" request to "${CTX:apiContext}/v1.0/probe" until the response body contains "hr-rapid-v3.example" with body:
       """
       {}
       """
-    And I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
+    And I stop background requests "traffic"
+    Then background requests "traffic" should have recorded at least 10 responses
+    And every background response of "traffic" should be successful with JSON field "headers.Host" set to one of:
+      | hr-rapid-v1.example |
+      | hr-rapid-v2.example |
+      | hr-rapid-v3.example |
+    And background requests "traffic" should have seen at least 2 different values of JSON field "headers.Host"
+
+    When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
     Then the response status code should be 200
     And the JSON response field "headers.Host" should be "hr-rapid-v3.example"
-
-    When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
-    Then the JSON response field "headers.Host" should be "hr-rapid-v3.example"
-
-    When I send a "POST" request to "${CTX:apiContext}/v1.0/probe"
-    Then the JSON response field "headers.Host" should be "hr-rapid-v3.example"
 
     When I reset the request
     And I authenticate using basic auth as "admin"

@@ -64,6 +64,7 @@ func newSteps(base requestBase) *Steps {
 func (s *Steps) register(sc *godog.ScenarioContext) {
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests alternating between these paths, each echoing the JSON field "([^"]*)":$`,
 		s.sendConcurrentAlternatingPaths)
+	s.registerBackgroundRequests(sc)
 }
 
 // pathExpectation is one table row: a data-plane path and the value its response must echo.
