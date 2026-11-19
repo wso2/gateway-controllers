@@ -130,10 +130,8 @@ func TestGetPolicyRejectsInvalidParams(t *testing.T) {
 		{name: "clientId not a GUID", params: valid(map[string]interface{}{"clientId": "my-app"}), wantInError: "clientId"},
 		{name: "tenantId with a slash", params: valid(map[string]interface{}{"tenantId": "a/b"}), wantInError: "tenantId"},
 		{name: "tenantId with a dot dot", params: valid(map[string]interface{}{"tenantId": "contoso..com"}), wantInError: "tenantId"},
-		{name: "empty headerName", params: valid(map[string]interface{}{"headerName": ""}), wantInError: "headerName"},
-		{name: "headerName with a space", params: valid(map[string]interface{}{"headerName": "Bad Header"}), wantInError: "headerName"},
-		{name: "pseudo-header", params: valid(map[string]interface{}{"headerName": ":authority"}), wantInError: "headerName"},
-		{name: "valuePrefix with a line break", params: valid(map[string]interface{}{"valuePrefix": "Bearer\r\nX-Injected: 1"}), wantInError: "valuePrefix"},
+		{name: "headerName", params: valid(map[string]interface{}{"headerName": "Authorization"}), wantInError: "'headerName' is not a parameter"},
+		{name: "valuePrefix", params: valid(map[string]interface{}{"valuePrefix": "Bearer"}), wantInError: "'valuePrefix' is not a parameter"},
 		{name: "unparsable timeout", params: valid(map[string]interface{}{"tokenRequestTimeout": "soon"}), wantInError: "tokenRequestTimeout"},
 		{name: "zero timeout", params: valid(map[string]interface{}{"tokenRequestTimeout": "0s"}), wantInError: "tokenRequestTimeout"},
 		{name: "negative timeout", params: valid(map[string]interface{}{"tokenRequestTimeout": "-1s"}), wantInError: "tokenRequestTimeout"},
@@ -143,10 +141,10 @@ func TestGetPolicyRejectsInvalidParams(t *testing.T) {
 		{name: "minutes timeout", params: valid(map[string]interface{}{"tokenRequestTimeout": "1m"}), wantInError: "tokenRequestTimeout"},
 		{name: "timeout with a leading zero", params: valid(map[string]interface{}{"tokenRequestTimeout": "05s"}), wantInError: "tokenRequestTimeout"},
 		{name: "timeout over 30000ms", params: valid(map[string]interface{}{"tokenRequestTimeout": "30001ms"}), wantInError: "tokenRequestTimeout"},
-		{name: "misspelled headerName", params: valid(map[string]interface{}{"headerNmae": "X-Token"}), wantInError: "'headerNmae' is not a parameter"},
+		{name: "misspelled tokenRequestTimeout", params: valid(map[string]interface{}{"tokenRequestTimout": "5s"}), wantInError: "'tokenRequestTimout' is not a parameter"},
 		{name: "clientId in the wrong case", params: map[string]interface{}{"authenticationType": "managed-identity", "clientID": testClientID}, wantInError: "'clientID' is not a parameter"},
 		{name: "unknown key set to null", params: valid(map[string]interface{}{"scopes": nil}), wantInError: "'scopes' is not a parameter"},
-		{name: "two unknown keys", params: valid(map[string]interface{}{"tenantID": "contoso.onmicrosoft.com", "headerNmae": "X-Token"}), wantInError: "'headerNmae', 'tenantID' are not parameters"},
+		{name: "two unknown keys", params: valid(map[string]interface{}{"tenantID": "contoso.onmicrosoft.com", "tokenRequestTimout": "5s"}), wantInError: "'tenantID', 'tokenRequestTimout' are not parameters"},
 		{name: "authenticationType misspelled", params: map[string]interface{}{"authType": "workload-identity"}, wantInError: "'authType' is not a parameter"},
 	}
 	for _, tt := range tests {
@@ -165,12 +163,12 @@ func TestGetPolicyRejectsInvalidParams(t *testing.T) {
 // An unknown key is reported with the parameters the policy has, so a typo in an LLM provider's
 // upstream.auth, which the controller does not check, names the fix.
 func TestUnknownParamErrorListsTheParameters(t *testing.T) {
-	_, err := extractParams(map[string]interface{}{"authenticationType": "workload-identity", "headerNmae": "X-Token"})
+	_, err := extractParams(map[string]interface{}{"authenticationType": "workload-identity", "tokenRequestTimout": "5s"})
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	want := "'headerNmae' is not a parameter of the azure-authentication policy; its parameters are " +
-		"authenticationType, scope, clientId, tenantId, headerName, valuePrefix and tokenRequestTimeout"
+	want := "'tokenRequestTimout' is not a parameter of the azure-authentication policy; its parameters are " +
+		"authenticationType, scope, clientId, tenantId and tokenRequestTimeout"
 	if err.Error() != want {
 		t.Fatalf("error = %q, want %q", err, want)
 	}
@@ -270,46 +268,21 @@ func TestOnRequestHeadersSetsBearerToken(t *testing.T) {
 	}
 }
 
-func TestOnRequestHeadersUsesConfiguredHeaderPrefixAndScope(t *testing.T) {
-	tests := []struct {
-		name       string
-		params     map[string]interface{}
-		wantHeader string
-		wantValue  string
-		wantScope  string
-	}{
-		{
-			name:       "custom header without prefix",
-			params:     map[string]interface{}{"headerName": "X-Upstream-Token", "valuePrefix": ""},
-			wantHeader: "X-Upstream-Token", wantValue: "tok-1", wantScope: "https://ai.azure.com/.default",
-		},
-		{
-			name:       "custom prefix",
-			params:     map[string]interface{}{"valuePrefix": "Token"},
-			wantHeader: "Authorization", wantValue: "Token tok-1", wantScope: "https://ai.azure.com/.default",
-		},
-		{
-			name:       "cognitive services scope",
-			params:     map[string]interface{}{"scope": "https://cognitiveservices.azure.com/.default"},
-			wantHeader: "Authorization", wantValue: "Bearer tok-1", wantScope: "https://cognitiveservices.azure.com/.default",
-		},
+func TestOnRequestHeadersUsesConfiguredScope(t *testing.T) {
+	setWorkloadIdentityEnv(t, "federated-token")
+	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+
+	p := mustGetPolicy(t, map[string]interface{}{
+		"authenticationType": "workload-identity",
+		"scope":              "https://cognitiveservices.azure.com/.default",
+	})
+	mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+
+	if len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Authorization"] != "Bearer tok-1" {
+		t.Fatalf("HeadersToSet = %v, want Authorization: Bearer tok-1", mods.HeadersToSet)
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setWorkloadIdentityEnv(t, "federated-token")
-			f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
-			tt.params["authenticationType"] = "workload-identity"
-
-			p := mustGetPolicy(t, tt.params)
-			mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-
-			if len(mods.HeadersToSet) != 1 || mods.HeadersToSet[tt.wantHeader] != tt.wantValue {
-				t.Fatalf("HeadersToSet = %v, want %s: %s", mods.HeadersToSet, tt.wantHeader, tt.wantValue)
-			}
-			if scope := f.tokenRequests()[0].form.Get("scope"); strings.Fields(scope)[0] != tt.wantScope {
-				t.Fatalf("scope = %q, want %q first", scope, tt.wantScope)
-			}
-		})
+	if scope := f.tokenRequests()[0].form.Get("scope"); strings.Fields(scope)[0] != "https://cognitiveservices.azure.com/.default" {
+		t.Fatalf("scope = %q, want https://cognitiveservices.azure.com/.default first", scope)
 	}
 }
 
