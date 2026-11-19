@@ -1,5 +1,5 @@
 name: intelligent-model-routing
-version: v0.9.0
+version: v0.10.0
 description: |
   Routes AI/LLM requests to different models using LLM-powered classification.
   An LLM analyzes each incoming request against user-defined routing rules (each

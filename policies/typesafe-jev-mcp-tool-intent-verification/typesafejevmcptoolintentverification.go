@@ -190,7 +190,7 @@ func GetPolicy(
 		apiKey:  apiKey,
 		baseURL: stringParamOrDefault(params, "baseURL", defaultBaseURL),
 		model:   stringParamOrDefault(params, "model", defaultModel),
-		client:  &http.Client{},
+		client:  newPolicyHTTPClient(0, false),
 		timeout: defaultTimeout,
 	}
 	if err := p.parseParams(params); err != nil {

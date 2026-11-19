@@ -1,5 +1,5 @@
 name: oauth2-generator
-version: v0.10.0
+version: v0.11.0
 displayName: OAuth2 Generator
 description: |
   Injects an upstream OAuth2 credential into a request header before
@@ -13,6 +13,7 @@ parameters:
   properties:
     tokenEndpoint:
       type: string
+      format: uri
       x-wso2-policy-advanced-param: false
       minLength: 1
       description: |
@@ -150,24 +151,34 @@ parameters:
       default: "memory"
     proxyURL:
       type: string
+      # A URL the policy dials, checked against the gateway's network access
+      # control on deploy; a marker rather than format: uri, which would reject
+      # the empty default.
+      x-wso2-url: true
       x-wso2-policy-advanced-param: true
       description: |
-        Proxy URL for the token-endpoint call. Defaults to the
-        standard HTTP_PROXY/HTTPS_PROXY env vars.
+        Proxy URL for the token-endpoint call. Takes effect only when the
+        gateway runs without its shared outbound HTTP client; otherwise the
+        proxy is the one configured under [policy_engine.http_client].
       default: ""
     tlsCaCert:
       type: string
       x-wso2-policy-advanced-param: true
       description: |
         PEM CA certificate to trust for the token endpoint's TLS
-        connection. Reference a stored secret, not a raw value.
+        connection. Reference a stored secret, not a raw value. Takes effect
+        only when the gateway runs without its shared outbound HTTP client;
+        otherwise configure TLS roots and client certificates under
+        [policy_engine.http_client].
       default: ""
     tlsInsecureSkipVerify:
       type: boolean
       x-wso2-policy-advanced-param: true
       description: |
         Disables TLS certificate verification for the token endpoint.
-        Non-production only.
+        Non-production only. Takes effect only when the gateway runs without
+        its shared outbound HTTP client; otherwise configure TLS roots and
+        client certificates under [policy_engine.http_client].
       default: false
   oneOf:
     - required: ["tokenEndpoint", "clientId", "clientSecret"]

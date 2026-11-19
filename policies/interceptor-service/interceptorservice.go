@@ -159,14 +159,18 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		p.responseCfg = cfg
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var tune func(*http.Transport)
 	if skipVerify {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opt-in for dev
+		tune = func(t *http.Transport) {
+			t.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // user-opt-in for dev
+		}
 	}
-	p.client = &http.Client{
-		Timeout:   p.timeout,
-		Transport: transport,
+	// The request body carries the request/response payload, so a redirect
+	// must never be followed to a different origin.
+	if skipVerify && sharedClientInstalled() {
+		slog.Warn("Interceptor Service Policy: tlsSkipVerify is ignored because the gateway's shared HTTP client is in use; configure TLS roots and client certificates in [policy_engine.http_client]")
 	}
+	p.client = redirectGuardedClient(derivedClient(p.timeout, tune))
 
 	return p, nil
 }

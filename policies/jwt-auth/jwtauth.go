@@ -180,8 +180,6 @@ type JwtAuthPolicy struct {
 	cacheMutex sync.RWMutex
 	cacheStore map[string]*CachedJWKS
 	cacheTTLs  map[string]time.Time
-	httpClient *http.Client
-
 	// tokenCacheMu guards the tokenCache pointer and tokenCacheSize. The SDK cache fixes its
 	// size at construction (no live resize), so a changed cacheMaxSize is applied by swapping
 	// in a new cache. Reads take the RLock and copy the pointer so an in-flight request keeps
@@ -284,9 +282,6 @@ type JWKSKey struct {
 var ins = &JwtAuthPolicy{
 	cacheStore: make(map[string]*CachedJWKS),
 	cacheTTLs:  make(map[string]time.Time),
-	httpClient: &http.Client{
-		Timeout: 5 * time.Second,
-	},
 	tokenCache:     newTokenCache(defaultTokenCacheMaxSize),
 	tokenCacheSize: defaultTokenCacheMaxSize,
 }
@@ -1104,33 +1099,11 @@ func (p *JwtAuthPolicy) fetchJWKS(remote *RemoteJWKS, fetchTimeout time.Duration
 		)
 	}
 
-	// Create a new HTTP client per request to avoid race conditions on shared state
-	var client *http.Client
-	if remote.tlsConfig != nil {
-		// Create a new client with custom TLS config
-		if debugEnabled() {
-			slog.Debug("JWT Auth Policy: Creating HTTP client with custom TLS config",
-				"uri", remote.URI,
-			)
-		}
-		customTransport := &http.Transport{
-			TLSClientConfig: remote.tlsConfig,
-		}
-		client = &http.Client{
-			Transport: customTransport,
-			Timeout:   fetchTimeout,
-		}
-	} else {
-		// Create a new client with default transport
-		if debugEnabled() {
-			slog.Debug("JWT Auth Policy: Creating HTTP client with default transport",
-				"uri", remote.URI,
-			)
-		}
-		client = &http.Client{
-			Timeout: fetchTimeout,
-		}
-	}
+	// Derive a per-call copy of the process-wide client (never mutating it)
+	// carrying this fetch's timeout. The endpoint's TLS settings apply only on
+	// the fallback client; the shared client is used as is.
+	client := clientWithTLS(remote.tlsConfig)
+	client.Timeout = fetchTimeout
 
 	if debugEnabled() {
 		slog.Debug("JWT Auth Policy: Sending HTTP GET request to JWKS endpoint",
@@ -2533,6 +2506,10 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 									)
 								}
 								remoteJWKS.tlsConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}
+							}
+							if remoteJWKS.tlsConfig != nil && sharedClientInstalled() {
+								slog.Warn("JWT Auth Policy: remote JWKS skipTlsVerify/certificatePath is ignored because the gateway's shared HTTP client is in use; configure TLS roots and client certificates in [policy_engine.http_client]",
+									"keyManager", name)
 							}
 							jwksConfig.Remote = remoteJWKS
 						}

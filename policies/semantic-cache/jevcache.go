@@ -263,13 +263,11 @@ type jevClient struct {
 
 func newJevClient(config jevCacheCheckConfig) *jevClient {
 	return &jevClient{
-		url:     strings.TrimRight(config.BaseURL, "/") + jevSystemOnePath,
-		apiKey:  config.APIKey,
-		model:   config.Model,
-		timeout: config.Timeout,
-		httpClient: &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}},
+		url:        strings.TrimRight(config.BaseURL, "/") + jevSystemOnePath,
+		apiKey:     config.APIKey,
+		model:      config.Model,
+		timeout:    config.Timeout,
+		httpClient: newPolicyHTTPClient(0, true),
 	}
 }
 

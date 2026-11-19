@@ -1,5 +1,5 @@
 name: jwt-auth
-version: v1.6.0
+version: v1.7.0
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
@@ -263,11 +263,11 @@ systemParameters:
                     description: JWKS endpoint URL (e.g., https://idp.example/.well-known/jwks.json).
                   certificatePath:
                     type: string
-                    description: Optional path to CA certificate file for validating self-signed JWKS endpoints (e.g., /etc/certs/ca.pem).
+                    description: Optional path to CA certificate file for validating self-signed JWKS endpoints (e.g., /etc/certs/ca.pem). Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure TLS roots and client certificates under [policy_engine.http_client].
                   skipTlsVerify:
                     type: boolean
                     default: false
-                    description: If true, skip TLS certificate verification for the JWKS endpoint. Use with caution, only for testing or trusted internal endpoints.
+                    description: If true, skip TLS certificate verification for the JWKS endpoint. Use with caution, only for testing or trusted internal endpoints. Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure TLS roots and client certificates under [policy_engine.http_client].
               local:
                 type: object
                 description: Local certificate configuration for signature verification. Either 'inline' or 'certificatePath' must be provided, but not both.
