@@ -35,10 +35,9 @@ Feature: Azure Authentication policy configuration validation
   # The controller validates the policy reference and its parameters against the policy
   # definition: authenticationType is a required string, workload-identity, managed-identity or
   # container-apps, scope ends in /.default, clientId is a GUID, tenantId a GUID or domain name,
-  # headerName an HTTP token, tokenRequestTimeout whole seconds up to 30s or milliseconds up to
-  # 30000ms, valuePrefix has no control characters, and the policy version must be a major version
-  # the gateway has loaded.
-  Scenario Outline: Validate invalid policy configuration, including missing or unsupported authentication type, malformed identity, scope, header, prefix and timeout, and unsupported policy version (<case>)
+  # tokenRequestTimeout whole seconds up to 30s or milliseconds up to 30000ms, no other parameter
+  # is allowed, and the policy version must be a major version the gateway has loaded.
+  Scenario Outline: Validate invalid policy configuration, including missing or unsupported authentication type, malformed identity, scope and timeout, an unknown parameter, and unsupported policy version (<case>)
     Given I generate a unique value from "az-invalid-config" and store it as "apiName"
     And I generate a unique API version from "az-invalid-config" and store it as "apiVersion"
     And I generate a unique API context from "/az-invalid-config" and store it as "apiContext"
@@ -69,8 +68,7 @@ Feature: Azure Authentication policy configuration validation
       | scope without /.default              | v0      | "authenticationType":"workload-identity","scope":"https://ai.azure.com"                  | Does not match pattern                                     | params.scope               |
       | client ID that is not a GUID         | v0      | "authenticationType":"workload-identity","clientId":"not-a-guid"                         | Does not match pattern                                     | params.clientId            |
       | tenant ID with a slash               | v0      | "authenticationType":"workload-identity","tenantId":"tenant/evil"                        | Does not match pattern                                     | params.tenantId            |
-      | header name with a space             | v0      | "authenticationType":"workload-identity","headerName":"Bad Header"                       | Does not match pattern                                     | params.headerName          |
       | token request timeout over 30s       | v0      | "authenticationType":"workload-identity","tokenRequestTimeout":"45s"                     | Does not match pattern                                     | params.tokenRequestTimeout |
       | token request timeout in minutes     | v0      | "authenticationType":"workload-identity","tokenRequestTimeout":"1m"                      | Does not match pattern                                     | params.tokenRequestTimeout |
-      | value prefix with a line break       | v0      | "authenticationType":"workload-identity","valuePrefix":"Bearer\\r\\nX-Injected: 1"       | Does not match pattern                                     | params.valuePrefix         |
+      | header name, not a parameter         | v0      | "authenticationType":"workload-identity","headerName":"Authorization"                    | Additional property headerName is not allowed              | params                     |
       | unsupported policy version           | v99     | "authenticationType":"workload-identity"                                                 | major version 'v99' not found in loaded policy definitions | v99                        |
