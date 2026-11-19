@@ -93,3 +93,30 @@ blocks:
       - name: azure-content-safety-content-moderation-missing-azure-configuration
         features:
           - features/azure_content_safety_content_moderation_missing_azure_configuration.feature
+
+  # Each API chooses its Azure identity in azureAuth, so one gateway without a subscription key
+  # serves every identity: a check that passes shows the identity authenticated it. The gateways get
+  # their identities from the testbench Entra ID and Container Apps mocks. The database plays no part
+  # in authentication, so these blocks run on sqlite only.
+  - name: azure-content-safety-identity
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/identity.toml
+      - name: testbench
+    runners:
+      - name: azure-content-safety-identity
+        features:
+          - features/azure_content_safety_identity.feature
+
+  # A gateway that allows its APIs only workload identity, so it needs a block of its own.
+  - name: azure-content-safety-allowlist
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/allowlist.toml
+      - name: testbench
+    runners:
+      - name: azure-content-safety-allowlist
+        features:
+          - features/azure_content_safety_allowlist.feature

@@ -437,3 +437,31 @@ Feature: Azure Content Safety content moderation policy
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # From v1.2 the API definition lists the endpoint and key as params an API may override. The
+  # gateway's key is the testbench's; a check made with the API's own, wrong key fails.
+  Scenario: An API's own subscription key replaces the gateway's
+    Given I generate a unique value from "acs-own-key" and store it as "apiName"
+    And I generate a unique API version from "acs-own-key" and store it as "apiVersion"
+    And I generate a unique API context from "/acs-own-key" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}  |
+      | name                   | ${CTX:apiName}             |
+      | spec.displayName       | ${CTX:apiName}             |
+      | spec.version           | ${CTX:apiVersion}          |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002      |
+      | spec.operations        | [{"method":"POST","path":"/validate","policies":[{"name":"azure-content-safety-content-moderation","version":"v1","params":{"azureContentSafetyKey":"not-the-subscription-key","request":{"jsonPath":"$.message","hateSeverityThreshold":4}}}]},{"method":"GET","path":"/health"}] |
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" until status 422 with body:
+      """
+      {"message":"Hello, this is safe content"}
+      """
+    Then the response body should contain "Error calling Azure Content Safety API"
+    And the response body should not contain "not-the-subscription-key"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
