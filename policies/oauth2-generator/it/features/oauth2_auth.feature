@@ -110,7 +110,8 @@ Feature: OAuth2 upstream authentication
     Given I clear all headers
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/data"
     Then the response status code should be 200
-    And the response body should contain "mock-token-"
+    # The backend echoes "X-Upstream-Token":["<value>"], so the value must start with the token.
+    And the response body should match pattern "X-Upstream-Token.{4}mock-token-"
     And the response should not contain echoed header "Authorization"
     And I authenticate using basic auth as "admin"
     When I delete the API "${CTX:apiName}"
