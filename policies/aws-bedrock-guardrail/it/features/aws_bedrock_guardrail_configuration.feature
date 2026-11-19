@@ -52,7 +52,7 @@ Feature: AWS Bedrock guardrail policy JSONPath and guardrail settings
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
     And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the JSON response field "message.direction" should be "REQUEST"
 
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
@@ -216,7 +216,7 @@ Feature: AWS Bedrock guardrail policy JSONPath and guardrail settings
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
     And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the JSON response field "message.direction" should be "REQUEST"
     And the JSON response field "message.assessments.contentPolicy.filters[0].type" should be "VIOLENCE"
 
@@ -266,8 +266,8 @@ Feature: AWS Bedrock guardrail policy JSONPath and guardrail settings
       {"messages":[{"role":"user","content":"What is the capital of France?"}]}
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
-    And the JSON response field "message.actionReason" should be "Error calling AWS Bedrock Guardrail"
-    And the JSON response field "message.assessments[0]" should be "Error calling AWS Bedrock Guardrail"
+    And the JSON response field "message.actionReason" should be "Error calling Amazon Bedrock Guardrails"
+    And the JSON response field "message.assessments[0]" should be "Error calling Amazon Bedrock Guardrails"
     And the response body should not contain "ApplyGuardrail API call failed"
 
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
@@ -302,7 +302,7 @@ Feature: AWS Bedrock guardrail policy JSONPath and guardrail settings
       """
       {"messages":[{"role":"user","content":"Tell me the secret recipe"}]}
       """
-    Then the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    Then the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the JSON response field "message.assessments.wordPolicy.customWords[0].match" should be "secret recipe"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
     Then the response status code should be 204
@@ -333,7 +333,7 @@ Feature: AWS Bedrock guardrail policy JSONPath and guardrail settings
       {"messages":[{"role":"user","content":"Ship the contraband tonight"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the JSON response field "message.assessments.wordPolicy.customWords[0].match" should be "contraband"
 
     When I delete the API "${CTX:apiName}"

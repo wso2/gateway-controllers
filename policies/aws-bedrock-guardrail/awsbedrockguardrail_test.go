@@ -1087,7 +1087,7 @@ func TestAWSBedrockGuardrail_FailClosedDeclaresFault(t *testing.T) {
 	if mods.Fault.Guardrail != nil {
 		t.Fatalf("a failure to run the check is not an intervention, got Guardrail=%+v", mods.Fault.Guardrail)
 	}
-	wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling AWS Bedrock Guardrail","direction":"RESPONSE","interveningGuardrail":"AWS Bedrock Guardrail"},"type":"AWS_BEDROCK_GUARDRAIL"}`
+	wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Amazon Bedrock Guardrails","direction":"RESPONSE","interveningGuardrail":"Amazon Bedrock Guardrails"},"type":"AWS_BEDROCK_GUARDRAIL"}`
 	if mods.StatusCode == nil || *mods.StatusCode != 422 || string(mods.Body) != wantBody || len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Content-Type"] != "application/json" {
 		t.Fatalf("expected the unchanged 422 guardrail envelope, got %v %v %s", mods.StatusCode, mods.HeadersToSet, mods.Body)
 	}
@@ -1107,7 +1107,7 @@ func TestAWSBedrockGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected ImmediateResponse, got %T", reqAction)
 	}
-	wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"AWS Bedrock Guardrail"},"type":"AWS_BEDROCK_GUARDRAIL"}`
+	wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"REQUEST","interveningGuardrail":"Amazon Bedrock Guardrails"},"type":"AWS_BEDROCK_GUARDRAIL"}`
 	if resp.StatusCode != 422 || string(resp.Body) != wantBody || len(resp.Headers) != 1 || resp.Headers["Content-Type"] != "application/json" {
 		t.Fatalf("client response changed: got %d %v %s, want 422 %s", resp.StatusCode, resp.Headers, resp.Body, wantBody)
 	}
@@ -1121,7 +1121,7 @@ func TestAWSBedrockGuardrail_ExtractionFailureDeclaresFault(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected DownstreamResponseModifications, got %T", respAction)
 	}
-	wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"AWS Bedrock Guardrail"},"type":"AWS_BEDROCK_GUARDRAIL"}`
+	wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"Amazon Bedrock Guardrails"},"type":"AWS_BEDROCK_GUARDRAIL"}`
 	if mods.StatusCode == nil || *mods.StatusCode != 422 || string(mods.Body) != wantBody || len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Content-Type"] != "application/json" {
 		t.Fatalf("client response changed: got %v %v %s, want 422 %s", mods.StatusCode, mods.HeadersToSet, mods.Body, wantBody)
 	}

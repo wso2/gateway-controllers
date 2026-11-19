@@ -433,8 +433,8 @@ When validation fails, the guardrail returns HTTP 422:
   "type": "AWS_BEDROCK_GUARDRAIL",
   "message": {
     "action": "GUARDRAIL_INTERVENED",
-    "interveningGuardrail": "AWS Bedrock Guardrail",
-    "actionReason": "Violation of AWS Bedrock Guardrail detected.",
+    "interveningGuardrail": "Amazon Bedrock Guardrails",
+    "actionReason": "Violation of Amazon Bedrock Guardrails detected.",
     "direction": "REQUEST"
   }
 }
@@ -447,8 +447,8 @@ If `showAssessment` is enabled, additional details are included:
   "type": "AWS_BEDROCK_GUARDRAIL",
   "message": {
     "action": "GUARDRAIL_INTERVENED",
-    "interveningGuardrail": "AWS Bedrock Guardrail",
-    "actionReason": "Violation of AWS Bedrock Guardrail detected.",
+    "interveningGuardrail": "Amazon Bedrock Guardrails",
+    "actionReason": "Violation of Amazon Bedrock Guardrails detected.",
     "direction": "REQUEST",
     "assessments": {
       "topicPolicy": {
@@ -618,5 +618,5 @@ For content filters, the first recognized filter in assessment order decides the
 of its action. The code can name a non-blocking filter rather than the filter that caused the rejection.
 
 The fault's `Description` carries the internal reason, for example
-`Violation of AWS Bedrock Guardrails detected` or `Error calling AWS Bedrock Guardrail`.
+`Violation of Amazon Bedrock Guardrails detected` or `Error calling Amazon Bedrock Guardrails`.
 It is passed to fault policies and analytics only, never to the client.

@@ -57,7 +57,7 @@ Feature: AWS Bedrock guardrail policy across gateway restarts
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
 
     When I restart the "gateway-controller" service
     And I wait for the gateway controller health endpoint
@@ -73,7 +73,7 @@ Feature: AWS Bedrock guardrail policy across gateway restarts
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
 
     When I restart the "gateway-runtime" service
     And I send a GET request to the router ready endpoint until status 200
@@ -89,7 +89,7 @@ Feature: AWS Bedrock guardrail policy across gateway restarts
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful

@@ -52,7 +52,7 @@ Feature: AWS Bedrock guardrail policy credentials
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the response body should not contain "SecretAccessKey000"
 
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
@@ -102,9 +102,9 @@ Feature: AWS Bedrock guardrail policy credentials
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
     And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
-    And the JSON response field "message.actionReason" should be "Error calling AWS Bedrock Guardrail"
+    And the JSON response field "message.actionReason" should be "Error calling Amazon Bedrock Guardrails"
     And the JSON response field "message.direction" should be "REQUEST"
-    And the JSON response field "message.assessments[0]" should be "Error calling AWS Bedrock Guardrail"
+    And the JSON response field "message.assessments[0]" should be "Error calling Amazon Bedrock Guardrails"
     And the response body should not contain "ApplyGuardrail API call failed"
     And the response body should not contain "SecretAccessKey000"
     And the response body should not contain "SessionToken000"
@@ -175,8 +175,8 @@ Feature: AWS Bedrock guardrail policy credentials
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
-    And the JSON response field "message.actionReason" should be "Error calling AWS Bedrock Guardrail"
-    And the JSON response field "message.assessments[0]" should be "Error calling AWS Bedrock Guardrail"
+    And the JSON response field "message.actionReason" should be "Error calling Amazon Bedrock Guardrails"
+    And the JSON response field "message.assessments[0]" should be "Error calling Amazon Bedrock Guardrails"
     And the response body should not contain "ApplyGuardrail API call failed"
     And the response body should not contain "SecretAccessKey000"
 

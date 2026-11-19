@@ -51,7 +51,7 @@ Feature: AWS Bedrock guardrail policy with gateway workload credentials
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the response body should not contain "SecretAccessKey000"
 
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"

@@ -1221,7 +1221,7 @@ func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, a
 // evaluateGuardrailResponse processes the AWS Bedrock Guardrail response
 func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}, originalContent string, redactPII bool, isRequest bool, metadata map[string]interface{}) (bool, string, error) {
 	if output == nil {
-		return true, "", fmt.Errorf("AWS Bedrock Guardrails API returned an invalid response")
+		return true, "", fmt.Errorf("Amazon Bedrock Guardrails API returned an invalid response")
 	}
 
 	outputTyped, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
@@ -1271,7 +1271,7 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 	}
 
 	// Unexpected response
-	return true, "", fmt.Errorf("AWS Bedrock Guardrails returned unexpected response action: %s", string(outputTyped.Action))
+	return true, "", fmt.Errorf("Amazon Bedrock Guardrails returned unexpected response action: %s", string(outputTyped.Action))
 }
 
 // hasBlockedFinding reports whether any policy in the assessment blocked.
@@ -1720,7 +1720,7 @@ func withFault(action interface{}, fault *policy.FaultDetails) interface{} {
 func (p *AWSBedrockGuardrailPolicy) buildAssessmentObject(reason string, validationError error, isResponse bool, showAssessment bool, output interface{}) map[string]interface{} {
 	assessment := map[string]interface{}{
 		"action":               "GUARDRAIL_INTERVENED",
-		"interveningGuardrail": "AWS Bedrock Guardrail",
+		"interveningGuardrail": "Amazon Bedrock Guardrails",
 	}
 
 	if isResponse {
@@ -1732,7 +1732,7 @@ func (p *AWSBedrockGuardrailPolicy) buildAssessmentObject(reason string, validat
 	if validationError != nil {
 		assessment["actionReason"] = reason
 	} else {
-		assessment["actionReason"] = "Violation of AWS Bedrock Guardrail detected."
+		assessment["actionReason"] = "Violation of Amazon Bedrock Guardrails detected."
 	}
 
 	if showAssessment {
@@ -2119,12 +2119,12 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
 			"error", err, "chunkIndex", chunk.Index)
 		return policy.TerminateResponseChunk{
-			Body:              p.buildSSEErrorEvent("Error calling AWS Bedrock Guardrail", err, rp.ShowAssessment, nil),
+			Body:              p.buildSSEErrorEvent("Error calling Amazon Bedrock Guardrails", err, rp.ShowAssessment, nil),
 			AnalyticsMetadata: guardrailHitAnalytics(),
 			IsFault:           true,
 			// The policy failed its own job, so there is no guardrail verdict to
 			// report — the same distinction the buffered path draws.
-			Fault: checkFailureFault("Error calling AWS Bedrock Guardrail", true),
+			Fault: checkFailureFault("Error calling Amazon Bedrock Guardrails", true),
 		}, nil, "", true
 	}
 
@@ -2149,12 +2149,12 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 		slog.Debug("AWSBedrockGuardrail: streaming violation detected",
 			"chunkIndex", chunk.Index, "batchChars", len([]rune(cleaned)))
 		return policy.TerminateResponseChunk{
-			Body:              p.buildSSEErrorEvent("Violation of AWS Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
+			Body:              p.buildSSEErrorEvent("Violation of Amazon Bedrock Guardrails detected", nil, rp.ShowAssessment, output),
 			AnalyticsMetadata: guardrailHitAnalytics(),
 			IsFault:           true,
 			// A real guardrail verdict, so it carries the code derived from what
 			// Bedrock reported — the mid-stream equivalent of the buffered 422.
-			Fault: p.buildGuardrailErrorResponse("Violation of AWS Bedrock Guardrails detected",
+			Fault: p.buildGuardrailErrorResponse("Violation of Amazon Bedrock Guardrails detected",
 				nil, true, rp.ShowAssessment, output),
 		}, nil, "", true
 	}
@@ -3227,7 +3227,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 	}
 	if violation {
 		slog.Debug("AWSBedrockGuardrail: Violation detected", "isResponse", isResponse)
-		return p.buildErrorResponse("Violation of AWS Bedrock Guardrails detected", nil, isResponse, params.ShowAssessment, output)
+		return p.buildErrorResponse("Violation of Amazon Bedrock Guardrails detected", nil, isResponse, params.ShowAssessment, output)
 	}
 
 	changed := false
@@ -3272,7 +3272,7 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 			checkFailureFault("Error evaluating guardrail response", true), payload, restored)
 	}
 	if violation {
-		return p.buildErrorResponse("Violation of AWS Bedrock Guardrails detected", nil, true, params.ShowAssessment, output)
+		return p.buildErrorResponse("Violation of Amazon Bedrock Guardrails detected", nil, true, params.ShowAssessment, output)
 	}
 	if len(replacements) == 0 || applyPIIReplacements(extractedValue, replacements) == extractedValue {
 		return noModification(true, restoredBody(payload, restored))
@@ -3304,8 +3304,8 @@ func (p *AWSBedrockGuardrailPolicy) assessContents(contents []string, params AWS
 	}
 	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, contents...)
 	if err != nil {
-		return nil, p.passOrBlock("Error calling AWS Bedrock Guardrail", err, params, isResponse, nil,
-			checkFailureFault("Error calling AWS Bedrock Guardrail", isResponse), payload, restored)
+		return nil, p.passOrBlock("Error calling Amazon Bedrock Guardrails", err, params, isResponse, nil,
+			checkFailureFault("Error calling Amazon Bedrock Guardrails", isResponse), payload, restored)
 	}
 	return output, nil
 }

@@ -2,9 +2,9 @@
   "body": {
     "message": {
       "action": "GUARDRAIL_INTERVENED",
-      "actionReason": "Violation of AWS Bedrock Guardrail detected.",
+      "actionReason": "Violation of Amazon Bedrock Guardrails detected.",
       "direction": "REQUEST",
-      "interveningGuardrail": "AWS Bedrock Guardrail"
+      "interveningGuardrail": "Amazon Bedrock Guardrails"
     },
     "type": "AWS_BEDROCK_GUARDRAIL"
   },

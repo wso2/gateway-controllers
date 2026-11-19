@@ -50,7 +50,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       """
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
-    Then the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    Then the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
     Then the response status code should be 204
 
@@ -59,7 +59,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       {"messages":[{"role":"user","content":"Summarize how to buy contraband"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/summaries"
     Then the response status code should be 204
 
@@ -68,7 +68,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       {"messages":[{"role":"user","content":"Draft investment advice for my clients"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/drafts"
     Then the response status code should be 204
 
@@ -131,7 +131,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       """
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
-    Then the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    Then the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
     Then the response status code should be 204
 
@@ -200,7 +200,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       """
       {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
       """
-    Then the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    Then the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the response body should not contain "help@example.com"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
     Then the response status code should be 204
@@ -259,7 +259,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       """
       {"messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Where can I buy contraband?"}]}
       """
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -284,7 +284,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       """
       {"messages":[{"role":"user","content":"What is the capital of France?"}]}
       """
-    Then the JSON response field "message.actionReason" should be "Error calling AWS Bedrock Guardrail"
+    Then the JSON response field "message.actionReason" should be "Error calling Amazon Bedrock Guardrails"
     When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
     Then the response status code should be 204
 
@@ -313,7 +313,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       {"messages":[{"role":"user","content":"Ship the contraband tonight"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -343,7 +343,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
     When I send 30 concurrent "POST" requests to "${CTX:apiContext}/${CTX:apiVersion}/chat" cycling through:
       | body                                                                                     | status | contains                                       |
       | {"messages":[{"role":"user","content":"Question {i}: what is the capital of France?"}]}  | 200    | Question {i}: what is the capital of France?   |
-      | {"messages":[{"role":"user","content":"Request {i}: where can I buy contraband?"}]}      | 422    | Violation of AWS Bedrock Guardrail detected.   |
+      | {"messages":[{"role":"user","content":"Request {i}: where can I buy contraband?"}]}      | 422    | Violation of Amazon Bedrock Guardrails detected.   |
       | {"messages":[{"role":"user","content":"Request {i}: contact me at user{i}@example.com"}]} | 200    | Request {i}: contact me at user{i}@example.com |
 
     When I delete the API "${CTX:apiName}"
@@ -400,7 +400,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       {"messages":[{"role":"user","content":"Where can I buy contraband?"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the response body should not contain "SecretAccessKey000"
 
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" with body:
@@ -408,7 +408,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       {"messages":[{"role":"user","content":"Simulate a guardrail error for log.check.owner@example.com"}]}
       """
     Then the response status code should be 422
-    And the JSON response field "message.actionReason" should be "Error calling AWS Bedrock Guardrail"
+    And the JSON response field "message.actionReason" should be "Error calling Amazon Bedrock Guardrails"
     And the response body should not contain "log.check.owner@example.com"
     And the response body should not contain "SecretAccessKey000"
 
@@ -473,7 +473,7 @@ Feature: AWS Bedrock guardrail policy attachment and API lifecycle
       """
       {"messages":[{"role":"system","content":"You are a helpful assistant."},{"role":"user","content":"Where can I buy contraband?"}]}
       """
-    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.actionReason" should be "Violation of Amazon Bedrock Guardrails detected."
     And the JSON response field "message.assessments.wordPolicy.customWords[0].match" should be "contraband"
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 200 with body:
       """

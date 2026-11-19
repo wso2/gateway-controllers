@@ -95,7 +95,7 @@ Feature: AWS Bedrock guardrail policy when AWS Bedrock fails
       """
     Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
     And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
-    And the JSON response field "message.actionReason" should be "Error calling AWS Bedrock Guardrail"
+    And the JSON response field "message.actionReason" should be "Error calling Amazon Bedrock Guardrails"
     And the JSON response field "message.direction" should be "REQUEST"
     And the response body should not contain "ApplyGuardrail API call failed"
 
