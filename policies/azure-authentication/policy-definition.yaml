@@ -4,8 +4,8 @@ displayName: Azure Authentication
 description: |
   Authenticates requests to Azure-hosted backends, such as Azure AI Foundry and
   Azure OpenAI, with a short-lived Microsoft Entra ID access token instead of a
-  static API key. The token is injected into a request header (by default
-  "Authorization: Bearer <token>") before the request is forwarded upstream.
+  static API key. The token is set in the Authorization header as
+  "Bearer <token>" before the request is forwarded upstream.
   With authenticationType "workload-identity", the gateway exchanges the
   Kubernetes service account token that AKS Workload Identity projects into the
   pod for an access token of the user-assigned managed identity federated with
@@ -26,8 +26,10 @@ parameters:
     authenticationType:
       type: string
       x-wso2-policy-advanced-param: false
+      default: "workload-identity"
       description: |
-        How the access token is obtained. "workload-identity" uses AKS Workload
+        How the access token is obtained; "workload-identity" is the default and
+        the recommended type. "workload-identity" uses AKS Workload
         Identity: the gateway pod must run with a service account federated with
         a Microsoft Entra ID identity, so that the Workload Identity webhook
         injects AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_FEDERATED_TOKEN_FILE
@@ -45,14 +47,17 @@ parameters:
         - container-apps
     scope:
       type: string
-      x-wso2-policy-advanced-param: false
+      x-wso2-policy-advanced-param: true
       pattern: "^\\S+/\\.default$"
       default: "https://ai.azure.com/.default"
       description: |
         Scope of the requested access token: the target resource followed by
-        "/.default". Azure AI Foundry uses "https://ai.azure.com/.default";
-        Azure OpenAI and Azure AI Content Safety use
-        "https://cognitiveservices.azure.com/.default".
+        "/.default", the form Microsoft Entra ID requires when an application
+        requests a token for itself (see
+        https://learn.microsoft.com/entra/identity-platform/scopes-oidc#client-credentials-grant-flow-and-default).
+        Azure AI Foundry and Azure OpenAI accept "https://ai.azure.com/.default";
+        Azure OpenAI and other Azure AI services, such as Azure AI Content
+        Safety, accept "https://cognitiveservices.azure.com/.default".
     clientId:
       type: string
       x-wso2-policy-advanced-param: true
@@ -75,23 +80,6 @@ parameters:
         Microsoft Entra tenant ID (GUID) or domain name. Defaults to the
         AZURE_TENANT_ID environment variable. Only for workload-identity; must
         not be set with managed-identity or container-apps.
-    headerName:
-      type: string
-      x-wso2-policy-advanced-param: true
-      minLength: 1
-      pattern: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
-      default: "Authorization"
-      description: |
-        Request header the access token is injected into.
-    valuePrefix:
-      type: string
-      x-wso2-policy-advanced-param: true
-      pattern: '^[^\x00-\x1F\x7F]*$'
-      default: "Bearer"
-      description: |
-        Prefix placed before the access token, separated by a space. Use an
-        empty string to send the token alone. Control characters are not
-        allowed.
     tokenRequestTimeout:
       type: string
       x-wso2-policy-advanced-param: true

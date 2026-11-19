@@ -44,8 +44,6 @@ const (
 	hostDefaultCredentialID = "host-default"
 
 	defaultScope               = "https://ai.azure.com/.default"
-	defaultHeaderName          = "Authorization"
-	defaultValuePrefix         = "Bearer"
 	defaultTokenRequestTimeout = 10 * time.Second
 
 	// maxTokenRequestTimeout keeps a token fetch well inside the ext_proc message timeout.
@@ -57,9 +55,6 @@ const (
 var (
 	// scopePattern accepts a single client-credentials scope: a resource followed by /.default.
 	scopePattern = regexp.MustCompile(`^\S+/\.default$`)
-
-	// headerNamePattern is an RFC 9110 token, which also rules out pseudo-headers.
-	headerNamePattern = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 	// guidPattern matches an Entra application (client) ID.
 	guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -75,16 +70,14 @@ var (
 )
 
 // Policy injects an Entra ID access token for the gateway's workload identity or managed identity
-// into a request header before the request is forwarded upstream.
+// into the Authorization header before the request is forwarded upstream.
 type Policy struct {
-	kind        *authenticationKind
-	scope       string
-	tenantID    string // only for a kind that usesTenant
-	clientID    string // "" for a host's identity without clientId: the host's default
-	headerName  string
-	valuePrefix string
-	timeout     time.Duration
-	credential  *credential
+	kind       *authenticationKind
+	scope      string
+	tenantID   string // only for a kind that usesTenant
+	clientID   string // "" for a host's identity without clientId: the host's default
+	timeout    time.Duration
+	credential *credential
 }
 
 type params struct {
@@ -92,8 +85,6 @@ type params struct {
 	scope               string
 	clientID            string
 	tenantID            string
-	headerName          string
-	valuePrefix         string
 	tokenRequestTimeout time.Duration
 }
 
@@ -118,19 +109,17 @@ func GetPolicy(metadata policy.PolicyMetadata, rawParams map[string]interface{})
 	}
 
 	pol := &Policy{
-		kind:        p.kind,
-		scope:       p.scope,
-		tenantID:    p.tenantID,
-		clientID:    p.clientID,
-		headerName:  p.headerName,
-		valuePrefix: p.valuePrefix,
-		timeout:     p.tokenRequestTimeout,
-		credential:  cred,
+		kind:       p.kind,
+		scope:      p.scope,
+		tenantID:   p.tenantID,
+		clientID:   p.clientID,
+		timeout:    p.tokenRequestTimeout,
+		credential: cred,
 	}
 
-	slog.Debug("AzureAuthentication: policy initialized", append(append([]any{
+	slog.Debug("AzureAuthentication: policy initialized", append([]any{
 		"route", metadata.RouteName, "apiName", metadata.APIName, "authenticationType", p.kind.name},
-		pol.identityAttrs()...), "headerName", p.headerName)...)
+		pol.identityAttrs()...)...)
 
 	return pol, nil
 }
@@ -154,7 +143,7 @@ func (p *Policy) credentialID() string {
 
 // paramNames are the policy's parameters, in the order policy-definition.yaml defines them.
 var paramNames = []string{
-	"authenticationType", "scope", "clientId", "tenantId", "headerName", "valuePrefix", "tokenRequestTimeout",
+	"authenticationType", "scope", "clientId", "tenantId", "tokenRequestTimeout",
 }
 
 // attachedToParam is the key the gateway controller adds to the params of every policy it attaches:
@@ -206,20 +195,6 @@ func extractParams(raw map[string]interface{}) (params, error) {
 	}
 	if p.tenantID != "" && !tenantPattern.MatchString(p.tenantID) {
 		return p, errors.New("'tenantId' must be a tenant ID (GUID) or a domain name")
-	}
-
-	if p.headerName, err = optionalString(raw, "headerName", defaultHeaderName); err != nil {
-		return p, err
-	}
-	if !headerNamePattern.MatchString(p.headerName) {
-		return p, errors.New("'headerName' must be a valid HTTP header name")
-	}
-
-	if p.valuePrefix, err = optionalString(raw, "valuePrefix", defaultValuePrefix); err != nil {
-		return p, err
-	}
-	if strings.ContainsFunc(p.valuePrefix, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
-		return p, errors.New("'valuePrefix' must not contain control characters")
 	}
 
 	timeout, err := optionalString(raw, "tokenRequestTimeout", "")
@@ -283,8 +258,8 @@ func requiredString(raw map[string]interface{}, key string) (string, error) {
 	return s, nil
 }
 
-// optionalString returns a trimmed string param, or def when the key is absent. An explicitly
-// empty string is returned as "" (so valuePrefix: "" means no prefix).
+// optionalString returns a trimmed string param, or def when the key is absent or null. An
+// explicitly empty string is returned as "".
 func optionalString(raw map[string]interface{}, key, def string) (string, error) {
 	v, ok := raw[key]
 	if !ok || v == nil {
@@ -308,27 +283,21 @@ func (p *Policy) Mode() policy.ProcessingMode {
 	}
 }
 
-// OnRequestHeaders injects the access token into headerName.
+// OnRequestHeaders sets the access token as "Authorization: Bearer <token>", the only form in
+// which Azure AI Foundry and Azure OpenAI accept an Entra ID token.
 func (p *Policy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) policy.RequestHeaderAction {
 	token, err := p.credential.token(ctx, p.scope, p.timeout)
 	switch {
 	case err == nil:
 		p.recordAuth(reqCtx, true)
 		return policy.UpstreamRequestHeaderModifications{
-			HeadersToSet: map[string]string{p.headerName: headerValue(p.valuePrefix, token)},
+			HeadersToSet: map[string]string{"Authorization": "Bearer " + token},
 		}
 	case ctx.Err() != nil:
 		return p.requestEnded(reqCtx)
 	default:
 		return p.authFailure(reqCtx, err)
 	}
-}
-
-func headerValue(prefix, token string) string {
-	if prefix == "" {
-		return token
-	}
-	return prefix + " " + token
 }
 
 // authFailure returns 502: the caller's request was fine, it is the gateway's own upstream

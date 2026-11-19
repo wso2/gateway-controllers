@@ -8,7 +8,7 @@ title: "Overview"
 The **Azure Authentication** policy authenticates requests to Azure-hosted backends with a
 short-lived [Microsoft Entra ID](https://learn.microsoft.com/entra/identity-platform/) access
 token instead of a static API key. Before a request is forwarded upstream, the policy obtains a
-token for the gateway's own Azure identity and sets it in a request header, by default
+token for the gateway's own Azure identity and sets it in the request as
 `Authorization: Bearer <token>`.
 
 With `authenticationType: workload-identity`, the gateway uses
@@ -64,12 +64,10 @@ accept Entra ID tokens, typically as the upstream authentication of an LLM provi
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `authenticationType` | string | Yes | | How the token is obtained: `workload-identity` (AKS Workload Identity), `managed-identity` (the host's managed identity) or `container-apps` (the managed identity of the Azure Container Apps app the gateway runs in). |
-| `scope` | string | No | `https://ai.azure.com/.default` | Scope of the access token: the target resource followed by `/.default`. See [Choosing the scope](#choosing-the-scope). |
+| `authenticationType` | string | Yes | `workload-identity` | How the token is obtained: `workload-identity` (AKS Workload Identity, the recommended type), `managed-identity` (the host's managed identity) or `container-apps` (the managed identity of the Azure Container Apps app the gateway runs in). |
+| `scope` | string | No | `https://ai.azure.com/.default` | Scope of the access token: the target resource followed by `/.default`, the form Microsoft Entra ID requires (see [the `.default` scope](https://learn.microsoft.com/entra/identity-platform/scopes-oidc#client-credentials-grant-flow-and-default)). See [Choosing the scope](#choosing-the-scope) for the scope of each backend. |
 | `clientId` | string | No | `AZURE_CLIENT_ID` (`workload-identity`) | Application (client) ID of the managed identity, as a GUID. With `workload-identity`, overrides the environment variable. With `managed-identity`, selects a user-assigned identity of the host; leave it unset for the host's default identity (its system-assigned identity, or its only user-assigned identity if it has none). With `container-apps`, selects a user-assigned identity of the container app; leave it unset for the app's system-assigned identity, which the app must then have. |
 | `tenantId` | string | No | `AZURE_TENANT_ID` | Microsoft Entra tenant ID (GUID) or domain name. Overrides the environment variable. `workload-identity` only: setting it with `managed-identity` or `container-apps` makes the policy fail to initialize. |
-| `headerName` | string | No | `Authorization` | Request header the token is set in. |
-| `valuePrefix` | string | No | `Bearer` | Prefix placed before the token, separated by a space. An empty string sends the token alone. Control characters are not allowed. |
 | `tokenRequestTimeout` | string | No | `10s` | Maximum time to obtain a token, including retries: whole seconds from `1s` to `30s`, or milliseconds from `1ms` to `30000ms`. |
 
 There are no system (`config.toml`) parameters.
@@ -185,13 +183,17 @@ authority host).
 
 ### Choosing the scope
 
-The scope names the resource the token is for, followed by `/.default`.
+The scope names the resource the token is for, followed by `/.default`. Microsoft Entra ID requires
+this form when an application requests a token for itself; see
+[the `.default` scope](https://learn.microsoft.com/entra/identity-platform/scopes-oidc#client-credentials-grant-flow-and-default)
+in the Microsoft identity platform documentation. Each service's Microsoft Entra authentication
+documentation names its resource:
 
-| Backend | Scope |
-|---------|-------|
-| Azure AI Foundry (`*.services.ai.azure.com`) | `https://ai.azure.com/.default` (default) |
-| Azure OpenAI (`*.openai.azure.com`) | `https://cognitiveservices.azure.com/.default` |
-| Azure AI Content Safety and other Azure AI services | `https://cognitiveservices.azure.com/.default` |
+| Backend | Scope | Microsoft documentation |
+|---------|-------|-------------------------|
+| Azure AI Foundry (`*.services.ai.azure.com`) | `https://ai.azure.com/.default` (default) | [Authentication and authorization in Microsoft Foundry](https://learn.microsoft.com/azure/foundry/concepts/authentication-authorization-foundry) |
+| Azure OpenAI (`*.openai.azure.com`) | `https://ai.azure.com/.default` (default) or `https://cognitiveservices.azure.com/.default` | [Azure OpenAI with Microsoft Entra ID authentication](https://learn.microsoft.com/azure/foundry-classic/openai/how-to/managed-identity) |
+| Azure AI Content Safety and other Azure AI services | `https://cognitiveservices.azure.com/.default` | [Authentication in Foundry Tools](https://learn.microsoft.com/azure/ai-services/authentication) |
 
 A token issued for the wrong scope is rejected by the backend with `401`, which the gateway passes
 through to the client unchanged.
@@ -303,8 +305,8 @@ apply to, so it needs no `NO_PROXY` entry.
    Retries honour `Retry-After`, but one longer than the longest wait (2 seconds for Entra ID and
    Container Apps, 4 seconds for managed identity) isn't retried. When the next wait doesn't fit in what is left of
    `tokenRequestTimeout`, the request waits until the timeout and fails.
-4. The token is set in `headerName` (`Authorization: Bearer <token>` by default) and the request
-   is forwarded upstream.
+4. The token is set as `Authorization: Bearer <token>`, replacing any `Authorization` header the
+   client sent, and the request is forwarded upstream.
 5. If no token can be obtained, the request is short-circuited with `502 Bad Gateway`: it is the
    gateway's own upstream credential that failed, not the client's. When Entra ID, the managed
    identity endpoint or the Container Apps identity endpoint rejects the token request itself (a
