@@ -1,0 +1,10 @@
+{
+  "name": "nvidia-switchyard-router",
+  "displayName": "NVIDIA Switchyard Router",
+  "version": "0.8",
+  "provider": "WSO2",
+  "categories": [
+    "AI"
+  ],
+  "description": "Chooses between an efficient and a capable model tier for each request by asking NVIDIA's switchyard-server, then routes the request through the gateway's own upstream.\nThe server runs a routing profile, such as the Stage router, which reads an agent's recent tool results to send routine work to cheaper models and exploration or error recovery to stronger ones.\nThe policy owns the model pool; Switchyard only returns the tier and never calls the selected model.\n\nNote: This policy requires a switchyard-server to be configured in the gateway."
+}
