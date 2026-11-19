@@ -55,7 +55,7 @@ func TestValidateAzureConfigParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAzureConfigParams(tt.params)
+			_, err := validateAzureConfigParams(tt.params)
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}
@@ -526,7 +526,7 @@ func TestAzureContentSafety_ExtractionFailureDeclaresFault(t *testing.T) {
 	p := &AzureContentSafetyContentModerationPolicy{}
 	params := AzureContentSafetyPolicyParams{JsonPath: "$.text", HateSeverityThreshold: 2}
 	for _, isResponse := range []bool{false, true} {
-		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		got := p.validatePayload(context.Background(), []byte(`not-json`), params, isResponse)
 		if isResponse {
 			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
 		} else {
@@ -586,7 +586,7 @@ func TestAzureContentSafety_APIFailureDeclaresFault(t *testing.T) {
 	p := &AzureContentSafetyContentModerationPolicy{endpoint: server.URL, apiKey: "key", client: server.Client()}
 	params := AzureContentSafetyPolicyParams{JsonPath: "$.text", HateSeverityThreshold: 2}
 	for _, isResponse := range []bool{false, true} {
-		got := p.validatePayload([]byte(`{"text":"hello"}`), params, isResponse)
+		got := p.validatePayload(context.Background(), []byte(`{"text":"hello"}`), params, isResponse)
 		wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Azure Content Safety API","direction":"REQUEST","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`
 		if isResponse {
 			wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Azure Content Safety API","direction":"RESPONSE","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`
