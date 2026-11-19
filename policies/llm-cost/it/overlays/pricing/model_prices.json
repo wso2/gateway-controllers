@@ -1,0 +1,48 @@
+{
+  "gpt-4o-mini": {
+    "provider": "openai",
+    "input_cost_per_token": 1e-06,
+    "output_cost_per_token": 4e-06,
+    "cache_read_input_token_cost": 5e-07
+  },
+  "my-org-llm": {
+    "provider": "openai",
+    "input_cost_per_token": 2e-06,
+    "output_cost_per_token": 8e-06
+  },
+  "Upper-Key-Model": {
+    "provider": "openai",
+    "input_cost_per_token": 1e-06,
+    "output_cost_per_token": 4e-06
+  },
+  "broken-entry": {
+    "provider": "openai",
+    "input_cost_per_token": "oops",
+    "output_cost_per_token": 4e-06
+  },
+  "claude-test": {
+    "provider": "anthropic",
+    "input_cost_per_token": 3e-06,
+    "output_cost_per_token": 1.5e-05,
+    "input_cost_per_token_above_200k_tokens": 6e-06,
+    "output_cost_per_token_above_200k_tokens": 2.25e-05,
+    "cache_read_input_token_cost": 3e-07
+  },
+  "gemini-test": {
+    "provider": "gemini",
+    "input_cost_per_token": 1e-06,
+    "output_cost_per_token": 4e-06,
+    "input_cost_per_audio_token": 3e-06,
+    "output_cost_per_audio_token": 1.2e-05,
+    "output_cost_per_image_token": 2e-05,
+    "web_search_cost_per_request": 0.035
+  },
+  "anthropic.claude-bedrock-test-v1:0": {
+    "provider": "bedrock",
+    "input_cost_per_token": 3e-06,
+    "output_cost_per_token": 1.5e-05,
+    "cache_read_input_token_cost": 3e-07,
+    "cache_creation_input_token_cost": 3.75e-06,
+    "cache_creation_input_token_cost_above_1hr": 6e-06
+  }
+}
