@@ -2213,7 +2213,11 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 		}
 	}
 
-	if sseStream {
+	// An empty jsonPath assesses the whole payload as text, an event stream
+	// included, so the body is withheld and assessed whole as any other
+	// non-event-stream body is; reading it as events would apply
+	// streamingJsonPath to a configuration that asked for the whole body.
+	if sseStream && p.responseParams.JsonPath != "" {
 		if p.isJSONRPCStream(chunkStr, respCtx) {
 			return p.handleJSONRPCStreamFlush(chunkStr, chunk, respCtx)
 		}
@@ -4145,11 +4149,15 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 	// The JSON-RPC stream path validates one batch of events at a time, and a
 	// batch may hold no JSON-RPC message of its own; it is read with jsonPath all
 	// the same, as the whole stream is.
+	//
+	// An empty jsonPath means "assess the whole payload", for an event stream as
+	// for anything else, so such a body is assessed whole as text (see
+	// extractPayload) and is never read as events.
 	forceJSONRPC := mediaType == jsonRPCEventStream
 	if forceJSONRPC {
 		mediaType = "text/event-stream"
 	}
-	if isResponse && isEventStreamResponse(mediaType, payload) {
+	if isResponse && params.JsonPath != "" && isEventStreamResponse(mediaType, payload) {
 		if !forceJSONRPC && !sseCarriesJSONRPC(payload) {
 			return p.validateStreamedBody(payload, params, metadata, restored)
 		}

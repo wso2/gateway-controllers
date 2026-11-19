@@ -1084,3 +1084,118 @@ func TestRegression_StreamOpeningWithoutThePathMemberIsNotRefused(t *testing.T) 
 		t.Errorf("violating stream: want it blocked, got terminated=%v %q", terminated, got)
 	}
 }
+
+// anthropicStream is a whole Anthropic-style event stream: its deltas sit under
+// delta.text, which the default streamingJsonPath does not address.
+func anthropicStream(text string) string {
+	return "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + text + "\"}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+}
+
+// An empty jsonPath assesses the whole payload, an event stream included, as in
+// v1.4: the stream is not read with streamingJsonPath.
+func TestRegression_EmptyJSONPathAssessesAnEventStreamWhole(t *testing.T) {
+	emptyPath := func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = "" }
+	for _, ct := range []string{"text/event-stream", "text/plain", ""} {
+		for _, body := range []string{anthropicStream("Hello there"), "data: hello world\n\n"} {
+			client := &blockOnClient{needle: "NEVER"}
+			mods := streamingPolicy(client, emptyPath).OnResponseBody(context.Background(),
+				bufferedResponse(map[string]interface{}{}, ct, body), nil).(policy.DownstreamResponseModifications)
+			if mods.StatusCode != nil || mods.Body != nil || len(client.texts) != 1 || !strings.Contains(client.texts[0], "data: ") {
+				t.Errorf("buffered %q %q: want the whole body assessed once and passed, got status=%v body=%q assessed=%q",
+					ct, body, mods.StatusCode, mods.Body, client.texts)
+			}
+		}
+	}
+
+	client := &blockOnClient{needle: "FORBIDDEN"}
+	mods := streamingPolicy(client, emptyPath).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", anthropicStream("FORBIDDEN")), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode == nil || *mods.StatusCode != 422 || !mods.IsFault {
+		t.Errorf("buffered violation: want 422 with a fault, got status=%v fault=%v", mods.StatusCode, mods.IsFault)
+	}
+
+	body := anthropicStream("Hello there")
+	client = &blockOnClient{needle: "NEVER"}
+	got, terminated := driveStream(streamingPolicy(client, emptyPath), streamCtxWithType("text/event-stream"),
+		[]string{body[:40], body[40:], ""})
+	if terminated || got != body || len(client.texts) != 1 || client.texts[0] != strings.TrimSpace(body) {
+		t.Errorf("streamed: want the whole body assessed once and delivered, got terminated=%v %q assessed=%q", terminated, got, client.texts)
+	}
+	got, terminated = driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, emptyPath), streamCtxWithType("text/event-stream"),
+		[]string{anthropicStream("FORBIDDEN"), ""})
+	if !terminated || strings.Contains(got, "text_delta") {
+		t.Errorf("streamed violation: want the stream ended before any of it was delivered, got terminated=%v %q", terminated, got)
+	}
+}
+
+// A JSON-RPC message that carries content the jsonPath does not reach is an
+// extraction error, as in v1.4; only content-free messages (initialize, lists,
+// notifications and their results) pass unassessed.
+func TestRegression_JSONRPCContentThePathMissesIsNotPassed(t *testing.T) {
+	const argsPath = "$.params.arguments.query"
+	call := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_sql","arguments":{"sql":"FORBIDDEN"}}}`
+	client := &blockOnClient{needle: "FORBIDDEN"}
+	if resp, ok := sendRequest(requestPolicy(client, argsPath), map[string]interface{}{}, call).(policy.ImmediateResponse); !ok || resp.StatusCode != 422 || !resp.IsFault ||
+		resp.Fault == nil || len(client.texts) != 0 {
+		t.Errorf("tools/call the path misses: want 422 with a fault and no assessment, got ok=%v status=%d assessed=%q", ok, resp.StatusCode, client.texts)
+	}
+
+	passthrough := requestPolicy(&blockOnClient{needle: "FORBIDDEN"}, argsPath)
+	passthrough.requestParams.PassthroughOnError = true
+	if _, blocked := sendRequest(passthrough, map[string]interface{}{}, call).(policy.ImmediateResponse); blocked {
+		t.Errorf("tools/call the path misses, passthroughOnError: want it passed")
+	}
+
+	for _, msg := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"c","version":"1"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`,
+		`{"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":1,"progress":5}}`,
+	} {
+		client := &blockOnClient{needle: "NEVER"}
+		if _, blocked := sendRequest(requestPolicy(client, argsPath), map[string]interface{}{}, msg).(policy.ImmediateResponse); blocked || len(client.texts) != 0 {
+			t.Errorf("content-free %s: want it passed unassessed, got blocked=%v assessed=%q", msg, blocked, client.texts)
+		}
+	}
+
+	const resultPath = "$.result.content[*].text"
+	for _, msg := range []string{
+		`{"jsonrpc":"2.0","id":7,"result":{"structuredContent":{"rows":"FORBIDDEN"}}}`,
+		`{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"resource","resource":{"text":"FORBIDDEN"}}]}}`,
+		`{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"failed","data":"FORBIDDEN"}}`,
+		`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"FORBIDDEN"}}`,
+	} {
+		p := streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath })
+		mods := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "application/json", msg), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode == nil || *mods.StatusCode != 422 || !mods.IsFault {
+			t.Errorf("response %s: want 422 with a fault, got status=%v", msg, mods.StatusCode)
+		}
+		sse := "event: message\ndata: " + msg + "\n\n"
+		got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath }),
+			streamCtxWithType("text/event-stream"), []string{sse, ""})
+		if !terminated || strings.Contains(got, "FORBIDDEN") {
+			t.Errorf("streamed %s: want the stream ended, got terminated=%v %q", msg, terminated, got)
+		}
+	}
+
+	for _, msg := range []string{
+		`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"s","version":"1"}}}`,
+		`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"run_sql","description":"Runs SQL"}]}}`,
+		`{"jsonrpc":"2.0","id":3,"result":{}}`,
+		`{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"Method not found"}}`,
+	} {
+		client := &blockOnClient{needle: "NEVER"}
+		p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath })
+		mods := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "application/json", msg), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode != nil || len(client.texts) != 0 {
+			t.Errorf("content-free response %s: want it passed unassessed, got status=%v assessed=%q", msg, mods.StatusCode, client.texts)
+		}
+		sse := "event: message\ndata: " + msg + "\n\n"
+		got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "NEVER"}, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath }),
+			streamCtxWithType("text/event-stream"), []string{sse, ""})
+		if terminated || got != sse {
+			t.Errorf("streamed content-free %s: want it delivered, got terminated=%v %q", msg, terminated, got)
+		}
+	}
+}

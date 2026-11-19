@@ -50,9 +50,12 @@ type extractedPayload struct {
 //     covers every MCP tool argument).
 //   - A Server-Sent Events body (e.g. an MCP Streamable HTTP response) is split
 //     into events, and jsonPath is resolved against the JSON in each event's data.
-//   - A single JSON-RPC message the path does not apply to (e.g. an MCP
-//     initialize, tools/list or notification, which carry no tool arguments or
-//     tool result) has nothing to check, so it yields no segments.
+//   - A single JSON-RPC message the path does not apply to yields no segments
+//     only when it carries no content to check: an MCP initialize, ping, list
+//     or notification, or the result of one (see carriesNoContent). Any other
+//     message the path misses, such as a tools/call whose arguments have a
+//     different shape, is an extraction error, as it was before JSON-RPC
+//     support: passing it would deliver its content unassessed.
 func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) {
 	if jsonPath == "" {
 		segment := &textSegment{value: string(payload)}
@@ -72,7 +75,7 @@ func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) 
 	if jsonErr == nil {
 		root := &doc
 		segments, err := resolveTextSegments(root, tokens, nil)
-		if errors.Is(err, errNoValue) && isJSONRPCMessage(doc) {
+		if errors.Is(err, errNoValue) && isJSONRPCMessage(doc) && carriesNoContent(doc) {
 			return unchangedPayload(payload), nil
 		}
 		if err != nil {
@@ -104,6 +107,75 @@ func isJSONRPCMessage(doc interface{}) bool {
 	}
 	version, ok := m["jsonrpc"].(string)
 	return ok && version == "2.0"
+}
+
+// contentFreeMethods are the JSON-RPC (MCP) methods whose requests carry no
+// content for a guardrail: session setup, keep-alives and listings.
+var contentFreeMethods = map[string]bool{
+	"initialize":               true,
+	"ping":                     true,
+	"tools/list":               true,
+	"prompts/list":             true,
+	"resources/list":           true,
+	"resources/templates/list": true,
+	"roots/list":               true,
+	"logging/setLevel":         true,
+	"resources/subscribe":      true,
+	"resources/unsubscribe":    true,
+}
+
+// contentFreeResultMembers are the members of a JSON-RPC result that mark it as
+// the answer to a content-free method: an initialize result or a listing.
+var contentFreeResultMembers = map[string]bool{
+	"protocolVersion":   true,
+	"capabilities":      true,
+	"serverInfo":        true,
+	"instructions":      true,
+	"tools":             true,
+	"prompts":           true,
+	"resources":         true,
+	"resourceTemplates": true,
+	"roots":             true,
+	"nextCursor":        true,
+	"_meta":             true,
+}
+
+// carriesNoContent reports whether a JSON-RPC message carries nothing a
+// guardrail needs to check, so a jsonPath that does not apply to it may let it
+// through:
+//   - a request or notification of a content-free method (see
+//     contentFreeMethods), or any notification except notifications/message,
+//     which carries log data;
+//   - a result made only of initialize or listing members, or an empty one;
+//   - an error with no data member (its code and message are protocol text).
+//
+// Anything else, a tools/call or a tool result say, is content the path was
+// meant to reach.
+func carriesNoContent(doc interface{}) bool {
+	m, ok := doc.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	if method, ok := m["method"].(string); ok {
+		if contentFreeMethods[method] {
+			return true
+		}
+		return strings.HasPrefix(method, "notifications/") && method != "notifications/message"
+	}
+	if errObj, ok := m["error"].(map[string]interface{}); ok {
+		_, hasData := errObj["data"]
+		return !hasData
+	}
+	result, ok := m["result"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	for member := range result {
+		if !contentFreeResultMembers[member] {
+			return false
+		}
+	}
+	return true
 }
 
 // unchangedPayload is a payload with nothing to check.
@@ -195,6 +267,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 	matched := false
 	allJSONRPC := true
 	sawJSONRPC := false
+	contentMissed := false
 	for _, event := range events {
 		data, ok := eventData(event.lines)
 		if !ok {
@@ -205,7 +278,8 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 			// Not JSON (e.g. a "[DONE]" marker); nothing to check in this event.
 			continue
 		}
-		if isJSONRPCMessage(doc) {
+		isRPC := isJSONRPCMessage(doc)
+		if isRPC {
 			sawJSONRPC = true
 		} else {
 			allJSONRPC = false
@@ -215,15 +289,24 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
 		if err != nil {
 			// The path does not apply to this event (e.g. a progress notification).
+			// A JSON-RPC message with content the path missed, such as a tool
+			// result of another shape, would be delivered unassessed.
+			if isRPC && !carriesNoContent(doc) {
+				contentMissed = true
+			}
 			continue
 		}
 		matched = true
 		segments = append(segments, eventSegments...)
 	}
+	if contentMissed {
+		return nil, fmt.Errorf("a JSON-RPC message in the Server-Sent Events stream carries content with no value at jsonPath %q", jsonPath)
+	}
 	if !matched && allJSONRPC && sawJSONRPC {
-		// Only JSON-RPC messages the path does not apply to, e.g. a stream of
-		// MCP progress notifications or an initialize result. A stream with no JSON
-		// event at all is not one: it has nothing to vouch for it, so it is an error.
+		// Only content-free JSON-RPC messages the path does not apply to, e.g. a
+		// stream of MCP progress notifications or an initialize result. A stream
+		// with no JSON event at all is not one: it has nothing to vouch for it, so
+		// it is an error.
 		return unchangedPayload(payload), nil
 	}
 	if !matched {
