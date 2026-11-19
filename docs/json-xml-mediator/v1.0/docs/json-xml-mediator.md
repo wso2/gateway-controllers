@@ -29,12 +29,13 @@ These parameters are configured per-API/route by the API developer:
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `downsteamPayloadFormat` | string | Yes | Defines the payload format expected by downstream clients. Requests are converted from this format before reaching upstream, and responses are converted back to this format before returning to the client. Valid values: `"xml"`, `"json"`. This value must differ from `upstreamPayloadFormat`. |
 | `upstreamPayloadFormat` | string | Yes | Defines the payload format expected by the upstream service. Requests are converted to this format before reaching upstream, and responses are interpreted as arriving in this format before any downstream conversion is applied. Valid values: `"xml"`, `"json"`. |
+| `downstreamPayloadFormat` | string | Yes (or the deprecated `downsteamPayloadFormat`) | Defines the payload format expected by downstream clients. Requests are converted from this format before reaching upstream, and responses are converted back to this format before returning to the client. Valid values: `"xml"`, `"json"`. This value must differ from `upstreamPayloadFormat`. |
 
 **Note:**
 
-- The `downsteamPayloadFormat` and `upstreamPayloadFormat` must be different. Configuring both as `"xml"` or both as `"json"` is not allowed.
+- The `downstreamPayloadFormat` and `upstreamPayloadFormat` must be different. Configuring both as `"xml"` or both as `"json"` is not allowed.
+- `downsteamPayloadFormat` (missing the "r") is a deprecated alias for `downstreamPayloadFormat`, kept for backward compatibility. Use `downstreamPayloadFormat` in new configuration; if both are set, they must have the same value.
 
 Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
@@ -65,7 +66,7 @@ spec:
     - name: json-xml-mediator
       version: v1
       params:
-        downsteamPayloadFormat: json
+        downstreamPayloadFormat: json
         upstreamPayloadFormat: xml
   operations:
     - method: POST
@@ -164,7 +165,7 @@ spec:
     - name: json-xml-mediator
       version: v1
       params:
-        downsteamPayloadFormat: xml
+        downstreamPayloadFormat: xml
         upstreamPayloadFormat: json
   operations:
     - method: POST
@@ -227,7 +228,7 @@ spec:
         - name: json-xml-mediator
           version: v1
           params:
-            downsteamPayloadFormat: json
+            downstreamPayloadFormat: json
             upstreamPayloadFormat: xml
     - method: POST
       path: /json-endpoint
@@ -235,7 +236,7 @@ spec:
         - name: json-xml-mediator
           version: v1
           params:
-            downsteamPayloadFormat: xml
+            downstreamPayloadFormat: xml
             upstreamPayloadFormat: json
     - method: GET
       path: /passthrough
@@ -245,9 +246,9 @@ spec:
 
 ## How it Works
 
-* **Request Flow**: When a request arrives, the policy checks the `downsteamPayloadFormat`. If transformation is needed (downstream format differs from upstream format), the request body is converted to the `upstreamPayloadFormat` before forwarding to the upstream service.
+* **Request Flow**: When a request arrives, the policy checks the `downstreamPayloadFormat`. If transformation is needed (downstream format differs from upstream format), the request body is converted to the `upstreamPayloadFormat` before forwarding to the upstream service.
 
-* **Response Flow**: When a response returns from upstream, the policy converts the body from the `upstreamPayloadFormat` back to the `downsteamPayloadFormat` before returning to the client.
+* **Response Flow**: When a response returns from upstream, the policy converts the body from the `upstreamPayloadFormat` back to the `downstreamPayloadFormat` before returning to the client.
 
 * **JSON to XML**: Converts JSON objects to XML elements, JSON arrays to repeated XML elements with singularized names, and handles all JSON primitive types appropriately.
 
@@ -266,7 +267,7 @@ spec:
 
 ## Notes
 
-* **Format Validation**: The policy validates that `downsteamPayloadFormat` and `upstreamPayloadFormat` are different. Configuring both as the same format will result in a validation error.
+* **Format Validation**: The policy validates that `downstreamPayloadFormat` and `upstreamPayloadFormat` are different. Configuring both as the same format will result in a validation error.
 
 * **Empty Payloads**: Requests or responses with empty bodies are passed through without transformation.
 
