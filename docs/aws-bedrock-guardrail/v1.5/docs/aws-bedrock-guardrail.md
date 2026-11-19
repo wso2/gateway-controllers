@@ -201,8 +201,9 @@ MCP servers using Streamable HTTP may reply with a Server-Sent Events body (`Con
 The policy runs on every message of the MCP proxy, not only `tools/call`. A JSON-RPC message that carries no content passes unchanged when the path does not match it:
 
 - a request or notification of `initialize`, `ping`, `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `roots/list`, `logging/setLevel`, `resources/subscribe` or `resources/unsubscribe`, or any notification other than `notifications/message`;
-- the result of one of those (an `initialize` result or a listing), or an empty result;
-- an error without a `data` member.
+- the result of one of those (an `initialize` result or a listing), or an empty result.
+
+A JSON-RPC error response the path does not match is validated by its own text: the error's `message` and every string in its `data`. A clean error is delivered unchanged, PII in it is masked, and a violation is blocked.
 
 Any other JSON-RPC message the path does not match, such as a `tools/call` whose arguments have another shape or a tool result without text content, is an extraction error, handled according to `passthroughOnError`, so its content is never passed unassessed. The same rules apply to each event of an event stream. A body that is not JSON-RPC, a JSON-RPC batch, or an event stream with other JSON that the path does not match is also an extraction error.
 

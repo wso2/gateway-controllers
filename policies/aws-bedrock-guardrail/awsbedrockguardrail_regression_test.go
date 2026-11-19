@@ -1163,7 +1163,6 @@ func TestRegression_JSONRPCContentThePathMissesIsNotPassed(t *testing.T) {
 	for _, msg := range []string{
 		`{"jsonrpc":"2.0","id":7,"result":{"structuredContent":{"rows":"FORBIDDEN"}}}`,
 		`{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"resource","resource":{"text":"FORBIDDEN"}}]}}`,
-		`{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"failed","data":"FORBIDDEN"}}`,
 		`{"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info","data":"FORBIDDEN"}}`,
 	} {
 		p := streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath })
@@ -1183,7 +1182,6 @@ func TestRegression_JSONRPCContentThePathMissesIsNotPassed(t *testing.T) {
 		`{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"s","version":"1"}}}`,
 		`{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"run_sql","description":"Runs SQL"}]}}`,
 		`{"jsonrpc":"2.0","id":3,"result":{}}`,
-		`{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"Method not found"}}`,
 	} {
 		client := &blockOnClient{needle: "NEVER"}
 		p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath })
@@ -1197,5 +1195,49 @@ func TestRegression_JSONRPCContentThePathMissesIsNotPassed(t *testing.T) {
 		if terminated || got != sse {
 			t.Errorf("streamed content-free %s: want it delivered, got terminated=%v %q", msg, terminated, got)
 		}
+	}
+}
+
+// A JSON-RPC error response the jsonPath does not apply to is assessed by its own
+// text, its message and anything in data, so a tool cannot pass content through
+// an error; a clean error still reaches the client.
+func TestRegression_JSONRPCErrorTextIsAssessed(t *testing.T) {
+	const resultPath = "$.result.content[*].text"
+	withPath := func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = resultPath }
+	for _, msg := range []string{
+		`{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"FORBIDDEN"}}`,
+		`{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"failed","data":"FORBIDDEN"}}`,
+		`{"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"failed","data":{"detail":["FORBIDDEN"]}}}`,
+	} {
+		mods := streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, withPath).OnResponseBody(context.Background(),
+			bufferedResponse(map[string]interface{}{}, "application/json", msg), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode == nil || *mods.StatusCode != 422 || !mods.IsFault || strings.Contains(string(mods.Body), "FORBIDDEN") {
+			t.Errorf("error %s: want 422 with a fault, got status=%v body=%q", msg, mods.StatusCode, mods.Body)
+		}
+		got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, withPath),
+			streamCtxWithType("text/event-stream"), []string{"event: message\ndata: " + msg + "\n\n", ""})
+		if !terminated || strings.Contains(got, "FORBIDDEN") {
+			t.Errorf("streamed error %s: want the stream ended, got terminated=%v %q", msg, terminated, got)
+		}
+	}
+
+	clean := `{"jsonrpc":"2.0","id":4,"error":{"code":-32601,"message":"Method not found"}}`
+	client := &blockOnClient{needle: "FORBIDDEN"}
+	mods := streamingPolicy(client, withPath).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "application/json", clean), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode != nil || mods.Body != nil || len(client.texts) != 1 || client.texts[0] != "Method not found" {
+		t.Errorf("clean error: want it assessed and delivered unchanged, got status=%v body=%q assessed=%q", mods.StatusCode, mods.Body, client.texts)
+	}
+	sse := "event: message\ndata: " + clean + "\n\n"
+	got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, withPath), streamCtxWithType("text/event-stream"), []string{sse, ""})
+	if terminated || got != sse {
+		t.Errorf("streamed clean error: want it delivered, got terminated=%v %q", terminated, got)
+	}
+
+	emailErr := `{"jsonrpc":"2.0","id":5,"error":{"code":-32000,"message":"Contact support@acme.com"}}`
+	mods = streamingPolicy(&reportsEntityClient{"support@acme.com", types.GuardrailPiiEntityTypeEmail}, withPath).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "application/json", emailErr), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode != nil || !strings.Contains(string(mods.Body), "Contact {EMAIL}") {
+		t.Errorf("error with PII: want the error delivered masked, got status=%v body=%q", mods.StatusCode, mods.Body)
 	}
 }

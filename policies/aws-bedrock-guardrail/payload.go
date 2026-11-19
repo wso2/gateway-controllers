@@ -75,8 +75,13 @@ func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) 
 	if jsonErr == nil {
 		root := &doc
 		segments, err := resolveTextSegments(root, tokens, nil)
-		if errors.Is(err, errNoValue) && isJSONRPCMessage(doc) && carriesNoContent(doc) {
-			return unchangedPayload(payload), nil
+		if errors.Is(err, errNoValue) && isJSONRPCMessage(doc) {
+			if carriesNoContent(doc) {
+				return unchangedPayload(payload), nil
+			}
+			if isJSONRPCError(doc) {
+				segments, err = resolveErrorText(root, nil)
+			}
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w (jsonPath %q)", err, jsonPath)
@@ -146,11 +151,12 @@ var contentFreeResultMembers = map[string]bool{
 //   - a request or notification of a content-free method (see
 //     contentFreeMethods), or any notification except notifications/message,
 //     which carries log data;
-//   - a result made only of initialize or listing members, or an empty one;
-//   - an error with no data member (its code and message are protocol text).
+//   - a result made only of initialize or listing members, or an empty one.
 //
 // Anything else, a tools/call or a tool result say, is content the path was
-// meant to reach.
+// meant to reach. An error response is not content-free either: its message
+// and data are server text that reaches the client, so when the path does not
+// apply to it they are assessed instead (see resolveErrorText).
 func carriesNoContent(doc interface{}) bool {
 	m, ok := doc.(map[string]interface{})
 	if !ok {
@@ -162,10 +168,6 @@ func carriesNoContent(doc interface{}) bool {
 		}
 		return strings.HasPrefix(method, "notifications/") && method != "notifications/message"
 	}
-	if errObj, ok := m["error"].(map[string]interface{}); ok {
-		_, hasData := errObj["data"]
-		return !hasData
-	}
 	result, ok := m["result"].(map[string]interface{})
 	if !ok {
 		return false
@@ -176,6 +178,30 @@ func carriesNoContent(doc interface{}) bool {
 		}
 	}
 	return true
+}
+
+// isJSONRPCError reports whether a JSON-RPC message is an error response.
+func isJSONRPCError(doc interface{}) bool {
+	m, ok := doc.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	_, isErr := m["error"].(map[string]interface{})
+	return isErr
+}
+
+// errorTextPath selects the error object of a JSON-RPC error response, so every
+// string in it (the message, and anything in data) is assessed.
+var errorTextPath, _ = parseJSONPath("$.error")
+
+// resolveErrorText selects the text of a JSON-RPC error response that jsonPath
+// does not apply to. An error with no text at all has nothing to assess.
+func resolveErrorText(root *interface{}, onChange func()) ([]*textSegment, error) {
+	segments, err := resolveTextSegments(root, errorTextPath, onChange)
+	if errors.Is(err, errNoValue) {
+		return nil, nil
+	}
+	return segments, err
 }
 
 // unchangedPayload is a payload with nothing to check.
@@ -287,6 +313,11 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		event.doc = doc
 		ev := event
 		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
+		if err != nil && isRPC && isJSONRPCError(doc) {
+			// An error response the path does not apply to: its own text is
+			// assessed instead.
+			eventSegments, err = resolveErrorText(&event.doc, func() { ev.dirty = true })
+		}
 		if err != nil {
 			// The path does not apply to this event (e.g. a progress notification).
 			// A JSON-RPC message with content the path missed, such as a tool
