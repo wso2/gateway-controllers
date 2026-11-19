@@ -45,6 +45,14 @@ Feature: Azure Content Safety content moderation policy
       {"message":"Hello, this is safe content"}
       """
 
+    # Violating content is still blocked, so the safe message passed the policy's check.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message":"This content contains hate speech"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.actionReason" should be "Violation of Azure content safety content moderation detected."
+
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
@@ -179,6 +187,14 @@ Feature: Azure Content Safety content moderation policy
       """
       {"message":"This contains hate speech but should pass"}
       """
+
+    # Violence is still checked, so only the disabled category lets content through.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message":"This content contains violence"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.actionReason" should be "Violation of Azure content safety content moderation detected."
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -349,6 +365,14 @@ Feature: Azure Content Safety content moderation policy
       """
       """
 
+    # A violating body is still blocked, so the empty body passed the policy's check.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message":"This content contains violence"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.actionReason" should be "Violation of Azure content safety content moderation detected."
+
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
@@ -373,6 +397,14 @@ Feature: Azure Content Safety content moderation policy
       """
       {"message":"This will simulate error in mock service"}
       """
+
+    # Violating content is still blocked: passthroughOnError applies only when the Azure call fails.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"message":"This content contains violence"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.actionReason" should be "Violation of Azure content safety content moderation detected."
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
