@@ -20,6 +20,7 @@ package awsbedrockguardrail
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,6 +28,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -167,6 +170,12 @@ const (
 	// below a full text unit.
 	maxHeldFlushBytes = 256 * 1024
 
+	// maxNonSSEHeldBytes bounds the body handleNonSSEStreamFlush withholds while
+	// it waits for the end of a response that is not an event stream. Above it the
+	// response cannot be assessed whole: it ends with a fault, or passes through
+	// under passthroughOnError.
+	maxNonSSEHeldBytes = 4 * 1024 * 1024
+
 	// maxPartialLineBytes bounds the retained incomplete line. A stream carrying
 	// no line terminator at all would otherwise grow it without limit; past this
 	// the fragment is dropped with a warning rather than held.
@@ -189,14 +198,14 @@ const (
 	// flush can carry only comments, "id:" or "retry:" lines and so look
 	// unclassifiable on its own; without this it would be mistaken for a
 	// non-SSE body and the accumulated text assessed as if it were one.
-	metaKeySSEStream = "awsbedrockguardrail:stream_is_sse"
+	metaKeySSEStream streamStateKey = "awsbedrockguardrail:stream_is_sse"
 
 	// metaKeyAssessedInHeld counts assessed characters still sitting in withheld
 	// frames: the batch boundary generally falls inside a frame, and that frame
 	// is retained whole. Its assessed prefix is not in pending — it must not be
 	// assessed or billed twice — so it has to be counted here instead, or the
 	// next release boundary is short by that much and the frame lingers.
-	metaKeyAssessedInHeld = "awsbedrockguardrail:assessed_in_held"
+	metaKeyAssessedInHeld streamStateKey = "awsbedrockguardrail:assessed_in_held"
 
 	// metaKeyPartialLine retains the trailing bytes of a flush that stopped in the
 	// middle of an SSE line. A truncated "data:" payload is unparseable JSON, so
@@ -204,32 +213,51 @@ const (
 	// never assessed. Reached when the engine force-flushes at its accumulator
 	// ceiling, or whenever an upstream's writes do not align with event
 	// boundaries.
-	metaKeyPartialLine = "awsbedrockguardrail:partial_line"
+	metaKeyPartialLine streamStateKey = "awsbedrockguardrail:partial_line"
 
 	// metaKeyNonSSEForwarded records that a non-SSE flush was already delivered,
 	// so the accumulated body must not be re-sent as a rewrite of a later chunk.
-	metaKeyNonSSEForwarded = "awsbedrockguardrail:non_sse_forwarded"
+	metaKeyNonSSEForwarded streamStateKey = "awsbedrockguardrail:non_sse_forwarded"
 
 	// metaKeyHeldBytes holds the flush bytes withheld from the client while the
 	// text they carry is still unassessed. Only used when ValidateBeforeDeliver
 	// is set; it is released verbatim once its text passes, and discarded
 	// without ever being delivered if the text fails.
-	metaKeyHeldBytes = "awsbedrockguardrail:held_bytes"
+	metaKeyHeldBytes streamStateKey = "awsbedrockguardrail:held_bytes"
 
 	// metaKeyPendingText holds assistant text seen but not yet validated: the
 	// remainder carried over when a batch is trimmed back to a word or sentence
 	// boundary, prepended to the next batch. AWS's guidance is that batches
 	// "don't split words or sentences, and by carrying over any necessary
 	// context from the previous batch" — this is that carry-over.
-	metaKeyPendingText = "awsbedrockguardrail:streamed_pending_text"
-
-	// metaKeyAccStreamedContent accumulates the assistant text already validated
-	// in this stream.
-	metaKeyAccStreamedContent = "awsbedrockguardrail:streamed_content"
+	metaKeyPendingText streamStateKey = "awsbedrockguardrail:streamed_pending_text"
 
 	// metaKeyAccStreamedJSONBody accumulates a non-SSE chunked body across
 	// flushes, so it can be validated whole at end of stream.
-	metaKeyAccStreamedJSONBody = "awsbedrockguardrail:streamed_json_body"
+	metaKeyAccStreamedJSONBody streamStateKey = "awsbedrockguardrail:streamed_json_body"
+
+	// metaKeyJSONRPCStream records whether an event stream carries JSON-RPC
+	// messages rather than LLM token deltas (see isJSONRPCStream).
+	metaKeyJSONRPCStream streamStateKey = "awsbedrockguardrail:stream_is_jsonrpc"
+
+	// metaKeyJSONRPCBuffer withholds the bytes of a JSON-RPC event still
+	// arriving, until the event is complete and can be assessed.
+	metaKeyJSONRPCBuffer streamStateKey = "awsbedrockguardrail:jsonrpc_buffer"
+
+	// metaKeyCarriedDecisions holds assessments whose rewrites apply to withheld
+	// frames, until those frames are released (see carryDecisions).
+	metaKeyCarriedDecisions streamStateKey = "awsbedrockguardrail:carried_decisions"
+
+	// metaKeyStreamingPathSeen records that an event of this stream carries the
+	// member streamingJsonPath starts with (see checkStreamingPath).
+	metaKeyStreamingPathSeen streamStateKey = "awsbedrockguardrail:streaming_path_seen"
+
+	// metaKeyStreamingPathWait withholds the flushes checkStreamingPath is still
+	// deciding about.
+	metaKeyStreamingPathWait streamStateKey = "awsbedrockguardrail:streaming_path_wait"
+
+	// metaKeyAccStreamedLen is the size of what metaKeyAccStreamedJSONBody holds.
+	metaKeyAccStreamedLen streamStateKey = "awsbedrockguardrail:streamed_json_len"
 )
 
 // Credential-acquisition modes selectable through awsAuth.authenticationType.
@@ -306,6 +334,34 @@ type AWSBedrockGuardrailPolicy struct {
 	// Testing hooks for AWS interactions.
 	loadAWSConfigFunc    func(ctx context.Context, region string) (aws.Config, error)
 	newBedrockClientFunc func(cfg aws.Config) bedrockGuardrailClient
+
+	// stateID makes this attachment's stream-state keys its own (see stateKey).
+	stateID     string
+	stateIDOnce sync.Once
+}
+
+// streamStateKey names one piece of per-stream state. It is a distinct type so
+// it cannot be used as a metadata key directly: every read and write has to go
+// through stateKey, which makes it specific to one attachment.
+type streamStateKey string
+
+// policyInstanceSeq numbers policy instances, so each attachment gets its own
+// stream-state keys.
+var policyInstanceSeq atomic.Uint64
+
+// stateKey returns the metadata key for this attachment's copy of a piece of
+// stream state.
+//
+// The metadata map is shared by every policy on the route, and two attachments of
+// this policy on one route (two guardrails, say) see the same stream. With one
+// fixed key per piece of state, the second attachment read and overwrote the
+// first one's withheld bytes and pending text, and the client received the
+// events out of order.
+func (p *AWSBedrockGuardrailPolicy) stateKey(key streamStateKey) string {
+	p.stateIDOnce.Do(func() {
+		p.stateID = strconv.FormatUint(policyInstanceSeq.Add(1), 10)
+	})
+	return string(key) + "#" + p.stateID
 }
 
 type AWSBedrockGuardrailPolicyParams struct {
@@ -1253,7 +1309,7 @@ func (p *AWSBedrockGuardrailPolicy) evaluateGuardrailResponse(output interface{}
 		// Nothing is blocked, so anything reported is anonymisable.
 		if hasAnonymizedFinding(outputTyped) {
 			masked := applyPIIReplacements(originalContent,
-				p.piiReplacements(outputTyped, redactPII, isRequest, metadata))
+				p.piiReplacements(outputTyped, redactPII, isRequest, metadata, originalContent))
 			if masked == originalContent {
 				return false, "", nil
 			}
@@ -1412,7 +1468,77 @@ func applyPIIReplacements(content string, replacements []piiReplacement) string 
 //     {EMAIL}. That value came from the upstream (an LLM answer, an MCP tool
 //     result), so there is nothing to restore it to. A value the request phase
 //     masked and the response phase restored is left alone: the client sent it.
-func (p *AWSBedrockGuardrailPolicy) piiReplacements(output *bedrockruntime.ApplyGuardrailOutput, redactPII, isRequest bool, metadata map[string]interface{}) []piiReplacement {
+//
+// partOfRequestValue reports whether a value the guardrail reported in a
+// response is the client's own value, put back from a request placeholder, so it
+// must not be masked again.
+//
+// An exact request value is. So is part of one -- Bedrock can draw a restored
+// value's boundary differently in the response ("John" of "John Smith") -- but
+// only when it is the same type of entity and every occurrence of it in text sits
+// inside that request value. A match found anywhere else is new content (a
+// different "John", or a PIN that happens to appear in an address) and is masked.
+func partOfRequestValue(match, entityType, text string, restored map[string]string) bool {
+	if _, exact := restored[match]; exact {
+		return true
+	}
+	for original, placeholder := range restored {
+		if original == match || !strings.Contains(original, match) || placeholderEntityType(placeholder) != entityType {
+			continue
+		}
+		if occursOnlyWithin(text, match, original) {
+			return true
+		}
+	}
+	return false
+}
+
+// placeholderEntityType returns the entity type a request placeholder was minted
+// for: "NAME" for "NAME_0000".
+func placeholderEntityType(placeholder string) string {
+	if i := strings.LastIndex(placeholder, "_"); i > 0 {
+		return placeholder[:i]
+	}
+	return ""
+}
+
+// occursOnlyWithin reports whether match occurs in text, and only inside
+// occurrences of original.
+func occursOnlyWithin(text, match, original string) bool {
+	if !strings.Contains(text, match) {
+		return false
+	}
+	type span struct{ start, end int }
+	var within []span
+	for from := 0; ; {
+		i := strings.Index(text[from:], original)
+		if i < 0 {
+			break
+		}
+		within = append(within, span{from + i, from + i + len(original)})
+		from += i + 1
+	}
+	for from := 0; ; {
+		i := strings.Index(text[from:], match)
+		if i < 0 {
+			return true
+		}
+		start, end := from+i, from+i+len(match)
+		inside := false
+		for _, w := range within {
+			if start >= w.start && end <= w.end {
+				inside = true
+				break
+			}
+		}
+		if !inside {
+			return false
+		}
+		from = start + 1
+	}
+}
+
+func (p *AWSBedrockGuardrailPolicy) piiReplacements(output *bedrockruntime.ApplyGuardrailOutput, redactPII, isRequest bool, metadata map[string]interface{}, text string) []piiReplacement {
 	if output == nil {
 		return nil
 	}
@@ -1481,7 +1607,7 @@ func (p *AWSBedrockGuardrailPolicy) piiReplacements(output *bedrockruntime.Apply
 	}
 
 	for _, m := range matches {
-		if _, fromRequest := restored[m.match]; fromRequest {
+		if partOfRequestValue(m.match, m.entityType, text, restored) {
 			continue
 		}
 		replacements = append(replacements, piiReplacement{match: m.match, replacement: "{" + m.entityType + "}"})
@@ -1530,30 +1656,28 @@ func redactionMatches(output *bedrockruntime.ApplyGuardrailOutput) []string {
 // redactedFlush applies the guardrail's redactions to a flush and reports
 // whether any reported value survived.
 //
-// Redaction is written back frame by frame, because that is the only place an
-// SSE value can be replaced without re-framing the stream. A value the model
-// emitted across two events — "john@" in one, "example.com" in the next — is
-// therefore present in neither frame's text and is replaced in neither, so the
-// rewrite alone cannot guarantee it is gone.
+// A model emits a value over several token events -- "support" in one,
+// "@acme" in the next, ".com" in a third -- so the values are found in the
+// flush's text read as a whole, and each one is written back across the frames
+// that carry it (rewriteAcrossFrames). Rewriting one frame at a time found the
+// value in no frame, and the stream was ended instead of masked.
 //
-// The check closes that: the rewritten flush is re-read as a whole and tested
-// against the same match list. A survivor means this flush cannot be delivered
-// redacted, and the caller fails closed rather than forward the value — the one
-// thing redaction mode exists to prevent.
+// The check is the safety net: the rewritten flush is re-read as a whole and
+// tested against the same match list. A survivor means this flush cannot be
+// delivered redacted, and the caller fails closed rather than forward the value
+// — the one thing redaction mode exists to prevent.
 func (p *AWSBedrockGuardrailPolicy) redactedFlush(
 	flush string,
 	output interface{},
 	rp AWSBedrockGuardrailPolicyParams,
 	metadata map[string]interface{},
 ) (rewritten string, changed, leaked bool) {
-	rewrites := p.responseRewrites(output, rp, metadata)
+	rewrites := p.responseRewrites(output, rp, metadata, extractSSEDeltaContent(flush, rp.StreamingJsonPath))
 	if len(rewrites) == 0 {
 		return flush, false, false
 	}
 
-	rewritten, changed = rewriteSSEDeltaContent(flush, rp.StreamingJsonPath, func(frameText string) string {
-		return applyPIIReplacements(frameText, rewrites)
-	})
+	rewritten, changed = rewriteAcrossFrames(flush, rp.StreamingJsonPath, rewrites)
 
 	joined := extractSSEDeltaContent(rewritten, rp.StreamingJsonPath)
 	for _, r := range rewrites {
@@ -1572,6 +1696,7 @@ func (p *AWSBedrockGuardrailPolicy) responseRewrites(
 	output interface{},
 	rp AWSBedrockGuardrailPolicyParams,
 	metadata map[string]interface{},
+	text string,
 ) []piiReplacement {
 	typed, ok := output.(*bedrockruntime.ApplyGuardrailOutput)
 	if !ok || typed == nil || typed.Action != types.GuardrailActionGuardrailIntervened {
@@ -1580,7 +1705,7 @@ func (p *AWSBedrockGuardrailPolicy) responseRewrites(
 	if !rp.RedactPII && !hasAnonymizedFinding(typed) {
 		return nil
 	}
-	return p.piiReplacements(typed, rp.RedactPII, false, metadata)
+	return p.piiReplacements(typed, rp.RedactPII, false, metadata, text)
 }
 
 // restorePIIInResponse handles PII restoration in responses when redactPII is disabled
@@ -1617,6 +1742,67 @@ func (p *AWSBedrockGuardrailPolicy) restorePIIInResponse(originalContent string,
 	}
 
 	return transformedContent
+}
+
+// restorePayload puts the request's placeholders back into a whole response body.
+//
+// The placeholder bytes are replaced in place, so the body keeps its layout, key
+// order and escaping exactly as the upstream wrote them -- including a
+// placeholder the upstream used as an object key. Inside JSON (a JSON document,
+// or the data of an event-stream event that is JSON) the original value is
+// written JSON-escaped, so a value containing a quote, a backslash or a newline
+// leaves the document valid. Any other body gets the value as it is.
+func (p *AWSBedrockGuardrailPolicy) restorePayload(payload []byte, maskedPIIEntities map[string]string) ([]byte, bool) {
+	if len(maskedPIIEntities) == 0 || !containsPlaceholder(string(payload), maskedPIIEntities) {
+		return payload, false
+	}
+	plain := func(s string) string { return p.restorePIIInResponse(s, maskedPIIEntities) }
+	escaped := func(s string) string { return p.restorePIIInResponse(s, jsonEscapedOriginals(maskedPIIEntities)) }
+
+	var restored string
+	switch {
+	case json.Valid(payload):
+		restored = escaped(string(payload))
+	case looksLikeEventStream(payload):
+		lines := strings.Split(string(payload), "\n")
+		for i, line := range lines {
+			if data, _, isData := sseDataPayload(strings.TrimSuffix(line, "\r")); isData && json.Valid([]byte(data)) {
+				lines[i] = escaped(line)
+			} else {
+				lines[i] = plain(line)
+			}
+		}
+		restored = strings.Join(lines, "\n")
+	default:
+		restored = plain(string(payload))
+	}
+	return []byte(restored), restored != string(payload)
+}
+
+// containsPlaceholder reports whether s contains any of the request's
+// placeholders, so a body with none is left byte-for-byte as it is.
+func containsPlaceholder(s string, maskedPIIEntities map[string]string) bool {
+	for _, placeholder := range maskedPIIEntities {
+		if placeholder != "" && strings.Contains(s, placeholder) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsonEscapedOriginals returns the request's original-to-placeholder mapping with
+// each original value escaped for use inside a JSON string.
+func jsonEscapedOriginals(maskedPIIEntities map[string]string) map[string]string {
+	escaped := make(map[string]string, len(maskedPIIEntities))
+	for original, placeholder := range maskedPIIEntities {
+		encoded, err := encodeJSON(original)
+		if err != nil || len(encoded) < 2 {
+			escaped[original] = placeholder
+			continue
+		}
+		escaped[string(encoded[1:len(encoded)-1])] = placeholder
+	}
+	return escaped
 }
 
 // buildGuardrailErrorResponse describes the intervention for the gateway: the code and
@@ -1882,7 +2068,8 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 	if respCtx.ResponseBody != nil {
 		content = respCtx.ResponseBody.Content
 	}
-	return p.validatePayload(content, p.responseParams, true, respCtx.Metadata).(policy.ResponseAction)
+	return p.validatePayloadAs(content, p.responseParams, true, respCtx.Metadata,
+		responseMediaType(respCtx.ResponseHeaders)).(policy.ResponseAction)
 }
 
 // ─── Streaming response path ─────────────────────────────────────────────────
@@ -1935,9 +2122,9 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBody(ctx context.Context, respCtx 
 //
 // The one case that must still be held is a unary JSON body, which is why the
 // discriminator below is "does this look like a JSON document", not "is this
-// SSE". An opaque framing with no transformer ahead of it in the chain is
-// forwarded unvalidated until end of stream; that is logged by
-// handleNonSSEStreamFlush.
+// SSE". Anything else that reaches OnResponseBodyChunk as a non-SSE body (plain
+// text, or an opaque framing with no transformer ahead of it in the chain) is
+// withheld there by handleNonSSEStreamFlush until end of stream.
 func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bool {
 	if !p.hasResponseParams || !p.responseParams.Enabled {
 		return false
@@ -1948,7 +2135,7 @@ func (p *AWSBedrockGuardrailPolicy) NeedsMoreResponseData(accumulated []byte) bo
 	if len(accumulated) < streamFlushPacerBytes {
 		return true
 	}
-	if isSSEChunk(string(accumulated)) {
+	if looksLikeEventStream(accumulated) {
 		return !endsAtSSEEventBoundary(accumulated)
 	}
 	return false
@@ -2013,16 +2200,162 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 	// comments, "id:" or "retry:" lines — and the final one can be empty — so
 	// judging each flush alone would route the tail of an SSE stream down the
 	// non-SSE path and assess its accumulated text as a JSON body.
-	sseStream, _ := respCtx.Metadata[metaKeySSEStream].(bool)
-	if !sseStream && isSSEChunk(chunkStr) {
-		sseStream = true
-		respCtx.Metadata[metaKeySSEStream] = true
+	//
+	// The Content-Type and the first flush with content decide (see
+	// isEventStreamResponse). A flush with nothing but whitespace is not evidence
+	// either way, so it is not recorded.
+	sseStream, classified := respCtx.Metadata[p.stateKey(metaKeySSEStream)].(bool)
+	if !classified {
+		mediaType := responseMediaType(respCtx.ResponseHeaders)
+		sseStream = isEventStreamResponse(mediaType, chunk.Chunk)
+		if strings.TrimSpace(chunkStr) != "" {
+			respCtx.Metadata[p.stateKey(metaKeySSEStream)] = sseStream
+		}
 	}
 
 	if sseStream {
+		if p.isJSONRPCStream(chunkStr, respCtx) {
+			return p.handleJSONRPCStreamFlush(chunkStr, chunk, respCtx)
+		}
 		return p.handleSSEStreamFlush(chunkStr, chunk, respCtx, p.responseParams)
 	}
 	return p.handleNonSSEStreamFlush(chunkStr, chunk, respCtx)
+}
+
+// isJSONRPCStream reports whether this event stream carries JSON-RPC messages (an
+// MCP Streamable HTTP or A2A response) rather than LLM token deltas, and
+// remembers the answer once it is known.
+//
+// Its events are read with jsonPath, as the buffered path reads them;
+// streamingJsonPath addresses a token delta, which such a stream does not carry.
+func (p *AWSBedrockGuardrailPolicy) isJSONRPCStream(chunkStr string, respCtx *policy.ResponseStreamContext) bool {
+	if isRPC, known := respCtx.Metadata[p.stateKey(metaKeyJSONRPCStream)].(bool); known {
+		return isRPC
+	}
+	// The first JSON-RPC message may arrive over several flushes, so the bytes the
+	// token path is withholding are looked at too.
+	held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
+	buffered := held + chunkStr
+	if extractSSEDeltaContent(buffered, p.responseParams.StreamingJsonPath) != "" {
+		// Token deltas: this is an LLM stream, and its text is read with
+		// streamingJsonPath as before -- even if a JSON-RPC message appears beside
+		// it. Reading such a stream with jsonPath would leave the deltas unassessed.
+		respCtx.Metadata[p.stateKey(metaKeyJSONRPCStream)] = false
+		return false
+	}
+	if !sseCarriesJSONRPC([]byte(buffered)) {
+		return false
+	}
+	respCtx.Metadata[p.stateKey(metaKeyJSONRPCStream)] = true
+	// Hand over whatever the token path was withholding, so no byte is lost or
+	// delivered twice.
+	respCtx.Metadata[p.stateKey(metaKeyJSONRPCBuffer)] = held
+	respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = ""
+	respCtx.Metadata[p.stateKey(metaKeyPendingText)] = ""
+	respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = 0
+	delete(respCtx.Metadata, p.stateKey(metaKeyPartialLine))
+	return true
+}
+
+// handleJSONRPCStreamFlush assesses a JSON-RPC event stream one complete event
+// at a time, with the same extraction the buffered path uses (jsonPath against
+// each event's data). Bytes of an event still arriving are withheld until it
+// completes, so nothing is delivered before its message has been assessed.
+func (p *AWSBedrockGuardrailPolicy) handleJSONRPCStreamFlush(
+	chunkStr string,
+	chunk *policy.StreamBody,
+	respCtx *policy.ResponseStreamContext,
+) policy.StreamingResponseAction {
+	rp := p.responseParams
+	previous, _ := respCtx.Metadata[p.stateKey(metaKeyJSONRPCBuffer)].(string)
+	buffered := previous + chunkStr
+
+	complete, rest := buffered, ""
+	if !chunk.EndOfStream {
+		complete, rest = splitAtLastEventEnd(buffered)
+	}
+	if len(rest) > maxHeldFlushBytes {
+		// One message larger than the withheld-bytes limit: it cannot be held to
+		// completion, and releasing it would deliver it unassessed.
+		delete(respCtx.Metadata, p.stateKey(metaKeyJSONRPCBuffer))
+		if rp.PassthroughOnError {
+			slog.Debug("AWSBedrockGuardrail: JSON-RPC event exceeded the withheld-bytes limit, passthrough enabled",
+				"held_bytes", len(rest))
+			return policy.ForwardResponseChunk{Body: []byte(buffered)}
+		}
+		return p.unassessableEnd(true)
+	}
+	respCtx.Metadata[p.stateKey(metaKeyJSONRPCBuffer)] = rest
+
+	if strings.TrimSpace(complete) == "" {
+		// Nothing complete yet: withhold (a non-nil empty body delivers nothing).
+		return policy.ForwardResponseChunk{Body: []byte(complete)}
+	}
+	if !rp.PassthroughOnError && extractSSEDeltaContent(complete, rp.StreamingJsonPath) != "" {
+		// Token deltas after the stream was read as JSON-RPC: jsonPath does not
+		// address them, so they would be delivered unassessed.
+		slog.Warn("AWSBedrockGuardrail: JSON-RPC event stream also carries token deltas; they cannot be assessed")
+		return p.unassessableEnd(true)
+	}
+	if !sseHasJSONEvent(complete) {
+		// Keep-alives, comments or a "[DONE]" marker: no message to assess. A line
+		// that cannot be read at all is still refused; an event the stream never
+		// finished is not, since an SSE client discards it.
+		if !rp.PassthroughOnError && unreadableEventStream(complete) {
+			return p.unassessableEnd(true)
+		}
+		return policy.ForwardResponseChunk{Body: []byte(complete)}
+	}
+
+	result := p.validatePayloadAs([]byte(complete), rp, true, respCtx.Metadata, jsonRPCEventStream)
+	modifications, ok := result.(policy.DownstreamResponseModifications)
+	if !ok {
+		return policy.ForwardResponseChunk{Body: []byte(complete)}
+	}
+	if modifications.StatusCode != nil {
+		// The status already went downstream with the headers, so the verdict the
+		// buffered path answers with a 422 ends the stream as its last event.
+		return policy.TerminateResponseChunk{
+			Body:              []byte(sseDataPrefix + string(modifications.Body) + "\n\n"),
+			AnalyticsMetadata: modifications.AnalyticsMetadata,
+			IsFault:           true,
+			Fault:             modifications.Fault,
+		}
+	}
+	if modifications.Body != nil {
+		return policy.ForwardResponseChunk{Body: modifications.Body}
+	}
+	return policy.ForwardResponseChunk{Body: []byte(complete)}
+}
+
+// splitAtLastEventEnd divides s after its last complete event (the blank line
+// that ends it), returning the complete events and the event still arriving.
+func splitAtLastEventEnd(s string) (complete, rest string) {
+	end := -1
+	if i := strings.LastIndex(s, "\n\n"); i >= 0 {
+		end = i + 2
+	}
+	if i := strings.LastIndex(s, "\r\n\r\n"); i >= 0 && i+4 > end {
+		end = i + 4
+	}
+	if end < 0 {
+		return "", s
+	}
+	return s[:end], s[end:]
+}
+
+// sseHasJSONEvent reports whether any event of an SSE body carries JSON data.
+func sseHasJSONEvent(s string) bool {
+	for _, event := range splitEvents([]byte(s)) {
+		data, ok := eventData(event.lines)
+		if !ok {
+			continue
+		}
+		if _, err := decodeJSON([]byte(data)); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // handleNonSSEStreamFlush validates a non-SSE body that reached this path over
@@ -2034,35 +2367,63 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 	chunk *policy.StreamBody,
 	respCtx *policy.ResponseStreamContext,
 ) policy.StreamingResponseAction {
-	previous, _ := respCtx.Metadata[metaKeyAccStreamedJSONBody].(string)
-	full := previous + chunkStr
-	respCtx.Metadata[metaKeyAccStreamedJSONBody] = full
+	if forwarded, _ := respCtx.Metadata[p.stateKey(metaKeyNonSSEForwarded)].(bool); forwarded {
+		// passthroughOnError released this body unassessed when it outgrew the
+		// limit; the rest of it passes the same way, and nothing more is kept.
+		return p.forwardRestored(chunkStr, respCtx)
+	}
+	// The flushes are kept as a list and joined once, rather than re-copying the
+	// whole body on every flush.
+	parts, _ := respCtx.Metadata[p.stateKey(metaKeyAccStreamedJSONBody)].([]interface{})
+	size, _ := respCtx.Metadata[p.stateKey(metaKeyAccStreamedLen)].(int)
+	parts = append(parts, chunkStr)
+	size += len(chunkStr)
+	respCtx.Metadata[p.stateKey(metaKeyAccStreamedJSONBody)] = parts
+	respCtx.Metadata[p.stateKey(metaKeyAccStreamedLen)] = size
 
 	if !chunk.EndOfStream {
-		// Two ways to get here: the kernel force-flushed at its accumulator
-		// ceiling, or the response is in a framing this policy cannot read and
-		// no transformer ahead of it in the chain rewrote it into SSE. Either
-		// way the bytes are on their way to the client and there is nothing to
-		// decide now; the accumulated body is still validated at end of stream.
-		slog.Warn("AWSBedrockGuardrail: unrecognised streaming response format flushed before end of stream, validation deferred to end of stream",
-			"accumulated_bytes", len(full))
-		// Remember that bytes went downstream: the accumulated body can no longer
-		// be delivered as a rewrite of a later chunk without repeating them.
-		respCtx.Metadata[metaKeyNonSSEForwarded] = true
-		return policy.ForwardResponseChunk{}
+		// The kernel force-flushed at its accumulator ceiling, or the body is
+		// plain text, which it does not hold whole. Either way it is withheld here
+		// and assessed whole at end of stream, as a buffered response is, so none
+		// of it is delivered before it has been assessed and restored.
+		if size <= maxNonSSEHeldBytes {
+			return policy.ForwardResponseChunk{Body: []byte{}}
+		}
+		if !p.responseParams.PassthroughOnError {
+			slog.Warn("AWSBedrockGuardrail: response too large to withhold until assessed; ending the stream",
+				"accumulated_bytes", size, "limit", maxNonSSEHeldBytes)
+			p.dropAccumulated(respCtx)
+			return p.unassessableEnd(false)
+		}
+		slog.Warn("AWSBedrockGuardrail: response too large to withhold until assessed, passthrough enabled; releasing it unassessed",
+			"accumulated_bytes", size, "limit", maxNonSSEHeldBytes)
+		respCtx.Metadata[p.stateKey(metaKeyNonSSEForwarded)] = true
+		p.dropAccumulated(respCtx)
+		released := p.forwardRestored(joinParts(parts, size), respCtx)
+		if released.Body == nil {
+			released.Body = []byte(joinParts(parts, size))
+		}
+		return released
 	}
+	p.dropAccumulated(respCtx)
+	full := joinParts(parts, size)
+
+	// Nothing has been delivered yet: whatever is returned now replaces the whole
+	// response.
+	deliverAll := policy.ForwardResponseChunk{Body: []byte(full)}
 
 	// An empty body has nothing to assess, and handing it to validatePayload
 	// would fail JSONPath extraction and reject a response that carries no
 	// content at all.
 	if strings.TrimSpace(full) == "" {
-		return policy.ForwardResponseChunk{}
+		return deliverAll
 	}
 
-	result := p.validatePayload([]byte(full), p.responseParams, true, respCtx.Metadata)
+	result := p.validatePayloadAs([]byte(full), p.responseParams, true, respCtx.Metadata,
+		responseMediaType(respCtx.ResponseHeaders))
 	modifications, ok := result.(policy.DownstreamResponseModifications)
 	if !ok {
-		return policy.ForwardResponseChunk{}
+		return deliverAll
 	}
 	if modifications.StatusCode != nil {
 		// The buffered path answers a violation with a status; this one cannot,
@@ -2081,22 +2442,9 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 		}
 	}
 	if modifications.Body != nil {
-		forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool)
-		if len(chunkStr) == 0 || forwarded {
-			// Two reasons the rewrite cannot be delivered: the flush in hand is
-			// the empty end-of-stream sentinel, so there is nothing to replace;
-			// or earlier flushes already went downstream, so replacing this one
-			// with the accumulated body would repeat everything sent before it.
-			// Either way the assessment still ran — only the rewrite is dropped.
-			slog.Debug("AWSBedrockGuardrail: response modification not delivered",
-				"reason_empty_final_chunk", len(chunkStr) == 0,
-				"reason_earlier_flush_forwarded", forwarded,
-				"accumulated_bytes", len(full))
-			return policy.ForwardResponseChunk{}
-		}
 		return policy.ForwardResponseChunk{Body: modifications.Body}
 	}
-	return policy.ForwardResponseChunk{}
+	return deliverAll
 }
 
 // assessStreamBatch runs one ApplyGuardrail call for a batch. stop is true when
@@ -2104,7 +2452,7 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 // that passthroughOnError does not excuse.
 func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 	cleaned string,
-	emit string,
+	_ string,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 	chunk *policy.StreamBody,
@@ -2114,7 +2462,10 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 		if rp.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed, passthrough enabled",
 				"error", err, "chunkIndex", chunk.Index)
-			return p.releaseBytes(emit, nil, "", respCtx, rp), nil, "", true
+			// The caller releases the bytes, with every decision that still applies
+			// to them; releasing here would consume decisions carried for withheld
+			// frames, and they would then be missing from that release.
+			return policy.ForwardResponseChunk{}, nil, "", true
 		}
 		slog.Debug("AWSBedrockGuardrail: streaming guardrail call failed",
 			"error", err, "chunkIndex", chunk.Index)
@@ -2133,7 +2484,10 @@ func (p *AWSBedrockGuardrailPolicy) assessStreamBatch(
 		if rp.PassthroughOnError {
 			slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed, passthrough enabled",
 				"error", err, "chunkIndex", chunk.Index)
-			return p.releaseBytes(emit, nil, "", respCtx, rp), nil, "", true
+			// The caller releases the bytes, with every decision that still applies
+			// to them; releasing here would consume decisions carried for withheld
+			// frames, and they would then be missing from that release.
+			return policy.ForwardResponseChunk{}, nil, "", true
 		}
 		slog.Debug("AWSBedrockGuardrail: streaming guardrail evaluation failed",
 			"error", err, "chunkIndex", chunk.Index)
@@ -2199,8 +2553,15 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	// release point in the wrong place.
 	chunkStr = p.restoreFlushFrames(chunkStr, respCtx, rp)
 
-	pending, _ := respCtx.Metadata[metaKeyPendingText].(string)
-	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	chunkStr, pathDecision := p.checkStreamingPath(chunkStr, chunk.EndOfStream, respCtx, rp)
+	switch pathDecision {
+	case streamingPathRefuse:
+		return p.unassessableEnd(true)
+	case streamingPathWait:
+		return policy.ForwardResponseChunk{Body: []byte{}}
+	}
+	pending, _ := respCtx.Metadata[p.stateKey(metaKeyPendingText)].(string)
+	held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
 	newText, unassessable := p.flushText(chunkStr, chunk.EndOfStream, respCtx, rp)
 	if unassessable {
 		// A single data line too large to retain: its text can never be read, so
@@ -2212,18 +2573,12 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 			// would send the same events a second time, and a stale pending text or
 			// assessed-character count would put the next boundary walk in the
 			// wrong place. flushText has already dropped the line's own fragment.
-			respCtx.Metadata[metaKeyHeldBytes] = ""
-			respCtx.Metadata[metaKeyPendingText] = ""
-			respCtx.Metadata[metaKeyAssessedInHeld] = 0
+			respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = ""
+			respCtx.Metadata[p.stateKey(metaKeyPendingText)] = ""
+			respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = 0
 			return p.releaseBytes(held+chunkStr, nil, "", respCtx, rp)
 		}
-		return policy.TerminateResponseChunk{
-			Body: p.buildSSEErrorEvent("Response content could not be assessed",
-				nil, rp.ShowAssessment, nil),
-			AnalyticsMetadata: guardrailHitAnalytics(),
-			IsFault:           true,
-			Fault:             checkFailureFault("Response content could not be assessed", true),
-		}
+		return p.unassessableEnd(true)
 	}
 	unit := p.effectiveTextUnit()
 
@@ -2257,23 +2612,23 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		// Assessed characters already sitting in withheld frames count toward the
 		// boundary: they are not in the batch, but the frames carrying them are
 		// in held, so the walk has to account for them to reach the same point.
-		assessedInHeld, _ := respCtx.Metadata[metaKeyAssessedInHeld].(int)
+		assessedInHeld, _ := respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)].(int)
 		boundary := assessedInHeld + len([]rune(batch))
 
 		release, retain, covered := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, boundary)
 
-		action := p.assessBatchAndRelease(batch, release, retain, respCtx, rp, chunk)
+		action := p.assessBatchAndRelease(batch, release, retain, boundary-covered, respCtx, rp, chunk)
 		if action.TerminateStream() {
 			return action
 		}
-		respCtx.Metadata[metaKeyPendingText] = carry
-		respCtx.Metadata[metaKeyHeldBytes] = retain
-		respCtx.Metadata[metaKeyAssessedInHeld] = boundary - covered
+		respCtx.Metadata[p.stateKey(metaKeyPendingText)] = carry
+		respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = retain
+		respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = boundary - covered
 		return action
 	}
 
-	respCtx.Metadata[metaKeyPendingText] = combinedText
-	respCtx.Metadata[metaKeyHeldBytes] = combinedHeld
+	respCtx.Metadata[p.stateKey(metaKeyPendingText)] = combinedText
+	respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = combinedHeld
 	// Withhold: a non-nil empty body replaces the chunk, so nothing is delivered
 	// for this flush. A nil body would pass the bytes straight through.
 	return policy.ForwardResponseChunk{Body: []byte{}}
@@ -2316,9 +2671,9 @@ func (p *AWSBedrockGuardrailPolicy) assessAndRelease(
 		}
 	}
 
-	respCtx.Metadata[metaKeyPendingText] = ""
-	respCtx.Metadata[metaKeyHeldBytes] = retain
-	respCtx.Metadata[metaKeyAssessedInHeld] = 0
+	respCtx.Metadata[p.stateKey(metaKeyPendingText)] = ""
+	respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = retain
+	respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = 0
 
 	// The configured batch decides when to assess and deliver; it does not decide
 	// how much goes into one request. Every call carries at most one text unit,
@@ -2388,7 +2743,15 @@ func (p *AWSBedrockGuardrailPolicy) assessTextInUnits(
 
 		action, output, modified, stop := p.assessStreamBatch(cleaned, heldBytes, respCtx, rp, chunk)
 		if stop {
-			return action, nil, nil, "", false
+			if action.TerminateStream() {
+				return action, nil, nil, "", false
+			}
+			// passthroughOnError excused this unit's failure, so the rest of the
+			// release goes out as it is. The rewrites of the units already assessed
+			// still apply to the bytes they describe.
+			slog.Debug("AWSBedrockGuardrail: a unit could not be assessed, passthrough enabled; keeping earlier units' rewrites",
+				"assessed_units", len(decisions), "chunkIndex", chunk.Index)
+			break
 		}
 		lastOutput, lastModified, assessed = output, modified, true
 		// Every unit describes bytes in the same release, so every unit's rewrite
@@ -2415,6 +2778,7 @@ func (p *AWSBedrockGuardrailPolicy) releaseWithDecisions(
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) policy.StreamingResponseAction {
+	decisions = append(p.takeCarriedDecisions(respCtx, heldBytes), decisions...)
 	if len(decisions) == 0 {
 		return p.releaseBytes(heldBytes, lastOutput, lastModified, respCtx, rp)
 	}
@@ -2488,6 +2852,7 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	batchText string,
 	heldBytes string,
 	retainedBytes string,
+	assessedInRetained int,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 	chunk *policy.StreamBody,
@@ -2513,9 +2878,6 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 		return p.releaseBytes(heldBytes, nil, "", respCtx, rp)
 	}
 
-	validated, _ := respCtx.Metadata[metaKeyAccStreamedContent].(string)
-	respCtx.Metadata[metaKeyAccStreamedContent] = validated + batchText
-
 	// The batch boundary generally falls inside a frame, and that frame stays
 	// withheld. Its assessed prefix is covered by THESE decisions, but it will be
 	// delivered under a later batch's -- and that batch never sees this text, so a
@@ -2524,10 +2886,19 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 	// cannot be redacted in place. The same applies to a value that starts in the
 	// released frames and ends in the withheld one: neither part contains it
 	// whole, so neither rewrite would find it.
+	//
+	// A value wholly inside the withheld frame's assessed prefix is the exception:
+	// those bytes have not been delivered, so this batch's rewrite is carried
+	// forward and applied when they are (carryDecisions). Ending the stream there
+	// cut off any response whose batch ended in the middle of a token event --
+	// which a sentence boundary normally does.
+	var carry []interface{}
 	if retainedBytes != "" {
 		for _, decision := range decisions {
-			if !p.reportedValueRemains(retainedBytes, decision, rp, respCtx.Metadata) &&
-				!p.reportedValueSpans(heldBytes, retainedBytes, decision, rp, respCtx.Metadata) {
+			if !p.reportedValueSpans(heldBytes, retainedBytes, decision, rp, respCtx.Metadata) {
+				if p.reportedValueRemains(retainedBytes, assessedInRetained, decision, rp, respCtx.Metadata) {
+					carry = append(carry, decision)
+				}
 				continue
 			}
 			slog.Warn("AWSBedrockGuardrail: a reported value sits in a withheld frame this batch cannot rewrite; discarding the held bytes",
@@ -2543,24 +2914,69 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 		}
 	}
 
-	return p.releaseWithDecisions(heldBytes, decisions, lastOutput, lastModified, respCtx, rp)
+	action := p.releaseWithDecisions(heldBytes, decisions, lastOutput, lastModified, respCtx, rp)
+	if !action.TerminateStream() {
+		p.carryDecisions(respCtx, carry)
+	}
+	return action
 }
 
-// reportedValueRemains reports whether any value this assessment marked for
-// redaction still appears in the given frames' assistant text.
+// carryDecisions keeps rewrites for withheld frames whose assessed text carries
+// a reported value, to be applied when those frames are released.
+func (p *AWSBedrockGuardrailPolicy) carryDecisions(respCtx *policy.ResponseStreamContext, decisions []interface{}) {
+	if len(decisions) == 0 {
+		return
+	}
+	carried, _ := respCtx.Metadata[p.stateKey(metaKeyCarriedDecisions)].([]interface{})
+	respCtx.Metadata[p.stateKey(metaKeyCarriedDecisions)] = append(carried, decisions...)
+}
+
+// takeCarriedDecisions returns the rewrites carried for withheld frames, once the
+// bytes being released include text -- the withheld frames come first in any
+// later release, so that release is the one that delivers them.
+func (p *AWSBedrockGuardrailPolicy) takeCarriedDecisions(respCtx *policy.ResponseStreamContext, release string) []interface{} {
+	carried, _ := respCtx.Metadata[p.stateKey(metaKeyCarriedDecisions)].([]interface{})
+	if len(carried) == 0 || extractSSEDeltaContent(release, p.responseParams.StreamingJsonPath) == "" {
+		return nil
+	}
+	delete(respCtx.Metadata, p.stateKey(metaKeyCarriedDecisions))
+	return carried
+}
+
+// reportedValueRemains reports whether a value this assessment marked for
+// redaction starts within the first assessedChars characters of the given
+// frames' assistant text: the part of the withheld frames this batch assessed,
+// which no later batch will see.
+//
+// An occurrence after that point is unassessed text the next batch carries, so
+// that batch reports it and rewrites it when it releases these frames. Testing
+// the whole retained region ended the stream whenever a model repeated a value
+// after the batch boundary, although it would have been masked.
 func (p *AWSBedrockGuardrailPolicy) reportedValueRemains(
 	frames string,
+	assessedChars int,
 	output interface{},
 	rp AWSBedrockGuardrailPolicyParams,
 	metadata map[string]interface{},
 ) bool {
-	rewrites := p.responseRewrites(output, rp, metadata)
-	if len(rewrites) == 0 {
+	if assessedChars <= 0 {
 		return false
 	}
 	joined := extractSSEDeltaContent(frames, rp.StreamingJsonPath)
+	rewrites := p.responseRewrites(output, rp, metadata, joined)
+	if len(rewrites) == 0 {
+		return false
+	}
+	// The assessed prefix, in bytes: the boundary is counted in characters.
+	prefix := len(joined)
+	if runes := []rune(joined); assessedChars < len(runes) {
+		prefix = len(string(runes[:assessedChars]))
+	}
 	for _, r := range rewrites {
-		if strings.Contains(joined, r.match) {
+		if r.match == "" {
+			continue
+		}
+		if idx := strings.Index(joined, r.match); idx >= 0 && idx < prefix {
 			return true
 		}
 	}
@@ -2578,12 +2994,12 @@ func (p *AWSBedrockGuardrailPolicy) reportedValueSpans(
 	if released == "" || retained == "" {
 		return false
 	}
-	rewrites := p.responseRewrites(output, rp, metadata)
+	head := extractSSEDeltaContent(released, rp.StreamingJsonPath)
+	joined := head + extractSSEDeltaContent(retained, rp.StreamingJsonPath)
+	rewrites := p.responseRewrites(output, rp, metadata, joined)
 	if len(rewrites) == 0 {
 		return false
 	}
-	head := extractSSEDeltaContent(released, rp.StreamingJsonPath)
-	joined := head + extractSSEDeltaContent(retained, rp.StreamingJsonPath)
 	boundary := len(head)
 	for _, r := range rewrites {
 		if r.match == "" {
@@ -2620,6 +3036,13 @@ func (p *AWSBedrockGuardrailPolicy) releaseBytes(
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) policy.StreamingResponseAction {
+	for _, carried := range p.takeCarriedDecisions(respCtx, heldBytes) {
+		rewritten, stop := p.rewriteHeld(heldBytes, carried, rp, respCtx.Metadata)
+		if stop != nil {
+			return *stop
+		}
+		heldBytes = rewritten
+	}
 	if modified != "" {
 		rewritten, stop := p.rewriteHeld(heldBytes, output, rp, respCtx.Metadata)
 		if stop != nil {
@@ -2992,52 +3415,396 @@ func (p *AWSBedrockGuardrailPolicy) flushText(
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) (text string, unassessable bool) {
-	carried, _ := respCtx.Metadata[metaKeyPartialLine].(string)
+	carried, _ := respCtx.Metadata[p.stateKey(metaKeyPartialLine)].(string)
 	joined := carried + chunkStr
 
 	if endOfStream {
-		delete(respCtx.Metadata, metaKeyPartialLine)
-		return extractSSEDeltaContent(joined, rp.StreamingJsonPath), false
+		delete(respCtx.Metadata, p.stateKey(metaKeyPartialLine))
+		return extractSSEDeltaContent(joined, rp.StreamingJsonPath), refusesUnreadableBody(joined, rp)
 	}
 
 	complete, partial := splitTrailingPartialLine(joined)
+	if refusesUnreadable(complete, rp) {
+		// Text outside any event, or a data payload that is not JSON: delivering
+		// these bytes would release text no assessment has read.
+		slog.Warn("AWSBedrockGuardrail: SSE response carries a line that cannot be read; its text cannot be assessed")
+		delete(respCtx.Metadata, p.stateKey(metaKeyPartialLine))
+		return extractSSEDeltaContent(complete, rp.StreamingJsonPath), true
+	}
 	if len(partial) > maxPartialLineBytes {
 		slog.Warn("AWSBedrockGuardrail: incomplete SSE line exceeded the retention limit; its text cannot be assessed",
 			"partial_bytes", len(partial), "limit", maxPartialLineBytes)
-		delete(respCtx.Metadata, metaKeyPartialLine)
+		delete(respCtx.Metadata, p.stateKey(metaKeyPartialLine))
 		return extractSSEDeltaContent(joined, rp.StreamingJsonPath), true
 	}
-	respCtx.Metadata[metaKeyPartialLine] = partial
+	respCtx.Metadata[p.stateKey(metaKeyPartialLine)] = partial
 	return extractSSEDeltaContent(complete, rp.StreamingJsonPath), false
 }
 
-// isSSEChunk reports whether s looks like SSE framing.
-//
-// Any of the specification's field names counts, as does a comment line (one
-// beginning with ":", which is how upstreams send keep-alives). Testing only
-// "data:" and "event:" would misclassify a flush that happens to carry just
-// comments or just "id:"/"retry:" lines, and the whole flush is scanned rather
-// than its first few lines for the same reason.
-func isSSEChunk(s string) bool {
-	for rest := s; rest != ""; {
+// joinParts joins the flushes handleNonSSEStreamFlush accumulated.
+func joinParts(parts []interface{}, size int) string {
+	var sb strings.Builder
+	sb.Grow(size)
+	for _, part := range parts {
+		if s, ok := part.(string); ok {
+			sb.WriteString(s)
+		}
+	}
+	return sb.String()
+}
+
+// dropAccumulated forgets the body handleNonSSEStreamFlush accumulated.
+func (p *AWSBedrockGuardrailPolicy) dropAccumulated(respCtx *policy.ResponseStreamContext) {
+	delete(respCtx.Metadata, p.stateKey(metaKeyAccStreamedJSONBody))
+	delete(respCtx.Metadata, p.stateKey(metaKeyAccStreamedLen))
+}
+
+// forwardRestored forwards bytes released without an assessment, with the
+// request's placeholders put back, as every other delivered response has them.
+// It returns a nil body (forward unchanged) when there is nothing to restore.
+func (p *AWSBedrockGuardrailPolicy) forwardRestored(s string, respCtx *policy.ResponseStreamContext) policy.ForwardResponseChunk {
+	if p.responseParams.RedactPII {
+		return policy.ForwardResponseChunk{}
+	}
+	masked, _ := respCtx.Metadata[MetadataKeyPIIEntities].(map[string]string)
+	if restored := p.restorePIIInResponse(s, masked); restored != s {
+		return policy.ForwardResponseChunk{Body: []byte(restored)}
+	}
+	return policy.ForwardResponseChunk{}
+}
+
+// jsonRPCEventStream is the media type handleJSONRPCStreamFlush passes to
+// validatePayloadAs: an event stream known to carry JSON-RPC messages.
+const jsonRPCEventStream = "text/event-stream; jsonrpc"
+
+// streamingPathKey returns the member name streamingJsonPath starts with --
+// "choices" for "$.choices[0].delta.content" -- or "" when it starts otherwise.
+func streamingPathKey(path string) string {
+	if m := streamingPathKeyPattern.FindStringSubmatch(path); m != nil {
+		if m[1] != "" {
+			return m[1]
+		}
+		return m[2]
+	}
+	return ""
+}
+
+var streamingPathKeyPattern = regexp.MustCompile(`^\$(?:\.([A-Za-z0-9_-]+)|\[['"]([^'"]+)['"]\])`)
+
+// streamingPathMatches reports, for the complete data lines of an event stream,
+// whether any event carries the member streamingJsonPath starts with, and whether
+// any does not. A provider's error event is neither.
+func streamingPathMatches(s, key string) (matched, unmatched bool) {
+	complete, _ := splitTrailingPartialLine(s)
+	for rest := complete; rest != ""; {
 		var line string
 		line, rest = nextLine(rest)
-		if isSSEFieldLine(line) {
+		payload, _, ok := sseDataPayload(line)
+		if !ok {
+			continue
+		}
+		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+			continue
+		}
+		var doc interface{}
+		if json.Unmarshal([]byte(payload), &doc) != nil {
+			continue // unreadable lines are refused separately
+		}
+		if obj, isObject := doc.(map[string]interface{}); isObject {
+			if _, has := obj[key]; has {
+				matched = true
+				continue
+			}
+			if _, isError := obj["error"]; isError {
+				continue
+			}
+		}
+		unmatched = true
+	}
+	return matched, unmatched
+}
+
+// streamingPathDecision is what checkStreamingPath decided for a flush.
+type streamingPathDecision int
+
+const (
+	streamingPathProceed streamingPathDecision = iota // assess the (possibly longer) flush as usual
+	streamingPathWait                                 // withhold it: no event has shown the path yet
+	streamingPathRefuse                               // end the stream: the path describes no event
+)
+
+// checkStreamingPath makes sure streamingJsonPath describes this token stream
+// before any of it is delivered.
+//
+// Until an event carrying the member streamingJsonPath starts with has been
+// seen, flushes whose JSON events lack it are withheld: some formats open with
+// such events (Anthropic's message_start, say) before the first one that does.
+// When one arrives, everything withheld is handed on with it. If the stream
+// ends, or the withheld bytes reach maxHeldFlushBytes, without one, the path
+// does not describe this stream (a provider's own format under the default, say),
+// so none of its text could be read: it ends rather than being delivered as if it
+// carried none. Flushes with no JSON event at all, and passthroughOnError, are
+// not affected.
+func (p *AWSBedrockGuardrailPolicy) checkStreamingPath(
+	chunkStr string,
+	endOfStream bool,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) (string, streamingPathDecision) {
+	key := streamingPathKey(rp.StreamingJsonPath)
+	if key == "" || rp.PassthroughOnError {
+		return chunkStr, streamingPathProceed
+	}
+	if seen, _ := respCtx.Metadata[p.stateKey(metaKeyStreamingPathSeen)].(bool); seen {
+		return chunkStr, streamingPathProceed
+	}
+	waiting, _ := respCtx.Metadata[p.stateKey(metaKeyStreamingPathWait)].(string)
+	buffered := waiting + chunkStr
+	carried, _ := respCtx.Metadata[p.stateKey(metaKeyPartialLine)].(string)
+	matched, unmatched := streamingPathMatches(carried+buffered, key)
+	if endOfStream {
+		// The last line counts too, terminated or not.
+		m, u := streamingPathMatches(carried+buffered+"\n", key)
+		matched, unmatched = matched || m, unmatched || u
+	}
+	switch {
+	case matched:
+		respCtx.Metadata[p.stateKey(metaKeyStreamingPathSeen)] = true
+		delete(respCtx.Metadata, p.stateKey(metaKeyStreamingPathWait))
+		return buffered, streamingPathProceed
+	case !unmatched && waiting == "":
+		return chunkStr, streamingPathProceed
+	case endOfStream || len(buffered) > maxHeldFlushBytes:
+		delete(respCtx.Metadata, p.stateKey(metaKeyStreamingPathWait))
+		if !unmatched {
+			return buffered, streamingPathProceed
+		}
+		slog.Warn("AWSBedrockGuardrail: streamingJsonPath matches no event of the response; its text cannot be assessed",
+			"streamingJsonPath", rp.StreamingJsonPath)
+		return "", streamingPathRefuse
+	default:
+		respCtx.Metadata[p.stateKey(metaKeyStreamingPathWait)] = buffered
+		return "", streamingPathWait
+	}
+}
+
+// errUnassessable is the reason given to the client when response content could
+// not be read to be assessed: no guardrail ran, so it is not reported as a
+// violation.
+var errUnassessable = errors.New("response content could not be assessed")
+
+// unassessableEnd ends a response whose content could not be assessed, with a
+// mediation fault and a reason that says so -- as an SSE event when the response
+// is an event stream, as the guardrail error JSON otherwise.
+func (p *AWSBedrockGuardrailPolicy) unassessableEnd(eventStream bool) policy.TerminateResponseChunk {
+	const reason = "Response content could not be assessed"
+	var body []byte
+	if eventStream {
+		body = p.buildSSEErrorEvent(reason, errUnassessable, p.responseParams.ShowAssessment, nil)
+	} else if errResp, ok := p.buildErrorResponse(reason, errUnassessable, true, p.responseParams.ShowAssessment, nil).(policy.DownstreamResponseModifications); ok {
+		body = errResp.Body
+	}
+	return policy.TerminateResponseChunk{
+		Body:              body,
+		AnalyticsMetadata: guardrailHitAnalytics(),
+		IsFault:           true,
+		Fault:             checkFailureFault(reason, true),
+	}
+}
+
+// amazonEventStreamMediaType is the binary framing Bedrock streams in. A
+// translating policy later in the chain (openai-to-bedrock-transformer) rewrites
+// both the body and this Content-Type into SSE, but a body that still carries it
+// may be either, so it is sniffed like a response with no Content-Type.
+const amazonEventStreamMediaType = "application/vnd.amazon.eventstream"
+
+// responseMediaType returns the response's media type, lower-cased and without
+// parameters, or "" when there is no Content-Type.
+func responseMediaType(headers *policy.Headers) string {
+	if headers == nil {
+		return ""
+	}
+	values := headers.Get("content-type")
+	if len(values) == 0 {
+		return ""
+	}
+	mediaType, _, _ := strings.Cut(values[0], ";")
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
+// isEventStreamResponse reports whether a response body is Server-Sent Events.
+//
+// A text/event-stream Content-Type is SSE, unless the body is plainly a JSON
+// document (its first non-blank character opens an object or array): that is
+// read with jsonPath, as it always was. A response with no Content-Type, or one
+// an event stream is commonly mislabelled as (sniffedMediaType), is an event
+// stream only when its first non-blank line is an SSE field or comment and it
+// carries a data line, so an event stream labelled application/json is still read
+// as one. Any other type is not sniffed.
+//
+// Only the first line is sniffed: a plain-text answer can contain a line that
+// starts "id:" or "data:" and is still plain text.
+func isEventStreamResponse(mediaType string, body []byte) bool {
+	if mediaType == "text/event-stream" {
+		return !looksLikeJSONDocument(body)
+	}
+	if !sniffedMediaType(mediaType) {
+		return false
+	}
+	return looksLikeEventStream(body) && hasSSEDataLine(body)
+}
+
+// sniffedMediaType reports whether a response labelled mediaType may still be an
+// event stream: no Content-Type, or one an event stream is commonly sent under
+// by mistake. Any other type (application/yaml, text/html, ...) is taken at its
+// word and read with jsonPath, as it always was.
+func sniffedMediaType(mediaType string) bool {
+	switch mediaType {
+	case "", "application/json", "text/plain", "application/octet-stream", amazonEventStreamMediaType:
+		return true
+	}
+	return false
+}
+
+// hasSSEDataLine reports whether any line of body is a "data:" field. A body
+// that is not labelled text/event-stream is read as an event stream only when it
+// carries one: text that merely opens with "id: 42" or ":)" is still text, and
+// is read with jsonPath like any other non-event-stream body.
+func hasSSEDataLine(body []byte) bool {
+	for rest := string(body); rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		if strings.HasPrefix(strings.TrimPrefix(line, byteOrderMark), sseDataField) {
 			return true
 		}
 	}
 	return false
 }
 
-// isSSEFieldLine reports whether one line is an SSE field or comment line.
-func isSSEFieldLine(line string) bool {
-	if strings.HasPrefix(line, ":") {
-		return true // comment, e.g. ": keep-alive"
+// byteOrderMark may open an event stream; the SSE specification strips it.
+const byteOrderMark = "\uFEFF"
+
+// unreadableSSELine reports whether any line of an SSE body carries text this
+// policy cannot read: text outside any event, or a data line whose payload is
+// neither JSON nor "[DONE]".
+//
+// Either would reach the client without its text having been assessed. A data
+// payload that is not JSON cannot be read at streamingJsonPath -- and that
+// includes an event whose JSON the upstream split over several data lines, each
+// of which is a fragment on its own.
+//
+// A leading byte order mark is stripped, and blank lines, comments and the other
+// fields the SSE specification defines ("event", "id", "retry", with or without
+// a colon) are ignored. Any other line is treated as text outside any event:
+// the specification has a client ignore an unknown field, but a client that is
+// not an EventSource shows it, so a line such as "SSN: 123-45-6789" is refused
+// rather than delivered unread.
+func unreadableSSELine(s string) bool {
+	for rest := s; rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		line = strings.TrimPrefix(line, byteOrderMark)
+		if strings.Contains(line, "\r") {
+			return true // a bare carriage return ends lines this reader does not split on
+		}
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		name, value, hasColon := strings.Cut(line, ":")
+		if !isSSEFieldName(name) {
+			return true // text outside any event
+		}
+		if name != "data" || !hasColon {
+			continue
+		}
+		payload := strings.TrimPrefix(value, " ")
+		if t := strings.TrimSpace(payload); t != "" && t != sseDone && !json.Valid([]byte(payload)) {
+			return true
+		}
 	}
-	return strings.HasPrefix(line, sseDataField) ||
-		strings.HasPrefix(line, sseEventField) ||
-		strings.HasPrefix(line, sseIDField) ||
-		strings.HasPrefix(line, sseRetryField)
+	return false
+}
+
+// isSSEFieldName reports whether s names one of the fields the SSE
+// specification defines: what a line carries before its colon, or the whole of a
+// line with none.
+func isSSEFieldName(s string) bool {
+	switch s {
+	case "data", "event", "id", "retry":
+		return true
+	}
+	return false
+}
+
+// unreadableSSEBody is unreadableSSELine for a body that has ended. Its last
+// line, when it has no terminator, is an event the stream never finished; an SSE
+// client discards it, so a field cut off there is not refused. Text that is not
+// a field at all still is, and so is a bare carriage return.
+func unreadableSSEBody(s string) bool {
+	complete, partial := splitTrailingPartialLine(s)
+	if unreadableSSELine(complete) {
+		return true
+	}
+	return strings.Contains(partial, "\r") || unreadablePartialLine(partial)
+}
+
+// unreadablePartialLine reports whether an unterminated last line carries text
+// that cannot be read. A field cut off there is not: a field other than data, or
+// a data line that is empty or whose JSON was cut short (it opens an object or
+// array). Prose, or a data line carrying anything else, is.
+func unreadablePartialLine(partial string) bool {
+	partial = strings.TrimPrefix(strings.TrimSuffix(partial, "\r"), byteOrderMark)
+	if strings.TrimSpace(partial) == "" || strings.HasPrefix(partial, ":") {
+		return false
+	}
+	name, value, _ := strings.Cut(partial, ":")
+	if !isSSEFieldName(name) {
+		return true
+	}
+	if name != "data" {
+		return false
+	}
+	value = strings.TrimSpace(value)
+	return value != "" && !strings.HasPrefix(value, "{") && !strings.HasPrefix(value, "[") && value != sseDone
+}
+
+// unreadableEventStream is the readability check for an event stream of JSON-RPC
+// messages, read event by event as extractEventStream reads it: line endings may
+// be CRLF or CR, an event's data lines are joined, and the joined data must be
+// JSON, "[DONE]" or empty. Text outside any field is unreadable too. Without this,
+// a data payload that is not JSON was skipped by the extraction and delivered.
+func unreadableEventStream(s string) bool {
+	complete, partial := splitTrailingPartialLine(normalizeLineEndings([]byte(s)))
+	for _, event := range splitEvents([]byte(complete)) {
+		for _, line := range event.lines {
+			line = strings.TrimPrefix(line, byteOrderMark)
+			if strings.TrimSpace(line) == "" || strings.HasPrefix(line, ":") {
+				continue
+			}
+			if name, _, _ := strings.Cut(line, ":"); !isSSEFieldName(name) {
+				return true
+			}
+		}
+		if data, ok := eventData(event.lines); ok {
+			if t := strings.TrimSpace(data); t != "" && t != sseDone && !json.Valid([]byte(data)) {
+				return true
+			}
+		}
+	}
+	return unreadablePartialLine(partial)
+}
+
+// refusesUnreadableBody is refusesUnreadable for a body that has ended.
+func refusesUnreadableBody(s string, rp AWSBedrockGuardrailPolicyParams) bool {
+	return !rp.PassthroughOnError && unreadableSSEBody(s)
+}
+
+// refusesUnreadable reports whether an unreadable line (unreadableSSELine) ends
+// the response. With passthroughOnError it does not: such a line was delivered
+// as it was before this check existed, and the readable text around it is still
+// assessed as usual.
+func refusesUnreadable(s string, rp AWSBedrockGuardrailPolicyParams) bool {
+	return !rp.PassthroughOnError && unreadableSSELine(s)
 }
 
 // nextLine splits off the first line of s, dropping its terminator, and returns
@@ -3057,11 +3824,17 @@ func nextLine(s string) (line, rest string) {
 // whitespace belongs to the value and is preserved, so a rewritten event is
 // byte-identical to the original apart from the value this policy changed.
 func sseDataPayload(line string) (payload, prefix string, ok bool) {
+	// A byte order mark opening the stream is kept in the prefix, so the line is
+	// still read as data and a rewrite writes it back unchanged.
+	bom := ""
+	if strings.HasPrefix(line, byteOrderMark) {
+		bom, line = byteOrderMark, line[len(byteOrderMark):]
+	}
 	if !strings.HasPrefix(line, sseDataField) {
 		return "", "", false
 	}
 	payload = line[len(sseDataField):]
-	prefix = sseDataField
+	prefix = bom + sseDataField
 	if strings.HasPrefix(payload, " ") {
 		payload = payload[1:]
 		prefix += " "
@@ -3101,6 +3874,161 @@ func extractSSEDeltaContent(s string, streamingJsonPath string) string {
 	return sb.String()
 }
 
+// replacementSpan is one occurrence of a value to replace, as byte offsets into a
+// text.
+type replacementSpan struct {
+	start, end  int
+	replacement string
+}
+
+// findReplacementSpans returns the occurrences applyPIIReplacements would
+// replace in text, in order and without overlaps: the leftmost occurrence of any
+// value wins, and where two values start at the same position the earlier
+// replacement does (piiReplacements orders them longest first).
+func findReplacementSpans(text string, replacements []piiReplacement) []replacementSpan {
+	next := make([]int, len(replacements))
+	for i, r := range replacements {
+		next[i] = -1
+		if r.match != "" {
+			next[i] = strings.Index(text, r.match)
+		}
+	}
+	var spans []replacementSpan
+	pos := 0
+	for {
+		best := -1
+		for i, at := range next {
+			if at >= 0 && (best < 0 || at < next[best]) {
+				best = i
+			}
+		}
+		if best < 0 {
+			return spans
+		}
+		r := replacements[best]
+		start := next[best]
+		spans = append(spans, replacementSpan{start: start, end: start + len(r.match), replacement: r.replacement})
+		pos = start + len(r.match)
+		// Occurrences overlapping the one just taken are skipped.
+		for i, at := range next {
+			if at >= 0 && at < pos {
+				next[i] = -1
+				if idx := strings.Index(text[pos:], replacements[i].match); idx >= 0 {
+					next[i] = pos + idx
+				}
+			}
+		}
+	}
+}
+
+// sseTextFrame is one data line of a flush whose payload carries text at
+// streamingJsonPath.
+type sseTextFrame struct {
+	line     int
+	prefix   string
+	carriage bool
+	frame    map[string]interface{}
+	value    string
+	start    int // offset of value in the flush's joined text
+}
+
+// rewriteAcrossFrames replaces values in a flush's text read as a whole, then
+// writes the result back frame by frame: each replacement goes into the frame
+// where its value starts, and the rest of the value is removed from the frames
+// after it. Frames are kept -- one emptied of text still carries its event -- so
+// the stream keeps its shape and only the text changes. A frame whose text does
+// not change is passed through byte-for-byte.
+func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiReplacement) (string, bool) {
+	if len(replacements) == 0 {
+		return chunkStr, false
+	}
+	lines := strings.Split(chunkStr, "\n")
+	var (
+		frames []sseTextFrame
+		joined strings.Builder
+	)
+	for i, line := range lines {
+		carriage := strings.HasSuffix(line, "\r")
+		payload, prefix, ok := sseDataPayload(strings.TrimSuffix(line, "\r"))
+		if !ok {
+			continue
+		}
+		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+			continue
+		}
+		frame, ok := decodeFrame(payload)
+		if !ok {
+			continue
+		}
+		value, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+		if err != nil || value == "" {
+			continue
+		}
+		frames = append(frames, sseTextFrame{line: i, prefix: prefix, carriage: carriage,
+			frame: frame, value: value, start: joined.Len()})
+		joined.WriteString(value)
+	}
+
+	text := joined.String()
+	spans := findReplacementSpans(text, replacements)
+	if len(spans) == 0 {
+		return chunkStr, false
+	}
+
+	changed := false
+	first := 0 // first span that can still reach the current frame
+	for _, f := range frames {
+		start, end := f.start, f.start+len(f.value)
+		for first < len(spans) && spans[first].end <= start {
+			first++
+		}
+		var b strings.Builder
+		cursor := start
+		for _, sp := range spans[first:] {
+			if sp.start >= end {
+				break
+			}
+			if sp.start > cursor {
+				b.WriteString(text[cursor:sp.start])
+			}
+			if sp.start >= start {
+				// The value starts in this frame, so its replacement goes here.
+				b.WriteString(sp.replacement)
+			}
+			if sp.end > cursor {
+				cursor = sp.end
+			}
+		}
+		if cursor < end {
+			b.WriteString(text[cursor:end])
+		}
+		replacement := b.String()
+		if replacement == f.value {
+			continue
+		}
+		if err := utils.SetValueAtJSONPath(f.frame, streamingJsonPath, replacement); err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
+				"jsonPath", streamingJsonPath, "error", err)
+			continue
+		}
+		encoded, err := encodeJSON(f.frame)
+		if err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to marshal rewritten SSE frame", "error", err)
+			continue
+		}
+		rebuilt := f.prefix + string(encoded)
+		if f.carriage {
+			rebuilt += "\r"
+		}
+		lines[f.line] = rebuilt
+		changed = true
+	}
+	if !changed {
+		return chunkStr, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
 // rewriteSSEDeltaContent applies transform to the text at streamingJsonPath in
 // every data frame of chunkStr, returning the rewritten flush and whether
 // anything changed. A frame whose payload is not JSON, carries no text at that
@@ -3120,8 +4048,8 @@ func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform
 			continue
 		}
 
-		var frame map[string]interface{}
-		if err := json.Unmarshal([]byte(payload), &frame); err != nil {
+		frame, ok := decodeFrame(payload)
+		if !ok {
 			continue
 		}
 		original, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
@@ -3137,7 +4065,7 @@ func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform
 				"jsonPath", streamingJsonPath, "error", err)
 			continue
 		}
-		rewrittenPayload, err := json.Marshal(frame)
+		rewrittenPayload, err := encodeJSON(frame)
 		if err != nil {
 			slog.Debug("AWSBedrockGuardrail: failed to marshal rewritten SSE frame", "error", err)
 			continue
@@ -3157,8 +4085,28 @@ func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform
 	return strings.Join(lines, "\n"), true
 }
 
+// decodeFrame decodes one data payload as a JSON object. Numbers are kept as
+// written (decodeJSON), so re-encoding a rewritten frame does not round an
+// integer above 2^53 -- an "id" of 9007199254740993 came back as ...992.
+func decodeFrame(payload string) (map[string]interface{}, bool) {
+	doc, err := decodeJSON([]byte(payload))
+	if err != nil {
+		return nil, false
+	}
+	frame, ok := doc.(map[string]interface{})
+	return frame, ok
+}
+
 // validatePayload validates payload against AWS Bedrock Guardrail, returning policy actions.
+// A response body's type is sniffed; validatePayloadAs takes it from the response's
+// Content-Type instead.
 func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}) interface{} {
+	return p.validatePayloadAs(payload, params, isResponse, metadata, "")
+}
+
+// validatePayloadAs is validatePayload for a body whose media type is known (""
+// when it is not); see isEventStreamResponse.
+func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}, mediaType string) interface{} {
 	// Putting a masked value back used to return here, so the restored response
 	// was delivered without ever being assessed — the guardrail saw nothing of a
 	// response whose own request had masked something. The restoration now
@@ -3168,9 +4116,8 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 	if !params.RedactPII && isResponse {
 		if maskedPII, exists := metadata[MetadataKeyPIIEntities]; exists {
 			if maskedPIIMap, ok := maskedPII.(map[string]string); ok {
-				restoredContent := p.restorePIIInResponse(string(payload), maskedPIIMap)
-				if restoredContent != string(payload) {
-					payload = []byte(restoredContent)
+				if restoredContent, changed := p.restorePayload(payload, maskedPIIMap); changed {
+					payload = restoredContent
 					restored = true
 				}
 			}
@@ -3192,8 +4139,27 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 	// whole JSON-RPC message that jsonPath does address. Those take the general
 	// extraction below, which applies jsonPath to every event; read with
 	// streamingJsonPath they matched nothing and passed unassessed.
-	if isResponse && isSSEChunk(string(payload)) && !sseCarriesJSONRPC(payload) {
-		return p.validateStreamedBody(payload, params, metadata, restored)
+	//
+	// Whether the body is SSE comes from the Content-Type or its first line, not
+	// from an SSE-looking line somewhere in it (see isEventStreamResponse).
+	// The JSON-RPC stream path validates one batch of events at a time, and a
+	// batch may hold no JSON-RPC message of its own; it is read with jsonPath all
+	// the same, as the whole stream is.
+	forceJSONRPC := mediaType == jsonRPCEventStream
+	if forceJSONRPC {
+		mediaType = "text/event-stream"
+	}
+	if isResponse && isEventStreamResponse(mediaType, payload) {
+		if !forceJSONRPC && !sseCarriesJSONRPC(payload) {
+			return p.validateStreamedBody(payload, params, metadata, restored)
+		}
+		// A JSON-RPC event stream: an event whose data is not JSON would be
+		// skipped by the extraction below and delivered without being read.
+		if !params.PassthroughOnError && unreadableEventStream(string(payload)) {
+			err := errors.New("the event stream has text outside any event, or a data payload that is not JSON")
+			return p.passOrBlock("Error extracting value from JSONPath", err, params, true, nil,
+				extractionFault("Error extracting value from JSONPath", err, true), payload, restored)
+		}
 	}
 
 	extracted, err := extractPayload(payload, params.JsonPath)
@@ -3220,7 +4186,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 		return stop
 	}
 
-	violation, replacements, err := p.decide(output, params, isResponse, metadata)
+	violation, replacements, err := p.decide(output, params, isResponse, metadata, strings.Join(contents, "\n"))
 	if err != nil {
 		return p.passOrBlock("Error evaluating guardrail response", err, params, isResponse, output,
 			checkFailureFault("Error evaluating guardrail response", isResponse), payload, restored)
@@ -3246,7 +4212,10 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 	if err != nil {
 		// Never forward the unmasked payload when masking was required.
 		slog.Debug("AWSBedrockGuardrail: failed to rebuild masked payload", "error", err, "isResponse", isResponse)
-		return p.buildErrorResponse("Error updating payload with masked content", err, isResponse, params.ShowAssessment, output)
+		// The guardrail's verdict allowed the content; what failed is this policy
+		// writing the masks back, so the fault is a mediation one.
+		return withFault(p.buildErrorResponse("Error updating payload with masked content", err, isResponse, params.ShowAssessment, output),
+			checkFailureFault("Error updating payload with masked content", isResponse))
 	}
 	slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
 	return noModification(isResponse, modifiedPayload)
@@ -3255,6 +4224,21 @@ func (p *AWSBedrockGuardrailPolicy) validatePayload(payload []byte, params AWSBe
 // validateStreamedBody assesses an LLM event stream that arrived whole on the
 // buffered path, reading assistant text with streamingJsonPath.
 func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params AWSBedrockGuardrailPolicyParams, metadata map[string]interface{}, restored bool) interface{} {
+	if refusesUnreadableBody(string(payload), params) {
+		// Text this reader cannot extract would be delivered unassessed; finding no
+		// frames in it is not the same as it carrying no text. With
+		// passthroughOnError the readable text is still assessed below.
+		err := errors.New("the event stream has text outside any event, or a data payload that is not JSON")
+		return p.passOrBlock("Error extracting value from JSONPath", err, params, true, nil,
+			extractionFault("Error extracting value from JSONPath", err, true), payload, restored)
+	}
+	if key := streamingPathKey(params.StreamingJsonPath); key != "" && !params.PassthroughOnError {
+		if matched, unmatched := streamingPathMatches(string(payload), key); !matched && unmatched {
+			err := errors.New("streamingJsonPath matches no event of the event stream")
+			return p.passOrBlock("Error extracting value from JSONPath", err, params, true, nil,
+				extractionFault("Error extracting value from JSONPath", err, true), payload, restored)
+		}
+	}
 	extractedValue := strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(
 		extractSSEDeltaContent(string(payload), params.StreamingJsonPath), ""))
 	if extractedValue == "" {
@@ -3266,7 +4250,7 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 	if stop != nil {
 		return stop
 	}
-	violation, replacements, err := p.decide(output, params, true, metadata)
+	violation, replacements, err := p.decide(output, params, true, metadata, extractedValue)
 	if err != nil {
 		return p.passOrBlock("Error evaluating guardrail response", err, params, true, output,
 			checkFailureFault("Error evaluating guardrail response", true), payload, restored)
@@ -3278,9 +4262,8 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 		return noModification(true, restoredBody(payload, restored))
 	}
 
-	// One value spanning several events cannot be written back in place, so the
-	// frames are rewritten individually and a survivor is a failure rather than
-	// something to deliver.
+	// A value spanning several events is written back across them; one that still
+	// survives is a failure rather than something to deliver.
 	rewritten, _, leaked := p.redactedFlush(string(payload), output, params, metadata)
 	if leaked {
 		slog.Debug("AWSBedrockGuardrail: redaction could not be applied across events")
@@ -3312,7 +4295,7 @@ func (p *AWSBedrockGuardrailPolicy) assessContents(contents []string, params AWS
 
 // decide turns an assessment into a verdict and, when the content may pass, the
 // replacements to make in it (see evaluateGuardrailResponse for the rules).
-func (p *AWSBedrockGuardrailPolicy) decide(output *bedrockruntime.ApplyGuardrailOutput, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}) (bool, []piiReplacement, error) {
+func (p *AWSBedrockGuardrailPolicy) decide(output *bedrockruntime.ApplyGuardrailOutput, params AWSBedrockGuardrailPolicyParams, isResponse bool, metadata map[string]interface{}, text string) (bool, []piiReplacement, error) {
 	violation, _, err := p.evaluateGuardrailResponse(output, "", params.RedactPII, !isResponse, metadata)
 	if err != nil || violation {
 		return violation, nil, err
@@ -3320,7 +4303,7 @@ func (p *AWSBedrockGuardrailPolicy) decide(output *bedrockruntime.ApplyGuardrail
 	if output.Action != types.GuardrailActionGuardrailIntervened {
 		return false, nil, nil
 	}
-	return false, p.piiReplacements(output, params.RedactPII, !isResponse, metadata), nil
+	return false, p.piiReplacements(output, params.RedactPII, !isResponse, metadata, text), nil
 }
 
 // passOrBlock answers a check that could not run: passes the payload when

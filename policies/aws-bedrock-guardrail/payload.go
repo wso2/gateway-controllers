@@ -147,7 +147,8 @@ type payloadEvent struct {
 // looksLikeEventStream reports whether the first non-empty line of the body is
 // a Server-Sent Events field or comment.
 func looksLikeEventStream(payload []byte) bool {
-	for _, line := range strings.Split(normalizeLineEndings(payload), "\n") {
+	// A byte order mark may open the stream; the SSE specification strips it.
+	for _, line := range strings.Split(strings.TrimPrefix(normalizeLineEndings(payload), "\uFEFF"), "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
@@ -264,6 +265,8 @@ func eventData(lines []string) (string, bool) {
 }
 
 func dataLineValue(line string) (string, bool) {
+	// A byte order mark may open the stream; the SSE specification strips it.
+	line = strings.TrimPrefix(line, "\uFEFF")
 	if !strings.HasPrefix(line, "data:") {
 		return "", false
 	}
