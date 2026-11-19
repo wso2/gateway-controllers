@@ -998,6 +998,133 @@ func TestSendAllConcurrentlyExpectingChecksEachStatus(t *testing.T) {
 		sendAllConcurrentlyExpecting(context.Background(), client, requests, []int{200}, 4), "expected statuses")
 }
 
+func TestConcurrentExpectationCheck(t *testing.T) {
+	ok := &httpx.Response{StatusCode: http.StatusOK, Body: []byte(`{"body":"item 7"}`)}
+	blocked := &httpx.Response{StatusCode: http.StatusUnprocessableEntity, Body: []byte(`{"reason":"blocked"}`)}
+
+	require.NoError(t, concurrentExpectation{}.check(ok))
+	require.ErrorContains(t, concurrentExpectation{}.check(blocked), "returned")
+	require.ErrorContains(t, concurrentExpectation{}.check(nil), "returned no response")
+	require.NoError(t, concurrentExpectation{status: 422, contains: "blocked"}.check(blocked))
+	require.ErrorContains(t, concurrentExpectation{status: 200}.check(blocked), "want status 200")
+	require.NoError(t, concurrentExpectation{status: 200, contains: "item 7"}.check(ok))
+	require.ErrorContains(t, concurrentExpectation{status: 200, contains: "item 8"}.check(ok), `without "item 8"`)
+}
+
+func TestCycledRequests(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, tcontext.Set(ctx, "word", "contraband"))
+
+	rows, err := cycledRequests(ctx, headerTable(t,
+		[]string{"body", "status", "contains"},
+		[]string{`{"q":"{i}"}`, "200", "{i}"},
+		[]string{` {"q":"${CTX:word} {i}"} `, "422", ""},
+	))
+	require.NoError(t, err)
+	require.Equal(t, []cycledRequest{
+		{body: `{"q":"{i}"}`, status: 200, contains: "{i}"},
+		{body: `{"q":"contraband {i}"}`, status: 422},
+	}, rows)
+
+	rows, err = cycledRequests(ctx, headerTable(t, []string{"status", "body"}, []string{"204", ""}))
+	require.NoError(t, err)
+	require.Equal(t, []cycledRequest{{status: 204}}, rows)
+
+	for name, tc := range map[string]struct {
+		table *godog.Table
+		want  string
+	}{
+		"nil table":       {nil, "header row and at least one request row"},
+		"header only":     {headerTable(t, []string{"body", "status"}), "header row and at least one request row"},
+		"unknown column":  {headerTable(t, []string{"body", "code"}, []string{"", "200"}), `unknown column "code"`},
+		"duplicate":       {headerTable(t, []string{"body", "body"}, []string{"", ""}), `duplicate column "body"`},
+		"no status":       {headerTable(t, []string{"body"}, []string{""}), "status column is required"},
+		"no body":         {headerTable(t, []string{"status"}, []string{"200"}), "body column is required"},
+		"short row":       {headerTable(t, []string{"body", "status"}, []string{"200"}), "row 1 must contain 2 cells"},
+		"bad status":      {headerTable(t, []string{"body", "status"}, []string{"", "ok"}), `invalid status "ok"`},
+		"status too low":  {headerTable(t, []string{"body", "status"}, []string{"", "99"}), `invalid status "99"`},
+		"status too high": {headerTable(t, []string{"body", "status"}, []string{"", "600"}), `invalid status "600"`},
+		"missing context": {headerTable(t, []string{"body", "status"}, []string{"${CTX:absent}", "200"}), "absent"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := cycledRequests(ctx, tc.table)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestSendConcurrentCyclingChecksEachResponse(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen[r.URL.Path] = r.Method + " " + r.Header.Get("Content-Type") + " " + string(body)
+		mu.Unlock()
+		if strings.Contains(string(body), "blocked") {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+	stale := &httpx.Response{StatusCode: http.StatusTeapot}
+
+	ctx := publishedContext(t, stale)
+	require.NoError(t, base.sendConcurrentCycling(ctx, 4, "post", "/items/{i}", headerTable(t,
+		[]string{"body", "status", "contains"},
+		[]string{`{"allowed":{i}}`, "200", `{"allowed":{i}}`},
+		[]string{`{"blocked":{i}}`, "422", `{"blocked":{i}}`},
+	)))
+	require.Equal(t, map[string]string{
+		"/items/1": `POST application/json {"allowed":1}`,
+		"/items/2": `POST application/json {"blocked":2}`,
+		"/items/3": `POST application/json {"allowed":3}`,
+		"/items/4": `POST application/json {"blocked":4}`,
+	}, seen)
+	_, err = httpx.Published(ctx)
+	require.ErrorContains(t, err, "no response has been published")
+
+	// Each response is checked against its own row: a wrong status and a body without its own
+	// number both fail, naming the request.
+	ctx = publishedContext(t, stale)
+	err = base.sendConcurrentCycling(ctx, 2, "POST", "/items/{i}", headerTable(t,
+		[]string{"body", "status", "contains"},
+		[]string{`{"blocked":{i}}`, "200", ""},
+		[]string{`{"allowed":{i}}`, "200", `{"allowed":1}`},
+	))
+	require.ErrorContains(t, err, "request 1 of 2 returned")
+	require.ErrorContains(t, err, `request 2 of 2 returned a body without "{\"allowed\":1}"`)
+	_, err = httpx.Published(ctx)
+	require.ErrorContains(t, err, "no response has been published")
+
+	for _, n := range []int{0, -1, maxConcurrentSendRequests + 1} {
+		require.ErrorContains(t, base.sendConcurrentCycling(ctx, n, "POST", "/items",
+			headerTable(t, []string{"body", "status"}, []string{"", "200"})), "must be between")
+	}
+	require.ErrorContains(t, base.sendConcurrentCycling(ctx, 1, "POST", "/items", nil), "header row")
+	require.ErrorContains(t, base.sendConcurrentCycling(ctx, 1, "POST", "/items/${CTX:absent}",
+		headerTable(t, []string{"body", "status"}, []string{"", "200"})), "absent")
+	require.ErrorContains(t, sendEachConcurrentlyChecking(context.Background(), httpx.NewClient(httpx.Options{}),
+		1, func(int) httpx.Request { return httpx.Request{} }, []concurrentExpectation{{}, {}}, 1),
+		"2 expectations for 1 requests")
+}
+
 func TestSendConcurrentAlternatingRejectsInvalidInput(t *testing.T) {
 	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
 	table := headerTable(t, []string{"v", "200"})
