@@ -87,45 +87,47 @@ Feature: LLM cost usage shapes and pricing rules
       | version            | ${CTX:providerVersion}     |
       | template           | openai |
       | spec.context       | ${CTX:providerContext}     |
-      | spec.upstream.url  | http://testbench:3008      |
+      | spec.upstream.url  | http://testbench:3008/scripted |
       | accessControl.mode | allow_all                  |
       | spec.policies      | [{"name":"llm-cost","version":"v1","paths":[{"path":"/*","methods":["*"]}]}] |
     Then the response status code should be 201
 
+    # The upstream URL carries /scripted, so the called path ends in the real endpoint (/responses)
+    # that the template's resourceMappings match, and the testbench still scripts the reply.
     # A scripted reply with no model goes unpriced, so polling it until the route is live leaves the
     # requests below the only priced ones on their paths.
-    When I send a "POST" request to "${CTX:providerContext}/scripted/ready" until status 200 with body:
+    When I send a "POST" request to "${CTX:providerContext}/ready" until status 200 with body:
       """
       {"x_testbench_reply":{"body":{}}}
       """
     # chat: 1000 x 0.000001 + 500 x 0.000004 = 0.003. responses: 2000 x 0.000001 + 1000 x 0.000004 = 0.006
 
-    When I send a "POST" request to "${CTX:providerContext}/scripted/openai/v1/chat/completions" with body:
+    When I send a "POST" request to "${CTX:providerContext}/chat/completions" with body:
       """
       {"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}],"x_testbench_reply":{"body":{"id":"chatcmpl-lc","object":"chat.completion","model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"Hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":500,"total_tokens":1500}}}}
       """
     Then the response status code should be 200
     And the response header "X-Testbench-Scripted" should be "true"
     And the response header "x-llm-cost" should not exist
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/chat/completions" should have numeric metadata field "aiMetadata.llmCost" equal to "0.003"
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/chat/completions" should have numeric metadata field "aiTokenUsage.promptTokens" equal to "1000"
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/chat/completions" should have numeric metadata field "aiTokenUsage.completionTokens" equal to "500"
+    And the latest analytics event for path "${CTX:providerContext}/chat/completions" should have numeric metadata field "aiMetadata.llmCost" equal to "0.003"
+    And the latest analytics event for path "${CTX:providerContext}/chat/completions" should have numeric metadata field "aiTokenUsage.promptTokens" equal to "1000"
+    And the latest analytics event for path "${CTX:providerContext}/chat/completions" should have numeric metadata field "aiTokenUsage.completionTokens" equal to "500"
 
-    When I send a "POST" request to "${CTX:providerContext}/scripted/openai/v1/responses" with body:
+    When I send a "POST" request to "${CTX:providerContext}/responses" with body:
       """
       {"model":"gpt-4o-mini","input":"Hello","x_testbench_reply":{"body":{"id":"resp_lc","object":"response","model":"gpt-4o-mini","usage":{"input_tokens":2000,"output_tokens":1000,"total_tokens":3000}}}}
       """
     Then the response status code should be 200
     And the response header "X-Testbench-Scripted" should be "true"
     And the response header "x-llm-cost" should not exist
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/responses" should have numeric metadata field "aiMetadata.llmCost" equal to "0.006"
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/responses" should have numeric metadata field "aiTokenUsage.promptTokens" equal to "2000"
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/responses" should have numeric metadata field "aiTokenUsage.completionTokens" equal to "1000"
-    And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/responses" should have numeric metadata field "aiTokenUsage.totalTokens" equal to "3000"
+    And the latest analytics event for path "${CTX:providerContext}/responses" should have numeric metadata field "aiMetadata.llmCost" equal to "0.006"
+    And the latest analytics event for path "${CTX:providerContext}/responses" should have numeric metadata field "aiTokenUsage.promptTokens" equal to "2000"
+    And the latest analytics event for path "${CTX:providerContext}/responses" should have numeric metadata field "aiTokenUsage.completionTokens" equal to "1000"
+    And the latest analytics event for path "${CTX:providerContext}/responses" should have numeric metadata field "aiTokenUsage.totalTokens" equal to "3000"
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
-    And I send a "GET" request to "${CTX:providerContext}/scripted/ready" until status 404
+    And I send a "GET" request to "${CTX:providerContext}/ready" until status 404
 
   Scenario Outline: Send a successful response with no usable usage (<case>)
     Given I generate a unique resource name from "lc-no-usage-<slug>" and store it as "providerName"
