@@ -1,0 +1,11 @@
+{
+  "name": "subscription-token-ratelimit",
+  "displayName": "Subscription Token Rate Limit",
+  "version": "1.0",
+  "provider": "WSO2",
+  "categories": [
+    "AI",
+    "Security"
+  ],
+  "description": "Enforces the token limits of the caller's subscription plan on LLM APIs, counting the total, prompt or completion tokens of each response with a counter per subscription. Token counts are read using the LLM provider template, as token-based-ratelimit does. Runs after subscription-validation v2, which records the subscription and plan, and delegates counting to the advanced-ratelimit engine with in-memory or Redis backends."
+}
