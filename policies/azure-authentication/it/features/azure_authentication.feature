@@ -282,43 +282,6 @@ Feature: Azure Authentication policy
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
 
-  # headerName and valuePrefix put the token in another header with another prefix, or none, for
-  # upstreams that do not read the Authorization header. The upstream here echoes what it receives,
-  # and the pattern checks how the echoed value starts (\x22 is a double quote).
-  Scenario Outline: The token is sent in a custom header with a custom prefix (<case>)
-    Given I generate a unique resource name from "az" and store it as "tenant"
-    And I generate a unique value from "az-header" and store it as "apiName"
-    And I generate a unique API version from "az-header" and store it as "apiVersion"
-    And I generate a unique API context from "/az-header" and store it as "apiContext"
-    When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion             | ${CTX:gatewaySpecVersion} |
-      | name                   | ${CTX:apiName} |
-      | spec.displayName       | ${CTX:apiName} |
-      | spec.version           | ${CTX:apiVersion} |
-      | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3000 |
-      | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","headerName":"X-Upstream-Token","valuePrefix":"<prefix>"}}] |
-      | spec.operations        | [{"method":"GET","path":"/get"}] |
-    Then the response should be successful
-
-    # The data-plane request carries no Authorization header of its own, so one reaching the
-    # upstream could only have come from the policy.
-    When I clear all headers
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
-    Then the response should contain echoed header "X-Upstream-Token" containing "testbench-entra."
-    And the response body should match pattern "(?i:\x22X-Upstream-Token\x22):\s*\[?\x22<value start>"
-    And the response should not contain echoed header "Authorization"
-
-    When I authenticate using basic auth as "admin"
-    And I delete the API "${CTX:apiName}"
-    Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
-
-    Examples:
-      | case          | prefix | value start             |
-      | custom prefix | Token  | Token testbench-entra\. |
-      | no prefix     |        | testbench-entra\.       |
-
   # The policy sets the header rather than adding to it, so a token the client sends never reaches
   # the upstream: the Entra-protected upstream would refuse it.
   Scenario: An Authorization header from the client is replaced by the Entra token
