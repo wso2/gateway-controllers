@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strconv"
 	"strings"
 
@@ -49,7 +48,6 @@ const guardrailName = "content-length-guardrail"
 
 const (
 	GuardrailErrorCode           = 422
-	TextCleanRegex               = "^\"|\"$"
 	DefaultJSONPath              = "$.messages[-1].content"
 	DefaultResponseJSONPath      = "$.choices[0].message.content"
 	RequestFlowEnabledByDefault  = true
@@ -62,8 +60,6 @@ const (
 	metaKeyAccJsonBody          = "contentlengthguardrail:json_body"
 	DefaultStreamingJsonPath    = "$.choices[0].delta.content"
 )
-
-var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
 
 // ContentLengthGuardrailPolicy implements content length validation
 type ContentLengthGuardrailPolicy struct {
@@ -119,7 +115,6 @@ func GetPolicy(
 
 	return p, nil
 }
-
 
 func (p *ContentLengthGuardrailPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
@@ -422,7 +417,6 @@ func (p *ContentLengthGuardrailPolicy) validatePayload(payload []byte, params Co
 		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, isResponse, params.ShowAssessment, params.Min, params.Max), extractionFault("Error extracting value from JSONPath", err, isResponse))
 	}
 
-	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")
 	extractedValue = strings.TrimSpace(extractedValue)
 
 	byteCount := len([]byte(extractedValue))
