@@ -39,7 +39,7 @@ const (
 	DefaultEmailEntityName    = "EMAIL"
 	DefaultPhoneEntityName    = "PHONE"
 	DefaultSSNEntityName      = "SSN"
-	DefaultJSONPath           = "$.messages[-1].content"
+	DefaultJSONPath           = "$"
 	DefaultEmailRegex         = `(?i)\b[a-z0-9.!#$%&'*+/=?^_{|}~-]+@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])\b`
 	DefaultPhoneRegex         = `(?:\+?1[-.\s]?)?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[-.\s]?[2-9][0-9]{2}[-.\s]?[0-9]{4}\b`
 	DefaultSSNRegex           = `(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6(?:[0-57-9][0-9]|6[0-57-9])|[7-8][0-9]{2})[- ]?(?:0[1-9]|[1-9][0-9])[- ]?(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b`
@@ -256,7 +256,14 @@ func (p *PIIMaskingRegexPolicy) maskPIIFromContent(content string, piiEntities m
 
 	maskedContent := content
 	maskedPIIEntities := make(map[string]string)
-	counter := 0
+	// A wildcard JSONPath masks several values of one request. They share one placeholder table, so
+	// the same value keeps its placeholder and a new value never reuses another's.
+	if existing, ok := metadata[MetadataKeyPIIEntities].(map[string]string); ok {
+		for original, placeholder := range existing {
+			maskedPIIEntities[original] = placeholder
+		}
+	}
+	counter := len(maskedPIIEntities)
 	// Pre-compile placeholder pattern for efficiency
 	placeholderPattern := regexp.MustCompile(`^\[[A-Z_]+_[0-9a-f]{4}\]$`)
 
@@ -271,11 +278,14 @@ func (p *PIIMaskingRegexPolicy) maskPIIFromContent(content string, piiEntities m
 			}
 			entityHits[key]++
 			if _, exists := allMatches[match]; !exists {
-				// Generate unique placeholder like [EMAIL_0000]
-				placeholder := fmt.Sprintf("[%s_%04x]", key, counter)
+				placeholder, known := maskedPIIEntities[match]
+				if !known {
+					// Generate unique placeholder like [EMAIL_0000]
+					placeholder = fmt.Sprintf("[%s_%04x]", key, counter)
+					maskedPIIEntities[match] = placeholder
+					counter++
+				}
 				allMatches[match] = placeholder
-				maskedPIIEntities[match] = placeholder
-				counter++
 			}
 		}
 	}
@@ -432,6 +442,10 @@ func (p *PIIMaskingRegexPolicy) processRequestBody(reqCtx *policy.RequestContext
 	}
 	payload := reqCtx.Body.Content
 
+	if strings.Contains(p.params.JsonPath, "[*]") {
+		return p.processWildcardRequestBody(reqCtx, payload)
+	}
+
 	extractedValue, ok, err := extractStringFromPath(payload, p.params.JsonPath)
 	if err != nil {
 		return p.buildErrorResponse(fmt.Sprintf("error extracting value from JSONPath: %v", err)).(policy.RequestAction)
@@ -465,6 +479,92 @@ func (p *PIIMaskingRegexPolicy) processRequestBody(reqCtx *policy.RequestContext
 	}
 
 	return policy.UpstreamRequestModifications{}
+}
+
+// processWildcardRequestBody masks every value a JSONPath with "[*]" selects, such as the content of
+// every message for "$.messages[*].content". An element that has no string at the path, such as an
+// assistant turn that only calls tools, has nothing to mask and is skipped.
+func (p *PIIMaskingRegexPolicy) processWildcardRequestBody(reqCtx *policy.RequestContext, payload []byte) policy.RequestAction {
+	var jsonData map[string]interface{}
+	if err := json.Unmarshal(payload, &jsonData); err != nil {
+		return p.buildErrorResponse(fmt.Sprintf("error extracting value from JSONPath: %v", err)).(policy.RequestAction)
+	}
+	paths, err := expandWildcardPaths(jsonData, p.params.JsonPath, true)
+	if err != nil {
+		return p.buildErrorResponse(fmt.Sprintf("error extracting value from JSONPath: %v", err)).(policy.RequestAction)
+	}
+	if reqCtx.Metadata == nil {
+		reqCtx.Metadata = make(map[string]interface{})
+	}
+
+	changed := false
+	for _, path := range paths {
+		value, err := utils.ExtractValueFromJsonpath(jsonData, path)
+		content, isString := value.(string)
+		if err != nil || !isString || content == "" {
+			continue
+		}
+		var modifiedContent string
+		if p.params.RedactPII {
+			modifiedContent = p.redactPIIFromContent(content, p.params.PIIEntities)
+		} else {
+			modifiedContent, err = p.maskPIIFromContent(content, p.params.PIIEntities, reqCtx.Metadata)
+			if err != nil {
+				return p.buildErrorResponse(fmt.Sprintf("error masking PII: %v", err)).(policy.RequestAction)
+			}
+		}
+		if modifiedContent == "" || modifiedContent == content {
+			continue
+		}
+		if err := utils.SetValueAtJSONPath(jsonData, path, modifiedContent); err != nil {
+			return p.buildErrorResponse(fmt.Sprintf("error masking PII: %v", err)).(policy.RequestAction)
+		}
+		changed = true
+	}
+	if !changed {
+		return policy.UpstreamRequestModifications{}
+	}
+	modifiedPayload, err := json.Marshal(jsonData)
+	if err != nil {
+		return p.buildErrorResponse(fmt.Sprintf("error masking PII: %v", err)).(policy.RequestAction)
+	}
+	return policy.UpstreamRequestModifications{Body: modifiedPayload}
+}
+
+// expandWildcardPaths turns a JSONPath with "[*]" into one path per array element, for example
+// "$.messages[*].content" into "$.messages[0].content", "$.messages[1].content" and so on. The
+// array the first wildcard expands must exist, as any JSONPath target must, or the request is
+// rejected rather than forwarded unmasked. A further wildcard ("$.messages[*].content[*].text") is
+// expanded only for the elements that have that array.
+func expandWildcardPaths(data map[string]interface{}, path string, required bool) ([]string, error) {
+	idx := strings.Index(path, "[*]")
+	if idx == -1 {
+		return []string{path}, nil
+	}
+	prefix, rest := path[:idx], path[idx+len("[*]"):]
+	value, err := utils.ExtractValueFromJsonpath(data, prefix)
+	if err != nil {
+		if required {
+			return nil, err
+		}
+		return nil, nil
+	}
+	elements, ok := value.([]interface{})
+	if !ok {
+		if required {
+			return nil, fmt.Errorf("not an array: %s", prefix[strings.LastIndex(prefix, ".")+1:])
+		}
+		return nil, nil
+	}
+	var paths []string
+	for i := range elements {
+		expanded, err := expandWildcardPaths(data, fmt.Sprintf("%s[%d]%s", prefix, i, rest), false)
+		if err != nil {
+			return nil, err
+		}
+		paths = append(paths, expanded...)
+	}
+	return paths, nil
 }
 
 // OnResponseBody restores PII placeholders in a buffered response body.
