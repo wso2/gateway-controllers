@@ -228,7 +228,8 @@ func errorRecords(recs []map[string]interface{}) []map[string]interface{} {
 const (
 	// tokenReason names the identity, as a real reason can, so it must stay out of the client body.
 	tokenReason = "Azure Container Apps answered 400 for client 00000000-0000-0000-0000-000000000001"
-	// refusedBody stands for Azure OpenAI's answer to a refused token, which can name the principal.
+	// refusedBody stands for Azure OpenAI's answer to a refused token: out of the client body and the
+	// ERROR record, but kept in the DEBUG one, where it tells a missing role from a wrong scope.
 	refusedBody = `{"error":{"code":"PermissionDenied","message":"refused-body-marker"}}`
 )
 
@@ -350,8 +351,17 @@ func TestValidatePayloadRefusedTokenAnswers422WithoutTheProviderAnswer(t *testin
 		errs[0]["clientId"] != testClientID || errs[0]["scope"] != embeddingproviders.DefaultTokenScope {
 		t.Fatalf("expected one ERROR record for the refused token, got %v", recs)
 	}
-	if strings.Contains(fmt.Sprint(recs), "refused-body-marker") {
-		t.Fatalf("the provider's answer must not be logged: %v", recs)
+	if strings.Contains(fmt.Sprint(errs[0]), "refused-body-marker") {
+		t.Fatalf("the ERROR record carries the provider's answer: %v", errs[0])
+	}
+	var debug []map[string]interface{}
+	for _, rec := range recs {
+		if rec["level"] == "DEBUG" && rec["msg"] == "SemanticPromptGuard: Error fetching prompt embedding" {
+			debug = append(debug, rec)
+		}
+	}
+	if len(debug) != 1 || !strings.Contains(fmt.Sprint(debug[0]["error"]), "refused-body-marker") {
+		t.Fatalf("expected one DEBUG record with the provider's answer, got %v", recs)
 	}
 }
 

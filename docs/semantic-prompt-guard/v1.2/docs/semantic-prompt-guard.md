@@ -189,7 +189,8 @@ operationPolicies:
   and logged at `DEBUG` while it is.
 - A token Azure OpenAI refuses with `401` or `403` is rejected the same way. With `showAssessment`, the
   response says only `The embedding provider refused the access token`, and the fault's description carries
-  the status. Azure OpenAI's answer, which can name the identity, is not passed on or logged.
+  the status. Azure OpenAI's answer, which can name the identity, is not passed on; it is logged only at
+  `DEBUG`, where it tells a missing role from a wrong scope or endpoint.
 - APIs on the same gateway can authenticate differently: a key, the API's own or the gateway's, is sent only
   by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored.
 - The token goes to the endpoint in effect: the API's `embeddingEndpoint` if it sets one, otherwise the

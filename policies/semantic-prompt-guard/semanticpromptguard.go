@@ -538,6 +538,8 @@ func (p *SemanticPromptGuardPolicy) validatePayload(ctx context.Context, payload
 				checkFailureFault(errNoAccessToken.Error(), errors.New(reason)))
 		}
 		if status, ok := logRefusedToken(ctx, err, p.auth); ok {
+			// Only this DEBUG line keeps the provider's answer, which tells the causes apart.
+			slog.Debug("SemanticPromptGuard: Error fetching prompt embedding", "error", err)
 			return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", errRefusedToken, params.ShowAssessment),
 				checkFailureFault(errRefusedToken.Error(), fmt.Errorf("status %d", status)))
 		}
