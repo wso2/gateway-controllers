@@ -28,8 +28,11 @@ Coverage is statement-weighted: covered statements over all statements. The glob
 computed over every statement of every policy, not as the mean of the policy percentages, so a
 large policy weighs more than a small one, as it does in Codecov.
 
+The report also lists the policies below the 80% minimum, lowest first.
+
 Usage:
   summarize-coverage.py coverage/coverage.txt >> "$GITHUB_STEP_SUMMARY"
+  summarize-coverage.py --collapse coverage/coverage.txt   # full table folded, for a PR comment
 """
 
 import re
@@ -40,6 +43,8 @@ from collections import defaultdict
 # policies/<name>/v<N>/<file-or-package>... A v<N> directory directly under a policy is always a
 # version module: Go source files in a policy's root never are named like that.
 POLICY_PATH = re.compile(r"policies/(?P<name>[^/]+)(?:/(?P<version>v\d+)(?=/))?/")
+# The per-policy minimum, in percent (see .claude/rules/policy-code-coverage.md).
+MINIMUM = 80.0
 BLOCK = re.compile(r"^(?P<file>.+):\d+\.\d+,\d+\.\d+ (?P<stmts>\d+) (?P<count>\d+)$")
 
 
@@ -81,35 +86,52 @@ def percent(covered, total):
     return 100.0 * covered / total if total else 0.0
 
 
-def render(totals):
+def render(totals, collapse=False):
+    """Render the report. `collapse` folds the full table into a <details> block, which keeps a
+    70-row table from filling a pull request comment."""
     covered = sum(c for c, _ in totals.values())
     total = sum(t for _, t in totals.values())
+    below = sorted(
+        (p for p, (c, t) in totals.items() if percent(c, t) < MINIMUM),
+        key=lambda p: (percent(*totals[p]), p),
+    )
     out = [
         "## Policy unit-test coverage",
         "",
         f"**Global coverage: {percent(covered, total):.1f}%** "
         f"({covered:,} of {total:,} statements, {len(totals)} policies)",
         "",
-        "| Policy | Coverage | Covered / statements |",
-        "| --- | ---: | ---: |",
     ]
+    if below:
+        out.append(f"**{len(below)} of {len(totals)} policies are below the {MINIMUM:.0f}% minimum:**")
+        out.append("")
+        out.extend(f"- {p}: {percent(*totals[p]):.1f}%" for p in below)
+    else:
+        out.append(f"Every policy meets the {MINIMUM:.0f}% minimum.")
+    out.append("")
+    if collapse:
+        out.extend(["<details>", "<summary>Coverage of every policy</summary>", ""])
+    out.extend(["| Policy | Coverage | Covered / statements |", "| --- | ---: | ---: |"])
     for policy in sorted(totals):
         c, t = totals[policy]
         out.append(f"| {policy} | {percent(c, t):.1f}% | {c:,} / {t:,} |")
     out.append("")
+    if collapse:
+        out.extend(["</details>", ""])
     return "\n".join(out)
 
 
 def main(argv):
-    if len(argv) != 2:
+    args = [a for a in argv[1:] if a != "--collapse"]
+    if len(args) != 1:
         print(__doc__, file=sys.stderr)
         return 2
-    with open(argv[1], encoding="utf-8") as profile:
+    with open(args[0], encoding="utf-8") as profile:
         totals = parse(profile)
     if not totals:
-        print(f"no policy coverage found in {argv[1]}", file=sys.stderr)
+        print(f"no policy coverage found in {args[0]}", file=sys.stderr)
         return 1
-    print(render(totals))
+    print(render(totals, collapse="--collapse" in argv))
     return 0
 
 

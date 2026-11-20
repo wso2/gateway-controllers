@@ -29,6 +29,9 @@ jobs:
   coverage:
     name: Unit tests with coverage
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout gateway-controllers
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -63,6 +66,41 @@ jobs:
             python3 scripts/coverage/summarize-coverage.py coverage/coverage.txt | tee -a "$GITHUB_STEP_SUMMARY"
           else
             echo "No coverage report was produced" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # A sticky comment (updated in place on every push) with the global figure, the policies
+      # under the minimum and the full per-policy table. Codecov's own comment (see `comment` in
+      # codecov.yml) needs the Codecov app and CODECOV_TOKEN; this one needs neither. A pull
+      # request from a fork gets a read-only token, so it is skipped there and Codecov's comment
+      # is the report.
+      - name: Comment coverage on the pull request
+        if: >-
+          always() && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && hashFiles('coverage/coverage.txt') != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- policy-code-coverage -->'
+          { echo "$marker"; python3 scripts/coverage/summarize-coverage.py --collapse coverage/coverage.txt; } > coverage/comment.md
+          id=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@coverage/comment.md > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@coverage/comment.md > /dev/null
+          fi
+
+      - name: Warn when the Codecov token is missing
+        if: always()
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -z "$CODECOV_TOKEN" ]; then
+            echo "::warning::CODECOV_TOKEN is not available, so the Codecov upload is rejected and Codecov posts no pull request comment. Add the CODECOV_TOKEN secret and install the Codecov app on this repository (pull requests from forks never receive the secret)."
           fi
 
       # The report is one file holding every policy; Codecov splits it into per-policy

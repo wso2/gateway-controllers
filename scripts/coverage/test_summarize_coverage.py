@@ -69,6 +69,22 @@ class SummarizeTest(unittest.TestCase):
         self.assertIn("| basic-auth | 40.0% | 4 / 10 |", report)
         self.assertIn("| untested | 0.0% | 0 / 8 |", report)
 
+    def test_lists_policies_below_the_minimum_lowest_first(self):
+        report = summarize.render(summarize.parse(PROFILE.splitlines()))
+        self.assertIn("**3 of 4 policies are below the 80% minimum:**", report)
+        self.assertLess(report.index("- untested: 0.0%"), report.index("- basic-auth: 40.0%"))
+        self.assertNotIn("- backend-jwt: ", report)
+
+    def test_reports_when_every_policy_meets_the_minimum(self):
+        report = summarize.render(summarize.parse([f"{MOD}/a/a.go:1.1,2.1 5 1"]))
+        self.assertIn("Every policy meets the 80% minimum.", report)
+
+    def test_collapse_folds_the_table_but_not_the_global_figure(self):
+        report = summarize.render(summarize.parse(PROFILE.splitlines()), collapse=True)
+        self.assertLess(report.index("**Global coverage"), report.index("<details>"))
+        self.assertLess(report.index("<details>"), report.index("| basic-auth |"))
+        self.assertTrue(report.rstrip().endswith("</details>"))
+
 
 if __name__ == "__main__":
     unittest.main()
