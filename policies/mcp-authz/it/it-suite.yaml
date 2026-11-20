@@ -50,3 +50,9 @@ blocks:
       - name: mcp-authz
         features:
           - features/mcp_authz_error_compatibility.feature
+      # No gateway tag: the scenarios send handshake-style requests and build their upstream URL
+      # with ${CTX:gatewayMCPUpstreamPath}, so they run on 1.1.0, 1.2.0 and latest. The block's
+      # runners take turns (parallel: 1), which the runtime-log check of MAZ #6 relies on.
+      - name: mcp-authz-validation
+        features:
+          - features/mcp_authz_validation.feature
