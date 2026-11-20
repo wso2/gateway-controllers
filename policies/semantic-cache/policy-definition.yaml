@@ -219,10 +219,10 @@ systemParameters:
     apiKey:
       type: string
       description: |
-        API key for the embedding service (required for OPENAI, MISTRAL, AZURE_OPENAI),
-        sent by every API whose azureAuth.authenticationType is api-key, the
-        default, unless the API has its own. Not needed when every API uses an
-        Azure identity.
+        API key for the embedding service. Required in api-key mode, for every
+        provider: every API whose azureAuth.authenticationType is api-key, the
+        default, sends it unless the API has its own. Not needed when every API
+        uses an Azure identity.
         For Azure OpenAI, this may be the API key or the header name for authentication
       minLength: 1
       "wso2/defaultValue": "${config.embedding_provider_api_key}"

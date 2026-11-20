@@ -160,6 +160,7 @@ func TestCheckAllowedEndpoint(t *testing.T) {
 		{name: "other port", entries: []string{"http://testbench:3004"}, endpoint: "http://testbench:3002/openai/deployments/d/embeddings?api-version=x", wantErr: "is not allowed on this gateway"},
 		{name: "other scheme", entries: []string{"http://res.openai.azure.com"}, endpoint: e, wantErr: "is not allowed on this gateway"},
 		{name: "endpoint is not a URL", entries: []string{"https://res.openai.azure.com"}, endpoint: "not a url", wantErr: "is not allowed on this gateway"},
+		{name: "userinfo before another host", entries: []string{"https://res.openai.azure.com"}, endpoint: "https://res.openai.azure.com@evil.example/openai/deployments/d/embeddings?api-version=x", wantErr: "is not allowed on this gateway"},
 		{name: "unicode look-alike host", entries: []string{"https://myai.openai.azure.com"}, endpoint: "https://myaİ.openai.azure.com/openai/deployments/d/embeddings?api-version=x", wantErr: "is not allowed on this gateway"},
 		{name: "non-ASCII entry", entries: []string{"https://myaİ.openai.azure.com"}, endpoint: e, wantErr: "is not a resource URL"},
 		{name: "entry with path", entries: []string{"https://res.openai.azure.com/openai"}, endpoint: e, wantErr: "is not a resource URL"},
@@ -217,12 +218,17 @@ func logRecords(t *testing.T, buf *bytes.Buffer) []map[string]interface{} {
 
 func runTokenFailure(t *testing.T, embedErr error) (policy.RequestAction, *policy.RequestContext, []map[string]interface{}) {
 	t.Helper()
+	return runEmbeddingFailure(t, authentication{typ: "container-apps", tokenScope: embeddingproviders.DefaultTokenScope}, embedErr)
+}
+
+func runEmbeddingFailure(t *testing.T, auth authentication, embedErr error) (policy.RequestAction, *policy.RequestContext, []map[string]interface{}) {
+	t.Helper()
 	buf := captureLogs(t)
 	p := &SemanticCachePolicy{
 		embeddingProvider:   &mockEmbeddingProvider{getEmbeddingFn: func(string) ([]float32, error) { return nil, embedErr }},
 		vectorStoreProvider: &mockVectorDBProvider{},
 		threshold:           0.5,
-		auth:                authentication{typ: "container-apps", tokenScope: embeddingproviders.DefaultTokenScope},
+		auth:                auth,
 	}
 	reqCtx := &policy.RequestContext{
 		SharedContext: &policy.SharedContext{RequestID: "r1", Metadata: map[string]interface{}{}},
@@ -289,5 +295,80 @@ func TestOnRequestBodyOtherEmbeddingErrorsStayAtDebug(t *testing.T) {
 	}
 	if recs[0]["level"] != "DEBUG" || recs[0]["msg"] != "SemanticCache: Error generating embedding" {
 		t.Fatalf("unexpected record %v", recs[0])
+	}
+}
+
+// refusedBody stands for Azure OpenAI's answer to a refused token, which must stay out of the logs.
+const refusedBody = `{"error":{"code":"PermissionDenied","message":"refused-body-marker"}}`
+
+func errorRecords(recs []map[string]interface{}) []map[string]interface{} {
+	var errs []map[string]interface{}
+	for _, rec := range recs {
+		if rec["level"] == "ERROR" {
+			errs = append(errs, rec)
+		}
+	}
+	return errs
+}
+
+func TestOnRequestBodyRefusedTokenLogsErrorAndFailsOpen(t *testing.T) {
+	auth := authentication{typ: azureauthentication.WorkloadIdentity, clientID: testClientID, tokenScope: embeddingproviders.DefaultTokenScope}
+	action, reqCtx, recs := runEmbeddingFailure(t, auth, &embeddingproviders.StatusError{StatusCode: 403, Body: refusedBody})
+	assertFailsOpen(t, action, reqCtx)
+	errs := errorRecords(recs)
+	if len(errs) != 1 {
+		t.Fatalf("expected one ERROR record, got %v", recs)
+	}
+	want := map[string]interface{}{
+		"msg":                "SemanticCache: the embedding provider refused the access token",
+		"status":             float64(403),
+		"authenticationType": azureauthentication.WorkloadIdentity,
+		"clientId":           testClientID,
+		"scope":              embeddingproviders.DefaultTokenScope,
+	}
+	for k, v := range want {
+		if errs[0][k] != v {
+			t.Errorf("%s = %v, want %v", k, errs[0][k], v)
+		}
+	}
+	logged, err := json.Marshal(recs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logged), "refused-body-marker") {
+		t.Fatalf("the response body was logged: %s", logged)
+	}
+}
+
+func TestOnRequestBodyRefusedTokenWithoutClientIDNamesTheDefault(t *testing.T) {
+	auth := authentication{typ: "container-apps", tokenScope: embeddingproviders.DefaultTokenScope}
+	_, _, recs := runEmbeddingFailure(t, auth, fmt.Errorf("wrapped: %w", &embeddingproviders.StatusError{StatusCode: 401, Body: refusedBody}))
+	errs := errorRecords(recs)
+	if len(errs) != 1 || errs[0]["status"] != float64(401) || errs[0]["clientId"] != "host-default" {
+		t.Fatalf("expected one ERROR record for 401 naming host-default, got %v", recs)
+	}
+}
+
+func TestOnRequestBodyIdentityServerErrorStaysAtDebug(t *testing.T) {
+	auth := authentication{typ: azureauthentication.WorkloadIdentity, tokenScope: embeddingproviders.DefaultTokenScope}
+	action, reqCtx, recs := runEmbeddingFailure(t, auth, &embeddingproviders.StatusError{StatusCode: 500, Body: "boom"})
+	assertFailsOpen(t, action, reqCtx)
+	if errs := errorRecords(recs); len(errs) != 0 {
+		t.Fatalf("expected no ERROR record, got %v", errs)
+	}
+	if len(recs) != 1 || recs[0]["msg"] != "SemanticCache: Error generating embedding" {
+		t.Fatalf("expected the DEBUG embedding line, got %v", recs)
+	}
+}
+
+func TestOnRequestBodyAPIKeyRefusedStaysAtDebug(t *testing.T) {
+	auth := authentication{typ: embeddingproviders.AuthenticationTypeAPIKey}
+	action, reqCtx, recs := runEmbeddingFailure(t, auth, &embeddingproviders.StatusError{StatusCode: 401, Body: refusedBody})
+	assertFailsOpen(t, action, reqCtx)
+	if errs := errorRecords(recs); len(errs) != 0 {
+		t.Fatalf("expected no ERROR record, got %v", errs)
+	}
+	if len(recs) != 1 || recs[0]["level"] != "DEBUG" || recs[0]["msg"] != "SemanticCache: Error generating embedding" {
+		t.Fatalf("expected the DEBUG embedding line, got %v", recs)
 	}
 }

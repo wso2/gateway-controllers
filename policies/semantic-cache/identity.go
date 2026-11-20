@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -285,6 +286,28 @@ func logTokenFailure(ctx context.Context, err error, auth authentication) bool {
 	slog.Log(ctx, level, "SemanticCache: could not obtain an access token for the embedding provider",
 		"reason", tokenErr.Reason,
 		"error", err.Error(),
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return true
+}
+
+// logRefusedToken logs, at ERROR, an identity API's access token that the embedding provider
+// refused with 401 or 403, and reports whether it was one. Azure issues the token but Azure OpenAI
+// refuses it when, for example, the identity has no role on the resource, the endpoint is a
+// regional one or the scope is wrong; the cache fails open, so without this the cache turns off
+// with only a DEBUG line. The provider's answer is not logged. In api-key mode it does nothing.
+func logRefusedToken(ctx context.Context, err error, auth authentication) bool {
+	if !auth.usesIdentity() {
+		return false
+	}
+	var statusErr *embeddingproviders.StatusError
+	if !errors.As(err, &statusErr) ||
+		(statusErr.StatusCode != http.StatusUnauthorized && statusErr.StatusCode != http.StatusForbidden) {
+		return false
+	}
+	slog.Log(ctx, slog.LevelError, "SemanticCache: the embedding provider refused the access token",
+		"status", statusErr.StatusCode,
 		"authenticationType", auth.typ,
 		"clientId", auth.logClientID(),
 		"scope", auth.tokenScope)
