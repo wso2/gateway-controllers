@@ -24,6 +24,7 @@ Cache entries are scoped to the authenticated caller (application/subscriber ide
 - **Automatic cache management**: Stores eligible successful responses (200) automatically after upstream calls
 - **Immediate response on cache hit**: Returns cached response with `X-Cache-Status: HIT` header without upstream call
 - **TTL support**: Configurable time-to-live for cache entries
+- **Azure identity authentication**: From v1.4, an API can get embeddings from Azure OpenAI with a Microsoft Entra ID access token for the gateway's own Azure identity (AKS Workload Identity, a managed identity of the VM or AKS node, or of the Azure Container Apps app) instead of an API key, and the gateway can limit which authentication types and embedding endpoints its APIs use
 
 
 ## Configuration
@@ -42,7 +43,9 @@ These parameters are usually set at the gateway level and automatically applied,
 | `embeddingEndpoint` | string | Yes | Endpoint URL for the embedding service. Examples: OpenAI: `https://api.openai.com/v1/embeddings`, Mistral: `https://api.mistral.ai/v1/embeddings`, Azure OpenAI: Your Azure OpenAI endpoint URL |
 | `embeddingModel` | string | Conditional | Embedding model name. **Required for OPENAI and MISTRAL**, not required for AZURE_OPENAI (deployment name is in endpoint URL). Examples: OpenAI: `text-embedding-ada-002` or `text-embedding-3-small`, Mistral: `mistral-embed` |
 | `embeddingDimension` | integer | Yes | Dimension of embedding vectors. Common values: 1536 (OpenAI ada-002), 1024 (Mistral). Must match the model's output dimension. |
-| `apiKey` | string | Yes | API key for the embedding service authentication. The authentication header is automatically set to `api-key` for Azure OpenAI and `Authorization` for other providers. |
+| `apiKey` | string | Conditional | API key for the embedding service authentication, sent by every API whose `azureAuth.authenticationType` is `api-key` (the default), unless the API has its own. The authentication header is automatically set to `api-key` for Azure OpenAI and `Authorization` for other providers. Not needed when every API uses an Azure identity. |
+| `embeddingAllowedAuthTypes` | array of strings | No | If non-empty, the authentication types this gateway's APIs may choose in `azureAuth.authenticationType`: `api-key`, `workload-identity`, `managed-identity`, `container-apps`. An API without `azureAuth` counts as `api-key`. Empty (the default) places no limit. Set from the gateway's `embedding_provider_allowed_auth_types`; an API cannot set it. See [Limiting what APIs can use](#limiting-what-apis-can-use). |
+| `embeddingAllowedEndpoints` | array of strings | No | If non-empty, the embedding resources this gateway's APIs may call, including the gateway's own `embedding_provider_endpoint`. Entries are resource URLs such as `https://<resource>.openai.azure.com`, with no path, query or fragment. Empty (the default) places no limit. Set from the gateway's `embedding_provider_allowed_endpoints`; an API cannot set it. See [Limiting what APIs can use](#limiting-what-apis-can-use). |
 
 #### Vector Database Configuration
 
@@ -76,7 +79,12 @@ embedding_provider = "MISTRAL" # Supported: MISTRAL, OPENAI, AZURE_OPENAI
 embedding_provider_endpoint = "https://api.mistral.ai/v1/embeddings"
 embedding_provider_model = "mistral-embed"
 embedding_provider_dimension = 1024
-embedding_provider_api_key = ""
+embedding_provider_api_key = "" # Optional when every API uses an Azure identity
+
+# Optional: limit what the gateway's APIs may use. Empty (the default) means no limit.
+# Shared with the semantic-prompt-guard and semantic-tool-filtering policies.
+embedding_provider_allowed_auth_types = []
+embedding_provider_allowed_endpoints = []
 
 vector_db_provider = "REDIS" # Supported: REDIS, MILVUS
 vector_db_provider_host = "redis"
@@ -100,14 +108,172 @@ model = "jev-latest"
 | `similarityThreshold` | number | Yes | `0.5` | Similarity threshold for cache hits (0.0 to 1.0). Higher values require more similarity. For example, 0.9 means 90% similarity required. Recommended: 0.85-0.95 for strict matching, 0.70-0.85 for more flexible matching. |
 | `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression to extract text from request body for embedding generation. If empty, uses the entire request body. Example: `"$.messages[-1].content"` to extract the last message's content. |
 | `streamingJsonPath` | string | No | `"$.choices[0].delta.content"` | JSONPath expression used to extract and concatenate content from buffered SSE events before caching or performing the Jev check. |
+| `azureAuth` | `azureAuth` object | No | `api-key` | How this API's embedding calls authenticate to Azure OpenAI. Without it, they send the API key. The identity types need `embeddingProvider` set to `AZURE_OPENAI`. See [Azure Identity Authentication](#azure-identity-authentication). |
 | `cacheUnauthenticated` | boolean | No | `false` | Controls caching for requests with no resolvable caller identity (a fully public, unauthenticated API). See [Cache Scoping and Provenance](#cache-scoping-and-provenance) below before enabling. |
 | `jevCacheCheck` | object | No | `{enabled: false}` | Optional Jev admission check for new cache writes. See [Jev Cache Admission](#jev-cache-admission). |
+
+| `azureAuth` field | Type | Required | Default | Description |
+|-------------------|------|----------|---------|-------------|
+| `authenticationType` | string | No | `api-key` | `api-key` sends the API key, the API's own `apiKey` or the gateway's `embedding_provider_api_key`. `workload-identity`, `managed-identity` and `container-apps` send an access token for the gateway's Azure identity and need the `AZURE_OPENAI` embedding provider. |
+| `clientId` | string | No | - | With an Azure identity, the client ID of the identity, as a GUID. Defaults to `AZURE_CLIENT_ID` for `workload-identity`; with `managed-identity` or `container-apps`, selects a user-assigned identity, and is left unset for the system-assigned one. Ignored with `api-key`. |
+| `scope` | string | No | `https://cognitiveservices.azure.com/.default` | With an Azure identity, the scope of the access token. Ignored with `api-key`. |
+
+An API can also set its own `embeddingEndpoint`, and `apiKey` in `api-key` mode, instead of the gateway's. It cannot set `embeddingAllowedAuthTypes` or `embeddingAllowedEndpoints`: the gateway rejects an API that does.
 
 | `jevCacheCheck` field | Type | Required | Default | Description |
 |-----------------------|------|----------|---------|-------------|
 | `enabled` | boolean | Yes when the object is present | `false` | Enables the Jev check. When `false`, the other fields are ignored and behavior remains compatible with v1.1. |
 | `timeout` | string | No | `"5s"` | Go duration greater than zero and no more than `30s`. Covers the initial call, retry delay, and one retry after HTTP 429 or 529. |
 | `questions` | array | No | Built-in questions | Questions used to reject cache writes. The UI starts with the four built-in questions. A non-empty array is evaluated exactly as configured; adding questions keeps the built-ins that remain in the array, while removing a built-in disables that check. An omitted or empty array restores all four built-ins. |
+
+### Azure Identity Authentication
+
+An API whose `azureAuth.authenticationType` is an Azure identity sends `Authorization: Bearer <token>`,
+a Microsoft Entra ID access token for the gateway's own identity, to Azure OpenAI, and never sends an API
+key. There is no key to store or rotate, and once every API uses an identity the Azure OpenAI resource can
+turn key access off. An API without `azureAuth` sends the API key, exactly as v1.3 does.
+
+The identity types need `embeddingProvider` set to `AZURE_OPENAI`: the gateway's
+`embedding_provider = "AZURE_OPENAI"`, or the same value in the API's params.
+
+```yaml
+operationPolicies:
+  - name: semantic-cache
+    version: v1
+    paths:
+      - path: /chat/completions
+        methods: [POST]
+        params:
+          similarityThreshold: 0.85
+          azureAuth:
+            authenticationType: container-apps
+            # Optional: a user-assigned identity. Without it, the app's system-assigned identity is used.
+            clientId: "<identity-client-id>"
+```
+
+| Authentication type | Where the gateway runs | Where the token comes from |
+|---------------------|------------------------|----------------------------|
+| `workload-identity` | AKS, with Workload Identity set up for the gateway runtime's service account | Microsoft Entra ID, in exchange for the pod's federated token |
+| `managed-identity` | An Azure VM, VM scale set or AKS node with a managed identity | The Azure Instance Metadata Service (IMDS) |
+| `container-apps` | An Azure Container Apps app with a managed identity | The identity endpoint Container Apps runs beside the app |
+
+**Azure setup**
+
+1. Give the gateway an identity: Workload Identity for the gateway runtime's service account on AKS, a
+   managed identity assigned to the VM or node pool, or a system-assigned or user-assigned identity on the
+   container app.
+2. Grant that identity the **Cognitive Services OpenAI User** role on the Azure OpenAI resource:
+
+   ```bash
+   az role assignment create --assignee <identity-principal-id> --role "Cognitive Services OpenAI User" \
+     --scope <azure-openai-resource-id>
+   ```
+
+3. Use the resource's custom subdomain, `https://<resource>.openai.azure.com`. The embeddings endpoint is
+   the deployment URL on it, with the deployment name in the path:
+   `https://<resource>.openai.azure.com/openai/deployments/<deployment>/embeddings?api-version=<version>`.
+   Regional endpoints such as `https://eastus.api.cognitive.microsoft.com` don't accept Entra ID tokens.
+4. Once the identity works, you can turn key access off on the resource
+   (`az resource update --ids <azure-openai-resource-id> --set properties.disableLocalAuth=true`), so that
+   only Entra ID tokens are accepted.
+
+**Choosing the identity**
+
+- `workload-identity` uses `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE`, which the
+  AKS Workload Identity webhook sets. `azureAuth.clientId` overrides the client ID; the tenant always comes
+  from `AZURE_TENANT_ID`.
+- `managed-identity` without a client ID uses the host's system-assigned identity, or its only user-assigned
+  identity if it has none; IMDS rejects the request if the host has several. The gateway must reach
+  `169.254.169.254` directly: if the gateway runtime has `HTTP_PROXY` or `HTTPS_PROXY` set, add
+  `169.254.169.254` to `NO_PROXY`. On AKS, prefer Workload Identity, because every pod that can reach IMDS
+  can get tokens for the node's identities.
+- `container-apps` without a client ID uses the app's system-assigned identity, which the app must then
+  have: unlike IMDS, Container Apps doesn't fall back to an app's only user-assigned identity, and answers
+  `400`. Container Apps sets `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` only while the app has a managed
+  identity, and a container sees the values it started with: when a running app gets its first identity,
+  Container Apps can replace its containers, which restarts the gateway; if the API still fails to deploy
+  because the variables are not set, restart the revision with `az containerapp revision restart`.
+
+**How the token is used**
+
+- The token is fetched when the embedding is requested, before the call to Azure OpenAI. The Azure Identity
+  SDK caches it and refreshes it before it expires, so most requests don't make a token request. Every
+  policy on the gateway that uses the same identity shares the cache.
+- An API's route answers `500` when its policy can't be built: when its settings are invalid, when the
+  gateway doesn't allow its authentication type or endpoint, or when the gateway's host can't provide the
+  identity, for example `container-apps` without `IDENTITY_ENDPOINT`. The reason, which names the setting or
+  the missing environment variable, is in the gateway log.
+- A request whose token can't be obtained is not cached: it goes to the upstream service as if the cache
+  were unavailable, like any other embedding failure. The failure is logged at `ERROR`, so a broken identity
+  can't quietly turn caching off. A token request the identity service refused is answered again from a
+  short cache for about two seconds, and logged at `DEBUG` while it is.
+- APIs on the same gateway can authenticate differently: a key, the API's own or the gateway's, is sent only
+  by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored.
+- The token goes to the endpoint in effect: the API's `embeddingEndpoint` if it sets one, otherwise the
+  gateway's. An API can use its own Azure OpenAI resource this way, with an identity that has the role on
+  it, or with its own `apiKey` in `api-key` mode, and the allowlists below apply to the endpoint it uses.
+
+#### Limiting what APIs can use
+
+`embedding_provider_allowed_auth_types` lists the authentication types the gateway's APIs may use, from
+`api-key`, `workload-identity`, `managed-identity` and `container-apps`. An API whose type isn't listed is
+refused, and an API without `azureAuth` counts as `api-key`.
+
+- To stop APIs from sending the key, leave `api-key` out, for example `["workload-identity"]`. APIs that
+  don't choose an identity are then refused instead of sending the key.
+- To keep APIs off the gateway's identities, list only `api-key`.
+
+`embedding_provider_allowed_endpoints` lists the embedding resources the gateway's APIs may call. An API can
+set its own `embeddingEndpoint`, so without this list an API could have the gateway's key, or a token for the
+gateway's identity, sent to a server of its choosing. The list is checked against the endpoint in effect, the
+API's or the gateway's, so include the gateway's own `embedding_provider_endpoint`. Set it on every gateway
+whose APIs use an Azure identity.
+
+- Entries are resource URLs: a scheme, a host and optionally a port, such as
+  `https://<resource>.openai.azure.com`. They match on scheme, host and port, ignoring case, so any
+  deployment and `api-version` on a listed resource is allowed.
+- An entry with a path other than `/`, a query or a fragment, or that isn't an `http` or `https` URL, is
+  invalid. So is a host with non-ASCII characters. An invalid entry in either list refuses every API that
+  uses the policy, so a typo is found at the first deployment.
+- Both lists are empty by default, which places no limit. They are gateway settings and are shared with the
+  semantic-prompt-guard and semantic-tool-filtering policies, as the other `embedding_provider_*` keys are.
+  An API cannot set them in its params: the gateway rejects such an API.
+
+A refused authentication type or endpoint makes the API's route answer `500`, with the reason in the
+gateway log.
+
+```toml
+embedding_provider = "AZURE_OPENAI"
+embedding_provider_endpoint = "https://<resource>.openai.azure.com/openai/deployments/<deployment>/embeddings?api-version=<version>"
+embedding_provider_dimension = 1536
+# No embedding_provider_api_key is needed when every API uses an identity.
+
+embedding_provider_allowed_auth_types = ["workload-identity"]
+embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
+```
+
+**Troubleshooting**
+
+- Azure OpenAI answers `401`: the identity lacks the Cognitive Services OpenAI User role (role assignments
+  can take several minutes to apply), the endpoint is a regional one, or the token scope is for another
+  resource, such as `https://management.azure.com/.default`. Use `https://cognitiveservices.azure.com/.default`,
+  the default.
+- The `ERROR` log line `SemanticCache: could not obtain an access token for the embedding provider` carries
+  the reason, such as the Microsoft Entra ID response, and the identity's client ID.
+
+**Security considerations**
+
+- **Least privilege**: grant the identity the Cognitive Services OpenAI User role on the Azure OpenAI
+  resource only, rather than on a resource group or subscription.
+- **Who configures an API chooses its identity and endpoint**: whoever creates an API with this policy
+  chooses which of the gateway's identities its embedding calls use, the token scope, and the endpoint the
+  token is sent to. Without `embedding_provider_allowed_endpoints`, they can have a token for any identity
+  the gateway can use sent to a server of their choosing, just as they can have the gateway's key sent there
+  in `api-key` mode. List the gateway's Azure OpenAI resources in `embedding_provider_allowed_endpoints`, use
+  `embedding_provider_allowed_auth_types` to keep APIs to the types you intend, and give the gateway's
+  identities only the roles its APIs need.
+- **No stored secret**: with an Azure identity, no key is stored in the gateway's configuration or sent to
+  Azure OpenAI, and the tokens are short lived.
 
 ### Jev Cache Admission
 
