@@ -56,3 +56,7 @@ blocks:
       - name: mcp-authz-validation
         features:
           - features/mcp_authz_validation.feature
+      # No gateway tag, for the same reason as mcp-authz-validation.
+      - name: mcp-authz-rules
+        features:
+          - features/mcp_authz_rules.feature
