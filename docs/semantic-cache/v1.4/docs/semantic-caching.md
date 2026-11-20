@@ -82,7 +82,8 @@ embedding_provider_dimension = 1024
 embedding_provider_api_key = "" # Optional when every API uses an Azure identity
 
 # Optional: limit what the gateway's APIs may use. Empty (the default) means no limit.
-# Shared with the semantic-prompt-guard and semantic-tool-filtering policies.
+# Meant to be shared with the semantic-prompt-guard and semantic-tool-filtering policies, but only
+# semantic-cache v1.4 reads them so far.
 embedding_provider_allowed_auth_types = []
 embedding_provider_allowed_endpoints = []
 
@@ -199,10 +200,10 @@ operationPolicies:
 - The token is fetched when the embedding is requested, before the call to Azure OpenAI. The Azure Identity
   SDK caches it and refreshes it before it expires, so most requests don't make a token request. Every
   policy on the gateway that uses the same identity shares the cache.
-- An API's route answers `500` when its policy can't be built: when its settings are invalid, when the
-  gateway doesn't allow its authentication type or endpoint, or when the gateway's host can't provide the
-  identity, for example `container-apps` without `IDENTITY_ENDPOINT`. The reason, which names the setting or
-  the missing environment variable, is in the gateway log.
+- On gateways newer than 1.2.0, an API's route answers `500` when its policy can't be built: when its
+  settings are invalid, when the gateway doesn't allow its authentication type or endpoint, or when the
+  gateway's host can't provide the identity, for example `container-apps` without `IDENTITY_ENDPOINT`. The
+  reason, which names the setting or the missing environment variable, is in the gateway log.
 - A request whose token can't be obtained is not cached: it goes to the upstream service as if the cache
   were unavailable, like any other embedding failure. The failure is logged at `ERROR`, so a broken identity
   can't quietly turn caching off. A token request the identity service refused is answered again from a
@@ -235,12 +236,14 @@ whose APIs use an Azure identity.
 - An entry with a path other than `/`, a query or a fragment, or that isn't an `http` or `https` URL, is
   invalid. So is a host with non-ASCII characters. An invalid entry in either list refuses every API that
   uses the policy, so a typo is found at the first deployment.
-- Both lists are empty by default, which places no limit. They are gateway settings and are shared with the
-  semantic-prompt-guard and semantic-tool-filtering policies, as the other `embedding_provider_*` keys are.
+- Both lists are empty by default, which places no limit. They are gateway settings, at the root like the
+  other `embedding_provider_*` keys, and are meant to be shared with the semantic-prompt-guard and
+  semantic-tool-filtering policies. Only semantic-cache v1.4 reads them so far: semantic-prompt-guard and
+  semantic-tool-filtering aren't limited by them until their Azure identity versions.
   An API cannot set them in its params: the gateway rejects such an API.
 
-A refused authentication type or endpoint makes the API's route answer `500`, with the reason in the
-gateway log.
+On gateways newer than 1.2.0, a refused authentication type or endpoint makes the API's route answer
+`500`, with the reason in the gateway log.
 
 ```toml
 embedding_provider = "AZURE_OPENAI"
@@ -257,7 +260,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
 - Azure OpenAI answers `401`: the identity lacks the Cognitive Services OpenAI User role (role assignments
   can take several minutes to apply), the endpoint is a regional one, or the token scope is for another
   resource, such as `https://management.azure.com/.default`. Use `https://cognitiveservices.azure.com/.default`,
-  the default.
+  the default. For an API that uses an Azure identity, a `401` or `403` from Azure OpenAI is logged at
+  `ERROR` as `SemanticCache: the embedding provider refused the access token`, with the status, the
+  authentication type, the identity's client ID and the scope.
 - The `ERROR` log line `SemanticCache: could not obtain an access token for the embedding provider` carries
   the reason, such as the Microsoft Entra ID response, and the identity's client ID.
 
