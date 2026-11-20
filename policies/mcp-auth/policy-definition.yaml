@@ -1,5 +1,5 @@
 name: mcp-auth
-version: v1.5.1
+version: v1.6.0
 description: |
   Secure Model Context Protocol traffic by validating bearer access tokens for MCP resources using the underlying JWT authentication runtime.
 
@@ -83,6 +83,18 @@ parameters:
       type: array
       x-wso2-policy-advanced-param: true
       description: Specify issuer names from `system.keyManagers` to publish in protected resource metadata and use for token validation; if empty, runtime uses all configured key managers.
+      default: []
+      items:
+        type: string
+
+    audiences:
+      type: array
+      x-wso2-policy-advanced-param: true
+      description: >-
+        Accepted audience (`aud`) values. When set, a token is accepted only if its `aud` claim
+        contains at least one of these values, compared exactly. Set it to the `resource` URL this
+        policy publishes in its protected resource metadata to accept only tokens issued for this
+        MCP server. If empty, the audience is not checked.
       default: []
       items:
         type: string

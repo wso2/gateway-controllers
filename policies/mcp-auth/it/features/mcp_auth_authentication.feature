@@ -422,6 +422,132 @@ Feature: mcp-auth authentication of MCP requests
       # MAN #8: issued by an issuer no key manager is configured for.
       | unconfigured issuer | 3600      | {"iss":"https://nobody.example.com"}     |
 
+  # ---- Audience ---------------------------------------------------------------------------
+
+  # mcp-auth forwards audiences to jwt-auth, so a proxy that sets it accepts only a token whose aud
+  # names one of its entries. The audience is the resource this proxy publishes in its protected
+  # resource metadata (the overlay's gatewayurl, the context, then /mcp), which is what an MCP
+  # client asks the authorization server to issue a token for (RFC 8707). Each row first sends a
+  # control token for that audience (200), so the refusal comes from the aud alone. The context
+  # shares its base with the outline above, as the mcp_auth_access.feature scenarios share theirs,
+  # so the refusal is held to the same recorded answer: a client cannot tell a token for another
+  # audience from any other token that cannot be validated.
+  Scenario Outline: A token issued for another audience is rejected (<case>)
+    Given I generate a unique resource name from "mcp-auth-audience" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-audience" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-audience" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-bad-token" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-audience" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"audiences":["https://mcp-e2e-gatewayurl.example.com:7777${CTX:mcpContext}/mcp"]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I mint a JWT token from the testbench OIDC provider expiring in 3600 seconds and store it as "goodToken" with claims:
+      """
+      {"aud":"https://mcp-e2e-gatewayurl.example.com:7777${CTX:mcpContext}/mcp"}
+      """
+    And I set header "Authorization" to "Bearer ${CTX:goodToken}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I mint a JWT token from the testbench OIDC provider expiring in 3600 seconds and store it as "badToken" with claims:
+      """
+      <claims>
+      """
+    And I set header "Authorization" to "Bearer ${CTX:badToken}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 401
+    And the response should match the expected error response "mcp-auth-invalid-token"
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: tokens issued for another audience
+      | case                 | claims                                                                      |
+      # A token issued for another MCP server.
+      | another server       | {"aud":"https://other.example.com/mcp"}                                     |
+      # A token naming no audience at all.
+      | no aud               | {}                                                                          |
+      # The audiences are compared exactly, so a trailing slash is another audience.
+      | trailing slash added | {"aud":"https://mcp-e2e-gatewayurl.example.com:7777${CTX:mcpContext}/mcp/"} |
+
+  # The counterpart: a token is accepted when one of its audiences is allowed, and, with audiences
+  # left out, whatever its audience is, exactly as before the parameter was declared. The backend
+  # records one request, which shows the call reached it.
+  Scenario Outline: A token whose audience is allowed is accepted (<case>)
+    Given I generate a unique resource name from "mcp-auth-audience-ok" and store it as "mcpName"
+    And I generate a unique value from "mcp-auth-audience-ok" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-auth-audience-ok" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-auth-audience-ok" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-auth-audience-ok" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":<params>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I mint a JWT token from the testbench OIDC provider expiring in 3600 seconds and store it as "token" with claims:
+      """
+      <claims>
+      """
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{}}}
+      """
+    Then the response status code should be 200
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the JSON response array field "requests" should have 1 item
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: allowed audiences
+      | case                  | params                                                                             | claims                                                                                                       |
+      # The token names several audiences, one of them the allowed one.
+      | aud array includes it | {"audiences":["https://mcp-e2e-gatewayurl.example.com:7777${CTX:mcpContext}/mcp"]} | {"aud":["https://other.example.com/mcp","https://mcp-e2e-gatewayurl.example.com:7777${CTX:mcpContext}/mcp"]} |
+      # Unchanged default: with audiences left out, a token for another server is still accepted.
+      | audiences left out    | {}                                                                                 | {"aud":"https://other.example.com/mcp"}                                                                      |
+
   # MAN #28 and #29: after validating a token, mcp-auth removes the inbound Authorization header,
   # and forwards the token to the backend only when forwardToken is on: under
   # x-forwarded-authorization with the scheme by default, or under a custom header without the

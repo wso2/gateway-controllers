@@ -964,11 +964,11 @@ func (p *McpAuthPolicy) authenticate(ctx context.Context, headerCtx *policy.Requ
 
 	// Params are forwarded to the delegated policy verbatim, so any parameter it
 	// already understands needs no mapping here — only an entry in this policy's
-	// definition to make it configurable, since `parameters` sets
-	// additionalProperties: false. forwardToken, forwardedTokenHeader,
-	// forwardTokenStripScheme and userIdClaim reach jwt-auth this way and keep its
-	// names, types and defaults deliberately: a divergence in either name or type
-	// would be read as absent and silently fall back to jwt-auth's default.
+	// definition, which is what makes it a supported, documented parameter.
+	// audiences, forwardToken, forwardedTokenHeader, forwardTokenStripScheme and
+	// userIdClaim reach jwt-auth this way and keep its names, types and defaults
+	// deliberately: a divergence in either name or type would be read as absent and
+	// silently fall back to jwt-auth's default.
 	//
 	// requiredScopes is the one parameter that must not be forwarded. mcp-auth
 	// advertises it through protected resource metadata without enforcing it,
