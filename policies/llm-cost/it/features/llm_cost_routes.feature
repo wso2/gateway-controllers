@@ -101,10 +101,10 @@ Feature: LLM cost on different route shapes
       """
     Then the response header "X-Testbench-Scripted" should be "true"
     And the response header "x-llm-cost" should not exist
-    # The gateway reports the provider's own AI metadata and token usage for any call. A run showed the
-    # unattached call's aiMetadata holds only model and vendor, with no llmCost, but no step can assert
-    # that a nested field is absent, so this checks the event exists and the call was untouched.
+    # The gateway reports the provider's own AI metadata (model and vendor) and token usage for any call, so
+    # the event is still there. Only llm-cost adds a cost, so its absence shows nothing priced this call.
     And the latest analytics event for path "${CTX:providerContext}/scripted/other/chat/completions" should have metadata field "aiMetadata.vendorName" with value "openai"
+    And the latest analytics event for path "${CTX:providerContext}/scripted/other/chat/completions" should not have metadata field "aiMetadata.llmCost"
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful

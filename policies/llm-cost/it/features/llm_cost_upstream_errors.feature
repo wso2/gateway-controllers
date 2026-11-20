@@ -101,6 +101,14 @@ Feature: LLM cost on upstream error responses
     Then the response status code should be 200
     And the JSON response field "received" should be 3
 
+    # Control: the same budget now refuses a call, so the earlier calls passing was not because nothing was
+    # ever deducted. The charge commits after the response, so poll until it settles. A refused call is
+    # answered by the gateway and never reaches the upstream.
+    When I send a "POST" request to "${CTX:providerContext}/scripted/err/4" until status 429 with body:
+      """
+      {"model":"gpt-4o-mini","messages":[{"role":"user","content":"Hello"}]}
+      """
+
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:providerContext}/scripted/ready" until status 404
