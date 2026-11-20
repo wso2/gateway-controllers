@@ -21,6 +21,11 @@
 # succeeded, so a hit shows the API's Azure identity authenticated that call. Each API chooses its
 # identity in azureAuth. The gateway gets its workload identity from the testbench Entra ID mock and
 # its container app's identity from the testbench Container Apps identity endpoint.
+#
+# This policy doesn't cache on gateway 1.1.0, which is why the suite's semantic-cache-policy runner
+# needs 1.2.0. So the scenarios that expect a cache hit run on 1.2.0 and later, and so do the two
+# that expect none, which mean something only beside a hit on the same gateway. The controller's
+# checks, the two outlines, run on every gateway.
 @semantic-cache-identity
 Feature: Semantic cache with the gateway's Azure identity
   As an API developer
@@ -32,7 +37,8 @@ Feature: Semantic cache with the gateway's Azure identity
     And I authenticate using basic auth as "admin"
 
   Scenario: A repeated request is a cache hit with the gateway's workload identity
-    Given I generate a unique value from "sc-wi-hit" and store it as "apiName"
+    Given the gateway version satisfies ">=1.2.0"
+    And I generate a unique value from "sc-wi-hit" and store it as "apiName"
     And I generate a unique API version from "sc-wi-hit" and store it as "apiVersion"
     And I generate a unique API context from "/sc-wi-hit" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -62,7 +68,8 @@ Feature: Semantic cache with the gateway's Azure identity
 
   # A managed identity of the container app the gateway runs in: its system-assigned identity.
   Scenario: A repeated request is a cache hit with the container app's identity
-    Given I generate a unique value from "sc-ca-hit" and store it as "apiName"
+    Given the gateway version satisfies ">=1.2.0"
+    And I generate a unique value from "sc-ca-hit" and store it as "apiName"
     And I generate a unique API version from "sc-ca-hit" and store it as "apiVersion"
     And I generate a unique API context from "/sc-ca-hit" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -93,7 +100,8 @@ Feature: Semantic cache with the gateway's Azure identity
   # A token scope the testbench Container Apps identity endpoint always refuses, so the API gets no
   # access token and no embedding. The cache fails open: requests still reach the upstream, uncached.
   Scenario: Without an access token, requests go through uncached
-    Given I generate a unique value from "sc-noid" and store it as "apiName"
+    Given the gateway version satisfies ">=1.2.0"
+    And I generate a unique value from "sc-noid" and store it as "apiName"
     And I generate a unique API version from "sc-noid" and store it as "apiVersion"
     And I generate a unique API context from "/sc-noid" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -126,7 +134,8 @@ Feature: Semantic cache with the gateway's Azure identity
   # An API without azureAuth sends an API key. On a gateway with no key it brings its own, and it can
   # point at a deployment of its own too.
   Scenario: An API can still use its own endpoint and key
-    Given I generate a unique value from "sc-own-key" and store it as "apiName"
+    Given the gateway version satisfies ">=1.2.0"
+    And I generate a unique value from "sc-own-key" and store it as "apiName"
     And I generate a unique API version from "sc-own-key" and store it as "apiVersion"
     And I generate a unique API context from "/sc-own-key" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -156,7 +165,8 @@ Feature: Semantic cache with the gateway's Azure identity
 
   # The testbench deployment refuses a key it didn't issue, so the API gets no embedding.
   Scenario: A wrong key leaves requests uncached
-    Given I generate a unique value from "sc-wrong-key" and store it as "apiName"
+    Given the gateway version satisfies ">=1.2.0"
+    And I generate a unique value from "sc-wrong-key" and store it as "apiName"
     And I generate a unique API version from "sc-wrong-key" and store it as "apiVersion"
     And I generate a unique API context from "/sc-wrong-key" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
