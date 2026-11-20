@@ -46,3 +46,16 @@ blocks:
       - name: semantic-prompt-guard
         features:
           - features/semantic_prompt_guard.feature
+
+  # A gateway with no API key, so a guardrail verdict shows the API's Azure identity authenticated
+  # both the phrase embeddings, made when the route is built, and the prompt's.
+  - name: semantic-prompt-guard-identity
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/identity.toml
+      - name: testbench
+    runners:
+      - name: semantic-prompt-guard-identity
+        features:
+          - features/semantic_prompt_guard_identity.feature
