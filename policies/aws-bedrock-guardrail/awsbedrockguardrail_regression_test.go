@@ -1695,3 +1695,50 @@ func TestRegression_RedactionFailureIsAMediationFault(t *testing.T) {
 		t.Errorf("streamed: want a mediation fault, got %+v", term)
 	}
 }
+
+// ─── response redactPII ──────────────────────────────────────────────────────
+
+// response.redactPII redacts the response, not only the request: PII the
+// guardrail anonymizes in a buffered, streamed or buffered-SSE response becomes
+// "*****", and request placeholders are left as they are. It is parsed from the
+// response block, and request.redactPII turns it on as well.
+func TestRegression_ResponseRedactPIIRedactsTheResponse(t *testing.T) {
+	for name, params := range map[string]map[string]interface{}{
+		"response.redactPII": paramsWith(map[string]interface{}{
+			"request":  nil,
+			"response": map[string]interface{}{"enabled": true, "redactPII": true},
+		}),
+		"request.redactPII": paramsWith(map[string]interface{}{
+			"request":  map[string]interface{}{"enabled": true, "redactPII": true},
+			"response": map[string]interface{}{"enabled": true},
+		}),
+	} {
+		p := mustGetPolicy(t, params)
+		if !p.responseParams.RedactPII {
+			t.Fatalf("%s: response redaction must be on", name)
+		}
+		p.loadAWSConfigFunc = func(_ context.Context, _ string) (aws.Config, error) { return aws.Config{}, nil }
+		p.newBedrockClientFunc = func(_ aws.Config) bedrockGuardrailClient {
+			return &reportsEntityClient{"bob@corp.com", types.GuardrailPiiEntityTypeEmail}
+		}
+
+		md := map[string]interface{}{MetadataKeyPIIEntities: map[string]string{"me@x.com": "EMAIL_0000"}}
+		mods := p.OnResponseBody(context.Background(), bufferedResponse(md, "application/json",
+			`{"choices":[{"message":{"content":"From EMAIL_0000: mail bob@corp.com"}}]}`), nil).(policy.DownstreamResponseModifications)
+		got := string(mods.Body)
+		if mods.StatusCode != nil || strings.Contains(got, "bob@corp.com") || !strings.Contains(got, "mail *****") || !strings.Contains(got, "EMAIL_0000") {
+			t.Errorf("%s buffered: want the email redacted and the placeholder left, got status=%v %s", name, mods.StatusCode, got)
+		}
+
+		stream := sseEvent("Mail bob@corp.com today.") + "data: [DONE]\n\n"
+		out, terminated := driveStream(p, streamCtxWithType("text/event-stream"), []string{stream, ""})
+		if terminated || strings.Contains(out, "bob@corp.com") || !strings.Contains(out, "*****") {
+			t.Errorf("%s streamed: want the email redacted, got terminated=%v %q", name, terminated, out)
+		}
+
+		mods = p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", stream), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode != nil || strings.Contains(string(mods.Body), "bob@corp.com") || !strings.Contains(string(mods.Body), "*****") {
+			t.Errorf("%s buffered SSE: want the email redacted, got status=%v %s", name, mods.StatusCode, mods.Body)
+		}
+	}
+}

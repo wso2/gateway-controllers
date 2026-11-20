@@ -225,6 +225,15 @@ parameters:
             "$.result.content[*].text". Empty validates the whole payload. Streamed LLM
             responses use streamingJsonPath instead.
           default: "$.choices[0].message.content"
+        redactPII:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            If true, PII the guardrail anonymizes in the response is replaced with "*****",
+            and request placeholders are not restored. If false (default), it is replaced
+            with its type, such as {EMAIL}, and request placeholders are restored.
+            Always true when request.redactPII is true.
+          default: false
         passthroughOnError:
           type: boolean
           x-wso2-policy-advanced-param: true
