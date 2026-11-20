@@ -1617,3 +1617,81 @@ func TestRegression_EventBoundariesAcceptEveryLineTerminator(t *testing.T) {
 		}
 	}
 }
+
+// ─── eighth review round ─────────────────────────────────────────────────────
+
+// An MCP tool result whose items differ in shape is assessed whole under
+// $.result.content[*].text: an embedded resource's text and structuredContent
+// are read too, rather than passing beside the text items. An image item has no
+// text to read and does not make the result an error.
+func TestRegression_MixedMCPToolResultIsAssessedWhole(t *testing.T) {
+	params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = "$.result.content[*].text" }
+	mixed := `{"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"ok"},` +
+		`{"type":"resource","resource":{"uri":"x","text":"SSN 123-45-6789"}}],"structuredContent":{"ssn":"987-65-4321"}}}`
+	for contentType, body := range map[string]string{"application/json": mixed, "text/event-stream": "data: " + mixed + "\n\n"} {
+		client := &blockOnClient{needle: "NEVER"}
+		streamingPolicy(client, params).OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, contentType, body), nil)
+		joined := strings.Join(client.texts, "|")
+		for _, want := range []string{"ok", "SSN 123-45-6789", "987-65-4321"} {
+			if !strings.Contains(joined, want) {
+				t.Errorf("%s: %q was not assessed, got %q", contentType, want, client.texts)
+			}
+		}
+	}
+
+	// A value masked in a resource item is written back there.
+	withEmail := `{"jsonrpc":"2.0","id":5,"result":{"content":[{"type":"text","text":"see below"},` +
+		`{"type":"resource","resource":{"uri":"x","text":"mail bob@corp.com"}}]}}`
+	mods := streamingPolicy(&reportsEntityClient{"bob@corp.com", types.GuardrailPiiEntityTypeEmail}, params).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "application/json", withEmail), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode != nil || strings.Contains(string(mods.Body), "bob@corp.com") || !strings.Contains(string(mods.Body), "{EMAIL}") {
+		t.Errorf("want the resource's email masked in place, got status=%v %s", mods.StatusCode, mods.Body)
+	}
+
+	image := `{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"a chart"},{"type":"image","data":"iVBORw0KGgo=","mimeType":"image/png"}]}}`
+	client := &blockOnClient{needle: "NEVER"}
+	mods = streamingPolicy(client, params).OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "application/json", image), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode != nil || strings.Contains(strings.Join(client.texts, "|"), "iVBOR") {
+		t.Errorf("an image item must neither fail the result nor be assessed, got status=%v assessed=%q", mods.StatusCode, client.texts)
+	}
+}
+
+// OpenAI log probabilities repeat the tokens of the text the path reads, so a
+// stream that carries them is assessed and delivered, not refused as output the
+// path does not read.
+func TestRegression_StreamWithLogprobsIsNotRefused(t *testing.T) {
+	body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hi\"},\"logprobs\":{\"content\":[{\"token\":\"Hi\",\"logprob\":-0.1,\"bytes\":[72,105],\"top_logprobs\":[]}],\"refusal\":null}}]}\n\ndata: [DONE]\n\n"
+	client := &blockOnClient{needle: "NEVER"}
+	got, terminated := driveStream(streamingPolicy(client, nil), streamCtxWithType("text/event-stream"), []string{body, ""})
+	if terminated || got != body || len(client.texts) == 0 {
+		t.Errorf("want it assessed and delivered, got terminated=%v assessed=%q %q", terminated, client.texts, got)
+	}
+}
+
+// A reported value this policy could not mask ends the stream as a mediation
+// fault: masking is not a block, and the failure is the policy's own. A value its
+// own replacement contains ("EMAIL" in "{EMAIL}") survives the rewrite every
+// time, which makes the failure deterministic here.
+func TestRegression_RedactionFailureIsAMediationFault(t *testing.T) {
+	body := sseEvent("Write to the EMAIL desk.") + "data: [DONE]\n\n"
+	client := func() bedrockGuardrailClient { return &reportsEntityClient{"EMAIL", types.GuardrailPiiEntityTypeEmail} }
+
+	mods := streamingPolicy(client(), nil).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", body), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode == nil || mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed || mods.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("buffered: want a mediation fault, got status=%v fault=%+v", mods.StatusCode, mods.Fault)
+	}
+
+	p := streamingPolicy(client(), nil)
+	rc := streamCtxWithType("text/event-stream")
+	var term *policy.TerminateResponseChunk
+	for i, f := range []string{body, ""} {
+		if a, ok := p.OnResponseBodyChunk(context.Background(), rc, &policy.StreamBody{Chunk: []byte(f), EndOfStream: i == 1}, nil).(policy.TerminateResponseChunk); ok {
+			term = &a
+			break
+		}
+	}
+	if term == nil || !term.IsFault || term.Fault == nil || term.Fault.Code != policy.FaultCodeMediationFailed || term.Fault.Type != policy.FaultTypeMediation {
+		t.Errorf("streamed: want a mediation fault, got %+v", term)
+	}
+}

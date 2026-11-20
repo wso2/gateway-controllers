@@ -65,17 +65,46 @@ func guardrailCodeFor(output interface{}) string {
 	if !ok || typed == nil {
 		return policy.GuardrailCodeUnsafeContent
 	}
-	for _, a := range typed.Assessments {
-		if a.SensitiveInformationPolicy != nil &&
-			(len(a.SensitiveInformationPolicy.PiiEntities) > 0 || len(a.SensitiveInformationPolicy.Regexes) > 0) {
-			return policy.GuardrailCodePII
+	// What blocked the content decides the code: a prompt attack blocked beside an
+	// email the guardrail only anonymized is a prompt attack. Findings without an
+	// action, or whose action is not BLOCKED, are only consulted when nothing
+	// blocked, in the order they always were.
+	if code := guardrailCodeMatching(typed.Assessments, true); code != "" {
+		return code
+	}
+	if code := guardrailCodeMatching(typed.Assessments, false); code != "" {
+		return code
+	}
+	return policy.GuardrailCodeUnsafeContent
+}
+
+// guardrailCodeMatching returns the code for the first finding, by category, in
+// the assessments -- PII, then content filters, words and denied topics -- or ""
+// for none. blockedOnly considers only findings whose action is BLOCKED.
+func guardrailCodeMatching(assessments []types.GuardrailAssessment, blockedOnly bool) string {
+	counts := func(action string) bool { return !blockedOnly || action == "BLOCKED" }
+	for _, a := range assessments {
+		if sip := a.SensitiveInformationPolicy; sip != nil {
+			for _, e := range sip.PiiEntities {
+				if counts(string(e.Action)) {
+					return policy.GuardrailCodePII
+				}
+			}
+			for _, r := range sip.Regexes {
+				if counts(string(r.Action)) {
+					return policy.GuardrailCodePII
+				}
+			}
 		}
 	}
-	for _, a := range typed.Assessments {
+	for _, a := range assessments {
 		if a.ContentPolicy == nil {
 			continue
 		}
 		for _, f := range a.ContentPolicy.Filters {
+			if !counts(string(f.Action)) {
+				continue
+			}
 			switch f.Type {
 			case types.GuardrailContentFilterTypeHate:
 				return policy.GuardrailCodeHate
@@ -92,20 +121,32 @@ func guardrailCodeFor(output interface{}) string {
 			}
 		}
 	}
-	for _, a := range typed.Assessments {
-		if a.WordPolicy != nil &&
-			(len(a.WordPolicy.CustomWords) > 0 || len(a.WordPolicy.ManagedWordLists) > 0) {
-			return policy.GuardrailCodeProfanity
+	for _, a := range assessments {
+		if wp := a.WordPolicy; wp != nil {
+			for _, w := range wp.CustomWords {
+				if counts(string(w.Action)) {
+					return policy.GuardrailCodeProfanity
+				}
+			}
+			for _, w := range wp.ManagedWordLists {
+				if counts(string(w.Action)) {
+					return policy.GuardrailCodeProfanity
+				}
+			}
 		}
 	}
-	for _, a := range typed.Assessments {
+	for _, a := range assessments {
 		// A denied topic is what the content MEANT, measured against the operator's own
-		// configured policy — the intent group rather than the content-safety one.
-		if a.TopicPolicy != nil && len(a.TopicPolicy.Topics) > 0 {
-			return policy.GuardrailCodeSemanticMatch
+		// configured policy -- the intent group rather than the content-safety one.
+		if tp := a.TopicPolicy; tp != nil {
+			for _, t := range tp.Topics {
+				if counts(string(t.Action)) {
+					return policy.GuardrailCodeSemanticMatch
+				}
+			}
 		}
 	}
-	return policy.GuardrailCodeUnsafeContent
+	return ""
 }
 
 // guardrailName identifies this guardrail in GuardrailDetails.InterveningGuardrail.
@@ -2882,10 +2923,10 @@ func (p *AWSBedrockGuardrailPolicy) rewriteHeld(
 				nil, rp.ShowAssessment, output),
 			AnalyticsMetadata: guardrailHitAnalytics(),
 			IsFault:           true,
-			// The guardrail did report a finding; what failed is delivering it
-			// redacted, so this stays a guardrail fault rather than a mediation one.
-			Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
-				nil, true, rp.ShowAssessment, output),
+			// The guardrail asked for the value to be masked, which is not a block;
+			// what failed is this policy delivering it masked, so it is a mediation
+			// fault rather than a guardrail violation.
+			Fault: checkFailureFault("Sensitive content could not be redacted in a streamed response", true),
 		}
 	}
 	if changed {
@@ -2978,8 +3019,7 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 					nil, rp.ShowAssessment, decision),
 				AnalyticsMetadata: guardrailHitAnalytics(),
 				IsFault:           true,
-				Fault: p.buildGuardrailErrorResponse("Sensitive content could not be redacted in a streamed response",
-					nil, true, rp.ShowAssessment, decision),
+				Fault:             checkFailureFault("Sensitive content could not be redacted in a streamed response", true),
 			}
 		}
 	}
@@ -3912,6 +3952,13 @@ var streamedOutputKeys = map[string]bool{
 	"partial_json":      true,
 }
 
+// streamedMetadataKeys name members whose strings describe output rather than
+// carry it, so nothing beneath them counts as output: log probabilities repeat
+// the tokens of the text the path reads (logprobs.content[].token).
+var streamedMetadataKeys = map[string]bool{
+	"logprobs": true,
+}
+
 // missedStreamedOutput reports whether a data line of s carries model output that
 // streamingJsonPath does not read, so it would be delivered unassessed: a
 // tool-call delta beside or instead of delta.content, a legacy completion's
@@ -3980,7 +4027,7 @@ func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
 			return carriesStreamedOutput(node, output) // another shape: the path reads nothing
 		}
 		for key, child := range object {
-			if key != token.key && carriesStreamedOutput(child, output || streamedOutputKeys[key]) {
+			if key != token.key && !streamedMetadataKeys[key] && carriesStreamedOutput(child, output || streamedOutputKeys[key]) {
 				return true
 			}
 		}
@@ -4020,7 +4067,7 @@ func carriesStreamedOutput(v interface{}, output bool) bool {
 		return output && strings.TrimSpace(node) != ""
 	case map[string]interface{}:
 		for key, child := range node {
-			if carriesStreamedOutput(child, output || streamedOutputKeys[key]) {
+			if !streamedMetadataKeys[key] && carriesStreamedOutput(child, output || streamedOutputKeys[key]) {
 				return true
 			}
 		}
@@ -4517,8 +4564,9 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 	rewritten, _, leaked := p.redactedFlush(string(payload), output, params, metadata)
 	if leaked {
 		slog.Debug("AWSBedrockGuardrail: redaction could not be applied across events")
-		return p.buildErrorResponse("Sensitive content could not be redacted in a streamed response",
-			nil, true, params.ShowAssessment, output)
+		return withFault(p.buildErrorResponse("Sensitive content could not be redacted in a streamed response",
+			nil, true, params.ShowAssessment, output),
+			checkFailureFault("Sensitive content could not be redacted in a streamed response", true))
 	}
 	return noModification(true, []byte(rewritten))
 }

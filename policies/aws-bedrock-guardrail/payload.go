@@ -99,6 +99,9 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 		if err != nil {
 			return nil, fmt.Errorf("%w (jsonPath %q)", err, jsonPath)
 		}
+		if isJSONRPCMessage(doc) {
+			segments = withStructuredContent(root, tokens, segments, nil)
+		}
 		return &extractedPayload{
 			segments: segments,
 			rebuild:  func() ([]byte, error) { return encodeJSON(*root) },
@@ -111,6 +114,32 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 
 	return nil, fmt.Errorf("payload is neither JSON nor a Server-Sent Events stream: %w", jsonErr)
 }
+
+// withStructuredContent adds the text of an MCP tool result's structuredContent
+// to segments when jsonPath reads the result but not that member: it is the same
+// result in another form, and would otherwise reach the client unassessed.
+func withStructuredContent(root *interface{}, tokens []pathToken, segments []*textSegment, onChange func()) []*textSegment {
+	if len(tokens) == 0 || tokens[0].kind != tokenKey || tokens[0].key != "result" {
+		return segments
+	}
+	if len(tokens) > 1 && tokens[1].kind == tokenKey && tokens[1].key == structuredContentMember {
+		return segments
+	}
+	message, _ := (*root).(map[string]interface{})
+	result, _ := message["result"].(map[string]interface{})
+	if _, has := result[structuredContentMember]; !has {
+		return segments
+	}
+	extra, err := resolveTextSegments(root, structuredContentPath, onChange)
+	if err != nil {
+		return segments // no text in it
+	}
+	return append(segments, extra...)
+}
+
+const structuredContentMember = "structuredContent"
+
+var structuredContentPath = mustParseJSONPath("$.result.structuredContent")
 
 // errNoValue is returned when jsonPath matches nothing in a document.
 var errNoValue = errors.New("no value found at jsonPath")
@@ -366,6 +395,9 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 			continue
 		}
 		matched = true
+		if isRPC {
+			eventSegments = withStructuredContent(&event.doc, tokens, eventSegments, func() { ev.dirty = true })
+		}
 		segments = append(segments, eventSegments...)
 	}
 	var missed error
@@ -545,6 +577,29 @@ func parseJSONPath(path string) ([]pathToken, error) {
 type slot struct {
 	get func() interface{}
 	set func(interface{})
+	// fromWildcard marks an element a wildcard selected, whose shape may differ
+	// from its siblings' (see resolveTextSegments).
+	fromWildcard bool
+}
+
+// descendantSlots returns the members named key anywhere beneath node.
+func descendantSlots(node interface{}, key string) []slot {
+	var found []slot
+	switch v := node.(type) {
+	case map[string]interface{}:
+		for _, k := range sortedKeys(v) {
+			if k == key {
+				found = append(found, mapSlot(v, k))
+				continue
+			}
+			found = append(found, descendantSlots(v[k], key)...)
+		}
+	case []interface{}:
+		for i := range v {
+			found = append(found, descendantSlots(v[i], key)...)
+		}
+	}
+	return found
 }
 
 func mapSlot(m map[string]interface{}, key string) slot {
@@ -589,10 +644,19 @@ func resolveTextSegments(root *interface{}, tokens []pathToken, onChange func())
 				case tokenKey:
 					if _, ok := node[token.key]; ok {
 						next = append(next, mapSlot(node, token.key))
+					} else if s.fromWildcard {
+						// An element of another shape than its siblings, such as an MCP
+						// resource item ({"resource":{"text":...}}) beside text items
+						// under $.result.content[*].text: its members of that name,
+						// however deep, are read too, rather than its text passing
+						// unassessed. An element with none (an image) has no such text.
+						next = append(next, descendantSlots(node, token.key)...)
 					}
 				case tokenWildcard:
 					for _, k := range sortedKeys(node) {
-						next = append(next, mapSlot(node, k))
+						sl := mapSlot(node, k)
+						sl.fromWildcard = true
+						next = append(next, sl)
 					}
 				}
 			case []interface{}:
@@ -607,7 +671,9 @@ func resolveTextSegments(root *interface{}, tokens []pathToken, onChange func())
 					}
 				case tokenWildcard:
 					for i := range node {
-						next = append(next, arraySlot(node, i))
+						sl := arraySlot(node, i)
+						sl.fromWildcard = true
+						next = append(next, sl)
 					}
 				}
 			}
