@@ -33,7 +33,7 @@ defaults:
     platform-gateway:
       db: sqlite
       dbCompatibility:
-        sqlserver: "gateway-version>=1.2.0"
+        sqlserver: "gateway-version>1.2.0"
   timeouts:
     boot: 5m
     propagation: 60s
@@ -80,6 +80,14 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/llm_cost_routes.feature
+      - name: llm-cost-upstream-errors
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/llm_cost_upstream_errors.feature
+      - name: llm-cost-bedrock-transformer
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/llm_cost_bedrock_transformer.feature
       - name: llm-cost-logging
         tags: "gateway-version>1.2.0"
         features:
