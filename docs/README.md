@@ -41,7 +41,7 @@ All available policies, sorted alphabetically.
 | [Content Length Guardrail](./content-length-guardrail/v1.1/docs/content-length.md) | Guardrails, AI | Validates the byte length of request or response body content. |
 | [CORS](./cors/v1.0/docs/cors.md) | Security, AI, MCP | Cross-Origin Resource Sharing (CORS) policy that handles preflight requests and adds appropriate CORS headers to responses. |
 | [Cost-Based Model Routing](./cost-based-model-routing/v0.11/docs/cost-based-model-routing.md) | AI | Budgets exact, pattern-matched, and unlisted requested models, then uses the fallback model's own budget or rejects with HTTP 429 without looping. |
-| [Dynamic Endpoint](./dynamic-endpoint/v1.0/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition at request time. |
+| [Dynamic Endpoint](./dynamic-endpoint/v1.1/docs/dynamic-endpoint.md) | Transformation | Routes requests to a named upstream definition or gateway-wide Backend, or to the Backend a CEL expression names from the request context. |
 | [Error Response Formatter](./error-response-formatter/v1.0/docs/error-response-formatter.md) | Transformation | Renders a gateway-generated error into an operator-defined shape, and sets the headers that go with it. |
 | [Granite Guardian Prompt Injection](./granite-guardian-prompt-injection/v0.10/docs/granite-guardian-prompt-injection.md) | Guardrails, AI | Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B. |
 | [Host Rewrite](./host-rewrite/v1.1/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
