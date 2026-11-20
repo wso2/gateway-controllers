@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -33,6 +34,17 @@ import (
 type textSegment struct {
 	value string
 	set   func(string)
+	// loc is where the value sits in the decoded document; the zero value for
+	// a segment that is not a member or element (the whole payload).
+	loc slotLocation
+}
+
+// slotLocation identifies a member or array element of a decoded document: the
+// map or array holding it, and its key or index.
+type slotLocation struct {
+	container uintptr
+	key       string
+	index     int
 }
 
 // extractedPayload holds the text segments found in a payload and rebuilds the
@@ -89,7 +101,7 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 		root := &doc
 		segments, err := resolveTextSegments(root, tokens, nil)
 		if isJSONRPCMessage(doc) && (err == nil || errors.Is(err, errNoValue)) {
-			if extra := structuredContentSegments(root, tokens, nil); len(extra) > 0 {
+			if extra := structuredContentSegments(root, tokens, segments, nil); len(extra) > 0 {
 				if err != nil {
 					segments, err = nil, nil // the result's text is all in structuredContent
 				}
@@ -121,20 +133,25 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 }
 
 // structuredContentSegments returns the text of an MCP tool result's
-// structuredContent when jsonPath reads the result but not that member: it is
-// the same result in another form, and would otherwise reach the client
-// unassessed. It is assessed even when jsonPath matches nothing, as for a tool
-// result whose content list is empty. A path that already covers the member
-// (the whole result, or every member of it) gets nothing, so no text is
-// assessed twice.
-func structuredContentSegments(root *interface{}, tokens []pathToken, onChange func()) []*textSegment {
-	if len(tokens) == 0 || tokens[0].kind != tokenKey || tokens[0].key != "result" {
+// structuredContent that the primary selection does not already hold, when
+// jsonPath reads the result: it is the same result in another form, and would
+// otherwise reach the client unassessed. It is assessed even when jsonPath
+// matches nothing, as for a tool result whose content list is empty. A path
+// whose first member is a wildcard reads the result too. Values the primary
+// selection already holds are left out by location, not by text, so equal text
+// in two fields is still assessed in both, and none is assessed twice. A path
+// into structuredContent itself is the operator's own choice of what to read.
+func structuredContentSegments(root *interface{}, tokens []pathToken, primary []*textSegment, onChange func()) []*textSegment {
+	if len(tokens) == 0 {
 		return nil
 	}
-	if len(tokens) == 1 || (len(tokens) == 2 && tokens[1].kind == tokenWildcard) {
-		return nil // the selection already holds structuredContent
+	switch {
+	case tokens[0].kind == tokenKey && tokens[0].key == "result":
+	case tokens[0].kind == tokenWildcard:
+	default:
+		return nil
 	}
-	if tokens[1].kind == tokenKey && tokens[1].key == structuredContentMember {
+	if len(tokens) > 1 && tokens[1].kind == tokenKey && tokens[1].key == structuredContentMember {
 		return nil
 	}
 	message, _ := (*root).(map[string]interface{})
@@ -146,7 +163,19 @@ func structuredContentSegments(root *interface{}, tokens []pathToken, onChange f
 	if err != nil {
 		return nil // no text in it
 	}
-	return extra
+	covered := make(map[slotLocation]bool, len(primary))
+	for _, segment := range primary {
+		if segment.loc != (slotLocation{}) {
+			covered[segment.loc] = true
+		}
+	}
+	var missing []*textSegment
+	for _, segment := range extra {
+		if !covered[segment.loc] {
+			missing = append(missing, segment)
+		}
+	}
+	return missing
 }
 
 const structuredContentMember = "structuredContent"
@@ -386,7 +415,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		ev := event
 		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
 		if isRPC && (err == nil || errors.Is(err, errNoValue)) {
-			if extra := structuredContentSegments(&event.doc, tokens, func() { ev.dirty = true }); len(extra) > 0 {
+			if extra := structuredContentSegments(&event.doc, tokens, eventSegments, func() { ev.dirty = true }); len(extra) > 0 {
 				if err != nil {
 					eventSegments, err = nil, nil
 				}
@@ -597,6 +626,7 @@ type slot struct {
 	// fromWildcard marks an element a wildcard selected, whose shape may differ
 	// from its siblings' (see resolveTextSegments).
 	fromWildcard bool
+	loc          slotLocation
 }
 
 // descendantSlots returns the members named key anywhere beneath node.
@@ -623,6 +653,7 @@ func mapSlot(m map[string]interface{}, key string) slot {
 	return slot{
 		get: func() interface{} { return m[key] },
 		set: func(v interface{}) { m[key] = v },
+		loc: slotLocation{container: reflect.ValueOf(m).Pointer(), key: key, index: -1},
 	}
 }
 
@@ -630,6 +661,7 @@ func arraySlot(arr []interface{}, index int) slot {
 	return slot{
 		get: func() interface{} { return arr[index] },
 		set: func(v interface{}) { arr[index] = v },
+		loc: slotLocation{container: reflect.ValueOf(arr).Pointer(), index: index},
 	}
 }
 
@@ -706,6 +738,7 @@ func resolveTextSegments(root *interface{}, tokens []pathToken, onChange func())
 	newSegment := func(value string, s slot) {
 		segments = append(segments, &textSegment{
 			value: value,
+			loc:   s.loc,
 			set: func(v string) {
 				s.set(v)
 				if onChange != nil {

@@ -1493,10 +1493,15 @@ func TestRegression_OffPathCheckIgnoresTheUnfinishedLastLine(t *testing.T) {
 // of text that reached Bedrock.
 func TestRegression_OffPathOutputIsRefusedWhateverTheShape(t *testing.T) {
 	const offPath = "OFFPATH"
-	for name, tc := range map[string]struct{ path, body string }{
-		"wildcard path":                      {"$.choices[*].delta.content", sseEvent(offPath)},
-		"later event without choices":        {ResponseDefaultStreamingJSONPath, sseEvent("Hello.") + "data: {\"type\":\"note\",\"text\":\"" + offPath + "\"}\n\n"},
-		"string where an object is expected": {"$.delta.content.text", "data: {\"delta\":{\"content\":\"" + offPath + "\"}}\n\n"},
+	for name, tc := range map[string]struct {
+		path, body string
+		onPathText bool // whether the stream also carries text the path reads
+	}{
+		// A wildcard is rejected when the policy loads; the parameters are set
+		// directly here to check the refusal behind that.
+		"wildcard path":                      {"$.choices[*].delta.content", sseEvent(offPath), false},
+		"later event without choices":        {ResponseDefaultStreamingJSONPath, sseEvent("Hello.") + "data: {\"type\":\"note\",\"text\":\"" + offPath + "\"}\n\n", true},
+		"string where an object is expected": {"$.delta.content.text", "data: {\"delta\":{\"content\":\"" + offPath + "\"}}\n\n", false},
 	} {
 		params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.StreamingJsonPath = tc.path }
 		assessedOffPath := func(c *blockOnClient) bool {
@@ -1528,9 +1533,14 @@ func TestRegression_OffPathOutputIsRefusedWhateverTheShape(t *testing.T) {
 			t.Errorf("streamed %s: want the stream ended, got %q", name, out.String())
 		case !term.IsFault || term.Fault == nil || term.Fault.Code != policy.FaultCodeMediationFailed:
 			t.Errorf("streamed %s: want a %s fault, got %+v", name, policy.FaultCodeMediationFailed, term.Fault)
+		case strings.Contains(string(term.Body), offPath):
+			t.Errorf("streamed %s: the termination body carries the off-path text: %q", name, term.Body)
 		}
 		if strings.Contains(out.String(), offPath) || assessedOffPath(streamed) {
 			t.Errorf("streamed %s: off-path text was delivered or sent to Bedrock (calls %q)", name, streamed.texts)
+		}
+		if !tc.onPathText && len(streamed.texts) != 0 {
+			t.Errorf("streamed %s: want no Bedrock call, got %q", name, streamed.texts)
 		}
 
 		buffered := &blockOnClient{needle: "NEVER"}
@@ -1539,8 +1549,11 @@ func TestRegression_OffPathOutputIsRefusedWhateverTheShape(t *testing.T) {
 		if mods.StatusCode == nil || mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed {
 			t.Errorf("buffered %s: want a %s fault, got status=%v fault=%+v", name, policy.FaultCodeMediationFailed, mods.StatusCode, mods.Fault)
 		}
-		if assessedOffPath(buffered) {
-			t.Errorf("buffered %s: off-path text was sent to Bedrock (calls %q)", name, buffered.texts)
+		if assessedOffPath(buffered) || strings.Contains(string(mods.Body), offPath) {
+			t.Errorf("buffered %s: off-path text was sent to Bedrock or returned (calls %q, body %q)", name, buffered.texts, mods.Body)
+		}
+		if !tc.onPathText && len(buffered.texts) != 0 {
+			t.Errorf("buffered %s: want no Bedrock call, got %q", name, buffered.texts)
 		}
 	}
 }
@@ -1793,6 +1806,9 @@ func TestRegression_StreamingPathTheSDKCannotReadIsRejected(t *testing.T) {
 		"$.choices[0][0].delta.content",
 		"$..content",
 		"$",
+		"$.*.delta.content",
+		"*.content",
+		"$.choices.*.text",
 	} {
 		if _, err := parseRequestResponseParams(map[string]interface{}{"streamingJsonPath": path}, true); err == nil {
 			t.Errorf("%q: want a configuration error", path)
@@ -1802,7 +1818,6 @@ func TestRegression_StreamingPathTheSDKCannotReadIsRejected(t *testing.T) {
 		ResponseDefaultStreamingJSONPath,
 		"$.delta.text",
 		"choices[-1].delta.content",
-		"$.choices.*.text",
 		"$.content_block.partial-json",
 	} {
 		if _, err := parseRequestResponseParams(map[string]interface{}{"streamingJsonPath": path}, true); err != nil {
@@ -1851,11 +1866,13 @@ func TestRegression_StructuredContentIsAssessedWhenContentIsEmpty(t *testing.T) 
 	}
 }
 
-// A path that already selects structuredContent (the whole result, or every
-// member of it) does not have it assessed a second time.
+// structuredContent is assessed exactly once whatever the path: a path that
+// already selects it (the whole result, every member of it, or one of its
+// members through a wildcard) does not have that text assessed again, and a path
+// that reaches the result through a root wildcard still has it assessed.
 func TestRegression_StructuredContentIsNotAssessedTwice(t *testing.T) {
 	body := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello"}],"structuredContent":{"msg":"structured"}}}`
-	for _, path := range []string{"$.result", "$.result.*", "$.result.content[*].text"} {
+	for _, path := range []string{"$.result", "$.result.*", "$.result.*.msg", "$.*.content[*].text", "$.result.content[*].text"} {
 		c := &blockOnClient{needle: "NEVER"}
 		params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = path }
 		streamingPolicy(c, params).OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "application/json", body), nil)
@@ -1868,5 +1885,46 @@ func TestRegression_StructuredContentIsNotAssessedTwice(t *testing.T) {
 		if n != 1 {
 			t.Errorf("%s: want structuredContent assessed once, got calls %q", path, c.texts)
 		}
+	}
+}
+
+// ─── tenth review round ──────────────────────────────────────────────────────
+
+// An unlabelled token stream whose first flush is only a keep-alive (or another
+// field without "data:") is not read as one body: the opening is withheld until
+// a flush decides, then handed to the token reader with it, so text is
+// assessed and released as it streams and every byte reaches the client in
+// order.
+func TestRegression_KeepAliveOpenerDoesNotDecideTheStreamFormat(t *testing.T) {
+	for _, opener := range []string{": keep-alive\n\n", "event: ping\n\n", "id: 1\nretry: 100\n\n"} {
+		events := sseEvent("Hello there. ") + sseEvent("More text.")
+		client := &blockOnClient{needle: "NEVER"}
+		p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) { pp.StreamingTextUnitChars = 0 })
+		rc := streamCtxWithType("")
+		first := p.OnResponseBodyChunk(context.Background(), rc, &policy.StreamBody{Chunk: []byte(opener), Index: 0}, nil)
+		if f, ok := first.(policy.ForwardResponseChunk); !ok || f.Body == nil || len(f.Body) != 0 {
+			t.Errorf("%q: want the opener withheld, got %#v", opener, first)
+		}
+		if sse, ok := rc.Metadata[p.stateKey(metaKeySSEStream)].(bool); ok {
+			t.Errorf("%q: the opener alone classified the stream as sse=%v", opener, sse)
+		}
+		got, terminated := driveStream(p, rc, []string{events, ""})
+		if terminated || got != opener+events {
+			t.Errorf("%q: want every byte delivered in order, got terminated=%v %q", opener, terminated, got)
+		}
+		if sse, _ := rc.Metadata[p.stateKey(metaKeySSEStream)].(bool); !sse {
+			t.Errorf("%q: want the stream read as an event stream", opener)
+		}
+		if len(client.texts) == 0 {
+			t.Errorf("%q: want the text assessed", opener)
+		}
+	}
+
+	// Plain text that merely opens like a comment is still one body.
+	p := streamingPolicy(&blockOnClient{needle: "NEVER"}, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = "" })
+	rc := streamCtxWithType("text/plain")
+	got, terminated := driveStream(p, rc, []string{":) hello\n", "world\n", ""})
+	if terminated || got != ":) hello\nworld\n" {
+		t.Errorf("plain text: want it delivered whole, got terminated=%v %q", terminated, got)
 	}
 }

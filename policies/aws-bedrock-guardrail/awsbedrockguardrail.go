@@ -241,6 +241,13 @@ const (
 	// non-SSE body and the accumulated text assessed as if it were one.
 	metaKeySSEStream streamStateKey = "awsbedrockguardrail:stream_is_sse"
 
+	// metaKeyClassifyWait holds the opening flushes of a stream that is not
+	// labelled text/event-stream and that so far carries only SSE fields other
+	// than "data:" (a keep-alive comment, "event:", "id:" or "retry:"): they could
+	// open an event stream or a plain-text body, so they are withheld until a
+	// later flush decides which.
+	metaKeyClassifyWait streamStateKey = "awsbedrockguardrail:classify_wait"
+
 	// metaKeyAssessedInHeld counts assessed characters still sitting in withheld
 	// frames: the batch boundary generally falls inside a frame, and that frame
 	// is retained whole. Its assessed prefix is not in pending — it must not be
@@ -348,16 +355,18 @@ var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
 // segments the SDK's JSONPath reader resolves: a member name, or a member name
 // with one array index.
 var (
-	streamingPathKeySegment   = regexp.MustCompile(`^[^.\[\]\s$'"]+$`)
+	streamingPathKeySegment   = regexp.MustCompile(`^[^.\[\]\s$'"*]+$`)
 	streamingPathIndexSegment = regexp.MustCompile(`^[a-zA-Z0-9_]+\[-?\d+\]$`)
 )
 
-// validateStreamingJSONPath rejects a streamingJsonPath the SDK cannot read.
-// Token text is read and rewritten with the SDK's reader, which splits the path
-// on "." and resolves only member names, name[n] and "*"; the policy's own path
-// parser also accepts forms such as ['key'], [*] and chained indexes. Accepting
-// one of those would leave the two disagreeing about what the path reads, so
-// text the off-path check counts as read would never be extracted or assessed.
+// validateStreamingJSONPath rejects a streamingJsonPath the SDK cannot read as
+// one text value. Token text is read and rewritten with the SDK's reader, which
+// splits the path on "." and resolves only member names and name[n]; the
+// policy's own path parser also accepts forms such as ['key'], [*] and chained
+// indexes. Accepting one of those would leave the two disagreeing about what the
+// path reads, so text the off-path check counts as read would never be
+// extracted or assessed. A wildcard is rejected too: the SDK returns a list for
+// it, which is not text, so the path would read nothing.
 func validateStreamingJSONPath(path string) error {
 	segments := strings.Split(path, ".")
 	if segments[0] == "$" {
@@ -367,10 +376,10 @@ func validateStreamingJSONPath(path string) error {
 		return fmt.Errorf("invalid 'streamingJsonPath' %q: it must select a member", path)
 	}
 	for _, segment := range segments {
-		if segment == "*" || streamingPathKeySegment.MatchString(segment) || streamingPathIndexSegment.MatchString(segment) {
+		if streamingPathKeySegment.MatchString(segment) || streamingPathIndexSegment.MatchString(segment) {
 			continue
 		}
-		return fmt.Errorf("invalid 'streamingJsonPath' %q: unsupported segment %q; use dotted member names with at most one array index each, such as $.choices[0].delta.content", path, segment)
+		return fmt.Errorf("invalid 'streamingJsonPath' %q: unsupported segment %q; use dotted member names with at most one array index each and no wildcard, such as $.choices[0].delta.content", path, segment)
 	}
 	if _, err := parseJSONPath(path); err != nil {
 		return fmt.Errorf("invalid 'streamingJsonPath': %w", err)
@@ -2283,14 +2292,47 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 	// The Content-Type and the first flush with content decide (see
 	// isEventStreamResponse). A flush with nothing but whitespace is not evidence
 	// either way, so it is not recorded.
+	//
+	// An unlabelled stream whose opening flushes carry only SSE fields other than
+	// "data:" (a keep-alive, say) is not decided yet: those flushes are withheld
+	// and handed, with the flush that decides, to the reader it selects. Deciding
+	// on them alone would read a token stream as one body, held until the end of
+	// the stream and refused past maxNonSSEHeldBytes.
 	sseStream, classified := respCtx.Metadata[p.stateKey(metaKeySSEStream)].(bool)
+	prepended := false
 	if !classified {
 		mediaType := responseMediaType(respCtx.ResponseHeaders)
-		sseStream = isEventStreamResponse(mediaType, chunk.Chunk)
+		if wait, ok := respCtx.Metadata[p.stateKey(metaKeyClassifyWait)].(string); ok {
+			delete(respCtx.Metadata, p.stateKey(metaKeyClassifyWait))
+			chunkStr = wait + chunkStr
+			prepended = true
+		}
+		body := []byte(chunkStr)
+		sseStream = isEventStreamResponse(mediaType, body)
+		if !sseStream && !chunk.EndOfStream && sniffedMediaType(mediaType) &&
+			looksLikeEventStream(body) && len(chunkStr) <= maxHeldFlushBytes {
+			respCtx.Metadata[p.stateKey(metaKeyClassifyWait)] = chunkStr
+			return policy.ForwardResponseChunk{Body: []byte{}}
+		}
 		if strings.TrimSpace(chunkStr) != "" {
 			respCtx.Metadata[p.stateKey(metaKeySSEStream)] = sseStream
 		}
 	}
+	if prepended {
+		// A reader that forwards "unchanged" means the bytes it was given, which
+		// include the withheld opening flushes, not this flush alone.
+		action := p.dispatchResponseChunk(chunkStr, sseStream, chunk, respCtx)
+		if forward, ok := action.(policy.ForwardResponseChunk); ok && forward.Body == nil {
+			forward.Body = []byte(chunkStr)
+			return forward
+		}
+		return action
+	}
+	return p.dispatchResponseChunk(chunkStr, sseStream, chunk, respCtx)
+}
+
+// dispatchResponseChunk hands a flush to the reader for the stream's format.
+func (p *AWSBedrockGuardrailPolicy) dispatchResponseChunk(chunkStr string, sseStream bool, chunk *policy.StreamBody, respCtx *policy.ResponseStreamContext) policy.StreamingResponseAction {
 
 	// An empty jsonPath assesses the whole payload as text, an event stream
 	// included, so the body is withheld and assessed whole as any other
