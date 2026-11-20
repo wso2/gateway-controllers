@@ -16,13 +16,29 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: generate-catalog validate-catalog it it-unit it-standards it-scaffold it-framework-pin it-workspace
+.PHONY: generate-catalog validate-catalog unit-coverage coverage-summary generate-codecov-config validate-codecov-config itit-unit it-standards it-scaffold it-framework-pin it-workspace
 
 generate-catalog: ## Generate docs/README.md policy catalog from metadata.json files
 	python3 scripts/generate-policy-catalog.py
 
 validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 	python3 scripts/generate-policy-catalog.py --validate
+
+# Policy unit-test coverage. Each policy is a Go module of its own, so the script runs every
+# module's unit tests and merges the profiles into coverage/coverage.txt, the report Codecov
+# uploads. POLICIES narrows the run (comma-separated, e.g. POLICIES=basic-auth,backend-jwt/v2);
+# COVERAGE_JOBS sets how many modules run at once.
+unit-coverage: ## Run every policy's unit tests and write coverage/coverage.txt
+	scripts/coverage/run-unit-coverage.sh $(subst $(comma),$(space),$(POLICIES))
+
+coverage-summary: ## Print policy-wise and global coverage from coverage/coverage.txt
+	python3 scripts/coverage/summarize-coverage.py coverage/coverage.txt
+
+generate-codecov-config: ## Regenerate the per-policy components in codecov.yml
+	python3 scripts/coverage/generate-codecov-config.py
+
+validate-codecov-config: ## Verify codecov.yml lists every policy (used in CI)
+	python3 scripts/coverage/generate-codecov-config.py --validate
 
 # Policy integration tests. Each policy owns a suite in policies/<name>/it, a Go module of its own,
 # and the targets below run those suites. They need Docker and run against a released gateway image:

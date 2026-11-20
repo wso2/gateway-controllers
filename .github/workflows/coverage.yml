@@ -1,0 +1,79 @@
+name: Policy Code Coverage
+
+# Runs the unit tests of every policy and reports their coverage to Codecov: per policy (one
+# Codecov component each, see codecov.yml) and as the repository-wide global figure. Pull
+# requests are compared with the coverage of main, which the push trigger keeps current.
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'policies/**'
+      - 'codecov.yml'
+      - 'scripts/coverage/**'
+      - 'Makefile'
+      - '.github/workflows/coverage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Unit tests with coverage
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout gateway-controllers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: |
+            policies/*/go.sum
+            policies/*/v*/go.sum
+
+      - name: Check the coverage tooling
+        run: |
+          python3 scripts/coverage/test_summarize_coverage.py
+          make validate-codecov-config
+
+      # Every policy module runs and the script lists the ones that failed. This job reports
+      # coverage and is not the unit-test gate, so a failing test is shown but does not turn the
+      # check red; remove continue-on-error to make it one. A module whose tests crash writes no
+      # profile and is missing from the report.
+      - name: Run policy unit tests with coverage
+        continue-on-error: true
+        run: make unit-coverage
+
+      - name: Summarise policy-wise and global coverage
+        if: always()
+        run: |
+          if [ -s coverage/coverage.txt ]; then
+            python3 scripts/coverage/summarize-coverage.py coverage/coverage.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No coverage report was produced" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The report is one file holding every policy; Codecov splits it into per-policy
+      # components by path. Listed explicitly, with search off, so that only this report is
+      # uploaded.
+      - name: Upload coverage to Codecov
+        if: always() && hashFiles('coverage/coverage.txt') != ''
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          disable_search: true
+          files: coverage/coverage.txt
+          flags: unit
+          fail_ci_if_error: false
