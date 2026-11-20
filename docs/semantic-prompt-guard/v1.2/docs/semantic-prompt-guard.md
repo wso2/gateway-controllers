@@ -240,7 +240,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
 
 - The API's route answers `500`: look for `Failed to build policy chain for route, skipping` in the gateway
   log. Its reason names the refused setting, the missing environment variable, or the failed phrase
-  embeddings.
+  embeddings. The gateway doesn't retry that build on its own: after fixing the cause (the role, the
+  environment variables or the key), redeploy or update the API so its route is built again. A new role
+  assignment can take several minutes to apply, so redeploy after it has.
 - Azure OpenAI answers `401`: the identity lacks the Cognitive Services OpenAI User role (role assignments
   can take several minutes to apply), the endpoint is a regional one, or the token scope is for another
   resource, such as `https://management.azure.com/.default`. Use `https://cognitiveservices.azure.com/.default`,
