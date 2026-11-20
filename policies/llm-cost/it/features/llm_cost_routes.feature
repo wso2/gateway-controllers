@@ -67,6 +67,9 @@ Feature: LLM cost on different route shapes
 
   # docs Example 1: the provider denies everything but two paths, and llm-cost is attached to one of
   # them. Only the attached path is priced.
+  # The upstream URL carries /scripted because gateways rewrite the upstream path differently for a route
+  # attached below the context (1.1.0 drops the route's own prefix, later releases keep it). Either way the
+  # call still lands under /scripted/ on the testbench.
   Scenario: Attach llm-cost to one path of a provider that allows two
     Given I generate a unique resource name from "lc-narrow" and store it as "providerName"
     And I generate a unique value from "lc-narrow" and store it as "providerDisplayName"
@@ -79,7 +82,7 @@ Feature: LLM cost on different route shapes
       | version                       | ${CTX:providerVersion}     |
       | template                      | openai |
       | spec.context                  | ${CTX:providerContext}     |
-      | spec.upstream.url             | http://testbench:3008      |
+      | spec.upstream.url             | http://testbench:3008/scripted |
       | accessControl.mode            | deny_all                   |
       | spec.accessControl.exceptions | [{"path":"/scripted/priced/*","methods":["POST"]},{"path":"/scripted/other/*","methods":["POST"]}] |
       | spec.policies                 | [{"name":"llm-cost","version":"v1","paths":[{"path":"/scripted/priced/*","methods":["POST"]}]}] |

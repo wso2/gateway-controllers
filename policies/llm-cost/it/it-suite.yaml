@@ -51,6 +51,14 @@ blocks:
         tags: "gateway-version>1.2.0"
         features:
           - features/llm_cost_calculation_providers.feature
+      - name: llm-cost-calculation-providers-gw-1.2.0
+        tags: "gateway-version=1.2.0;~@known-issue-gw-1.2.0"
+        features:
+          - features/llm_cost_calculation_providers.feature
+      - name: llm-cost-calculation-providers-gw-1.1.0
+        tags: "gateway-version<1.2.0;~@known-issue-gw-1.2.0 && ~@known-issue-gw-1.1.0"
+        features:
+          - features/llm_cost_calculation_providers.feature
 
   - name: llm-cost-staged
     parallel: 4
@@ -65,31 +73,43 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-model-resolution
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/llm_cost_model_resolution.feature
+      - name: llm-cost-model-resolution-gw-1.1.0
+        tags: "gateway-version<1.2.0;~@known-issue-gw-1.1.0"
         features:
           - features/llm_cost_model_resolution.feature
       - name: llm-cost-usage
         tags: "gateway-version>1.2.0"
         features:
           - features/llm_cost_usage.feature
+      - name: llm-cost-usage-gw-1.2.0-and-earlier
+        tags: "gateway-version<=1.2.0;~@known-issue-gw-1.2.0"
+        features:
+          - features/llm_cost_usage.feature
       - name: llm-cost-streaming
         tags: "gateway-version>1.2.0"
         features:
           - features/llm_cost_streaming.feature
+      - name: llm-cost-streaming-gw-1.2.0-and-earlier
+        tags: "gateway-version<=1.2.0;~@known-issue-gw-1.2.0"
+        features:
+          - features/llm_cost_streaming.feature
       - name: llm-cost-routes
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_routes.feature
       - name: llm-cost-upstream-errors
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_upstream_errors.feature
       - name: llm-cost-bedrock-transformer
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.2.0"
         features:
           - features/llm_cost_bedrock_transformer.feature
       - name: llm-cost-logging
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_logging.feature
 
@@ -100,7 +120,7 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-missing
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_missing.feature
 
@@ -113,7 +133,7 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-malformed
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_malformed.feature
 
@@ -124,7 +144,7 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-traversal
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_traversal.feature
 
@@ -135,7 +155,7 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-sensitive
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_sensitive.feature
 
@@ -148,7 +168,7 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-no-entries
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_no_entries.feature
 
@@ -159,7 +179,7 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-empty
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_empty.feature
 
@@ -170,6 +190,6 @@ blocks:
       - name: testbench
     runners:
       - name: llm-cost-pricing-file-not-string
-        tags: "gateway-version>1.2.0"
+        tags: "gateway-version>=1.1.0"
         features:
           - features/llm_cost_pricing_file_not_string.feature

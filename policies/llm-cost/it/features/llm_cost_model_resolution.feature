@@ -120,6 +120,8 @@ Feature: LLM cost model resolution and pricing file contents
       | provider prefix             | prefix    | openai/gpt-4o-mini | 0.003 |
       | key with an uppercase letter | uppercase | Upper-Key-Model    | 0     |
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2951 (https://github.com/wso2/api-platform/pull/2951): the 1.1.0 Bedrock template's model-from-URL pattern does not compile in Go.
+  @known-issue-gw-1.1.0
   Scenario: Send a Bedrock call through an inference-profile ID that the pricing file carries only as the foundation model
     Given I generate a unique resource name from "lc-bedrock-alias" and store it as "providerName"
     And I generate a unique value from "lc-bedrock-alias" and store it as "providerDisplayName"

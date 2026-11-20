@@ -306,6 +306,8 @@ Feature: LLM cost usage shapes and pricing rules
     Then the response should be successful
     And I send a "GET" request to "${CTX:providerContext}/scripted/ready" until status 404
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains providerFields.
+  @known-issue-gw-1.2.0
   Scenario: Price a Gemini response that carries grounding web search queries
     Given I generate a unique resource name from "lc-gemini-grounding" and store it as "providerName"
     And I generate a unique value from "lc-gemini-grounding" and store it as "providerDisplayName"
@@ -344,6 +346,8 @@ Feature: LLM cost usage shapes and pricing rules
     Then the response should be successful
     And I send a "GET" request to "${CTX:providerContext}/scripted/ready" until status 404
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains providerFields.
+  @known-issue-gw-1.2.0
   Scenario: Price a Gemini response carrying audio and image token details
     Given I generate a unique resource name from "lc-gemini-modalities" and store it as "providerName"
     And I generate a unique value from "lc-gemini-modalities" and store it as "providerDisplayName"
@@ -384,6 +388,8 @@ Feature: LLM cost usage shapes and pricing rules
     Then the response should be successful
     And I send a "GET" request to "${CTX:providerContext}/scripted/ready" until status 404
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains cacheWriteTokens and providerFields.
+  @known-issue-gw-1.2.0
   Scenario: Price a Bedrock Converse response with cache writes broken down by TTL
     Given I generate a unique resource name from "lc-bedrock-cache-ttl" and store it as "providerName"
     And I generate a unique value from "lc-bedrock-cache-ttl" and store it as "providerDisplayName"
