@@ -18,7 +18,11 @@ package semanticpromptguard
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -43,6 +47,14 @@ const (
 	// allowedEndpointsParam is the gateway's list of the endpoints its APIs may call.
 	allowedEndpointsParam = "embeddingAllowedEndpoints"
 )
+
+// errNoAccessToken is what a client sees, with showAssessment, when the check failed for want of a
+// token: never the reason, which can describe the gateway's identity.
+var errNoAccessToken = errors.New("Could not obtain an access token for the embedding provider")
+
+// errRefusedToken is what a client sees, with showAssessment, when the embedding provider refused
+// the identity's token: never the provider's answer, which can name the identity.
+var errRefusedToken = errors.New("The embedding provider refused the access token")
 
 // authentication is how the policy authenticates to the embedding provider.
 type authentication struct {
@@ -263,4 +275,43 @@ func quotedList(names []string) string {
 		return quoted[0]
 	}
 	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
+}
+
+// logTokenFailure logs a failure to get a token for the gateway's identity (DEBUG when cached) and
+// returns its reason for the fault description; the reason can describe the identity, so never the client.
+func logTokenFailure(ctx context.Context, err error, auth authentication) (string, bool) {
+	var tokenErr *azureauthentication.TokenError
+	if !errors.As(err, &tokenErr) {
+		return "", false
+	}
+	level := slog.LevelError
+	if tokenErr.Cached {
+		level = slog.LevelDebug
+	}
+	slog.Log(ctx, level, "SemanticPromptGuard: could not obtain an access token for the embedding provider",
+		"reason", tokenErr.Reason,
+		"error", err.Error(),
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return tokenErr.Reason, true
+}
+
+// logRefusedToken logs an identity's token the provider refused with 401 or 403 (no role, wrong scope or
+// endpoint) and returns the status; the provider's answer can name the identity, so it is never used.
+func logRefusedToken(ctx context.Context, err error, auth authentication) (int, bool) {
+	if !auth.usesIdentity() {
+		return 0, false
+	}
+	var statusErr *embeddingproviders.StatusError
+	if !errors.As(err, &statusErr) ||
+		(statusErr.StatusCode != http.StatusUnauthorized && statusErr.StatusCode != http.StatusForbidden) {
+		return 0, false
+	}
+	slog.Log(ctx, slog.LevelError, "SemanticPromptGuard: the embedding provider refused the access token",
+		"status", statusErr.StatusCode,
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return statusErr.StatusCode, true
 }

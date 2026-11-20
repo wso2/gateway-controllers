@@ -762,7 +762,7 @@ func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &SemanticPromptGuardPolicy{embeddingProvider: tc.provider}
-			got, ok := p.validatePayload([]byte(tc.payload), params).(policy.ImmediateResponse)
+			got, ok := p.validatePayload(context.Background(), []byte(tc.payload), params).(policy.ImmediateResponse)
 			if !ok {
 				t.Fatalf("expected ImmediateResponse")
 			}

@@ -20,6 +20,7 @@ package semanticpromptguard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -515,11 +516,11 @@ func (p *SemanticPromptGuardPolicy) OnRequestBody(ctx context.Context, reqCtx *p
 	if reqCtx.Body != nil {
 		content = reqCtx.Body.Content
 	}
-	return p.validatePayload(content, p.params).(policy.RequestAction)
+	return p.validatePayload(ctx, content, p.params).(policy.RequestAction)
 }
 
 // validatePayload validates payload using semantic similarity, returning policy actions.
-func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params SemanticPromptGuardPolicyParams) interface{} {
+func (p *SemanticPromptGuardPolicy) validatePayload(ctx context.Context, payload []byte, params SemanticPromptGuardPolicyParams) interface{} {
 	prompt, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
 	if err != nil {
 		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, params.ShowAssessment), unreadablePromptFault("Error extracting value from JSONPath: "+err.Error()))
@@ -531,6 +532,15 @@ func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params Seman
 
 	promptEmbedding, err := p.embeddingProvider.GetEmbedding(prompt)
 	if err != nil {
+		// With an Azure identity, the client sees only that the token was missing or refused.
+		if reason, ok := logTokenFailure(ctx, err, p.auth); ok {
+			return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", errNoAccessToken, params.ShowAssessment),
+				checkFailureFault(errNoAccessToken.Error(), errors.New(reason)))
+		}
+		if status, ok := logRefusedToken(ctx, err, p.auth); ok {
+			return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", errRefusedToken, params.ShowAssessment),
+				checkFailureFault(errRefusedToken.Error(), fmt.Errorf("status %d", status)))
+		}
 		slog.Debug("SemanticPromptGuard: Error fetching prompt embedding", "error", err)
 		return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", err, params.ShowAssessment), checkFailureFault("Failed to generate embedding for prompt", err))
 	}
