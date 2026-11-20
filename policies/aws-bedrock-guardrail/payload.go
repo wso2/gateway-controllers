@@ -57,6 +57,14 @@ type extractedPayload struct {
 //     different shape, is an extraction error, as it was before JSON-RPC
 //     support: passing it would deliver its content unassessed.
 func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) {
+	return extractPayloadAs(payload, jsonPath, looksLikeEventStream(payload))
+}
+
+// extractPayloadAs is extractPayload for a body whose format the caller has
+// already established: eventStream says the body is a Server-Sent Events stream
+// (from its Content-Type, say), so it is read as one even when its first line
+// is not an SSE field, as the caller's own readability checks read it.
+func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extractedPayload, error) {
 	if jsonPath == "" {
 		segment := &textSegment{value: string(payload)}
 		segment.set = func(v string) { segment.value = v }
@@ -92,7 +100,7 @@ func extractPayload(payload []byte, jsonPath string) (*extractedPayload, error) 
 		}, nil
 	}
 
-	if looksLikeEventStream(payload) {
+	if eventStream {
 		return extractEventStream(payload, jsonPath, tokens)
 	}
 
@@ -150,7 +158,7 @@ var contentFreeResultMembers = map[string]bool{
 // through:
 //   - a request or notification of a content-free method (see
 //     contentFreeMethods), or any notification except notifications/message,
-//     which carries log data;
+//     which carries log data, and a notifications/progress with a message;
 //   - a result made only of initialize or listing members, or an empty one.
 //
 // Anything else, a tools/call or a tool result say, is content the path was
@@ -165,6 +173,13 @@ func carriesNoContent(doc interface{}) bool {
 	if method, ok := m["method"].(string); ok {
 		if contentFreeMethods[method] {
 			return true
+		}
+		if method == "notifications/progress" {
+			// A progress update may carry a human-readable message; only a bare
+			// counter is content-free.
+			params, _ := m["params"].(map[string]interface{})
+			message, _ := params["message"].(string)
+			return strings.TrimSpace(message) == ""
 		}
 		return strings.HasPrefix(method, "notifications/") && method != "notifications/message"
 	}
@@ -192,7 +207,18 @@ func isJSONRPCError(doc interface{}) bool {
 
 // errorTextPath selects the error object of a JSON-RPC error response, so every
 // string in it (the message, and anything in data) is assessed.
-var errorTextPath, _ = parseJSONPath("$.error")
+var errorTextPath = mustParseJSONPath("$.error")
+
+// mustParseJSONPath parses a path fixed in the code. A path that fails to parse,
+// or parses to no tokens, would select the whole message (nil tokens resolve to
+// the root), so it stops the policy from loading instead.
+func mustParseJSONPath(path string) []pathToken {
+	tokens, err := parseJSONPath(path)
+	if err != nil || len(tokens) == 0 {
+		panic(fmt.Sprintf("awsbedrockguardrail: invalid built-in jsonPath %q: %v", path, err))
+	}
+	return tokens
+}
 
 // resolveErrorText selects the text of a JSON-RPC error response that jsonPath
 // does not apply to. An error with no text at all has nothing to assess.
@@ -313,17 +339,24 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		event.doc = doc
 		ev := event
 		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
-		if err != nil && isRPC && isJSONRPCError(doc) {
+		if errors.Is(err, errNoValue) && isRPC && isJSONRPCError(doc) {
 			// An error response the path does not apply to: its own text is
 			// assessed instead.
 			eventSegments, err = resolveErrorText(&event.doc, func() { ev.dirty = true })
 		}
 		if err != nil {
 			// The path does not apply to this event (e.g. a progress notification).
-			// A JSON-RPC message with content the path missed, such as a tool
-			// result of another shape, would be delivered unassessed.
-			if isRPC && !carriesNoContent(doc) {
+			// Content it missed would be delivered unassessed: a JSON-RPC message
+			// with content, such as a tool result of another shape; other JSON with
+			// text, even beside events the path does match; or a value the path
+			// selects that is not text (null, say), as extractPayload treats it.
+			switch {
+			case !errors.Is(err, errNoValue):
 				contentMissed = true
+			case isRPC:
+				contentMissed = contentMissed || !carriesNoContent(doc)
+			default:
+				contentMissed = contentMissed || carriesText(doc)
 			}
 			continue
 		}
@@ -331,7 +364,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		segments = append(segments, eventSegments...)
 	}
 	if contentMissed {
-		return nil, fmt.Errorf("a JSON-RPC message in the Server-Sent Events stream carries content with no value at jsonPath %q", jsonPath)
+		return nil, fmt.Errorf("an event in the Server-Sent Events stream carries content with no text at jsonPath %q", jsonPath)
 	}
 	if !matched && allJSONRPC && sawJSONRPC {
 		// Only content-free JSON-RPC messages the path does not apply to, e.g. a
@@ -362,6 +395,27 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 	}
 
 	return &extractedPayload{segments: segments, rebuild: rebuild}, nil
+}
+
+// carriesText reports whether a JSON value holds any non-blank string.
+func carriesText(v interface{}) bool {
+	switch node := v.(type) {
+	case string:
+		return strings.TrimSpace(node) != ""
+	case map[string]interface{}:
+		for _, child := range node {
+			if carriesText(child) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, child := range node {
+			if carriesText(child) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // eventData joins an event's data lines, as the SSE specification does.

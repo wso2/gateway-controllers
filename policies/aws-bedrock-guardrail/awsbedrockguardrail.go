@@ -2237,9 +2237,12 @@ func (p *AWSBedrockGuardrailPolicy) isJSONRPCStream(chunkStr string, respCtx *po
 		return isRPC
 	}
 	// The first JSON-RPC message may arrive over several flushes, so the bytes the
-	// token path is withholding are looked at too.
+	// token path is withholding are looked at too: those it has read and holds
+	// until assessed, then those checkStreamingPath holds unread, in that order.
 	held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
-	buffered := held + chunkStr
+	waiting, _ := respCtx.Metadata[p.stateKey(metaKeyStreamingPathWait)].(string)
+	withheld := held + waiting
+	buffered := withheld + chunkStr
 	if extractSSEDeltaContent(buffered, p.responseParams.StreamingJsonPath) != "" {
 		// Token deltas: this is an LLM stream, and its text is read with
 		// streamingJsonPath as before -- even if a JSON-RPC message appears beside
@@ -2253,8 +2256,9 @@ func (p *AWSBedrockGuardrailPolicy) isJSONRPCStream(chunkStr string, respCtx *po
 	respCtx.Metadata[p.stateKey(metaKeyJSONRPCStream)] = true
 	// Hand over whatever the token path was withholding, so no byte is lost or
 	// delivered twice.
-	respCtx.Metadata[p.stateKey(metaKeyJSONRPCBuffer)] = held
+	respCtx.Metadata[p.stateKey(metaKeyJSONRPCBuffer)] = withheld
 	respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = ""
+	delete(respCtx.Metadata, p.stateKey(metaKeyStreamingPathWait))
 	respCtx.Metadata[p.stateKey(metaKeyPendingText)] = ""
 	respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = 0
 	delete(respCtx.Metadata, p.stateKey(metaKeyPartialLine))
@@ -2282,15 +2286,32 @@ func (p *AWSBedrockGuardrailPolicy) handleJSONRPCStreamFlush(
 		// One message larger than the withheld-bytes limit: it cannot be held to
 		// completion, and releasing it would deliver it unassessed.
 		delete(respCtx.Metadata, p.stateKey(metaKeyJSONRPCBuffer))
-		if rp.PassthroughOnError {
-			slog.Debug("AWSBedrockGuardrail: JSON-RPC event exceeded the withheld-bytes limit, passthrough enabled",
-				"held_bytes", len(rest))
+		if !rp.PassthroughOnError {
+			return p.unassessableEnd(true)
+		}
+		slog.Debug("AWSBedrockGuardrail: JSON-RPC event exceeded the withheld-bytes limit, passthrough enabled",
+			"held_bytes", len(rest))
+		// Only the oversized event passes unassessed. The complete events before
+		// it in this flush are assessed as usual, and their verdict stands.
+		if strings.TrimSpace(complete) == "" {
 			return policy.ForwardResponseChunk{Body: []byte(buffered)}
 		}
-		return p.unassessableEnd(true)
+		action := p.assessJSONRPCEvents(complete, respCtx)
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok {
+			return action
+		}
+		return policy.ForwardResponseChunk{Body: append(forward.Body, rest...)}
 	}
 	respCtx.Metadata[p.stateKey(metaKeyJSONRPCBuffer)] = rest
+	return p.assessJSONRPCEvents(complete, respCtx)
+}
 
+// assessJSONRPCEvents assesses the complete events of a JSON-RPC event stream
+// flush. A forward it returns always carries a non-nil body: the events as they
+// are to be delivered, or nothing while none is complete.
+func (p *AWSBedrockGuardrailPolicy) assessJSONRPCEvents(complete string, respCtx *policy.ResponseStreamContext) policy.StreamingResponseAction {
+	rp := p.responseParams
 	if strings.TrimSpace(complete) == "" {
 		// Nothing complete yet: withhold (a non-nil empty body delivers nothing).
 		return policy.ForwardResponseChunk{Body: []byte(complete)}
@@ -3431,7 +3452,7 @@ func (p *AWSBedrockGuardrailPolicy) flushText(
 	if refusesUnreadable(complete, rp) {
 		// Text outside any event, or a data payload that is not JSON: delivering
 		// these bytes would release text no assessment has read.
-		slog.Warn("AWSBedrockGuardrail: SSE response carries a line that cannot be read; its text cannot be assessed")
+		slog.Warn("AWSBedrockGuardrail: SSE response carries a line that cannot be read, or output streamingJsonPath does not read; its text cannot be assessed")
 		delete(respCtx.Metadata, p.stateKey(metaKeyPartialLine))
 		return extractSSEDeltaContent(complete, rp.StreamingJsonPath), true
 	}
@@ -3471,10 +3492,25 @@ func (p *AWSBedrockGuardrailPolicy) forwardRestored(s string, respCtx *policy.Re
 		return policy.ForwardResponseChunk{}
 	}
 	masked, _ := respCtx.Metadata[MetadataKeyPIIEntities].(map[string]string)
+	if len(masked) == 0 || !containsPlaceholder(s, masked) {
+		return policy.ForwardResponseChunk{}
+	}
+	// The body cannot be parsed whole here, so its Content-Type decides: inside a
+	// JSON document a restored value is escaped, or a quote or backslash in it
+	// would break the JSON the client receives.
+	if isJSONMediaType(responseMediaType(respCtx.ResponseHeaders)) {
+		masked = jsonEscapedOriginals(masked)
+	}
 	if restored := p.restorePIIInResponse(s, masked); restored != s {
 		return policy.ForwardResponseChunk{Body: []byte(restored)}
 	}
 	return policy.ForwardResponseChunk{}
+}
+
+// isJSONMediaType reports whether a media type names a JSON document:
+// application/json, or any +json type.
+func isJSONMediaType(mediaType string) bool {
+	return mediaType == "application/json" || strings.HasSuffix(mediaType, "+json")
 }
 
 // jsonRPCEventStream is the media type handleJSONRPCStreamFlush passes to
@@ -3800,15 +3836,144 @@ func unreadableEventStream(s string) bool {
 
 // refusesUnreadableBody is refusesUnreadable for a body that has ended.
 func refusesUnreadableBody(s string, rp AWSBedrockGuardrailPolicyParams) bool {
-	return !rp.PassthroughOnError && unreadableSSEBody(s)
+	return !rp.PassthroughOnError && (unreadableSSEBody(s) || missedStreamedOutput(s, rp.StreamingJsonPath))
 }
 
-// refusesUnreadable reports whether an unreadable line (unreadableSSELine) ends
-// the response. With passthroughOnError it does not: such a line was delivered
-// as it was before this check existed, and the readable text around it is still
-// assessed as usual.
+// refusesUnreadable reports whether an unreadable line (unreadableSSELine), or an
+// event with model output streamingJsonPath does not read (missedStreamedOutput),
+// ends the response. With passthroughOnError it does not: such a line was
+// delivered as it was before this check existed, and the readable text around it
+// is still assessed as usual.
 func refusesUnreadable(s string, rp AWSBedrockGuardrailPolicyParams) bool {
-	return !rp.PassthroughOnError && unreadableSSELine(s)
+	return !rp.PassthroughOnError && (unreadableSSELine(s) || missedStreamedOutput(s, rp.StreamingJsonPath))
+}
+
+// streamedOutputKeys name the members of a streamed event that carry model
+// output: text, a refusal, reasoning, or a tool call and its arguments. Any
+// non-blank string beneath one of them is output.
+var streamedOutputKeys = map[string]bool{
+	"content":           true,
+	"text":              true,
+	"refusal":           true,
+	"reasoning":         true,
+	"reasoning_content": true,
+	"thinking":          true,
+	"tool_calls":        true,
+	"function_call":     true,
+	"arguments":         true,
+	"partial_json":      true,
+}
+
+// missedStreamedOutput reports whether a data line of s carries model output that
+// streamingJsonPath does not read, so it would be delivered unassessed: a
+// tool-call delta beside or instead of delta.content, a legacy completion's
+// choices[].text under the chat path, or a member of another shape where the
+// path expects an array.
+//
+// Only events that carry the member the path starts with are looked at (events
+// without it are checkStreamingPath's concern), and along the path only the
+// members beside it are: an event's id, model, role, finish reason or usage are
+// not output. Events with no text at all -- the opening role delta, the
+// finishing delta, a usage frame with no choices -- carry none.
+func missedStreamedOutput(s, streamingJsonPath string) bool {
+	tokens, err := parseJSONPath(streamingJsonPath)
+	if err != nil || len(tokens) == 0 || tokens[0].kind != tokenKey {
+		return false
+	}
+	for rest := s; rest != ""; {
+		var line string
+		line, rest = nextLine(rest)
+		payload, _, ok := sseDataPayload(strings.TrimSuffix(line, "\r"))
+		if !ok {
+			continue
+		}
+		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+			continue
+		}
+		doc, err := decodeJSON([]byte(payload))
+		if err != nil {
+			continue // unreadable lines are refused separately
+		}
+		event, isObject := doc.(map[string]interface{})
+		if !isObject {
+			continue
+		}
+		if _, has := event[tokens[0].key]; !has {
+			continue
+		}
+		if outputOffPath(doc, tokens) {
+			return true
+		}
+	}
+	return false
+}
+
+// outputOffPath reports whether node carries model output anywhere the remaining
+// path tokens do not lead to text.
+func outputOffPath(node interface{}, tokens []pathToken) bool {
+	if len(tokens) == 0 {
+		switch node.(type) {
+		case string, json.Number, bool, nil:
+			return false // the text the path reads (or no text at all)
+		}
+		return carriesStreamedOutput(node, true) // an object or array: not read as text
+	}
+	token := tokens[0]
+	switch token.kind {
+	case tokenKey:
+		object, ok := node.(map[string]interface{})
+		if !ok {
+			return carriesStreamedOutput(node, false)
+		}
+		for key, child := range object {
+			if key != token.key && carriesStreamedOutput(child, streamedOutputKeys[key]) {
+				return true
+			}
+		}
+		child, has := object[token.key]
+		return has && outputOffPath(child, tokens[1:])
+	default:
+		array, ok := node.([]interface{})
+		if !ok {
+			return carriesStreamedOutput(node, false)
+		}
+		index := token.index
+		if index < 0 {
+			index += len(array)
+		}
+		for i, element := range array {
+			if token.kind == tokenWildcard || i == index {
+				if outputOffPath(element, tokens[1:]) {
+					return true
+				}
+			} else if carriesStreamedOutput(element, false) {
+				return true // another choice the path does not read
+			}
+		}
+		return false
+	}
+}
+
+// carriesStreamedOutput reports whether v holds a non-blank string beneath one of
+// streamedOutputKeys; output says v itself is beneath one.
+func carriesStreamedOutput(v interface{}, output bool) bool {
+	switch node := v.(type) {
+	case string:
+		return output && strings.TrimSpace(node) != ""
+	case map[string]interface{}:
+		for key, child := range node {
+			if carriesStreamedOutput(child, output || streamedOutputKeys[key]) {
+				return true
+			}
+		}
+	case []interface{}:
+		for _, child := range node {
+			if carriesStreamedOutput(child, output) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // nextLine splits off the first line of s, dropping its terminator, and returns
@@ -4157,7 +4322,8 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 	if forceJSONRPC {
 		mediaType = "text/event-stream"
 	}
-	if isResponse && params.JsonPath != "" && isEventStreamResponse(mediaType, payload) {
+	eventStream := isResponse && params.JsonPath != "" && isEventStreamResponse(mediaType, payload)
+	if eventStream {
 		if !forceJSONRPC && !sseCarriesJSONRPC(payload) {
 			return p.validateStreamedBody(payload, params, metadata, restored)
 		}
@@ -4170,7 +4336,16 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 		}
 	}
 
-	extracted, err := extractPayload(payload, params.JsonPath)
+	// An event stream is read as one even when it opens with a line that is not an
+	// SSE field: re-sniffing it here would reject what the checks above accepted
+	// (with passthroughOnError, deliver it unassessed).
+	var extracted *extractedPayload
+	var err error
+	if eventStream {
+		extracted, err = extractPayloadAs(payload, params.JsonPath, true)
+	} else {
+		extracted, err = extractPayload(payload, params.JsonPath)
+	}
 	if err != nil {
 		return p.passOrBlock("Error extracting value from JSONPath", err, params, isResponse, nil,
 			extractionFault("Error extracting value from JSONPath", err, isResponse), payload, restored)
@@ -4236,7 +4411,7 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 		// Text this reader cannot extract would be delivered unassessed; finding no
 		// frames in it is not the same as it carrying no text. With
 		// passthroughOnError the readable text is still assessed below.
-		err := errors.New("the event stream has text outside any event, or a data payload that is not JSON")
+		err := errors.New("the event stream has text outside any event, a data payload that is not JSON, or output streamingJsonPath does not read")
 		return p.passOrBlock("Error extracting value from JSONPath", err, params, true, nil,
 			extractionFault("Error extracting value from JSONPath", err, true), payload, restored)
 	}
