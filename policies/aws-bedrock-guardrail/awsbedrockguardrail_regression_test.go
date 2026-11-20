@@ -2065,3 +2065,37 @@ func TestRegression_RedactionFailureBodyOmitsTheValue(t *testing.T) {
 		t.Errorf("batch boundary: body carries the assessment: %s", a.Body)
 	}
 }
+
+// After a release forced by the withheld-bytes limit, only the text it did not
+// assess is carried. Carrying the assessed prefix as well made the next batch
+// boundary count text that the withheld frames no longer held, so a later
+// text-unit release delivered frames whose text had not been assessed.
+func TestRegression_CapReleaseCarriesOnlyTheUnassessedText(t *testing.T) {
+	var first, second strings.Builder
+	for i := 0; i < 100; i++ {
+		first.WriteString(logprobsEvent("word "))
+	}
+	for i := 0; i < 26; i++ {
+		second.WriteString(logprobsEvent("word "))
+	}
+	second.WriteString(logprobsEvent("contact ") + logprobsEvent("john"))
+	var third strings.Builder
+	for i := 0; i < 80; i++ {
+		third.WriteString(sseEvent("more "))
+	}
+	third.WriteString(sseEvent("the forbidden plan "))
+	for i := 0; i < 200; i++ {
+		third.WriteString(sseEvent("tail "))
+	}
+
+	client := &blockOnClient{needle: "forbidden"}
+	p := streamingPolicy(client, nil)
+	got, terminated := driveStream(p, streamCtxWithType("text/event-stream"),
+		[]string{first.String(), second.String(), third.String(), sseEvent(" end") + "data: [DONE]\n\n"})
+	if strings.Contains(extractSSEDeltaContent(got, ResponseDefaultStreamingJSONPath), "forbidden") {
+		t.Errorf("text released before it was assessed")
+	}
+	if !terminated {
+		t.Errorf("want the stream ended by the blocked phrase")
+	}
+}

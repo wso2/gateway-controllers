@@ -2794,11 +2794,11 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		// frames carrying the trailing word stay withheld; when there is no
 		// boundary to cut at, or the frames after it are too large to keep,
 		// everything is released as before.
-		if batch, _ := splitAtWordBoundary(combinedText); batch != "" {
+		if batch, carry := splitAtWordBoundary(combinedText); batch != "" {
 			assessedInHeld, _ := respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)].(int)
 			boundary := assessedInHeld + len([]rune(batch))
 			if release, retain, covered := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, boundary); release != "" && len(retain) <= maxCapRetainBytes {
-				return p.releaseBatch(batch, combinedText, release, retain, boundary-covered, respCtx, rp, chunk)
+				return p.releaseBatch(batch, carry, release, retain, boundary-covered, respCtx, rp, chunk)
 			}
 		}
 		return p.assessAndRelease(combinedText, combinedHeld, respCtx, rp, chunk)
