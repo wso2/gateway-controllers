@@ -77,6 +77,8 @@ type SemanticPromptGuardPolicy struct {
 	embeddingProvider embeddingproviders.EmbeddingProvider
 	embeddingConfig   embeddingproviders.EmbeddingProviderConfig
 	params            SemanticPromptGuardPolicyParams
+	// auth is how the policy authenticates to the embedding provider.
+	auth authentication
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -131,6 +133,15 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticPromptGuardP
 		return fmt.Errorf("'embeddingEndpoint' is required")
 	}
 
+	// Checked before the provider is created, because building the policy embeds the phrases.
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return err
+	}
+	if err := checkAllowedEndpoint(params, embeddingEndpoint); err != nil {
+		return err
+	}
+
 	// embeddingModel is required for OPENAI and MISTRAL, but not for AZURE_OPENAI
 	embeddingModel, ok := params["embeddingModel"].(string)
 	if !ok || embeddingModel == "" {
@@ -142,26 +153,35 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticPromptGuardP
 		embeddingModel = ""
 	}
 
-	apiKey, ok := params["apiKey"].(string)
-	if !ok || apiKey == "" {
-		return fmt.Errorf("'apiKey' is required")
-	}
+	// In an identity mode the SDK gets tokens for the gateway's identity and the key is never
+	// passed on.
+	var apiKey, authHeaderName string
+	if !auth.usesIdentity() {
+		apiKey, ok = params["apiKey"].(string)
+		if !ok || apiKey == "" {
+			return fmt.Errorf("'apiKey' is required")
+		}
 
-	// Set header name based on provider type
-	// Azure OpenAI uses "api-key", others use "Authorization"
-	authHeaderName := "Authorization"
-	if strings.ToUpper(provider) == "AZURE_OPENAI" {
-		authHeaderName = "api-key"
+		// Set header name based on provider type
+		// Azure OpenAI uses "api-key", others use "Authorization"
+		authHeaderName = "Authorization"
+		if strings.ToUpper(provider) == "AZURE_OPENAI" {
+			authHeaderName = "api-key"
+		}
 	}
 
 	p.embeddingConfig = embeddingproviders.EmbeddingProviderConfig{
-		EmbeddingProvider: strings.ToUpper(provider),
-		EmbeddingEndpoint: embeddingEndpoint,
-		APIKey:            apiKey,
-		AuthHeaderName:    authHeaderName,
-		EmbeddingModel:    embeddingModel, // Empty string is allowed for AZURE_OPENAI (deployment name is in endpoint)
-		TimeOut:           strconv.Itoa(defaultTimeoutMs),
+		EmbeddingProvider:  strings.ToUpper(provider),
+		EmbeddingEndpoint:  embeddingEndpoint,
+		APIKey:             apiKey,
+		AuthHeaderName:     authHeaderName,
+		EmbeddingModel:     embeddingModel, // Empty string is allowed for AZURE_OPENAI (deployment name is in endpoint)
+		TimeOut:            strconv.Itoa(defaultTimeoutMs),
+		AuthenticationType: auth.typ,
+		ClientID:           auth.clientID,
+		TokenScope:         auth.tokenScope,
 	}
+	p.auth = auth
 
 	return nil
 }
