@@ -475,7 +475,8 @@ func (p *SemanticCachePolicy) OnRequestBody(ctx context.Context, reqCtx *policy.
 	// Generate embedding
 	embedding, err := p.embeddingProvider.GetEmbedding(textToEmbed)
 	if err != nil {
-		if !logTokenFailure(ctx, err, p.auth) && !logRefusedToken(ctx, err, p.auth) {
+		if !logTokenFailure(ctx, err, p.auth) {
+			logRefusedToken(ctx, err, p.auth)
 			slog.Debug("SemanticCache: Error generating embedding", "error", err)
 		}
 		// Log error but don't block request

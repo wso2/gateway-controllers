@@ -298,7 +298,8 @@ func TestOnRequestBodyOtherEmbeddingErrorsStayAtDebug(t *testing.T) {
 	}
 }
 
-// refusedBody stands for Azure OpenAI's answer to a refused token, which must stay out of the logs.
+// refusedBody stands for Azure OpenAI's answer to a refused token. It must stay out of the ERROR
+// record and stay in the DEBUG one, where it tells a missing role from a wrong scope or endpoint.
 const refusedBody = `{"error":{"code":"PermissionDenied","message":"refused-body-marker"}}`
 
 func errorRecords(recs []map[string]interface{}) []map[string]interface{} {
@@ -309,6 +310,22 @@ func errorRecords(recs []map[string]interface{}) []map[string]interface{} {
 		}
 	}
 	return errs
+}
+
+// embeddingDebugRecord returns the DEBUG "Error generating embedding" record, failing the test
+// unless there is exactly one.
+func embeddingDebugRecord(t *testing.T, recs []map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	var found []map[string]interface{}
+	for _, rec := range recs {
+		if rec["level"] == "DEBUG" && rec["msg"] == "SemanticCache: Error generating embedding" {
+			found = append(found, rec)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("expected one DEBUG embedding record, got %v", recs)
+	}
+	return found[0]
 }
 
 func TestOnRequestBodyRefusedTokenLogsErrorAndFailsOpen(t *testing.T) {
@@ -331,12 +348,18 @@ func TestOnRequestBodyRefusedTokenLogsErrorAndFailsOpen(t *testing.T) {
 			t.Errorf("%s = %v, want %v", k, errs[0][k], v)
 		}
 	}
-	logged, err := json.Marshal(recs)
+	logged, err := json.Marshal(errs[0])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(logged), "refused-body-marker") {
-		t.Fatalf("the response body was logged: %s", logged)
+		t.Fatalf("the ERROR record carries the response body: %s", logged)
+	}
+	if debug := embeddingDebugRecord(t, recs); !strings.Contains(fmt.Sprint(debug["error"]), "refused-body-marker") {
+		t.Fatalf("the DEBUG record lacks the response body: %v", debug)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("expected the ERROR and DEBUG records only, got %v", recs)
 	}
 }
 
@@ -347,6 +370,7 @@ func TestOnRequestBodyRefusedTokenWithoutClientIDNamesTheDefault(t *testing.T) {
 	if len(errs) != 1 || errs[0]["status"] != float64(401) || errs[0]["clientId"] != "host-default" {
 		t.Fatalf("expected one ERROR record for 401 naming host-default, got %v", recs)
 	}
+	embeddingDebugRecord(t, recs)
 }
 
 func TestOnRequestBodyIdentityServerErrorStaysAtDebug(t *testing.T) {
@@ -356,7 +380,7 @@ func TestOnRequestBodyIdentityServerErrorStaysAtDebug(t *testing.T) {
 	if errs := errorRecords(recs); len(errs) != 0 {
 		t.Fatalf("expected no ERROR record, got %v", errs)
 	}
-	if len(recs) != 1 || recs[0]["msg"] != "SemanticCache: Error generating embedding" {
+	if len(recs) != 1 || recs[0]["level"] != "DEBUG" || recs[0]["msg"] != "SemanticCache: Error generating embedding" {
 		t.Fatalf("expected the DEBUG embedding line, got %v", recs)
 	}
 }
