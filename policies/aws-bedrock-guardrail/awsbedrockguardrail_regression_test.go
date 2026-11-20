@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -1926,5 +1927,141 @@ func TestRegression_KeepAliveOpenerDoesNotDecideTheStreamFormat(t *testing.T) {
 	got, terminated := driveStream(p, rc, []string{":) hello\n", "world\n", ""})
 	if terminated || got != ":) hello\nworld\n" {
 		t.Errorf("plain text: want it delivered whole, got terminated=%v %q", terminated, got)
+	}
+}
+
+// ─── cap release, audio transcripts, redaction-failure bodies ───────────────
+
+// logprobsEvent is a chat token event carrying a log-probability block about
+// 2 KB long, so the withheld bytes reach maxHeldFlushBytes after a few hundred
+// tokens.
+func logprobsEvent(token string) string {
+	pad := strings.Repeat("x", 2000)
+	return fmt.Sprintf("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"logprobs\":{\"content\":[{\"token\":%q,\"logprob\":-0.1,\"bytes\":[1],\"top_logprobs\":[{\"token\":%q,\"logprob\":-1}]}]}}]}\n\n", token, token, pad)
+}
+
+// A release forced by the withheld-bytes limit is cut at a word boundary, as a
+// text-unit batch is. Cutting it wherever the limit fell assessed a value split
+// by the cut in two halves, neither of which matched, and the value reached the
+// client unmasked.
+func TestRegression_CapReleaseKeepsAValueWhole(t *testing.T) {
+	const pii = "john@example.com"
+	var first, second strings.Builder
+	for i := 0; i < 100; i++ {
+		first.WriteString(logprobsEvent("word "))
+	}
+	for i := 0; i < 25; i++ {
+		second.WriteString(logprobsEvent("word "))
+	}
+	second.WriteString(logprobsEvent("contact ") + logprobsEvent("john") + logprobsEvent("@exa"))
+	third := logprobsEvent("mple") + logprobsEvent(".com") + logprobsEvent(" thanks") + "data: [DONE]\n\n"
+	if first.Len()+second.Len() <= maxHeldFlushBytes {
+		t.Fatalf("fixture must pass the withheld-bytes limit at the second flush")
+	}
+
+	client := &reportsPIIWhenPresentClient{pii: pii}
+	p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) { pp.RedactPII = true })
+	got, terminated := driveStream(p, streamCtxWithType("text/event-stream"), []string{first.String(), second.String(), third})
+	text := extractSSEDeltaContent(got, ResponseDefaultStreamingJSONPath)
+	if terminated {
+		t.Fatalf("stream ended: %q", got[len(got)-min(len(got), 300):])
+	}
+	if strings.Contains(text, pii) {
+		t.Errorf("value cut by the forced release was delivered unmasked")
+	}
+	if !strings.HasSuffix(text, " thanks") || strings.Count(text, "word ") != 125 {
+		t.Errorf("text after the forced release is not all delivered: %q", text[max(0, len(text)-80):])
+	}
+
+	// A phrase the guardrail blocks is not split either.
+	p = streamingPolicy(&blockOnClient{needle: "forbidden plan"}, nil)
+	second.Reset()
+	for i := 0; i < 25; i++ {
+		second.WriteString(logprobsEvent("word "))
+	}
+	second.WriteString(logprobsEvent("the forbid"))
+	if _, terminated := driveStream(p, streamCtxWithType("text/event-stream"),
+		[]string{first.String(), second.String(), logprobsEvent("den plan") + "data: [DONE]\n\n"}); !terminated {
+		t.Errorf("phrase cut by the forced release was not blocked")
+	}
+}
+
+// An OpenAI audio response streams its text as delta.audio.transcript, which the
+// default path does not read. It is output, so the stream ends rather than
+// delivering it unassessed. The encoded audio beside it is not output.
+func TestRegression_AudioTranscriptIsOutput(t *testing.T) {
+	audio := func(field, value string) string {
+		return fmt.Sprintf("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":null,\"audio\":{\"id\":\"a1\",%q:%q}}}]}\n\n", field, value)
+	}
+	body := "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"}}]}\n\n" +
+		audio("transcript", "the FORBIDDEN plan") + "data: [DONE]\n\n"
+	client := &blockOnClient{needle: "NEVER"}
+	got, terminated := driveStream(streamingPolicy(client, nil), streamCtxWithType("text/event-stream"), []string{body, ""})
+	if !terminated || strings.Contains(got, "FORBIDDEN") {
+		t.Errorf("streamed: want the stream ended, got terminated=%v %q", terminated, got)
+	}
+	mods := streamingPolicy(&blockOnClient{needle: "NEVER"}, nil).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", body), nil).(policy.DownstreamResponseModifications)
+	if mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Errorf("buffered: want a mediation fault, got %+v", mods.Fault)
+	}
+
+	withData := sseEvent("Hello.") + audio("data", "UklGRiQAAABXQVZF") + "data: [DONE]\n\n"
+	if got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "NEVER"}, nil),
+		streamCtxWithType("text/event-stream"), []string{withData, ""}); terminated || got != withData {
+		t.Errorf("encoded audio must not count as output, got terminated=%v %q", terminated, got)
+	}
+}
+
+// When a reported value cannot be masked in place, the error sent to the client
+// names that failure and leaves the assessment out even under showAssessment:
+// the assessment would carry the value the stream was ended to keep back.
+func TestRegression_RedactionFailureBodyOmitsTheValue(t *testing.T) {
+	const pii = "4111-2222"
+	opts := func(pp *AWSBedrockGuardrailPolicyParams) { pp.RedactPII = true; pp.ShowAssessment = true }
+	// The quote between the halves is dropped from the assessed text but is in
+	// the frames, so the value cannot be found there to be masked.
+	body := sseEvent("card 4111-\"") + sseEvent("\"2222 ok") + "data: [DONE]\n\n"
+	check := func(name string, out []byte, fault *policy.FaultDetails) {
+		t.Helper()
+		if fault == nil || fault.Code != policy.FaultCodeMediationFailed {
+			t.Errorf("%s: want a mediation fault, got %+v", name, fault)
+		}
+		if strings.Contains(string(out), pii) || strings.Contains(string(out), "assessments") {
+			t.Errorf("%s: body carries the assessment: %s", name, out)
+		}
+		if !strings.Contains(string(out), "could not be redacted") {
+			t.Errorf("%s: body does not give the reason: %s", name, out)
+		}
+	}
+
+	rc := streamCtxWithType("text/event-stream")
+	p := streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, opts)
+	a, ok := p.OnResponseBodyChunk(context.Background(), rc, &policy.StreamBody{Chunk: []byte(body), EndOfStream: true}, nil).(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("streamed: want the stream ended")
+	}
+	check("streamed", a.Body, a.Fault)
+
+	mods := streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, opts).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", body), nil).(policy.DownstreamResponseModifications)
+	check("buffered", mods.Body, mods.Fault)
+
+	// A value that starts in the frames a batch releases and ends in the frame
+	// it keeps withheld.
+	const email = "john@example.com"
+	var batch strings.Builder
+	for i := 0; i < 196; i++ {
+		batch.WriteString(sseEvent("word "))
+	}
+	batch.WriteString(sseEvent("john@exa") + sseEvent("mple.com and more text here") + sseEvent(" and on"))
+	p = streamingPolicy(&reportsPIIWhenPresentClient{pii: email}, opts)
+	a, ok = p.OnResponseBodyChunk(context.Background(), streamCtxWithType("text/event-stream"),
+		&policy.StreamBody{Chunk: []byte(batch.String())}, nil).(policy.TerminateResponseChunk)
+	if !ok {
+		t.Fatalf("batch boundary: want the stream ended")
+	}
+	if strings.Contains(string(a.Body), email) || strings.Contains(string(a.Body), "assessments") {
+		t.Errorf("batch boundary: body carries the assessment: %s", a.Body)
 	}
 }

@@ -2781,14 +2781,28 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	// The withheld buffer has grown as far as it may. Reached by a stream whose
 	// events carry little or no assessable text, which never trips the character
 	// boundary below.
-	if len(held)+len(chunkStr) > maxHeldFlushBytes {
-		slog.Warn("AWSBedrockGuardrail: withheld response bytes reached the limit; assessing and releasing early",
-			"held_bytes", len(held), "limit", maxHeldFlushBytes, "pending_chars", len([]rune(pending)))
-		return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
-	}
-
 	combinedText := pending + newText
 	combinedHeld := held + chunkStr
+
+	if len(combinedHeld) > maxHeldFlushBytes {
+		slog.Warn("AWSBedrockGuardrail: withheld response bytes reached the limit; assessing and releasing early",
+			"held_bytes", len(held), "limit", maxHeldFlushBytes, "pending_chars", len([]rune(pending)))
+		// The release is still trimmed to a word boundary, as a unit batch is: a
+		// value cut by the release would be assessed in two halves, neither of
+		// which matches. Events carrying logprobs reach this limit after about a
+		// thousand characters of text, so the cut is not a rare edge. Only the
+		// frames carrying the trailing word stay withheld; when there is no
+		// boundary to cut at, or the frames after it are too large to keep,
+		// everything is released as before.
+		if batch, _ := splitAtWordBoundary(combinedText); batch != "" {
+			assessedInHeld, _ := respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)].(int)
+			boundary := assessedInHeld + len([]rune(batch))
+			if release, retain, covered := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, boundary); release != "" && len(retain) <= maxCapRetainBytes {
+				return p.releaseBatch(batch, combinedText, release, retain, boundary-covered, respCtx, rp, chunk)
+			}
+		}
+		return p.assessAndRelease(combinedText, combinedHeld, respCtx, rp, chunk)
+	}
 
 	// Past a text unit: trim the batch back to the end of a sentence, or failing
 	// that a word, exactly as the immediate-delivery path does — a phrase assessed
@@ -2806,15 +2820,7 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 		boundary := assessedInHeld + len([]rune(batch))
 
 		release, retain, covered := splitHeldAtTextBoundary(combinedHeld, rp.StreamingJsonPath, boundary)
-
-		action := p.assessBatchAndRelease(batch, release, retain, boundary-covered, respCtx, rp, chunk)
-		if action.TerminateStream() {
-			return action
-		}
-		respCtx.Metadata[p.stateKey(metaKeyPendingText)] = carry
-		respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = retain
-		respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = boundary - covered
-		return action
+		return p.releaseBatch(batch, carry, release, retain, boundary-covered, respCtx, rp, chunk)
 	}
 
 	respCtx.Metadata[p.stateKey(metaKeyPendingText)] = combinedText
@@ -2822,6 +2828,25 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 	// Withhold: a non-nil empty body replaces the chunk, so nothing is delivered
 	// for this flush. A nil body would pass the bytes straight through.
 	return policy.ForwardResponseChunk{Body: []byte{}}
+}
+
+// releaseBatch assesses batch, releases the frames that carry it, and records
+// the text and bytes that stay withheld for the next flush.
+func (p *AWSBedrockGuardrailPolicy) releaseBatch(
+	batch, carry, release, retain string,
+	assessedInRetained int,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+	chunk *policy.StreamBody,
+) policy.StreamingResponseAction {
+	action := p.assessBatchAndRelease(batch, release, retain, assessedInRetained, respCtx, rp, chunk)
+	if action.TerminateStream() {
+		return action
+	}
+	respCtx.Metadata[p.stateKey(metaKeyPendingText)] = carry
+	respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = retain
+	respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = assessedInRetained
+	return action
 }
 
 // assessAndRelease assesses everything still withheld and, if all of it passes,
@@ -2998,8 +3023,10 @@ func (p *AWSBedrockGuardrailPolicy) rewriteHeld(
 		slog.Warn("AWSBedrockGuardrail: a reported value spans event boundaries and could not be redacted; discarding the held bytes",
 			"held_bytes", len(heldBytes))
 		return "", &policy.TerminateResponseChunk{
+			// No assessment in the body, whatever showAssessment says: it would
+			// carry the very value that could not be masked.
 			Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
-				nil, rp.ShowAssessment, output),
+				errRedactionFailed, false, nil),
 			AnalyticsMetadata: guardrailHitAnalytics(),
 			IsFault:           true,
 			// The guardrail asked for the value to be masked, which is not a block;
@@ -3035,6 +3062,12 @@ func (p *AWSBedrockGuardrailPolicy) restoreHeld(
 	}
 	return heldBytes
 }
+
+// errRedactionFailed marks the error body sent when a reported value could not
+// be masked in place. It makes the body give that reason rather than call the
+// response a violation, and showAssessment is never honoured there: the
+// assessment names the value that could not be masked.
+var errRedactionFailed = errors.New("sensitive content could not be redacted")
 
 // assessBatchAndRelease assesses one batch and releases the bytes it covers,
 // leaving the caller to record whatever text and bytes remain withheld.
@@ -3094,8 +3127,10 @@ func (p *AWSBedrockGuardrailPolicy) assessBatchAndRelease(
 			slog.Warn("AWSBedrockGuardrail: a reported value sits in a withheld frame this batch cannot rewrite; discarding the held bytes",
 				"retained_bytes", len(retainedBytes), "chunkIndex", chunk.Index)
 			return policy.TerminateResponseChunk{
+				// No assessment in the body: it would carry the value that could
+				// not be masked.
 				Body: p.buildSSEErrorEvent("Sensitive content could not be redacted in a streamed response",
-					nil, rp.ShowAssessment, decision),
+					errRedactionFailed, false, nil),
 				AnalyticsMetadata: guardrailHitAnalytics(),
 				IsFault:           true,
 				Fault:             checkFailureFault("Sensitive content could not be redacted in a streamed response", true),
@@ -3333,6 +3368,26 @@ func splitAtTextUnit(text string, unit int, endOfStream bool) (batch, carry stri
 	}
 	return string(runes[:cut]), string(runes[cut:])
 }
+
+// splitAtWordBoundary cuts text after its last sentence or word end, for a
+// release forced by the withheld-bytes limit rather than by a text unit. batch
+// is empty when no boundary lies within maxBoundarySearchRunes of the end.
+func splitAtWordBoundary(text string) (batch, carry string) {
+	runes := []rune(text)
+	cut := lastSentenceEnd(runes, len(runes), false)
+	if cut <= 0 {
+		cut = lastWordEnd(runes, len(runes))
+	}
+	if cut <= 0 {
+		return "", text
+	}
+	return string(runes[:cut]), string(runes[cut:])
+}
+
+// maxCapRetainBytes bounds what a release forced by maxHeldFlushBytes may keep
+// withheld: the frames carrying the trailing partial word. Past it the release
+// takes everything, so the buffer cannot stay near its limit.
+const maxCapRetainBytes = maxHeldFlushBytes / 4
 
 // maxBoundarySearchRunes bounds how far back a boundary is looked for, so a
 // batch is never trimmed to a small fraction of a text unit by one very long
@@ -4016,11 +4071,14 @@ func refusesUnreadable(s string, rp AWSBedrockGuardrailPolicyParams) bool {
 }
 
 // streamedOutputKeys name the members of a streamed event that carry model
-// output: text, a refusal, reasoning, or a tool call and its arguments. Any
-// non-blank string beneath one of them is output.
+// output: text, a refusal, reasoning, an audio response's transcript, or a tool
+// call and its arguments. Any non-blank string beneath one of them is output.
+// An audio delta's data is not: it is encoded audio, which the guardrail cannot
+// read, and its transcript is the text of the same audio.
 var streamedOutputKeys = map[string]bool{
 	"content":           true,
 	"text":              true,
+	"transcript":        true,
 	"refusal":           true,
 	"reasoning":         true,
 	"reasoning_content": true,
@@ -4643,8 +4701,10 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 	rewritten, _, leaked := p.redactedFlush(string(payload), output, params, metadata)
 	if leaked {
 		slog.Debug("AWSBedrockGuardrail: redaction could not be applied across events")
+		// No assessment in the body: it would carry the value that could not be
+		// masked.
 		return withFault(p.buildErrorResponse("Sensitive content could not be redacted in a streamed response",
-			nil, true, params.ShowAssessment, output),
+			errRedactionFailed, true, false, nil),
 			checkFailureFault("Sensitive content could not be redacted in a streamed response", true))
 	}
 	return noModification(true, []byte(rewritten))
