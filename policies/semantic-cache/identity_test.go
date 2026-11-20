@@ -17,10 +17,19 @@
 package semanticcache
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/wso2/api-platform/sdk/ai/azureauthentication"
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
+	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
 const testClientID = "11111111-2222-3333-4444-555555555555"
@@ -176,5 +185,109 @@ func TestCheckAllowedEndpoint(t *testing.T) {
 				t.Fatalf("error = %v, want containing %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+// captureLogs routes slog.Default() to a JSON buffer for the test and restores it afterwards.
+// Tests that use it must not run in parallel.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+func logRecords(t *testing.T, buf *bytes.Buffer) []map[string]interface{} {
+	t.Helper()
+	var records []map[string]interface{}
+	for _, line := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		if line == "" {
+			continue
+		}
+		var rec map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("bad log line %q: %v", line, err)
+		}
+		records = append(records, rec)
+	}
+	return records
+}
+
+func runTokenFailure(t *testing.T, embedErr error) (policy.RequestAction, *policy.RequestContext, []map[string]interface{}) {
+	t.Helper()
+	buf := captureLogs(t)
+	p := &SemanticCachePolicy{
+		embeddingProvider:   &mockEmbeddingProvider{getEmbeddingFn: func(string) ([]float32, error) { return nil, embedErr }},
+		vectorStoreProvider: &mockVectorDBProvider{},
+		threshold:           0.5,
+		auth:                authentication{typ: "container-apps", tokenScope: embeddingproviders.DefaultTokenScope},
+	}
+	reqCtx := &policy.RequestContext{
+		SharedContext: &policy.SharedContext{RequestID: "r1", Metadata: map[string]interface{}{}},
+		Body:          &policy.Body{Content: []byte("hello"), Present: true},
+	}
+	action := p.OnRequestBody(context.Background(), reqCtx, nil)
+	return action, reqCtx, logRecords(t, buf)
+}
+
+func assertFailsOpen(t *testing.T, action policy.RequestAction, reqCtx *policy.RequestContext) {
+	t.Helper()
+	got, ok := action.(policy.UpstreamRequestModifications)
+	if !ok {
+		t.Fatalf("expected UpstreamRequestModifications, got %T", action)
+	}
+	if !reflect.DeepEqual(got, policy.UpstreamRequestModifications{}) {
+		t.Fatalf("expected empty modifications, got %+v", got)
+	}
+	if _, ok := reqCtx.Metadata[MetadataKeyEmbedding]; ok {
+		t.Fatalf("no embedding should be stored")
+	}
+}
+
+func tokenErr(cached bool) error {
+	return fmt.Errorf("could not obtain an access token for the embedding provider: %w",
+		&azureauthentication.TokenError{Reason: "Azure Container Apps answered 400", Cached: cached})
+}
+
+func TestOnRequestBodyTokenFailureLogsErrorAndFailsOpen(t *testing.T) {
+	action, reqCtx, recs := runTokenFailure(t, tokenErr(false))
+	assertFailsOpen(t, action, reqCtx)
+	if len(recs) != 1 {
+		t.Fatalf("expected one log record, got %d: %v", len(recs), recs)
+	}
+	rec := recs[0]
+	want := map[string]interface{}{
+		"level":              "ERROR",
+		"msg":                "SemanticCache: could not obtain an access token for the embedding provider",
+		"reason":             "Azure Container Apps answered 400",
+		"authenticationType": "container-apps",
+		"clientId":           "host-default",
+		"scope":              embeddingproviders.DefaultTokenScope,
+	}
+	for k, v := range want {
+		if rec[k] != v {
+			t.Errorf("%s = %v, want %v", k, rec[k], v)
+		}
+	}
+}
+
+func TestOnRequestBodyCachedTokenFailureLogsAtDebug(t *testing.T) {
+	action, reqCtx, recs := runTokenFailure(t, tokenErr(true))
+	assertFailsOpen(t, action, reqCtx)
+	if len(recs) != 1 || recs[0]["level"] != "DEBUG" {
+		t.Fatalf("expected one DEBUG record, got %v", recs)
+	}
+}
+
+func TestOnRequestBodyOtherEmbeddingErrorsStayAtDebug(t *testing.T) {
+	action, reqCtx, recs := runTokenFailure(t, errors.New("status 500"))
+	assertFailsOpen(t, action, reqCtx)
+	if len(recs) != 1 {
+		t.Fatalf("expected one record, got %v", recs)
+	}
+	if recs[0]["level"] != "DEBUG" || recs[0]["msg"] != "SemanticCache: Error generating embedding" {
+		t.Fatalf("unexpected record %v", recs[0])
 	}
 }

@@ -18,7 +18,10 @@ package semanticcache
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"slices"
@@ -263,4 +266,27 @@ func quotedList(names []string) string {
 		return quoted[0]
 	}
 	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
+}
+
+// logTokenFailure logs err when it is a failure to obtain an access token for the gateway's
+// identity, and reports whether it was one. The cache fails open, so the log is the only sign
+// that a broken identity has turned it off: it is an ERROR, or a DEBUG when the failure is a
+// cached one already logged at ERROR. The reason can describe the gateway's identity, so it goes
+// to the log and never to the client.
+func logTokenFailure(ctx context.Context, err error, auth authentication) bool {
+	var tokenErr *azureauthentication.TokenError
+	if !errors.As(err, &tokenErr) {
+		return false
+	}
+	level := slog.LevelError
+	if tokenErr.Cached {
+		level = slog.LevelDebug
+	}
+	slog.Log(ctx, level, "SemanticCache: could not obtain an access token for the embedding provider",
+		"reason", tokenErr.Reason,
+		"error", err.Error(),
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return true
 }
