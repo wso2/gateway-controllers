@@ -1029,6 +1029,14 @@ func TestRegression_OtherContentTypesAreNotSniffed(t *testing.T) {
 	if mods.StatusCode != nil || len(client.texts) == 0 {
 		t.Fatalf("want the YAML assessed and passed, got status=%v assessed=%q", mods.StatusCode, client.texts)
 	}
+	// The case above assesses the whole body whatever its type (an empty
+	// jsonPath); the classification itself is checked directly.
+	if isEventStreamResponse("application/yaml", []byte(body)) {
+		t.Error("application/yaml must not be sniffed as an event stream")
+	}
+	if !isEventStreamResponse("text/plain", []byte(body)) {
+		t.Error("the same body under a sniffed type must read as an event stream, or this test proves nothing")
+	}
 }
 
 // A body released unassessed under passthroughOnError still has the request's
@@ -1525,6 +1533,87 @@ func TestRegression_JSONRPCMissDoesNotReleaseMatchingEvents(t *testing.T) {
 		}
 		if mods.Fault.Code != wantCode {
 			t.Errorf("passthrough=%v: fault code %s", passthrough, mods.Fault.Code)
+		}
+	}
+}
+
+// ─── seventh review round ────────────────────────────────────────────────────
+
+// An event stream assessed whole (an empty jsonPath) that is blocked ends with
+// the error framed as an SSE event, so an SSE client sees it rather than a
+// clean end. A JSON document keeps the raw error JSON.
+func TestRegression_WholeBodyEventStreamBlockIsFramed(t *testing.T) {
+	params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = "" }
+	for contentType, body := range map[string]string{
+		"text/event-stream": sseEvent("FORBIDDEN") + "data: [DONE]\n\n",
+		"application/json":  `{"answer":"FORBIDDEN"}`,
+	} {
+		p := streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, params)
+		got, terminated := driveStream(p, streamCtxWithType(contentType), []string{body, ""})
+		if !terminated || strings.Contains(got, "FORBIDDEN") {
+			t.Fatalf("%s: want the stream ended, got terminated=%v %q", contentType, terminated, got)
+		}
+		framed := strings.HasPrefix(got, "data: {") && strings.HasSuffix(got, "}\n\n")
+		if framed != (contentType == "text/event-stream") {
+			t.Errorf("%s: framed=%v, got %q", contentType, framed, got)
+		}
+	}
+}
+
+// A word Bedrock reports that sits inside two different restored values of its
+// type is the client's own text in both places, and is not masked again; the
+// same word elsewhere still is.
+func TestRegression_PartSharedByTwoRestoredValuesIsNotMaskedAgain(t *testing.T) {
+	names := map[string]string{"Taylor Lee": "NAME_0000", "Taylor Kim": "NAME_0001"}
+	respond := func(content string) string {
+		md := map[string]interface{}{MetadataKeyPIIEntities: names}
+		mods := streamingPolicy(&reportsEntityClient{"Taylor", types.GuardrailPiiEntityTypeName}, nil).OnResponseBody(context.Background(),
+			bufferedResponse(md, "application/json", `{"choices":[{"message":{"content":"`+content+`"}}]}`), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode != nil {
+			t.Fatalf("unexpected rejection: %s", mods.Body)
+		}
+		return string(mods.Body)
+	}
+	if got := respond("NAME_0000 and NAME_0001 joined."); !strings.Contains(got, "Taylor Lee and Taylor Kim joined.") {
+		t.Errorf("both restored names must stay whole, got %s", got)
+	}
+	if got := respond("NAME_0000 met Taylor Swift."); strings.Contains(got, "Taylor Swift") {
+		t.Errorf("a Taylor outside the restored values must be masked, got %s", got)
+	}
+}
+
+// Event boundaries are found with every SSE line terminator, in any mix, so a
+// JSON-RPC event ended with bare CRs or LF+CRLF is assessed and delivered as it
+// completes rather than held until the stream ends. A CR that ends the flush
+// may be half of a CRLF, so it does not end an event yet.
+func TestRegression_EventBoundariesAcceptEveryLineTerminator(t *testing.T) {
+	for s, want := range map[string]int{
+		"data: a\n\n":     len("data: a\n\n"),
+		"data: a\r\n\r\n": len("data: a\r\n\r\n"),
+		"data: a\r\r":     len("data: a\r\r"),
+		"data: a\n\r\n":   len("data: a\n\r\n"),
+		"data: a\r\n\n":   len("data: a\r\n\n"),
+		"data: a\r\nx":    -1,
+		"data: a\r":       -1,
+		"data: a\n\r":     len("data: a\n\r"),
+		"data: a\n\nda":   len("data: a\n\n"),
+	} {
+		if got := lastEventEnd(s); got != want {
+			t.Errorf("lastEventEnd(%q) = %d, want %d", s, got, want)
+		}
+	}
+	if !endsAtSSEEventBoundary([]byte("data: a\r\r")) || endsAtSSEEventBoundary([]byte("data: a\r")) {
+		t.Error("endsAtSSEEventBoundary must follow lastEventEnd")
+	}
+
+	for _, end := range []string{"\r\r", "\n\r\n"} {
+		event := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"ok\"}]}}" + end
+		p := streamingPolicy(&blockOnClient{needle: "NEVER"}, func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = "$.result.content[*].text" })
+		rc := streamCtxWithType("text/event-stream")
+		action := p.OnResponseBodyChunk(context.Background(), rc, &policy.StreamBody{Chunk: []byte(event)}, nil)
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok || (forward.Body != nil && string(forward.Body) != event) {
+			t.Errorf("%q: want the event delivered in its own flush, got %#v", end, action)
 		}
 	}
 }

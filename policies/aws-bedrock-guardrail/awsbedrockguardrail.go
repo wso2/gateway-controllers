@@ -1475,22 +1475,21 @@ func applyPIIReplacements(content string, replacements []piiReplacement) string 
 //
 // An exact request value is. So is part of one -- Bedrock can draw a restored
 // value's boundary differently in the response ("John" of "John Smith") -- but
-// only when it is the same type of entity and every occurrence of it in text sits
-// inside that request value. A match found anywhere else is new content (a
-// different "John", or a PIN that happens to appear in an address) and is masked.
+// only when every occurrence of it in text sits inside a request value of the
+// same type of entity -- one value or several ("Taylor" of both "Taylor Lee" and
+// "Taylor Kim"). A match found anywhere else is new content (a different "John",
+// or a PIN that happens to appear in an address) and is masked.
 func partOfRequestValue(match, entityType, text string, restored map[string]string) bool {
 	if _, exact := restored[match]; exact {
 		return true
 	}
+	var originals []string
 	for original, placeholder := range restored {
-		if original == match || !strings.Contains(original, match) || placeholderEntityType(placeholder) != entityType {
-			continue
-		}
-		if occursOnlyWithin(text, match, original) {
-			return true
+		if original != match && strings.Contains(original, match) && placeholderEntityType(placeholder) == entityType {
+			originals = append(originals, original)
 		}
 	}
-	return false
+	return len(originals) > 0 && occursOnlyWithin(text, match, originals)
 }
 
 // placeholderEntityType returns the entity type a request placeholder was minted
@@ -1503,20 +1502,22 @@ func placeholderEntityType(placeholder string) string {
 }
 
 // occursOnlyWithin reports whether match occurs in text, and only inside
-// occurrences of original.
-func occursOnlyWithin(text, match, original string) bool {
+// occurrences of the originals.
+func occursOnlyWithin(text, match string, originals []string) bool {
 	if !strings.Contains(text, match) {
 		return false
 	}
 	type span struct{ start, end int }
 	var within []span
-	for from := 0; ; {
-		i := strings.Index(text[from:], original)
-		if i < 0 {
-			break
+	for _, original := range originals {
+		for from := 0; ; {
+			i := strings.Index(text[from:], original)
+			if i < 0 {
+				break
+			}
+			within = append(within, span{from + i, from + i + len(original)})
+			from += i + 1
 		}
-		within = append(within, span{from + i, from + i + len(original)})
-		from += i + 1
 	}
 	for from := 0; ; {
 		i := strings.Index(text[from:], match)
@@ -2356,17 +2357,48 @@ func (p *AWSBedrockGuardrailPolicy) assessJSONRPCEvents(complete string, respCtx
 // splitAtLastEventEnd divides s after its last complete event (the blank line
 // that ends it), returning the complete events and the event still arriving.
 func splitAtLastEventEnd(s string) (complete, rest string) {
-	end := -1
-	if i := strings.LastIndex(s, "\n\n"); i >= 0 {
-		end = i + 2
-	}
-	if i := strings.LastIndex(s, "\r\n\r\n"); i >= 0 && i+4 > end {
-		end = i + 4
-	}
+	end := lastEventEnd(s)
 	if end < 0 {
 		return "", s
 	}
 	return s[:end], s[end:]
+}
+
+// lastEventEnd returns the offset just after the last blank line in s -- a line
+// terminator directly after another -- or -1 when there is none. Terminators are
+// CRLF, LF or CR, in any mix, as the SSE specification allows and the JSON-RPC
+// reader accepts. A CR that is the last byte of s may be the first half of a
+// CRLF still arriving: right after text it does not end the line yet, but right
+// after another terminator it completes a blank line either way (an LF that
+// follows only finishes that CRLF, and reads as one more blank line).
+func lastEventEnd(s string) int {
+	end := -1
+	afterTerminator := false
+	for i := 0; i < len(s); {
+		width := 0
+		switch {
+		case s[i] == '\r' && i+1 == len(s):
+			if afterTerminator {
+				return len(s)
+			}
+			return end
+		case s[i] == '\r' && s[i+1] == '\n':
+			width = 2
+		case s[i] == '\r' || s[i] == '\n':
+			width = 1
+		}
+		if width == 0 {
+			afterTerminator = false
+			i++
+			continue
+		}
+		i += width
+		if afterTerminator {
+			end = i
+		}
+		afterTerminator = true
+	}
+	return end
 }
 
 // sseHasJSONEvent reports whether any event of an SSE body carries JSON data.
@@ -2418,7 +2450,7 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 			slog.Warn("AWSBedrockGuardrail: response too large to withhold until assessed; ending the stream",
 				"accumulated_bytes", size, "limit", maxNonSSEHeldBytes)
 			p.dropAccumulated(respCtx)
-			return p.unassessableEnd(false)
+			return p.unassessableEnd(p.classifiedAsEventStream(respCtx))
 		}
 		slog.Warn("AWSBedrockGuardrail: response too large to withhold until assessed, passthrough enabled; releasing it unassessed",
 			"accumulated_bytes", size, "limit", maxNonSSEHeldBytes)
@@ -2453,9 +2485,15 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 	if modifications.StatusCode != nil {
 		// The buffered path answers a violation with a status; this one cannot,
 		// because the status went downstream with the headers. The body it built
-		// is still the right thing to deliver as the stream's last event.
+		// is still the right thing to deliver as the stream's last event -- framed
+		// as an SSE event when the response is an event stream assessed whole (an
+		// empty jsonPath), or an SSE client would discard it and see a clean end.
+		body := modifications.Body
+		if p.classifiedAsEventStream(respCtx) {
+			body = []byte(sseDataPrefix + string(body) + "\n\n")
+		}
 		return policy.TerminateResponseChunk{
-			Body:              modifications.Body,
+			Body:              body,
 			AnalyticsMetadata: modifications.AnalyticsMetadata,
 			// The status that would have carried this verdict went downstream with
 			// the headers, so IsFault is the only thing left marking the stream as
@@ -2470,6 +2508,13 @@ func (p *AWSBedrockGuardrailPolicy) handleNonSSEStreamFlush(
 		return policy.ForwardResponseChunk{Body: modifications.Body}
 	}
 	return deliverAll
+}
+
+// classifiedAsEventStream reports whether OnResponseBodyChunk classified this
+// response as Server-Sent Events.
+func (p *AWSBedrockGuardrailPolicy) classifiedAsEventStream(respCtx *policy.ResponseStreamContext) bool {
+	sse, _ := respCtx.Metadata[p.stateKey(metaKeySSEStream)].(bool)
+	return sse
 }
 
 // assessStreamBatch runs one ApplyGuardrail call for a batch. stop is true when
@@ -4027,12 +4072,11 @@ func sseDataPayload(line string) (payload, prefix string, ok bool) {
 // endsAtSSEEventBoundary reports whether s ends where one event ends, so a
 // flush released here never cuts a `data:` line in half.
 //
-// Both terminators are accepted: matching "\n\n" alone would treat a CRLF
-// stream as one event that never ends, and accumulate it to the kernel's
-// ceiling instead of releasing it.
+// Every terminator is accepted, in any mix (see lastEventEnd): matching "\n\n"
+// alone would treat a CRLF or CR stream as one event that never ends, and
+// accumulate it to the kernel's ceiling instead of releasing it.
 func endsAtSSEEventBoundary(s []byte) bool {
-	text := string(s)
-	return strings.HasSuffix(text, "\n\n") || strings.HasSuffix(text, "\r\n\r\n")
+	return len(s) > 0 && lastEventEnd(string(s)) == len(s)
 }
 
 // extractSSEDeltaContent concatenates the assistant text carried by every
