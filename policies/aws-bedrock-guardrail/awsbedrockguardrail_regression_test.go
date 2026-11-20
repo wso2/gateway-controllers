@@ -1389,8 +1389,9 @@ func TestRegression_JSONRPCOversizedEventDoesNotReleaseCompleteEvents(t *testing
 		pp.JsonPath = "$.result.content[*].text"
 		pp.PassthroughOnError = true
 	})
-	got, terminated = driveStream(p, streamCtxWithType("text/event-stream"), []string{clean + big, "\"}]}}\n\n", ""})
-	if terminated || !strings.HasPrefix(got, clean+big) {
+	tail := "\"}]}}\n\n"
+	got, terminated = driveStream(p, streamCtxWithType("text/event-stream"), []string{clean + big, tail, ""})
+	if terminated || got != clean+big+tail {
 		t.Errorf("want the clean event and the oversized one delivered, got terminated=%v %.120q", terminated, got)
 	}
 }
@@ -1430,6 +1431,17 @@ func TestRegression_OversizedPassthroughRestoresJSONEscaped(t *testing.T) {
 		if json.Valid([]byte(got)) != wantValid {
 			t.Errorf("%s: want valid JSON=%v", contentType, wantValid)
 		}
+		if wantValid {
+			var decoded struct {
+				Choices []struct {
+					Message struct{ Content string } `json:"message"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal([]byte(got), &decoded); err != nil || len(decoded.Choices) == 0 ||
+				!strings.HasPrefix(decoded.Choices[0].Message.Content, "hi "+original+" ") {
+				t.Errorf("%s: want the value restored in the content, got err=%v", contentType, err)
+			}
+		}
 		if contentType == "text/plain" && !strings.Contains(got, original) {
 			t.Errorf("text/plain: want the value restored as it was")
 		}
@@ -1445,5 +1457,74 @@ func TestRegression_JSONRPCHandoverKeepsBytesTheStreamingPathCheckHeld(t *testin
 	got, terminated := driveStream(p, streamCtxWithType("text/event-stream"), []string{first, rpc, ""})
 	if terminated || got != first+rpc {
 		t.Errorf("want both events delivered in order, got terminated=%v %q", terminated, got)
+	}
+}
+
+// ─── sixth review round ──────────────────────────────────────────────────────
+
+// An unfinished last line is ignored by the off-path check as it is by the
+// readability check: an SSE client discards it, so a tool-call fragment there
+// does not end a stream whose complete events are fine.
+func TestRegression_OffPathCheckIgnoresTheUnfinishedLastLine(t *testing.T) {
+	body := sseEvent("Hello.") + `data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"x"}}]}}]}`
+	got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "NEVER"}, nil), streamCtxWithType("text/event-stream"), []string{body, ""})
+	if terminated || got != body {
+		t.Errorf("streamed: want it delivered, got terminated=%v %q", terminated, got)
+	}
+	mods := streamingPolicy(&blockOnClient{needle: "NEVER"}, nil).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", body), nil).(policy.DownstreamResponseModifications)
+	if mods.StatusCode != nil {
+		t.Errorf("buffered: want it delivered, got fault=%+v", mods.Fault)
+	}
+}
+
+// Output the path cannot read is refused however the path misses it: a wildcard
+// (the SDK reads no text through one), a later event without the path's first
+// member, or a value of another shape beneath an output member.
+func TestRegression_OffPathOutputIsRefusedWhateverTheShape(t *testing.T) {
+	for name, tc := range map[string]struct{ path, body string }{
+		"wildcard path":                      {"$.choices[*].delta.content", sseEvent("FORBIDDEN")},
+		"later event without choices":        {ResponseDefaultStreamingJSONPath, sseEvent("Hello.") + "data: {\"type\":\"note\",\"text\":\"FORBIDDEN\"}\n\n"},
+		"string where an object is expected": {"$.delta.content.text", "data: {\"delta\":{\"content\":\"FORBIDDEN\"}}\n\n"},
+	} {
+		params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.StreamingJsonPath = tc.path }
+		got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, params), streamCtxWithType("text/event-stream"), []string{tc.body, ""})
+		if !terminated || strings.Contains(got, "FORBIDDEN") {
+			t.Errorf("streamed %s: want the stream ended, got terminated=%v %q", name, terminated, got)
+		}
+		mods := streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, params).OnResponseBody(context.Background(),
+			bufferedResponse(map[string]interface{}{}, "text/event-stream", tc.body), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode == nil {
+			t.Errorf("buffered %s: want a refusal", name)
+		}
+	}
+}
+
+// With passthroughOnError, a JSON-RPC event whose content the path misses passes
+// unassessed, but the events in the same batch that the path does match are
+// still assessed. Without passthrough the miss is a fault, as before.
+func TestRegression_JSONRPCMissDoesNotReleaseMatchingEvents(t *testing.T) {
+	body := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"FORBIDDEN\"}]}}\n\n" +
+		"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"structuredContent\":{\"city\":\"Paris\"}}}\n\n"
+	for _, passthrough := range []bool{true, false} {
+		client := &blockOnClient{needle: "FORBIDDEN"}
+		p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) {
+			pp.JsonPath = "$.result.content[*].text"
+			pp.PassthroughOnError = passthrough
+		})
+		mods := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", body), nil).(policy.DownstreamResponseModifications)
+		if mods.StatusCode == nil || mods.Fault == nil {
+			t.Fatalf("passthrough=%v: want a refusal, got %+v", passthrough, mods)
+		}
+		wantCode := policy.FaultCodeMediationFailed
+		if passthrough {
+			wantCode = mods.Fault.Code // the guardrail's own code
+			if len(client.texts) == 0 || mods.Fault.Type != policy.FaultTypeGuardrail {
+				t.Errorf("passthrough: want the matching event assessed and blocked, got assessed=%q fault=%+v", client.texts, mods.Fault)
+			}
+		}
+		if mods.Fault.Code != wantCode {
+			t.Errorf("passthrough=%v: fault code %s", passthrough, mods.Fault.Code)
+		}
 	}
 }

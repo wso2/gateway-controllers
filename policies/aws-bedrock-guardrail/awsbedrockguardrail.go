@@ -3836,7 +3836,10 @@ func unreadableEventStream(s string) bool {
 
 // refusesUnreadableBody is refusesUnreadable for a body that has ended.
 func refusesUnreadableBody(s string, rp AWSBedrockGuardrailPolicyParams) bool {
-	return !rp.PassthroughOnError && (unreadableSSEBody(s) || missedStreamedOutput(s, rp.StreamingJsonPath))
+	// An unfinished last line is an event an SSE client discards, so only the
+	// complete lines are checked for output the path does not read.
+	complete, _ := splitTrailingPartialLine(s)
+	return !rp.PassthroughOnError && (unreadableSSEBody(s) || missedStreamedOutput(complete, rp.StreamingJsonPath))
 }
 
 // refusesUnreadable reports whether an unreadable line (unreadableSSELine), or an
@@ -3870,11 +3873,14 @@ var streamedOutputKeys = map[string]bool{
 // choices[].text under the chat path, or a member of another shape where the
 // path expects an array.
 //
-// Only events that carry the member the path starts with are looked at (events
-// without it are checkStreamingPath's concern), and along the path only the
-// members beside it are: an event's id, model, role, finish reason or usage are
-// not output. Events with no text at all -- the opening role delta, the
-// finishing delta, a usage frame with no choices -- carry none.
+// An event without the member the path starts with reads nothing, so any output
+// in it counts (a provider's own event beside the chat deltas, say). In an event
+// with that member, only what the path does not lead to counts: the members
+// beside it, other array elements, everything beneath a wildcard (the SDK reads
+// no text through one), and a value of another shape where the path goes on.
+// An event's id, model, role, finish reason or usage are not output, and events
+// with no text at all -- the opening role delta, the finishing delta, a usage
+// frame with no choices, an error -- carry none.
 func missedStreamedOutput(s, streamingJsonPath string) bool {
 	tokens, err := parseJSONPath(streamingJsonPath)
 	if err != nil || len(tokens) == 0 || tokens[0].kind != tokenKey {
@@ -3899,9 +3905,12 @@ func missedStreamedOutput(s, streamingJsonPath string) bool {
 			continue
 		}
 		if _, has := event[tokens[0].key]; !has {
+			if carriesStreamedOutput(doc, false) {
+				return true
+			}
 			continue
 		}
-		if outputOffPath(doc, tokens) {
+		if outputOffPath(doc, tokens, false) {
 			return true
 		}
 	}
@@ -3909,8 +3918,8 @@ func missedStreamedOutput(s, streamingJsonPath string) bool {
 }
 
 // outputOffPath reports whether node carries model output anywhere the remaining
-// path tokens do not lead to text.
-func outputOffPath(node interface{}, tokens []pathToken) bool {
+// path tokens do not lead to text; output says node is beneath an output member.
+func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
 	if len(tokens) == 0 {
 		switch node.(type) {
 		case string, json.Number, bool, nil:
@@ -3923,30 +3932,34 @@ func outputOffPath(node interface{}, tokens []pathToken) bool {
 	case tokenKey:
 		object, ok := node.(map[string]interface{})
 		if !ok {
-			return carriesStreamedOutput(node, false)
+			return carriesStreamedOutput(node, output) // another shape: the path reads nothing
 		}
 		for key, child := range object {
-			if key != token.key && carriesStreamedOutput(child, streamedOutputKeys[key]) {
+			if key != token.key && carriesStreamedOutput(child, output || streamedOutputKeys[key]) {
 				return true
 			}
 		}
 		child, has := object[token.key]
-		return has && outputOffPath(child, tokens[1:])
+		return has && outputOffPath(child, tokens[1:], output || streamedOutputKeys[token.key])
+	case tokenWildcard:
+		// The SDK reads a wildcard as a list, which is not text: nothing beneath
+		// it is read.
+		return carriesStreamedOutput(node, output)
 	default:
 		array, ok := node.([]interface{})
 		if !ok {
-			return carriesStreamedOutput(node, false)
+			return carriesStreamedOutput(node, output)
 		}
 		index := token.index
 		if index < 0 {
 			index += len(array)
 		}
 		for i, element := range array {
-			if token.kind == tokenWildcard || i == index {
-				if outputOffPath(element, tokens[1:]) {
+			if i == index {
+				if outputOffPath(element, tokens[1:], output) {
 					return true
 				}
-			} else if carriesStreamedOutput(element, false) {
+			} else if carriesStreamedOutput(element, output) {
 				return true // another choice the path does not read
 			}
 		}
@@ -4345,6 +4358,16 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 		extracted, err = extractPayloadAs(payload, params.JsonPath, true)
 	} else {
 		extracted, err = extractPayload(payload, params.JsonPath)
+	}
+	if err == nil && extracted.missed != nil {
+		if !params.PassthroughOnError {
+			err = extracted.missed
+		} else {
+			// Only the content the path missed passes unassessed; the events it
+			// does match are assessed as usual.
+			slog.Debug("AWSBedrockGuardrail: some content has no value at jsonPath, passthrough enabled; assessing the rest",
+				"error", extracted.missed)
+		}
 	}
 	if err != nil {
 		return p.passOrBlock("Error extracting value from JSONPath", err, params, isResponse, nil,

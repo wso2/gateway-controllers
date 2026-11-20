@@ -40,6 +40,11 @@ type textSegment struct {
 type extractedPayload struct {
 	segments []*textSegment
 	rebuild  func() ([]byte, error)
+	// missed is the extraction error for content some events carry that the path
+	// does not reach, while other events' segments were found. The caller faults
+	// on it, or, with passthroughOnError, lets only that content pass and still
+	// assesses the segments.
+	missed error
 }
 
 // extractPayload finds the text the guardrail must check.
@@ -363,8 +368,12 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		matched = true
 		segments = append(segments, eventSegments...)
 	}
+	var missed error
 	if contentMissed {
-		return nil, fmt.Errorf("an event in the Server-Sent Events stream carries content with no text at jsonPath %q", jsonPath)
+		missed = fmt.Errorf("an event in the Server-Sent Events stream carries content with no text at jsonPath %q", jsonPath)
+		if !matched {
+			return nil, missed
+		}
 	}
 	if !matched && allJSONRPC && sawJSONRPC {
 		// Only content-free JSON-RPC messages the path does not apply to, e.g. a
@@ -394,7 +403,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		return []byte(out.String()), nil
 	}
 
-	return &extractedPayload{segments: segments, rebuild: rebuild}, nil
+	return &extractedPayload{segments: segments, rebuild: rebuild, missed: missed}, nil
 }
 
 // carriesText reports whether a JSON value holds any non-blank string.
