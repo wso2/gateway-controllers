@@ -35,6 +35,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -4334,4 +4335,36 @@ func TestAwaitUpstreamForwardingFailsFastForARouteWithoutAKnownCluster(t *testin
 	require.ErrorContains(t, g.awaitUpstreamForwarding(ctx, "/per-request"), "picks its cluster per request")
 	require.Less(t, time.Since(start), 5*time.Second)
 	require.Error(t, g.awaitUpstreamForwarding(ctx, "${CTX:missing}"))
+}
+
+func TestMetadataFieldResolvesTopLevelKeysAndNestedPaths(t *testing.T) {
+	metadata := map[string]any{
+		"aiMetadata": map[string]any{"model": "gpt-4o-mini", "llmCost": 0.003},
+		"flat.key":   "literal",
+		"plain":      "value",
+	}
+	for name, tc := range map[string]struct {
+		field string
+		want  any
+		found bool
+	}{
+		"top-level key":                       {"plain", "value", true},
+		"top-level object":                    {"aiMetadata", metadata["aiMetadata"], true},
+		"nested field":                        {"aiMetadata.llmCost", 0.003, true},
+		"top-level key that contains a dot":   {"flat.key", "literal", true},
+		"nested field that is not there":      {"aiMetadata.promptTokens", nil, false},
+		"path through a field that is no map": {"plain.value", nil, false},
+		"missing top-level key":               {"missing", nil, false},
+		"missing nested object":               {"missing.llmCost", nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, found := metadataField(metadata, tc.field)
+			if found != tc.found {
+				t.Fatalf("metadataField(%q) found = %v, want %v", tc.field, found, tc.found)
+			}
+			if found && !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("metadataField(%q) = %v, want %v", tc.field, got, tc.want)
+			}
+		})
+	}
 }

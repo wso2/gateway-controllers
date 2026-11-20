@@ -123,6 +123,8 @@ Feature: LLM cost calculation across provider response shapes
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains cacheWrite1hTokens.
+  @known-issue-gw-1.2.0
   Scenario: Anthropic 1-hour TTL cache writes billed at higher rate
     # claude-opus-4-6: 10 input x 5e-6 + 5 output x 2.5e-5 + 100 5m-write x 6.25e-6 + 500 1hr-write x 1e-5
     #                 = 0.00005 + 0.000125 + 0.000625 + 0.005 = $0.0058 per request
@@ -165,6 +167,8 @@ Feature: LLM cost calculation across provider response shapes
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains providerFields.
+  @known-issue-gw-1.2.0
   Scenario: Anthropic web search tool per-query cost added to token cost
     # claude-3-5-haiku-20241022: 50 input x 8e-7 + 25 output x 4e-6 + 2 web-search queries x 0.01
     #                          = 0.00004 + 0.00010 + 0.02 = $0.02014 per request
@@ -405,6 +409,8 @@ Feature: LLM cost calculation across provider response shapes
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains serviceTier.
+  @known-issue-gw-1.2.0
   Scenario: OpenAI flex service tier - lower rates applied for flex tier
     # gpt-5.4 flex: 100 prompt x 1.25e-6 + 50 completion x 7.5e-6 = 1.25e-4 + 3.75e-4 = $0.0005 per request
     # Budget $0.001000 = exactly 2 requests worth
@@ -487,6 +493,8 @@ Feature: LLM cost calculation across provider response shapes
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains serviceTier.
+  @known-issue-gw-1.2.0
   Scenario: OpenAI batch service tier - batch rates applied for batch tier
     # gpt-4.1 batch: 100 prompt x 1e-6 + 50 completion x 4e-6 = 1e-4 + 2e-4 = $0.0003 per request
     # Budget $0.000600 = exactly 2 requests worth
@@ -570,6 +578,8 @@ Feature: LLM cost calculation across provider response shapes
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Fixed in newer gateways by wso2/api-platform PR #3275 (https://github.com/wso2/api-platform/pull/3275): the built-in template gains providerFields.
+  @known-issue-gw-1.2.0
   Scenario: OpenAI web search tool - url_citation annotation adds flat per-call fee
     # gpt-4.1-2025-04-14: 50 prompt x 2e-6 + 25 completion x 8e-6 + 1 web-search call x 0.01
     #                    = 1e-4 + 2e-4 + 0.01 = $0.0103 per request
@@ -702,7 +712,8 @@ Feature: LLM cost calculation across provider response shapes
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
-  @bedrock
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2951 (https://github.com/wso2/api-platform/pull/2951): the 1.1.0 Bedrock template's model-from-URL pattern does not compile in Go.
+  @known-issue-gw-1.1.0
   Scenario: Bedrock Converse model is extracted from URL and cost is calculated
     # apac.amazon.nova-micro-v1:0: 10 input x 3.7e-8 + 3 output x 1.48e-7 = $0.000000814 per request
     # Budget $0.000001628 = exactly 2 requests worth
