@@ -275,6 +275,20 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
 - **No stored secret**: with an Azure identity, no key is stored in the gateway's configuration or sent to
   Azure OpenAI, and the tokens are short lived.
 
+**Upgrading from v1.3**
+
+- An API that sets nothing keeps sending the gateway's key, exactly as v1.3 does. An API that sets its own
+  endpoint or key, or overrides any other setting, keeps doing so.
+- The only parameters v1.4 refuses in an API definition are `embeddingAllowedAuthTypes` and
+  `embeddingAllowedEndpoints`, which only the gateway can set.
+
+**Gateway versions**
+
+v1.4 needs Go 1.26.10 or later to build. The latest gateway's builder has it. A 1.2.0 gateway's builder
+downloads a newer Go during the build, so the build machine needs internet access. A 1.1.0 gateway's builder
+can't build v1.4: pin the policy to `@v1.3.0` in `build.yaml` before rebuilding, because `@v1` would pick
+v1.4.
+
 ### Jev Cache Admission
 
 When enabled, the policy sends a JSON state containing the extracted request and response text to TypeSafe Jev immediately before an otherwise eligible cache write. It stores the response only when every configured answer stays below its threshold. The check runs inline during response processing, so delivery to the client waits until Jev completes or reaches the configured timeout. A timeout, provider error, malformed answer, or missing response text skips the cache write, but the policy does not change the upstream response returned to the client. Existing cache lookups and entries are unaffected.
