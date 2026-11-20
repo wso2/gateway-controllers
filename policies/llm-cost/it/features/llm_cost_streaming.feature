@@ -80,9 +80,10 @@ Feature: LLM cost streaming
       """
     And the response body should contain "[DONE]"
     # The events arrive in the order they were sent, with the usage event after the content and [DONE]
-    # last. The second pattern counts them: four data events and [DONE], so none is dropped or repeated.
+    # last. The second pattern checks the framing and counts them: four data events and [DONE], each ended by a
+    # blank line as SSE requires, so none is dropped, repeated or left unterminated.
     And the response body should match pattern "(?s)\x22role\x22:\x22assistant\x22.*\x22content\x22:\x22Hi\x22.*\x22content\x22:\x22 there\x22.*\x22total_tokens\x22:1500.*\[DONE\]"
-    And the response body should match pattern "\A(?:data: [^\n]*\n+){4}data: \[DONE\]\s*\z"
+    And the response body should match pattern "\A(?:data: [^\n]*\n\n){4}data: \[DONE\]\n\n\z"
     And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/chat/completions" should have numeric metadata field "aiMetadata.llmCost" equal to "0.003"
     And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/chat/completions" should have numeric metadata field "aiTokenUsage.promptTokens" equal to "1000"
     And the latest analytics event for path "${CTX:providerContext}/scripted/openai/v1/chat/completions" should have numeric metadata field "aiTokenUsage.completionTokens" equal to "500"
