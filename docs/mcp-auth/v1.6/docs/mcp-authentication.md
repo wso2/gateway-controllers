@@ -224,7 +224,7 @@ Set `audiences` to turn the check on. A token is then accepted only if its `aud`
 - **The comparison is exact.** Scheme, host, port, path and a trailing slash must all match; no URL normalisation is applied.
 - **It is off by default.** With `audiences` left out or empty, the audience is not checked, as in earlier versions.
 
-A token rejected for its audience gets the same response as any other token that cannot be validated: `onfailurestatuscode` (default `401`) and a `WWW-Authenticate` challenge with `error="invalid_token"`. The fault's `Description` (`no valid audience found in token`) records the reason for fault policies and analytics; the client is not told.
+A token rejected for its audience gets the same response as any other token that cannot be validated: `onfailurestatuscode` (default `401`), a body shaped by `errormessageformat`, and a `WWW-Authenticate` challenge with `resource_metadata`. With the default `errormessageformat` (`json`), the challenge also carries `error="invalid_token"`; with `plain` or `minimal` it does not. The fault's `Description` (`no valid audience found in token`) records the reason for fault policies and analytics; the client is not told.
 
 ## Reference Scenarios
 
@@ -542,7 +542,7 @@ A token with `"aud": "https://mcp1.gw.example.com/mcpserver/mcp"`, or with an `a
 | Situation | Status | Body |
 |-----------|--------|------|
 | Token missing, expired, issued for an audience not in `audiences`, or otherwise invalid | `onfailurestatuscode` (default `401`) | Shaped by `errormessageformat`; accompanied by a `WWW-Authenticate: Bearer resource_metadata="…"` header. |
-| Request body is not valid JSON, or not a valid JSON-RPC request object | `400` | A JSON-RPC 2.0 error object — code `-32700` (Parse error) for invalid JSON syntax, `-32600` (Invalid Request) otherwise. Not affected by `errormessageformat`. |
+| Request body is not valid JSON, or not a valid JSON-RPC request object, when the policy decides from the body (see [How a request is identified](#how-a-request-is-identified)). On a gateway with an MCP operation resolver, a `2026-07-28` request is decided from its headers; attach `mcp-spec-validation` to reject its malformed body at the gateway. | `400` | A JSON-RPC 2.0 error object — code `-32700` (Parse error) for invalid JSON syntax, `-32600` (Invalid Request) otherwise. Not affected by `errormessageformat`. |
 | Policy configuration is invalid (e.g. a malformed `keymanagers` entry) | `500` | JSON error object. |
 
 ## Related Policies
@@ -567,13 +567,16 @@ token is passed through unchanged, with its code and type.
 | Protected resource metadata is requested but no key manager or matching issuer is configured | `onFailureStatusCode` | `960000` | `configuration` |
 | The policy is misconfigured: `onFailureStatusCode` or `errorMessageFormat` is invalid, or a `keyManagers` entry cannot be read when protected resource metadata is requested | `500` | `960000` | `configuration` |
 | `jwt-auth` cannot be loaded | `500` | `900900` | `authentication` |
-| The request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
+| When the policy decides from the body: the request body is not valid JSON (JSON-RPC `-32700`), or is not a single JSON-RPC request object, has a member of the wrong type or names a member twice (`-32600`) | `400` | `960001` | `validation` |
 | A `2026-07-28` request is missing `Mcp-Method`, or `Mcp-Name` where the method requires one, or sends an `Mcp-Name` that cannot be decoded (`-32020`) | `400` | `960004` | `validation` |
 
 The protected resource metadata document is a successful response and is not a fault. A
 malformed request's fault also carries its JSON-RPC error code.
 
 The fault's `Description` carries the internal reason, for example `no matching issuers found`, or
-for a malformed request the JSON-RPC error's `data`. The response body carries the same reason,
-as it did in v1.4 (except with `errorMessageFormat: minimal`), so the client receives it; the
-fault's `Message` is a generic one.
+for a malformed request the JSON-RPC error's `data`. For this policy's own rejections the response
+body carries the same reason, as it did in v1.4 (except with `errorMessageFormat: minimal`), so the
+client receives it; the fault's `Message` is a generic one. A token rejected by `jwt-auth` is
+different: its `Description` holds `jwt-auth`'s internal reason (for example
+`no valid audience found in token`), while the body carries only the configured error message, so
+the client is not told the reason.
