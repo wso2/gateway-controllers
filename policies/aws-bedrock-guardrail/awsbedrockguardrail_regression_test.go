@@ -1488,22 +1488,59 @@ func TestRegression_OffPathCheckIgnoresTheUnfinishedLastLine(t *testing.T) {
 
 // Output the path cannot read is refused however the path misses it: a wildcard
 // (the SDK reads no text through one), a later event without the path's first
-// member, or a value of another shape beneath an output member.
+// member, or a value of another shape beneath an output member. The text is
+// harmless, so the refusal is the extraction fault itself, not a guardrail block
+// of text that reached Bedrock.
 func TestRegression_OffPathOutputIsRefusedWhateverTheShape(t *testing.T) {
+	const offPath = "OFFPATH"
 	for name, tc := range map[string]struct{ path, body string }{
-		"wildcard path":                      {"$.choices[*].delta.content", sseEvent("FORBIDDEN")},
-		"later event without choices":        {ResponseDefaultStreamingJSONPath, sseEvent("Hello.") + "data: {\"type\":\"note\",\"text\":\"FORBIDDEN\"}\n\n"},
-		"string where an object is expected": {"$.delta.content.text", "data: {\"delta\":{\"content\":\"FORBIDDEN\"}}\n\n"},
+		"wildcard path":                      {"$.choices[*].delta.content", sseEvent(offPath)},
+		"later event without choices":        {ResponseDefaultStreamingJSONPath, sseEvent("Hello.") + "data: {\"type\":\"note\",\"text\":\"" + offPath + "\"}\n\n"},
+		"string where an object is expected": {"$.delta.content.text", "data: {\"delta\":{\"content\":\"" + offPath + "\"}}\n\n"},
 	} {
 		params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.StreamingJsonPath = tc.path }
-		got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, params), streamCtxWithType("text/event-stream"), []string{tc.body, ""})
-		if !terminated || strings.Contains(got, "FORBIDDEN") {
-			t.Errorf("streamed %s: want the stream ended, got terminated=%v %q", name, terminated, got)
+		assessedOffPath := func(c *blockOnClient) bool {
+			for _, text := range c.texts {
+				if strings.Contains(text, offPath) {
+					return true
+				}
+			}
+			return false
 		}
-		mods := streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, params).OnResponseBody(context.Background(),
+
+		streamed := &blockOnClient{needle: "NEVER"}
+		p := streamingPolicy(streamed, params)
+		rc := streamCtxWithType("text/event-stream")
+		var term *policy.TerminateResponseChunk
+		var out strings.Builder
+		for i, f := range []string{tc.body, ""} {
+			action := p.OnResponseBodyChunk(context.Background(), rc, &policy.StreamBody{Chunk: []byte(f), EndOfStream: i == 1, Index: uint64(i)}, nil)
+			if a, ok := action.(policy.TerminateResponseChunk); ok {
+				term = &a
+				break
+			}
+			if a, ok := action.(policy.ForwardResponseChunk); ok {
+				out.Write(a.Body)
+			}
+		}
+		switch {
+		case term == nil:
+			t.Errorf("streamed %s: want the stream ended, got %q", name, out.String())
+		case !term.IsFault || term.Fault == nil || term.Fault.Code != policy.FaultCodeMediationFailed:
+			t.Errorf("streamed %s: want a %s fault, got %+v", name, policy.FaultCodeMediationFailed, term.Fault)
+		}
+		if strings.Contains(out.String(), offPath) || assessedOffPath(streamed) {
+			t.Errorf("streamed %s: off-path text was delivered or sent to Bedrock (calls %q)", name, streamed.texts)
+		}
+
+		buffered := &blockOnClient{needle: "NEVER"}
+		mods := streamingPolicy(buffered, params).OnResponseBody(context.Background(),
 			bufferedResponse(map[string]interface{}{}, "text/event-stream", tc.body), nil).(policy.DownstreamResponseModifications)
-		if mods.StatusCode == nil {
-			t.Errorf("buffered %s: want a refusal", name)
+		if mods.StatusCode == nil || mods.Fault == nil || mods.Fault.Code != policy.FaultCodeMediationFailed {
+			t.Errorf("buffered %s: want a %s fault, got status=%v fault=%+v", name, policy.FaultCodeMediationFailed, mods.StatusCode, mods.Fault)
+		}
+		if assessedOffPath(buffered) {
+			t.Errorf("buffered %s: off-path text was sent to Bedrock (calls %q)", name, buffered.texts)
 		}
 	}
 }
@@ -1513,7 +1550,7 @@ func TestRegression_OffPathOutputIsRefusedWhateverTheShape(t *testing.T) {
 // still assessed. Without passthrough the miss is a fault, as before.
 func TestRegression_JSONRPCMissDoesNotReleaseMatchingEvents(t *testing.T) {
 	body := "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"FORBIDDEN\"}]}}\n\n" +
-		"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"structuredContent\":{\"city\":\"Paris\"}}}\n\n"
+		"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"answer\":{\"city\":\"Paris\"}}}\n\n"
 	for _, passthrough := range []bool{true, false} {
 		client := &blockOnClient{needle: "FORBIDDEN"}
 		p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) {
@@ -1739,6 +1776,97 @@ func TestRegression_ResponseRedactPIIRedactsTheResponse(t *testing.T) {
 		mods = p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", stream), nil).(policy.DownstreamResponseModifications)
 		if mods.StatusCode != nil || strings.Contains(string(mods.Body), "bob@corp.com") || !strings.Contains(string(mods.Body), "*****") {
 			t.Errorf("%s buffered SSE: want the email redacted, got status=%v %s", name, mods.StatusCode, mods.Body)
+		}
+	}
+}
+
+// ─── ninth review round ──────────────────────────────────────────────────────
+
+// A streamingJsonPath the SDK's reader cannot resolve is refused when the policy
+// loads: token text is extracted with that reader, so the off-path check and the
+// extraction would otherwise disagree and the text would go unassessed.
+func TestRegression_StreamingPathTheSDKCannotReadIsRejected(t *testing.T) {
+	for _, path := range []string{
+		"$.choices[0].delta['content']",
+		"$['choices'][0].delta.content",
+		"$.choices[*].delta.content",
+		"$.choices[0][0].delta.content",
+		"$..content",
+		"$",
+	} {
+		if _, err := parseRequestResponseParams(map[string]interface{}{"streamingJsonPath": path}, true); err == nil {
+			t.Errorf("%q: want a configuration error", path)
+		}
+	}
+	for _, path := range []string{
+		ResponseDefaultStreamingJSONPath,
+		"$.delta.text",
+		"choices[-1].delta.content",
+		"$.choices.*.text",
+		"$.content_block.partial-json",
+	} {
+		if _, err := parseRequestResponseParams(map[string]interface{}{"streamingJsonPath": path}, true); err != nil {
+			t.Errorf("%q: want it accepted, got %v", path, err)
+		}
+	}
+}
+
+// An MCP tool result whose content list is empty, with its text only in
+// structuredContent, is assessed under the recommended path, buffered or
+// streamed, rather than refused or (with passthrough) delivered unassessed.
+func TestRegression_StructuredContentIsAssessedWhenContentIsEmpty(t *testing.T) {
+	result := func(text string) string {
+		return `{"jsonrpc":"2.0","id":1,"result":{"content":[],"structuredContent":{"msg":"` + text + `"}}}`
+	}
+	for _, passthrough := range []bool{false, true} {
+		params := func(pp *AWSBedrockGuardrailPolicyParams) {
+			pp.JsonPath = "$.result.content[*].text"
+			pp.PassthroughOnError = passthrough
+		}
+		for _, tc := range []struct {
+			name, contentType string
+			body              func(string) string
+		}{
+			{"json", "application/json", result},
+			{"sse", "text/event-stream", func(s string) string { return "data: " + result(s) + "\n\n" }},
+		} {
+			c := &blockOnClient{needle: "FORBIDDEN"}
+			mods := streamingPolicy(c, params).OnResponseBody(context.Background(),
+				bufferedResponse(map[string]interface{}{}, tc.contentType, tc.body("FORBIDDEN")), nil).(policy.DownstreamResponseModifications)
+			if mods.StatusCode == nil || mods.Fault == nil || mods.Fault.Type != policy.FaultTypeGuardrail {
+				t.Errorf("buffered %s passthrough=%v: want a guardrail block, got status=%v fault=%+v", tc.name, passthrough, mods.StatusCode, mods.Fault)
+			}
+			clean := &blockOnClient{needle: "FORBIDDEN"}
+			mods = streamingPolicy(clean, params).OnResponseBody(context.Background(),
+				bufferedResponse(map[string]interface{}{}, tc.contentType, tc.body("fine")), nil).(policy.DownstreamResponseModifications)
+			if mods.StatusCode != nil || len(clean.texts) != 1 || clean.texts[0] != "fine" {
+				t.Errorf("buffered %s passthrough=%v: want it assessed and delivered, got status=%v calls=%q", tc.name, passthrough, mods.StatusCode, clean.texts)
+			}
+		}
+		sse := "data: " + result("FORBIDDEN") + "\n\n"
+		got, terminated := driveStream(streamingPolicy(&blockOnClient{needle: "FORBIDDEN"}, params), streamCtxWithType("text/event-stream"), []string{sse, ""})
+		if !terminated || strings.Contains(got, "FORBIDDEN") {
+			t.Errorf("streamed passthrough=%v: want the stream ended, got terminated=%v %q", passthrough, terminated, got)
+		}
+	}
+}
+
+// A path that already selects structuredContent (the whole result, or every
+// member of it) does not have it assessed a second time.
+func TestRegression_StructuredContentIsNotAssessedTwice(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello"}],"structuredContent":{"msg":"structured"}}}`
+	for _, path := range []string{"$.result", "$.result.*", "$.result.content[*].text"} {
+		c := &blockOnClient{needle: "NEVER"}
+		params := func(pp *AWSBedrockGuardrailPolicyParams) { pp.JsonPath = path }
+		streamingPolicy(c, params).OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "application/json", body), nil)
+		n := 0
+		for _, text := range c.texts {
+			if text == "structured" {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%s: want structuredContent assessed once, got calls %q", path, c.texts)
 		}
 	}
 }

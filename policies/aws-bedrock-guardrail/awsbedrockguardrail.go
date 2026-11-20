@@ -344,6 +344,40 @@ type credentialFields struct {
 
 var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
 
+// streamingPathKeySegment and streamingPathIndexSegment are the dot-separated
+// segments the SDK's JSONPath reader resolves: a member name, or a member name
+// with one array index.
+var (
+	streamingPathKeySegment   = regexp.MustCompile(`^[^.\[\]\s$'"]+$`)
+	streamingPathIndexSegment = regexp.MustCompile(`^[a-zA-Z0-9_]+\[-?\d+\]$`)
+)
+
+// validateStreamingJSONPath rejects a streamingJsonPath the SDK cannot read.
+// Token text is read and rewritten with the SDK's reader, which splits the path
+// on "." and resolves only member names, name[n] and "*"; the policy's own path
+// parser also accepts forms such as ['key'], [*] and chained indexes. Accepting
+// one of those would leave the two disagreeing about what the path reads, so
+// text the off-path check counts as read would never be extracted or assessed.
+func validateStreamingJSONPath(path string) error {
+	segments := strings.Split(path, ".")
+	if segments[0] == "$" {
+		segments = segments[1:]
+	}
+	if len(segments) == 0 {
+		return fmt.Errorf("invalid 'streamingJsonPath' %q: it must select a member", path)
+	}
+	for _, segment := range segments {
+		if segment == "*" || streamingPathKeySegment.MatchString(segment) || streamingPathIndexSegment.MatchString(segment) {
+			continue
+		}
+		return fmt.Errorf("invalid 'streamingJsonPath' %q: unsupported segment %q; use dotted member names with at most one array index each, such as $.choices[0].delta.content", path, segment)
+	}
+	if _, err := parseJSONPath(path); err != nil {
+		return fmt.Errorf("invalid 'streamingJsonPath': %w", err)
+	}
+	return nil
+}
+
 type bedrockGuardrailClient interface {
 	ApplyGuardrail(ctx context.Context, params *bedrockruntime.ApplyGuardrailInput, optFns ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error)
 }
@@ -664,6 +698,9 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 		}
 		if strings.TrimSpace(streamingJsonPath) == "" {
 			return result, fmt.Errorf("'streamingJsonPath' must not be empty")
+		}
+		if err := validateStreamingJSONPath(streamingJsonPath); err != nil {
+			return result, err
 		}
 		result.StreamingJsonPath = streamingJsonPath
 	}

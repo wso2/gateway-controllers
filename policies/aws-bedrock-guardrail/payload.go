@@ -88,6 +88,14 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 	if jsonErr == nil {
 		root := &doc
 		segments, err := resolveTextSegments(root, tokens, nil)
+		if isJSONRPCMessage(doc) && (err == nil || errors.Is(err, errNoValue)) {
+			if extra := structuredContentSegments(root, tokens, nil); len(extra) > 0 {
+				if err != nil {
+					segments, err = nil, nil // the result's text is all in structuredContent
+				}
+				segments = append(segments, extra...)
+			}
+		}
 		if errors.Is(err, errNoValue) && isJSONRPCMessage(doc) {
 			if carriesNoContent(doc) {
 				return unchangedPayload(payload), nil
@@ -98,9 +106,6 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 		}
 		if err != nil {
 			return nil, fmt.Errorf("%w (jsonPath %q)", err, jsonPath)
-		}
-		if isJSONRPCMessage(doc) {
-			segments = withStructuredContent(root, tokens, segments, nil)
 		}
 		return &extractedPayload{
 			segments: segments,
@@ -115,26 +120,33 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 	return nil, fmt.Errorf("payload is neither JSON nor a Server-Sent Events stream: %w", jsonErr)
 }
 
-// withStructuredContent adds the text of an MCP tool result's structuredContent
-// to segments when jsonPath reads the result but not that member: it is the same
-// result in another form, and would otherwise reach the client unassessed.
-func withStructuredContent(root *interface{}, tokens []pathToken, segments []*textSegment, onChange func()) []*textSegment {
+// structuredContentSegments returns the text of an MCP tool result's
+// structuredContent when jsonPath reads the result but not that member: it is
+// the same result in another form, and would otherwise reach the client
+// unassessed. It is assessed even when jsonPath matches nothing, as for a tool
+// result whose content list is empty. A path that already covers the member
+// (the whole result, or every member of it) gets nothing, so no text is
+// assessed twice.
+func structuredContentSegments(root *interface{}, tokens []pathToken, onChange func()) []*textSegment {
 	if len(tokens) == 0 || tokens[0].kind != tokenKey || tokens[0].key != "result" {
-		return segments
+		return nil
 	}
-	if len(tokens) > 1 && tokens[1].kind == tokenKey && tokens[1].key == structuredContentMember {
-		return segments
+	if len(tokens) == 1 || (len(tokens) == 2 && tokens[1].kind == tokenWildcard) {
+		return nil // the selection already holds structuredContent
+	}
+	if tokens[1].kind == tokenKey && tokens[1].key == structuredContentMember {
+		return nil
 	}
 	message, _ := (*root).(map[string]interface{})
 	result, _ := message["result"].(map[string]interface{})
 	if _, has := result[structuredContentMember]; !has {
-		return segments
+		return nil
 	}
 	extra, err := resolveTextSegments(root, structuredContentPath, onChange)
 	if err != nil {
-		return segments // no text in it
+		return nil // no text in it
 	}
-	return append(segments, extra...)
+	return extra
 }
 
 const structuredContentMember = "structuredContent"
@@ -373,6 +385,14 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		event.doc = doc
 		ev := event
 		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
+		if isRPC && (err == nil || errors.Is(err, errNoValue)) {
+			if extra := structuredContentSegments(&event.doc, tokens, func() { ev.dirty = true }); len(extra) > 0 {
+				if err != nil {
+					eventSegments, err = nil, nil
+				}
+				eventSegments = append(eventSegments, extra...)
+			}
+		}
 		if errors.Is(err, errNoValue) && isRPC && isJSONRPCError(doc) {
 			// An error response the path does not apply to: its own text is
 			// assessed instead.
@@ -395,9 +415,6 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 			continue
 		}
 		matched = true
-		if isRPC {
-			eventSegments = withStructuredContent(&event.doc, tokens, eventSegments, func() { ev.dirty = true })
-		}
 		segments = append(segments, eventSegments...)
 	}
 	var missed error
