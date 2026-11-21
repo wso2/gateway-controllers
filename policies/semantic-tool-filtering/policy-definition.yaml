@@ -1,5 +1,5 @@
 name: semantic-tool-filtering
-version: v1.0.2
+version: v1.1.0
 description: |
   Dynamically filters the tools provided within an API request based on their semantic relevance to the
   user query. This policy extracts both the query and the tool definitions from the incoming payload,
@@ -10,6 +10,9 @@ description: |
 
 parameters:
   type: object
+  propertyNames:
+    not:
+      enum: [embeddingAllowedAuthTypes, embeddingAllowedEndpoints]
   properties:
     selectionMode:
       type: string
@@ -76,6 +79,54 @@ parameters:
         <toolname>search_web</toolname>
         <tooldescription>Search the web for information</tooldescription>
       default: true
+    azureAuth:
+      type: object
+      x-wso2-policy-advanced-param: true
+      additionalProperties: false
+      description: |
+        How this API's embedding calls authenticate to Azure OpenAI. Omit it to
+        send the API key. The identity types need the AZURE_OPENAI embedding
+        provider. The gateway's embedding_provider_allowed_auth_types can limit
+        the types an API may use.
+      properties:
+        authenticationType:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            "api-key", the default, sends the API key: the API's apiKey, or the
+            gateway's embedding_provider_api_key. The other types send a
+            Microsoft Entra ID access token for the gateway's Azure identity
+            instead, and need the AZURE_OPENAI embedding provider.
+            "workload-identity" uses AKS Workload Identity: the gateway pod runs
+            with a service account federated with a Microsoft Entra ID identity.
+            "managed-identity" uses a managed identity of the host the gateway
+            runs on, from the Azure Instance Metadata Service of a VM, VM scale
+            set or AKS node. "container-apps" uses a managed identity of the
+            Azure Container Apps app the gateway runs in. The identity needs the
+            Cognitive Services OpenAI User role on the Azure OpenAI resource.
+          enum:
+            - api-key
+            - workload-identity
+            - managed-identity
+            - container-apps
+          default: api-key
+        clientId:
+          type: string
+          x-wso2-policy-advanced-param: false
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          description: |
+            Application (client) ID of the identity, for the Azure identity
+            types. With workload-identity, defaults to AZURE_CLIENT_ID. With
+            managed-identity or container-apps, selects a user-assigned identity;
+            leave it unset for the host's or app's system-assigned identity.
+            Ignored with api-key.
+        scope:
+          type: string
+          x-wso2-policy-advanced-param: false
+          pattern: "^\\S+/\\.default$"
+          description: |
+            Scope of the access token, for the Azure identity types. Defaults to
+            "https://cognitiveservices.azure.com/.default". Ignored with api-key.
   required:
     - selectionMode
 
@@ -102,10 +153,43 @@ systemParameters:
       "wso2/defaultValue": "${config.embedding_provider_model}"
     apiKey:
       type: string
-      description: "API key for the embedding service"
+      description: |
+        API key for the embedding provider. Required in api-key mode, for every
+        provider: every API whose azureAuth.authenticationType is api-key, the
+        default, sends it unless the API has its own. Not needed when every API
+        uses an Azure identity.
       "wso2/defaultValue": "${config.embedding_provider_api_key}"
       minLength: 1
+    embeddingAllowedAuthTypes:
+      type: array
+      items:
+        type: string
+        enum:
+          - api-key
+          - workload-identity
+          - managed-identity
+          - container-apps
+      description: |
+        If non-empty, the authentication types this gateway's APIs may choose
+        in azureAuth.authenticationType. An API without azureAuth uses api-key
+        and is checked as such. Leave out api-key to stop APIs sending the key;
+        list only api-key to keep them off the gateway's Azure identities. Empty
+        (the default) places no limit.
+      "wso2/defaultValue": "${config.embedding_provider_allowed_auth_types}"
+    embeddingAllowedEndpoints:
+      type: array
+      items:
+        type: string
+      description: |
+        If non-empty, the embedding resources this gateway's APIs may call,
+        including the gateway's own embedding_provider_endpoint. Entries are
+        resource URLs, such as https://<resource>.openai.azure.com, with no
+        path, query or fragment. They are matched on scheme, host and port,
+        ignoring case, against the endpoint an API uses, its own or the
+        gateway's, so the gateway's key and tokens for its Azure identity are
+        only sent to listed resources. Any deployment on a listed resource is
+        allowed. Empty (the default) places no limit.
+      "wso2/defaultValue": "${config.embedding_provider_allowed_endpoints}"
   required:
     - embeddingProvider
     - embeddingEndpoint
-    - apiKey
