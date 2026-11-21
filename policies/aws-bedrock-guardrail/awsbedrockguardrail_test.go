@@ -1172,6 +1172,26 @@ func TestAWSBedrockGuardrail_CodeNamesWhatBedrockReported(t *testing.T) {
 		// And a content verdict outranks a merely-configured topic.
 		{"a content filter outranks a topic", []types.GuardrailAssessment{topic, filter(types.GuardrailContentFilterTypeHate)}, policy.GuardrailCodeHate},
 		{"nothing recognised falls back to the group generic", nil, policy.GuardrailCodeUnsafeContent},
+		// What blocked decides: a blocked prompt attack beside PII the guardrail
+		// only anonymized is a prompt attack, and blocked PII still outranks it.
+		{"a blocked filter outranks anonymized pii", []types.GuardrailAssessment{{
+			ContentPolicy: &types.GuardrailContentPolicyAssessment{Filters: []types.GuardrailContentFilter{{
+				Type: types.GuardrailContentFilterTypePromptAttack, Action: types.GuardrailContentPolicyActionBlocked}}},
+			SensitiveInformationPolicy: &types.GuardrailSensitiveInformationPolicyAssessment{PiiEntities: []types.GuardrailPiiEntityFilter{{
+				Type: types.GuardrailPiiEntityTypeEmail, Action: types.GuardrailSensitiveInformationPolicyActionAnonymized}}},
+		}}, policy.GuardrailCodePromptInjection},
+		{"blocked pii outranks a blocked filter", []types.GuardrailAssessment{{
+			ContentPolicy: &types.GuardrailContentPolicyAssessment{Filters: []types.GuardrailContentFilter{{
+				Type: types.GuardrailContentFilterTypePromptAttack, Action: types.GuardrailContentPolicyActionBlocked}}},
+			SensitiveInformationPolicy: &types.GuardrailSensitiveInformationPolicyAssessment{PiiEntities: []types.GuardrailPiiEntityFilter{{
+				Type: types.GuardrailPiiEntityTypeAwsAccessKey, Action: types.GuardrailSensitiveInformationPolicyActionBlocked}}},
+		}}, policy.GuardrailCodePII},
+		{"a blocked word outranks a filter that did not block", []types.GuardrailAssessment{{
+			ContentPolicy: &types.GuardrailContentPolicyAssessment{Filters: []types.GuardrailContentFilter{{
+				Type: types.GuardrailContentFilterTypeHate, Action: types.GuardrailContentPolicyActionNone}}},
+			WordPolicy: &types.GuardrailWordPolicyAssessment{CustomWords: []types.GuardrailCustomWord{{
+				Match: aws.String("FORBIDDENWORD"), Action: types.GuardrailWordPolicyActionBlocked}}},
+		}}, policy.GuardrailCodeProfanity},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := guardrailCodeFor(&bedrockruntime.ApplyGuardrailOutput{Assessments: tc.assessments})

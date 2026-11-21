@@ -165,11 +165,12 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `false` | Enables validation for the response flow. |
 | `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression selecting the response content to validate. When it selects an object or array, every string inside it is validated. For a Server-Sent Events response, it is applied to the JSON in each event. If empty, validates the entire payload as a string. See [JSONPath Support](#jsonpath-support). |
+| `redactPII` | boolean | No | `false` | If `true`, PII the guardrail anonymizes in the response is replaced with `*****`, and the request's placeholders are not restored. If `false`, it is replaced with its type, such as `{EMAIL}`, and the request's placeholders are restored. Always `true` when the request's `redactPII` is `true`. Setting it to `true` while the request's `redactPII` is `false` delivers the request's placeholders (such as `EMAIL_0000`) unrestored. |
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the Amazon Bedrock Guardrails API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from Amazon Bedrock Guardrails in error responses. |
 | `applicableStatusCodes` | string | No | – | Comma-separated upstream response status codes and inclusive ranges to validate, such as `"200-299,422"`. Codes must be between `100` and `599`, and a range must not start after it ends. Responses with any other status code are passed through to the client unchanged. If not set, every response is validated. |
-| `streamingJsonPath` | string | No | `"$.choices[0].delta.content"` | JSONPath locating the assistant text inside one streamed event of an LLM response. Separate from `jsonPath` because a streamed response carries its text under a different field than a buffered one. The default suits the OpenAI streaming format, which is also what `openai-to-bedrock-transformer` emits. See [Streaming responses](#streaming-responses). |
-| `streamingTextUnitChars` | integer | No | `1000` | How many characters of streamed response text to assess at a time. Each batch is withheld until assessed. `1000` is Amazon's text unit and billing unit. Lower values give earlier first tokens but more `ApplyGuardrail` calls and a longer total time; `0` assesses the whole response when the stream ends. Minimum `100`. |
+| `streamingJsonPath` | string | No | `"$.choices[0].delta.content"` | JSONPath locating the assistant text inside one streamed event of an LLM response. Separate from `jsonPath` because a streamed response carries its text under a different field than a buffered one. The default suits the OpenAI streaming format, which is also what `openai-to-bedrock-transformer` emits. Write it as dotted member names, each with at most one array index, such as `$.delta.text`; quoted members (`['content']`), wildcards (`*`, `[*]`) and chained indexes are rejected when the policy loads. See [Streaming responses](#streaming-responses). |
+| `streamingTextUnitChars` | integer | No | `1000` | How many characters of streamed response text to assess at a time. Each batch is withheld until assessed. `1000` is Amazon's text unit and billing unit. Lower values give earlier first tokens but more `ApplyGuardrail` calls and a longer total time; `0` withholds the text until the stream ends, or until 256 KiB of the response is withheld, when the text up to the last word boundary is assessed and delivered. Minimum `100`. |
 
 #### JSONPath Support
 
@@ -183,9 +184,9 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 - `$.items[*].text` - Extracts `text` from every item in an array (`$.items.*.text` is equivalent)
 - `$.params.arguments` - Selects an object, so every string inside it is validated
 
-When the selected value is an object or an array, every string inside it is sent to the guardrail. A path that matches nothing, or that selects only `true`, `false`, or `null`, is an extraction error, handled according to `passthroughOnError`. Numbers are validated only when selected directly.
+When the selected value is an object or an array, every string inside it is sent to the guardrail. A path that matches nothing, or that selects only `true`, `false`, or `null`, is an extraction error, handled according to `passthroughOnError`. Numbers are validated only when selected directly. Every string includes non-text values such as inline base64 image data (`data:` URLs) and type names, so a path such as `$.messages[-1].content` sends every part of a multimodal message to the guardrail, image data included.
 
-If `jsonPath` is set to an empty string (`""`), the entire payload is treated as a string and validated. If `jsonPath` is omitted, the default path for that phase is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses).
+If `jsonPath` is set to an empty string (`""`), the entire payload is treated as a string and validated. This includes a Server-Sent Events response: it is withheld whole and validated as text, rather than read event by event with `streamingJsonPath`, so it is not streamed. If `jsonPath` is omitted, the default path for that phase is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses).
 
 #### MCP routes
 
@@ -196,9 +197,18 @@ The default paths target OpenAI-style chat completions. An MCP `tools/call` has 
 | Request | `$.params.arguments` | Every string argument of the tool call, whatever the argument names |
 | Response | `$.result.content[*].text` | The text of every content item in the tool result |
 
-MCP servers using Streamable HTTP may reply with a Server-Sent Events body (`Content-Type: text/event-stream`). The policy reads each event's `data:` JSON and applies the response `jsonPath` to it. Events the path does not match, such as progress notifications, are left unchanged.
+Items of a tool result can differ in shape. With `$.result.content[*].text`, an item without a `text` member of its own is read by its `text` members at any depth, such as an embedded resource's `resource.text`. An item with none, such as an image, has no text to assess and is skipped. When the path reads the result, the result's `structuredContent` is assessed as well, because it is the same result in another form. This includes a result whose `content` list is empty and whose text is only in `structuredContent`. Text the path already selects, as with `$.result`, `$.result.*` or `$.result.*.msg`, is not assessed a second time, and a path that reaches the result through a wildcard, such as `$.*.content[*].text`, has `structuredContent` assessed too.
 
-The policy runs on every message of the MCP proxy, not only `tools/call`. A JSON-RPC message the path does not match, such as `initialize`, `tools/list` or a tool result without text content, has nothing to validate and passes unchanged. The same applies to an event stream whose events are all JSON-RPC messages. A body that is not JSON-RPC, a JSON-RPC batch, or an event stream with other JSON that the path does not match is still treated as an extraction error.
+MCP servers using Streamable HTTP may reply with a Server-Sent Events body (`Content-Type: text/event-stream`). The policy reads each event's `data:` JSON and applies the response `jsonPath` to it. Events the path does not match that carry no content, such as progress notifications, are left unchanged.
+
+The policy runs on every message of the MCP proxy, not only `tools/call`. A JSON-RPC message that carries no content passes unchanged when the path does not match it:
+
+- a request or notification of `initialize`, `ping`, `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, `roots/list`, `logging/setLevel`, `resources/subscribe` or `resources/unsubscribe`, or any notification other than `notifications/message` and a `notifications/progress` that has a `message`;
+- the result of one of those (an `initialize` result or a listing), or an empty result.
+
+A JSON-RPC error response the path does not match is validated by its own text: the error's `message` and every string in its `data`. A clean error is delivered unchanged, PII in it is masked, and a violation is blocked.
+
+Any other JSON-RPC message the path does not match, such as a `tools/call` whose arguments have another shape or a tool result without text content, is an extraction error: the response is refused with a fault, or, with `passthroughOnError: true`, delivered unassessed. The same rules apply to each event of an event stream; with `passthroughOnError: true` only the event the path misses goes unassessed, and the events it matches are still assessed. A body that is not JSON-RPC, a JSON-RPC batch, a path that selects a value that is not text (such as `null`), or an event stream with other JSON text that the path does not match, even beside events it does match, is also an extraction error.
 
 **Note:**
 
@@ -214,9 +224,18 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
 A response flow on an LLM route can be streamed. With `stream: true`, the policy assesses the response a text unit at a time instead of holding it whole:
 
 - Assistant text is read from each event with `streamingJsonPath` and collected into batches of `streamingTextUnitChars` characters, cut at a sentence or word boundary.
-- Each batch is withheld until `ApplyGuardrail` has assessed it, so no unassessed text reaches the client. The exception is `passthroughOnError: true`: a batch whose assessment fails is released unassessed rather than stalling the stream. The first text therefore arrives after about one text unit has been generated and assessed; the rest of the response follows in batches.
+- Each `ApplyGuardrail` call carries at most 1000 characters, Amazon's text unit, whatever `streamingTextUnitChars` is. A larger value, or `0`, withholds more text before delivering it, but the text is still assessed in calls of up to 1000 characters. A phrase that straddles a cut is assessed in two calls, whereas a buffered response is assessed in a single call.
+- A streamed response is assessed, so it makes `ApplyGuardrail` calls (about one per 1000 characters) and is billed accordingly. v1.4 refused a streamed response without calling Bedrock.
+- Each batch is withheld until `ApplyGuardrail` has assessed it, so no unassessed text reaches the client. The exception is `passthroughOnError: true`: a batch whose assessment fails is released unassessed rather than stalling the stream. The first text therefore arrives after about one text unit has been generated and assessed; the rest of the response follows in batches. When 256 KiB of the response is withheld before a batch is complete (events that carry log probabilities reach this after about 1000 characters of text), the text up to the last word boundary is assessed and delivered early.
 - A violation found mid-stream cannot become HTTP `422`, because the `200` status and headers have already been sent. The stream ends with a final event carrying the guardrail error instead, and the termination is reported as a fault. Text delivered before the violating batch stays delivered. An API that must never deliver any text before the whole response is assessed should not stream.
-- A response whose body is a single JSON document arriving over chunked transfer is accumulated whole and answered with `422` as before.
+- A response that is not an event stream (a JSON document or plain text) arriving over chunked transfer is withheld whole and assessed, with masked values restored, before any of it is delivered. A violation cannot become HTTP `422` here either: the `200` status and headers were sent when the response started, so the client receives `200` with the guardrail error JSON as the body, under the upstream's `Content-Type`, and the termination is reported as a fault. An event stream assessed whole (an empty `jsonPath`) gets the error as a final `data:` event instead, so an SSE client sees it. The same document sent with a `Content-Length` is buffered and answered with `422`. A body too large to withhold (one that passes 4 MiB before its last chunk, or over the gateway's own 10 MB limit for an uncompressed JSON document) ends with a fault, or is delivered unassessed, with masked values restored, with `passthroughOnError: true`. A body that first passes 4 MiB in its last chunk is still assessed whole.
+- A response with `Content-Type: text/event-stream` is read as an event stream, unless its body is a JSON document, which is read with `jsonPath`. Any other response is read event by event only if its first non-blank line is an SSE field or comment and it has a `data:` line; otherwise it is read with `jsonPath`. When a streamed response's opening carries SSE fields but no `data:` line yet, such as a keep-alive comment, it is withheld until a later chunk decides. An SSE-looking line further into a plain-text answer does not make it an event stream.
+- An event stream line whose text the policy cannot read ends the stream: text outside any event, or a `data:` payload that is neither JSON nor `[DONE]` (on a token stream, this includes an event whose JSON is split over several `data:` lines; an event stream of JSON-RPC messages joins those lines, as the SSE specification does, and reads the joined JSON). The stream ends with a fault. With `passthroughOnError: true` the line is delivered as it is, and the readable text around it is still assessed. Comments, blank lines, the `event`, `id` and `retry` fields, a leading byte order mark, and a field cut off in an unfinished last line are ignored. Any other line, including a field the SSE specification does not define, ends the stream. Comments and the values of `event` and `id` are delivered without being assessed. On a token stream, lines must end in `\n` or `\r\n`; a token stream that ends lines with a bare `\r` ends with a fault. An event stream of JSON-RPC messages accepts `\n`, `\r\n` and `\r`, in any mix.
+- An event stream of JSON-RPC messages (an MCP or A2A response on a streamed route) is assessed with `jsonPath`, as it is on the buffered path. Complete events are assessed as they arrive, and the complete events that arrive together are assessed in one call. An event is withheld until it is complete; one still incomplete after 256 KiB ends the stream with a fault. With `passthroughOnError: true` that event is delivered unassessed, while the complete events before it are still assessed.
+- `streamingJsonPath` must describe the stream. If no event of a streamed response carries the member it starts with (for example a provider's own format under the default `$.choices[0].delta.content`), the stream ends with a fault rather than being delivered unassessed. Events before the first one that carries it are withheld until it arrives. Set `streamingJsonPath` for the provider's format, or place `openai-to-bedrock-transformer` (or another transformer that emits the OpenAI format) ahead of the guardrail.
+- Model output in an event that `streamingJsonPath` does not read ends the stream with a fault rather than being delivered unassessed: a tool call's name and arguments (`delta.tool_calls`), reasoning or refusal text beside `delta.content`, an audio response's transcript (`delta.audio.transcript`), a second choice in the same event, or a legacy completion's `choices[].text` under the default chat path. Events that carry no output, such as the opening role delta, the finishing delta, a usage frame or a content filter verdict, are delivered as usual. Log probabilities (`logprobs`) repeat the tokens of the text and are not assessed; a stream that carries them is assessed and delivered as usual. Any output in an event without the member `streamingJsonPath` starts with is refused the same way, and so is everything beneath a wildcard: `streamingJsonPath` must select a single value, such as `$.choices[0].delta.content`. On the buffered path the same stream is answered with `422`. The default paths do not read tool calls in either mode: a non-streamed tool-calling answer with `"content": null` is an extraction error under the default `jsonPath`. Set `streamingJsonPath` (token streams) or `jsonPath` (non-streamed JSON) for the field to be assessed, for example `$.choices[0].text` for the legacy completions API, or use `passthroughOnError: true` to deliver such responses unassessed.
+- The OpenAI Responses API stream (`/v1/responses` with `stream: true`) cannot be assessed on the streaming path. Its lifecycle events repeat the request settings and the full text outside any single `streamingJsonPath`, so the stream ends with a fault at its first event, or is delivered unassessed with `passthroughOnError: true`. Use a non-streamed request with a `jsonPath` such as `$.output[0].content[0].text`.
+- PII that the guardrail reports is masked even when the model emits it over several events: the replacement goes into the event where the value starts, and the rest of the value is removed from the events after it.
 
 Only an attachment whose response flow is enabled takes part in streaming. A request-only attachment does not hold the response back, and an attachment with neither flow enabled is skipped entirely.
 
@@ -549,7 +568,7 @@ With this configuration, an upstream `403` is returned to the client as is, whil
 3. **Content extraction**: Extracts content using `jsonPath` from a JSON body or from each event of an MCP Server-Sent Events body, using `streamingJsonPath` for a streamed LLM response, or uses the entire payload.
 4. **Guardrail evaluation**: Validates the response content through the guardrail.
 5. **Violation handling**: Blocks and returns HTTP `422` (or ends a stream) when any finding has the action `BLOCKED`.
-6. **PII masking**: PII that the guardrail anonymizes in the response is replaced with its type in braces, such as `{EMAIL}` (or `*****` with `redactPII: true`). This covers PII that the upstream adds, such as an LLM answer or an MCP tool result. A value the request masked and this phase restored is not masked again.
+6. **PII masking**: PII that the guardrail anonymizes in the response is replaced with its type in braces, such as `{EMAIL}` (or `*****` with `redactPII: true`). This covers PII that the upstream adds, such as an LLM answer or an MCP tool result. A value the request masked and this phase restored, or part of one, is not masked again. A masked JSON response is re-encoded: its object keys are sorted and insignificant whitespace is removed.
 7. **Error Strategy**: Applies `passthroughOnError` behavior for extraction errors and Bedrock API failures.
 
 #### Credential resolution
@@ -558,7 +577,7 @@ The credentials provider is built **once**, when the policy attachment is create
 
 #### PII Handling Modes
 
-- **Masking mode (`redactPII: false`)**: In the request, PII entities are replaced with placeholders such as `EMAIL_0001`, `PHONE_0002`, restorable in the response phase. In the response, new PII is replaced with its type, such as `{EMAIL}`, and is not restored. A value the request masked is restored, not replaced with its type.
+- **Masking mode (`redactPII: false`)**: In the request, PII entities are replaced with placeholders such as `EMAIL_0000`, `PHONE_0001`, restorable in the response phase. In the response, new PII is replaced with its type, such as `{EMAIL}`, and is not restored. A value the request masked is restored, not replaced with its type.
 - **Redaction mode (`redactPII: true`)**: PII entities are permanently replaced with `*****`.
 
 ## Notes
@@ -578,8 +597,13 @@ The credentials provider is built **once**, when the policy attachment is create
 From v1.4 (and in v1.5), every rejection this policy makes is also reported to the gateway as a **fault**:
 a stable code and type alongside the response. A gateway that supports fault policies uses it
 for the analytics event and hands it to the API's fault policies (for example `log-message`, to
-log the failure). The status and body the client receives are the same as in v1.3. A gateway
-without fault policy support ignores the fault, and the policy behaves exactly as v1.3.
+log the failure). For a request, and for a response the gateway buffers, the status and body the
+client receives are the same as in v1.3. A streamed response, or a response that is not an event
+stream but arrives over chunked transfer, has already sent its status and headers when it is
+rejected: it keeps the upstream status (usually `200`), and the stream ends with the guardrail error
+as a final `data:` event (for an event stream) or as the body (for a JSON or text response). The
+fault is reported all the same, and is what marks such a response as failed. A gateway without
+fault policy support ignores the fault.
 
 A guardrail verdict has type `guardrail` and a code from the guardrail block (`906000`–`906399`).
 It also names the intervening guardrail (`aws-bedrock-guardrail`) and records that it intervened; the
@@ -587,11 +611,16 @@ assessment is attached only when `showAssessment` is enabled, because it can hol
 A rejection made because the policy could not run its check is not a verdict and carries no
 guardrail details: a request body that cannot be read is reported as `960001` (`validation`),
 because it is the caller's, and every other such failure as `960000` (`mediation`).
+A response whose reported PII could not be masked in place is one of these: its error body
+never includes the assessment, even with `showAssessment` enabled, because the assessment holds
+the value that could not be masked.
 
 The response phase only rejects responses that it validates: when `applicableStatusCodes` is set,
 a response whose upstream status is not listed passes through without a fault. With
-`passthroughOnError` enabled, the errors in the last three rows pass the request or response through
-instead of rejecting it, and no fault is reported. An intervention whose findings are all
+`passthroughOnError` enabled, a value at `jsonPath` that cannot be extracted, a failed AWS
+configuration or Bedrock call, and response content that could not be assessed pass the request
+or response through instead of rejecting it, and no fault is reported. A value the guardrail asked
+to mask that cannot be masked is still rejected, because passing it would deliver the value. An intervention whose findings are all
 `ANONYMIZED` is masked or redacted rather than rejected, so it produces no fault. A PII finding
 with the action `BLOCKED` is rejected, and reported with the PII code.
 
@@ -610,12 +639,16 @@ with the action `BLOCKED` is rejected, and reported with the PII code.
 | Request: the value at `jsonPath` cannot be extracted | `422` | `960001` | `validation` |
 | Response: the value at `jsonPath` cannot be extracted | `422` | `960000` | `mediation` |
 | Request or response: the AWS configuration cannot be loaded, the Bedrock call fails, or Bedrock returns an invalid or unexpected response | `422` | `960000` | `mediation` |
+| Response: "Response content could not be assessed" -- a streamed event carries output `streamingJsonPath` does not read, an event stream line cannot be read, the stream does not match `streamingJsonPath`, or the response is too large to withhold until assessed | `422` | `960000` | `mediation` |
+| Response: a value the guardrail asked to mask cannot be masked in a streamed response ("Sensitive content could not be redacted") | `422` | `960000` | `mediation` |
 
-When Bedrock reports more than one finding, a sensitive information (PII) finding decides the code
-first, then a content filter, then a word filter, then a denied topic. A blocked content filter that
-comes with a PII finding is therefore reported with the PII code.
-For content filters, the first recognized filter in assessment order decides the code, regardless
-of its action. The code can name a non-blocking filter rather than the filter that caused the rejection.
+The status column is the status of a buffered response. A streamed or chunked response keeps the upstream status, as described above.
+
+When Bedrock reports more than one finding, the finding that blocked decides the code: a blocked
+sensitive information (PII or regex) finding first, then a blocked content filter, then a blocked word,
+then a blocked denied topic. A prompt attack blocked alongside PII that was only anonymized is
+therefore reported as a prompt attack. Findings that did not block (anonymized PII, or a filter in
+detect mode) decide the code only when no finding has an action of `BLOCKED`, in the same order.
 
 The fault's `Description` carries the internal reason, for example
 `Violation of AWS Bedrock Guardrails detected` or `Error calling AWS Bedrock Guardrail`.

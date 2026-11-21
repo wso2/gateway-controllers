@@ -225,6 +225,15 @@ parameters:
             "$.result.content[*].text". Empty validates the whole payload. Streamed LLM
             responses use streamingJsonPath instead.
           default: "$.choices[0].message.content"
+        redactPII:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            If true, PII the guardrail anonymizes in the response is replaced with "*****",
+            and request placeholders are not restored. If false (default), it is replaced
+            with its type, such as {EMAIL}, and request placeholders are restored.
+            Always true when request.redactPII is true.
+          default: false
         passthroughOnError:
           type: boolean
           x-wso2-policy-advanced-param: true
@@ -256,7 +265,9 @@ parameters:
             streamed response carries text incrementally under a different field
             than a buffered one, and no single path addresses both. The default
             suits the OpenAI streaming format, which is also what the
-            openai-to-bedrock-transformer emits.
+            openai-to-bedrock-transformer emits. Use dotted member names, each
+            with at most one array index; quoted members, wildcards and
+            chained indexes are rejected.
           default: "$.choices[0].delta.content"
         streamingTextUnitChars:
           type: integer
