@@ -394,7 +394,7 @@ spec:
 
 ### Example 8: Forward JWT Under a Custom Header
 
-When `forwardToken` is `true` (the default), the validated JWT is forwarded to the upstream under the header named by `forwardedTokenHeader` (default `x-forwarded-authorization`). Use this to preserve the incoming `Authorization` header for other purposes, or to hand the token to a backend that expects a specific header name.
+When `forwardToken` is `true` (the default), the validated JWT is forwarded to the upstream under the header named by `forwardedTokenHeader` (default `x-forwarded-authorization`). Use this to hand the token to a backend that expects a specific header name. When `forwardedTokenHeader` differs from `headerName`, the original header (here `Authorization`) is removed, so the upstream receives the token only under `forwardedTokenHeader`.
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1
