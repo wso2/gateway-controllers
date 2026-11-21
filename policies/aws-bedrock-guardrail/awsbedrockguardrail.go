@@ -2763,10 +2763,13 @@ func (p *AWSBedrockGuardrailPolicy) handleSSEStreamFlush(
 			// would send the same events a second time, and a stale pending text or
 			// assessed-character count would put the next boundary walk in the
 			// wrong place. flushText has already dropped the line's own fragment.
-			respCtx.Metadata[p.stateKey(metaKeyHeldBytes)] = ""
-			respCtx.Metadata[p.stateKey(metaKeyPendingText)] = ""
-			respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)] = 0
-			return p.releaseBytes(held+chunkStr, nil, "", respCtx, rp)
+			//
+			// The text that can be read -- the events withheld so far and the
+			// complete events of this flush -- is still assessed before anything is
+			// released, as passthroughOnError promises: only the oversized line goes
+			// out unread. assessAndRelease resets that state and releases the
+			// oversized fragment with the batch.
+			return p.assessAndRelease(pending+newText, held+chunkStr, respCtx, rp, chunk)
 		}
 		return p.unassessableEnd(true)
 	}
@@ -3615,10 +3618,23 @@ func frameText(payload, streamingJsonPath string) string {
 		return ""
 	}
 	value, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
-	if err != nil {
+	if err != nil || value == "" {
+		return ""
+	}
+	if frameReadsAnotherChoice(payload, streamingJsonPath) {
 		return ""
 	}
 	return textCleanRegexCompiled.ReplaceAllString(value, "")
+}
+
+// frameReadsAnotherChoice is readsAnotherChoice for one data payload.
+func frameReadsAnotherChoice(payload, streamingJsonPath string) bool {
+	tokens, err := parseJSONPath(streamingJsonPath)
+	if err != nil {
+		return false
+	}
+	doc, err := decodeJSON([]byte(payload))
+	return err == nil && readsAnotherChoice(doc, tokens)
 }
 
 // splitTrailingPartialLine divides s at its last line terminator, returning the
@@ -4091,9 +4107,90 @@ var streamedOutputKeys = map[string]bool{
 
 // streamedMetadataKeys name members whose strings describe output rather than
 // carry it, so nothing beneath them counts as output: log probabilities repeat
-// the tokens of the text the path reads (logprobs.content[].token).
+// the tokens of the text the path reads (logprobs.content[].token), and a role
+// names who wrote the text (Gemini's content.role beside content.parts).
+//
+// Log probabilities also carry top_logprobs, alternative tokens the model did
+// not choose. They are single tokens, not text, and are not assessed. When a
+// value is masked, the log probabilities of the event that carried it are
+// removed (dropLogprobs), since their tokens would deliver the value itself.
 var streamedMetadataKeys = map[string]bool{
-	"logprobs": true,
+	logprobsKey: true,
+	"role":      true,
+}
+
+const logprobsKey = "logprobs"
+
+// dropLogprobs removes every log probabilities member beneath v. A masked value
+// is written into the text the path reads; the same value is also in the tokens
+// of the log probabilities beside it, so they go with it.
+func dropLogprobs(v interface{}) {
+	switch node := v.(type) {
+	case map[string]interface{}:
+		delete(node, logprobsKey)
+		for _, child := range node {
+			dropLogprobs(child)
+		}
+	case []interface{}:
+		for _, child := range node {
+			dropLogprobs(child)
+		}
+	}
+}
+
+// choiceArrayKeys name the arrays whose elements are a response's alternative
+// answers, each naming its own position in an "index" member: OpenAI's choices
+// and Gemini's candidates. An "index" member of an element of any other array is
+// the provider's own data, not a choice's identity.
+var choiceArrayKeys = map[string]bool{
+	"choices":    true,
+	"candidates": true,
+}
+
+// readsAnotherChoice reports whether streamingJsonPath, followed through doc,
+// passes an element of a choice array (choiceArrayKeys) whose own "index" member
+// names another position. An OpenAI stream with n>1 sends each choice in its own
+// event at choices[0], told apart only by that member, so $.choices[0] reads
+// every choice; joining them would interleave their tokens and split each
+// choice's phrases. Only the choice the path names is read.
+func readsAnotherChoice(doc interface{}, tokens []pathToken) bool {
+	node := doc
+	arrayKey := ""
+	for _, token := range tokens {
+		switch token.kind {
+		case tokenKey:
+			object, ok := node.(map[string]interface{})
+			if !ok {
+				return false
+			}
+			node = object[token.key]
+			arrayKey = token.key
+		case tokenIndex:
+			array, ok := node.([]interface{})
+			if !ok || token.index < 0 || token.index >= len(array) {
+				return false
+			}
+			node = array[token.index]
+			if choiceArrayKeys[arrayKey] && choiceIndexDiffers(node, token.index) {
+				return true
+			}
+			arrayKey = ""
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// choiceIndexDiffers reports whether element is an object whose "index" member
+// is a number other than position.
+func choiceIndexDiffers(element interface{}, position int) bool {
+	object, ok := element.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	n, ok := object["index"].(json.Number)
+	return ok && n.String() != strconv.Itoa(position)
 }
 
 // missedStreamedOutput reports whether a data line of s carries model output that
@@ -4139,7 +4236,7 @@ func missedStreamedOutput(s, streamingJsonPath string) bool {
 			}
 			continue
 		}
-		if outputOffPath(doc, tokens, false) {
+		if outputOffPath(doc, tokens, false, "") {
 			return true
 		}
 	}
@@ -4147,8 +4244,10 @@ func missedStreamedOutput(s, streamingJsonPath string) bool {
 }
 
 // outputOffPath reports whether node carries model output anywhere the remaining
-// path tokens do not lead to text; output says node is beneath an output member.
-func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
+// path tokens do not lead to text; output says node is beneath an output member,
+// and arrayKey names the member node is the value of ("" for an array element or
+// the event itself).
+func outputOffPath(node interface{}, tokens []pathToken, output bool, arrayKey string) bool {
 	if len(tokens) == 0 {
 		switch node.(type) {
 		case string, json.Number, bool, nil:
@@ -4169,7 +4268,7 @@ func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
 			}
 		}
 		child, has := object[token.key]
-		return has && outputOffPath(child, tokens[1:], output || streamedOutputKeys[token.key])
+		return has && outputOffPath(child, tokens[1:], output || streamedOutputKeys[token.key], token.key)
 	case tokenWildcard:
 		// The SDK reads a wildcard as a list, which is not text: nothing beneath
 		// it is read.
@@ -4184,8 +4283,8 @@ func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
 			index += len(array)
 		}
 		for i, element := range array {
-			if i == index {
-				if outputOffPath(element, tokens[1:], output) {
+			if i == index && !(choiceArrayKeys[arrayKey] && choiceIndexDiffers(element, index)) {
+				if outputOffPath(element, tokens[1:], output, "") {
 					return true
 				}
 			} else if carriesStreamedOutput(element, output) {
@@ -4353,6 +4452,7 @@ func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiR
 		return chunkStr, false
 	}
 	lines := strings.Split(chunkStr, "\n")
+	tokens, _ := parseJSONPath(streamingJsonPath)
 	var (
 		frames []sseTextFrame
 		joined strings.Builder
@@ -4371,8 +4471,8 @@ func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiR
 			continue
 		}
 		value, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
-		if err != nil || value == "" {
-			continue
+		if err != nil || value == "" || readsAnotherChoice(frame, tokens) {
+			continue // the same frames frameText reads, so the offsets agree
 		}
 		frames = append(frames, sseTextFrame{line: i, prefix: prefix, carriage: carriage,
 			frame: frame, value: value, start: joined.Len()})
@@ -4416,6 +4516,7 @@ func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiR
 		if replacement == f.value {
 			continue
 		}
+		dropLogprobs(f.frame)
 		if err := utils.SetValueAtJSONPath(f.frame, streamingJsonPath, replacement); err != nil {
 			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
 				"jsonPath", streamingJsonPath, "error", err)
@@ -4640,6 +4741,11 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 	if !changed {
 		slog.Debug("AWSBedrockGuardrail: Validation passed", "isResponse", isResponse)
 		return noModification(isResponse, restoredBody(payload, restored))
+	}
+	if isResponse && extracted.stripLogprobs != nil {
+		// The masked value is also in the tokens of the response's log
+		// probabilities.
+		extracted.stripLogprobs()
 	}
 
 	modifiedPayload, err := extracted.rebuild()
