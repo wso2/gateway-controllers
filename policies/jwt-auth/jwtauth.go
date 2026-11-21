@@ -1955,6 +1955,20 @@ func getIntParam(params map[string]interface{}, key string, defaultValue int) in
 	return defaultValue
 }
 
+// getOptionalIntParam returns the integer value of key and whether it was set. A missing,
+// null or non-numeric value counts as unset.
+func getOptionalIntParam(params map[string]interface{}, key string) (int, bool) {
+	switch v := params[key].(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case float64:
+		return int(v), true
+	}
+	return 0, false
+}
+
 func getStringArrayParam(params map[string]interface{}, key string, defaultValue []string) []string {
 	if v, ok := params[key]; ok {
 		if arr, ok := v.([]interface{}); ok {
@@ -2197,15 +2211,19 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 	headerName := getStringParam(params, "headerName", "Authorization")
 	authHeaderScheme := getStringParam(params, "authHeaderScheme", "Bearer")
 	onFailureStatusCode := getIntParam(params, "onFailureStatusCode", 401)
-	// A valid token without the required scopes or claims is refused as forbidden
-	// (RFC 6750 section 3.1: insufficient_scope is 403), not as unauthenticated.
-	onAuthorizationFailureStatusCode := getIntParam(params, "onAuthorizationFailureStatusCode", 403)
-	if onAuthorizationFailureStatusCode < 400 || onAuthorizationFailureStatusCode > 499 {
-		// A caller that forwards its own parameters (another policy) is not held to the
-		// definition's range; a rejection must never read as success or as a server fault.
-		slog.Warn("JWT Auth Policy: onAuthorizationFailureStatusCode outside 400-499, using 403",
-			"configured", onAuthorizationFailureStatusCode)
-		onAuthorizationFailureStatusCode = 403
+	// A valid token without the required scopes or claims is refused with
+	// onAuthorizationFailureStatusCode when it is set (403 answers it as forbidden, RFC 6750
+	// section 3.1). Unset, it is refused with onFailureStatusCode, as before v1.6.
+	onAuthorizationFailureStatusCode := onFailureStatusCode
+	if configured, ok := getOptionalIntParam(params, "onAuthorizationFailureStatusCode"); ok {
+		if configured >= 400 && configured <= 499 {
+			onAuthorizationFailureStatusCode = configured
+		} else {
+			// A caller that forwards its own parameters (another policy) is not held to the
+			// definition's range; a rejection must never read as success or as a server fault.
+			slog.Warn("JWT Auth Policy: onAuthorizationFailureStatusCode outside 400-499, using onFailureStatusCode",
+				"configured", configured, "onFailureStatusCode", onFailureStatusCode)
+		}
 	}
 	errorMessageFormat := getStringParam(params, "errorMessageFormat", "json")
 	errorMessage := getStringParam(params, "errorMessage", "Authentication failed")
