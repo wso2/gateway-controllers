@@ -18,7 +18,11 @@ package semantictoolfiltering
 
 import (
 	"cmp"
+	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -263,4 +267,57 @@ func quotedList(names []string) string {
 		return quoted[0]
 	}
 	return strings.Join(quoted[:len(quoted)-1], ", ") + " or " + quoted[len(quoted)-1]
+}
+
+// logTokenFailure logs a failure to get a token for the gateway's identity, at DEBUG when the failure
+// is a cached one already logged, and reports whether err was one.
+func logTokenFailure(ctx context.Context, err error, auth authentication) bool {
+	var tokenErr *azureauthentication.TokenError
+	if !errors.As(err, &tokenErr) {
+		return false
+	}
+	level := slog.LevelError
+	if tokenErr.Cached {
+		level = slog.LevelDebug
+	}
+	slog.Log(ctx, level, "SemanticToolFiltering: could not obtain an access token for the embedding provider",
+		"reason", tokenErr.Reason,
+		"error", err.Error(),
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return true
+}
+
+// logRefusedToken logs an identity's token the provider refused with 401 or 403, without the
+// provider's answer, which can name the identity, and reports whether err was one.
+func logRefusedToken(ctx context.Context, err error, auth authentication) bool {
+	if !auth.usesIdentity() {
+		return false
+	}
+	var statusErr *embeddingproviders.StatusError
+	if !errors.As(err, &statusErr) ||
+		(statusErr.StatusCode != http.StatusUnauthorized && statusErr.StatusCode != http.StatusForbidden) {
+		return false
+	}
+	slog.Log(ctx, slog.LevelError, "SemanticToolFiltering: the embedding provider refused the access token",
+		"status", statusErr.StatusCode,
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return true
+}
+
+// logIdentityFailure logs an embedding error caused by the gateway's identity and reports whether it
+// did, so the caller skips its own lines, which would carry the provider's answer above DEBUG.
+func logIdentityFailure(ctx context.Context, err error, auth authentication, message string) bool {
+	if logTokenFailure(ctx, err, auth) {
+		return true
+	}
+	if !logRefusedToken(ctx, err, auth) {
+		return false
+	}
+	// Only this DEBUG line keeps the provider's answer, which tells the causes apart.
+	slog.Debug("SemanticToolFiltering: "+message, "error", err)
+	return true
 }

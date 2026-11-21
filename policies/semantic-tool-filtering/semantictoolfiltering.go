@@ -18,6 +18,7 @@
 package semantictoolfiltering
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -100,6 +101,7 @@ type toolEmbeddingResult struct {
 //
 // Returns a map of hashKey -> embedding for all successfully processed tools
 func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
+	ctx context.Context,
 	embeddingCache *EmbeddingCacheStore,
 	apiId string,
 	requests []toolEmbeddingRequest,
@@ -161,8 +163,10 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 	for _, req := range uncachedRequests {
 		embedding, err := p.embeddingProvider.GetEmbedding(req.Description)
 		if err != nil {
-			slog.Warn("SemanticToolFiltering: Error generating tool embedding, skipping",
-				"error", err, "toolName", req.Name)
+			if !logIdentityFailure(ctx, err, p.auth, "Error generating tool embedding, skipping") {
+				slog.Warn("SemanticToolFiltering: Error generating tool embedding, skipping",
+					"error", err, "toolName", req.Name)
+			}
 			continue
 		}
 
