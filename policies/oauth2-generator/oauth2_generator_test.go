@@ -2076,3 +2076,61 @@ func TestReuseTokenSource_JoiningCallerContextCancellation_ReturnsEarlyWithoutBl
 		t.Errorf("expected a later caller to reuse the token the owner's fetch populated, got tok=%+v err=%v", cached, err)
 	}
 }
+
+// TestBuildHeaderValue verifies prefix formatting for trailing spaces and tabs,
+// empty prefixes, and custom prefixes.
+func TestBuildHeaderValue(t *testing.T) {
+	tests := []struct {
+		name   string
+		prefix string
+		want   string
+	}{
+		{name: "default prefix", prefix: "Bearer", want: "Bearer tok"},
+		{name: "trailing space", prefix: "Bearer ", want: "Bearer tok"},
+		{name: "multiple trailing spaces", prefix: "Bearer   ", want: "Bearer tok"},
+		{name: "trailing tab", prefix: "Bearer\t", want: "Bearer tok"},
+		{name: "mixed trailing whitespace", prefix: "Bearer \t ", want: "Bearer tok"},
+		{name: "empty prefix", prefix: "", want: "tok"},
+		{name: "whitespace only prefix", prefix: " \t ", want: "tok"},
+		{name: "custom prefix", prefix: "Token ", want: "Token tok"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildHeaderValue(tt.prefix, "tok")
+
+			if got != tt.want {
+				t.Errorf("prefix %q: got %q, want %q", tt.prefix, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOnRequestHeaders_TrailingSpaceInValuePrefix verifies header injection
+// with a trailing-space prefix. GetPolicy already trims this input; the
+// helper's own normalization is covered by TestBuildHeaderValue.
+func TestOnRequestHeaders_TrailingSpaceInValuePrefix(t *testing.T) {
+	p, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"bearerToken": "tok",
+		"valuePrefix": "Bearer ",
+	})
+	if err != nil {
+		t.Fatalf("GetPolicy() failed: %v", err)
+	}
+
+	action := p.(*Policy).OnRequestHeaders(
+		context.Background(),
+		newRequestHeaderCtx(),
+		nil,
+	)
+
+	mods, ok := action.(policy.UpstreamRequestHeaderModifications)
+	if !ok {
+		t.Fatalf("expected UpstreamRequestHeaderModifications, got %T", action)
+	}
+
+	got := mods.HeadersToSet["Authorization"]
+	if got != "Bearer tok" {
+		t.Errorf("Authorization header = %q, want %q", got, "Bearer tok")
+	}
+}

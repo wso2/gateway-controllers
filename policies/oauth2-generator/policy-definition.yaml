@@ -98,8 +98,9 @@ parameters:
       type: string
       x-wso2-policy-advanced-param: true
       description: |
-        Prefix prepended to the credential value. Use an empty string
-        for no prefix.
+        Prefix prepended to the credential value with a single space
+        separator. Trailing spaces and tabs are ignored. Use an empty
+        string for no prefix.
       default: "Bearer"
     tokenRequestTimeout:
       type: string
