@@ -191,9 +191,8 @@ func resourceOf(raw string, bare bool) (string, bool) {
 	if bare && ((u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery) {
 		return "", false
 	}
-	// Fail closed on a non-ASCII host: Go's lower-casing folds some characters to ASCII, while the
-	// HTTP client dials the IDNA form of the host, so a look-alike would pass the check and be
-	// dialed as a different host.
+	// Fail closed on a non-ASCII host: lower-casing can fold a look-alike to ASCII while the HTTP
+	// client dials its IDNA form, so it would pass the check yet reach a different host.
 	for i := 0; i < len(u.Hostname()); i++ {
 		if u.Hostname()[i] >= 0x80 {
 			return "", false
