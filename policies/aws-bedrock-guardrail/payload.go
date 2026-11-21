@@ -52,6 +52,9 @@ type slotLocation struct {
 type extractedPayload struct {
 	segments []*textSegment
 	rebuild  func() ([]byte, error)
+	// root is the decoded document of a JSON body, which rebuild encodes; nil
+	// for any other body.
+	root *interface{}
 	// missed is the extraction error for content some events carry that the path
 	// does not reach, while other events' segments were found. The caller faults
 	// on it, or, with passthroughOnError, lets only that content pass and still
@@ -122,6 +125,7 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 		return &extractedPayload{
 			segments: segments,
 			rebuild:  func() ([]byte, error) { return encodeJSON(*root) },
+			root:     root,
 		}, nil
 	}
 

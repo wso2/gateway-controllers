@@ -2099,3 +2099,149 @@ func TestRegression_CapReleaseCarriesOnlyTheUnassessedText(t *testing.T) {
 		t.Errorf("want the stream ended by the blocked phrase")
 	}
 }
+
+// tokenEvent is an OpenAI chat token event with the log probabilities a client
+// gets when it asks for logprobs.
+func tokenEvent(token string) string {
+	return fmt.Sprintf("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"logprobs\":{\"content\":[{\"token\":%q,\"logprob\":-0.1,\"top_logprobs\":[]}]}}]}\n\n", token, token)
+}
+
+// A masked value is also in the tokens of the log probabilities beside it. Only
+// the text was rewritten, so a client that asked for logprobs read the value the
+// guardrail had masked.
+func TestRegression_MaskedValueLeavesNoLogprobs(t *testing.T) {
+	const pii = "john@example.com"
+	redacting := func(pp *AWSBedrockGuardrailPolicyParams) { pp.RedactPII = true }
+	stream := tokenEvent("Mail ") + tokenEvent("john@") + tokenEvent("example.com") + tokenEvent(" now.") + "data: [DONE]\n\n"
+
+	p := streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, redacting)
+	got, terminated := driveStream(p, streamCtxWithType("text/event-stream"), []string{stream})
+	if terminated || !strings.Contains(got, "*****") {
+		t.Fatalf("streamed: want the value masked, got terminated=%v %q", terminated, got)
+	}
+	if strings.Contains(got, "john@") || strings.Contains(got, "example.com") {
+		t.Errorf("streamed: the value is still delivered: %q", got)
+	}
+	if !strings.Contains(got, `"token":"Mail "`) {
+		t.Errorf("streamed: log probabilities of unmasked events should be kept: %q", got)
+	}
+
+	p = streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, redacting)
+	res, ok := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", stream), nil).(policy.DownstreamResponseModifications)
+	if !ok || res.StatusCode != nil || strings.Contains(string(res.Body), "john@") || strings.Contains(string(res.Body), "example.com") {
+		t.Errorf("buffered event stream: want the value masked everywhere, got %s", res.Body)
+	}
+
+	p = streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, redacting)
+	body := `{"choices":[{"index":0,"message":{"role":"assistant","content":"Mail john@example.com now."},"logprobs":{"content":[{"token":"john@example.com","logprob":-0.1}]}}]}`
+	res, ok = p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "application/json", body), nil).(policy.DownstreamResponseModifications)
+	if !ok || res.StatusCode != nil || !strings.Contains(string(res.Body), "*****") || strings.Contains(string(res.Body), pii) {
+		t.Errorf("buffered JSON: want the value masked everywhere, got %s", res.Body)
+	}
+}
+
+// choiceEvent is an OpenAI streaming delta of a request with n>1: every choice
+// is sent in its own event at choices[0], named by its "index" member.
+func choiceEvent(index int, text string) string {
+	return fmt.Sprintf("data: {\"choices\":[{\"index\":%d,\"delta\":{\"content\":%q}}]}\n\n", index, text)
+}
+
+// With n>1, $.choices[0] read every choice, so the choices' tokens were joined
+// into one text and a phrase split across one choice's tokens was never
+// assessed whole. Another choice's text is output the path does not read.
+func TestRegression_OtherChoicesAreNotReadAsTheFirst(t *testing.T) {
+	interleaved := choiceEvent(0, "the forbid") + choiceEvent(1, "ok ") +
+		choiceEvent(0, "den plan.") + choiceEvent(1, "fine.") + "data: [DONE]\n\n"
+
+	client := &blockOnClient{needle: "forbidden"}
+	got, terminated := driveStream(streamingPolicy(client, nil), streamCtxWithType("text/event-stream"), []string{interleaved})
+	if !terminated || strings.Contains(got, "forbid") {
+		t.Errorf("streamed: want the stream refused, got terminated=%v %q", terminated, got)
+	}
+
+	res, ok := streamingPolicy(&blockOnClient{needle: "forbidden"}, nil).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", interleaved), nil).(policy.DownstreamResponseModifications)
+	if !ok || res.StatusCode == nil || !res.IsFault {
+		t.Errorf("buffered: want a refusal, got %+v", res)
+	}
+
+	// With passthroughOnError the other choice passes unassessed, and the first
+	// is still read whole.
+	client = &blockOnClient{needle: "forbidden"}
+	passthrough := func(pp *AWSBedrockGuardrailPolicyParams) { pp.PassthroughOnError = true }
+	got, terminated = driveStream(streamingPolicy(client, passthrough), streamCtxWithType("text/event-stream"), []string{interleaved})
+	if !terminated || strings.Contains(got, "forbid") {
+		t.Errorf("passthrough: want the first choice's phrase blocked, got terminated=%v %q (assessed %q)", terminated, got, client.texts)
+	}
+
+	// A single choice that carries its index is read as before.
+	single := choiceEvent(0, "Hello ") + choiceEvent(0, "there.") + "data: [DONE]\n\n"
+	client = &blockOnClient{needle: "forbidden"}
+	got, terminated = driveStream(streamingPolicy(client, nil), streamCtxWithType("text/event-stream"), []string{single})
+	if terminated || got != single || len(client.texts) != 1 || client.texts[0] != "Hello there." {
+		t.Errorf("single choice: want it delivered after one assessment, got terminated=%v %q (assessed %q)", terminated, got, client.texts)
+	}
+}
+
+// A native Gemini stream names the author of its text beside content.parts, and
+// that role string counted as output the path did not read, so every Gemini
+// stream was refused.
+func TestRegression_GeminiStreamIsRead(t *testing.T) {
+	gemini := func(pp *AWSBedrockGuardrailPolicyParams) {
+		pp.StreamingJsonPath = "$.candidates[0].content.parts[0].text"
+	}
+	ev := func(text string) string {
+		return fmt.Sprintf("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"},\"index\":0}],\"modelVersion\":\"gemini-2.0-flash\"}\r\n\r\n", text)
+	}
+
+	clean := ev("Hello there. ") + ev("A clean answer.")
+	client := &blockOnClient{needle: "forbidden"}
+	got, terminated := driveStream(streamingPolicy(client, gemini), streamCtxWithType("text/event-stream"), []string{clean})
+	if terminated || got != clean {
+		t.Errorf("streamed: want the stream delivered, got terminated=%v %q", terminated, got)
+	}
+	if len(client.texts) != 1 || client.texts[0] != "Hello there. A clean answer." {
+		t.Errorf("streamed: want the text assessed, got %q", client.texts)
+	}
+
+	res, ok := streamingPolicy(&blockOnClient{needle: "forbidden"}, gemini).OnResponseBody(context.Background(),
+		bufferedResponse(map[string]interface{}{}, "text/event-stream", clean), nil).(policy.DownstreamResponseModifications)
+	if !ok || res.StatusCode != nil {
+		t.Errorf("buffered: want the body delivered, got %+v", res)
+	}
+
+	_, terminated = driveStream(streamingPolicy(&blockOnClient{needle: "forbidden"}, gemini), streamCtxWithType("text/event-stream"),
+		[]string{ev("the forbidden ") + ev("plan.")})
+	if !terminated {
+		t.Errorf("streamed: want a blocked phrase to end the stream")
+	}
+}
+
+// With passthroughOnError, a line too large to retain released everything
+// withheld without assessing it, including the complete events before it. Only
+// the oversized line may pass unread.
+func TestRegression_PassthroughOversizedLineStillAssessesTheRest(t *testing.T) {
+	client := &blockOnClient{needle: "forbidden"}
+	p := streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) { pp.PassthroughOnError = true })
+	oversized := `data: {"choices":[{"delta":{"content":"` + strings.Repeat("y", maxPartialLineBytes+1024)
+	got, terminated := driveStream(p, streamCtxWithType("text/event-stream"), []string{
+		sseEvent("the forbidden plan. "),
+		oversized,
+		`"}}]}` + "\n\n" + sseEvent("tail.") + "data: [DONE]\n\n",
+	})
+	if !terminated || strings.Contains(got, "forbidden") {
+		t.Errorf("want the withheld phrase assessed and blocked, got terminated=%v (assessed %d texts)", terminated, len(client.texts))
+	}
+
+	// Clean text around the oversized line is still delivered.
+	client = &blockOnClient{needle: "forbidden"}
+	p = streamingPolicy(client, func(pp *AWSBedrockGuardrailPolicyParams) { pp.PassthroughOnError = true })
+	got, terminated = driveStream(p, streamCtxWithType("text/event-stream"), []string{
+		sseEvent("a clean start. "),
+		oversized,
+		`"}}]}` + "\n\n" + sseEvent("tail.") + "data: [DONE]\n\n",
+	})
+	if terminated || !strings.Contains(got, "a clean start.") || !strings.Contains(got, "tail.") || !strings.Contains(got, oversized) {
+		t.Errorf("want everything delivered, got terminated=%v (%d bytes)", terminated, len(got))
+	}
+}
