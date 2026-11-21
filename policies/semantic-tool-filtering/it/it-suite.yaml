@@ -48,3 +48,16 @@ blocks:
       - name: semantic-tool-filtering
         features:
           - features/semantic_tool_filtering.feature
+
+  # A gateway with no API key: a request whose tools are filtered shows the API's Azure identity
+  # authenticated, because a refused embedding fails open and leaves every tool in.
+  - name: semantic-tool-filtering-identity
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/identity.toml
+      - name: testbench
+    runners:
+      - name: semantic-tool-filtering-identity
+        features:
+          - features/semantic_tool_filtering_identity.feature
