@@ -2128,7 +2128,7 @@ func TestRegression_MaskedValueLeavesNoLogprobs(t *testing.T) {
 
 	p = streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, redacting)
 	res, ok := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", stream), nil).(policy.DownstreamResponseModifications)
-	if !ok || res.StatusCode != nil || strings.Contains(string(res.Body), "john@") || strings.Contains(string(res.Body), "example.com") {
+	if !ok || res.StatusCode != nil || !strings.Contains(string(res.Body), "*****") || strings.Contains(string(res.Body), "john@") || strings.Contains(string(res.Body), "example.com") {
 		t.Errorf("buffered event stream: want the value masked everywhere, got %s", res.Body)
 	}
 
@@ -2243,5 +2243,42 @@ func TestRegression_PassthroughOversizedLineStillAssessesTheRest(t *testing.T) {
 	})
 	if terminated || !strings.Contains(got, "a clean start.") || !strings.Contains(got, "tail.") || !strings.Contains(got, oversized) {
 		t.Errorf("want everything delivered, got terminated=%v (%d bytes)", terminated, len(got))
+	}
+}
+
+// An "index" member names a choice only in a choice array. An element of any
+// other array that the path reads carries its own data under that name, and its
+// text is read as usual.
+func TestRegression_IndexOutsideChoiceArraysIsData(t *testing.T) {
+	items := func(pp *AWSBedrockGuardrailPolicyParams) { pp.StreamingJsonPath = "$.items[0].text" }
+	ev := func(text string) string {
+		return fmt.Sprintf("data: {\"items\":[{\"index\":7,\"text\":%q}]}\n\n", text)
+	}
+	stream := ev("Hello ") + ev("there.")
+	client := &blockOnClient{needle: "forbidden"}
+	got, terminated := driveStream(streamingPolicy(client, items), streamCtxWithType("text/event-stream"), []string{stream})
+	if terminated || got != stream || len(client.texts) != 1 || client.texts[0] != "Hello there." {
+		t.Errorf("want the text read and delivered, got terminated=%v %q (assessed %q)", terminated, got, client.texts)
+	}
+}
+
+// A masked JSON-RPC event of an event stream loses its log probabilities too,
+// and an event whose text did not change keeps them.
+func TestRegression_MaskedJSONRPCEventLeavesNoLogprobs(t *testing.T) {
+	const pii = "john@example.com"
+	ev := func(id int, text string) string {
+		return fmt.Sprintf("event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"content\":[{\"type\":\"text\",\"text\":%q}]},\"logprobs\":{\"content\":[{\"token\":%q}]}}\n\n", id, text, text)
+	}
+	body := ev(1, "Mail "+pii) + ev(2, "Hello")
+	p := streamingPolicy(&reportsPIIWhenPresentClient{pii: pii}, func(pp *AWSBedrockGuardrailPolicyParams) {
+		pp.RedactPII = true
+		pp.JsonPath = "$.result.content[0].text"
+	})
+	res, ok := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", body), nil).(policy.DownstreamResponseModifications)
+	if !ok || res.StatusCode != nil || !strings.Contains(string(res.Body), "*****") || strings.Contains(string(res.Body), pii) {
+		t.Fatalf("want the value masked everywhere, got %+v", res)
+	}
+	if !strings.Contains(string(res.Body), `"token":"Hello"`) {
+		t.Errorf("an unchanged event should keep its log probabilities: %s", res.Body)
 	}
 }

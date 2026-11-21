@@ -52,9 +52,10 @@ type slotLocation struct {
 type extractedPayload struct {
 	segments []*textSegment
 	rebuild  func() ([]byte, error)
-	// root is the decoded document of a JSON body, which rebuild encodes; nil
-	// for any other body.
-	root *interface{}
+	// stripLogprobs removes the log probabilities of every document whose text
+	// was changed, before rebuild encodes it: a JSON body, or each changed event
+	// of an event stream. nil for a body that is not JSON.
+	stripLogprobs func()
 	// missed is the extraction error for content some events carry that the path
 	// does not reach, while other events' segments were found. The caller faults
 	// on it, or, with passthroughOnError, lets only that content pass and still
@@ -123,9 +124,9 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 			return nil, fmt.Errorf("%w (jsonPath %q)", err, jsonPath)
 		}
 		return &extractedPayload{
-			segments: segments,
-			rebuild:  func() ([]byte, error) { return encodeJSON(*root) },
-			root:     root,
+			segments:      segments,
+			rebuild:       func() ([]byte, error) { return encodeJSON(*root) },
+			stripLogprobs: func() { dropLogprobs(*root) },
 		}, nil
 	}
 
@@ -485,7 +486,15 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		return []byte(out.String()), nil
 	}
 
-	return &extractedPayload{segments: segments, rebuild: rebuild, missed: missed}, nil
+	stripLogprobs := func() {
+		for _, event := range events {
+			if event.dirty {
+				dropLogprobs(event.doc)
+			}
+		}
+	}
+
+	return &extractedPayload{segments: segments, rebuild: rebuild, stripLogprobs: stripLogprobs, missed: missed}, nil
 }
 
 // carriesText reports whether a JSON value holds any non-blank string.

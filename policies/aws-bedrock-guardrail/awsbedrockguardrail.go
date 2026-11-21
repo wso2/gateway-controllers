@@ -4138,14 +4138,24 @@ func dropLogprobs(v interface{}) {
 	}
 }
 
+// choiceArrayKeys name the arrays whose elements are a response's alternative
+// answers, each naming its own position in an "index" member: OpenAI's choices
+// and Gemini's candidates. An "index" member of an element of any other array is
+// the provider's own data, not a choice's identity.
+var choiceArrayKeys = map[string]bool{
+	"choices":    true,
+	"candidates": true,
+}
+
 // readsAnotherChoice reports whether streamingJsonPath, followed through doc,
-// passes an array element whose own "index" member names another position. An
-// OpenAI stream with n>1 sends each choice in its own event at choices[0], told
-// apart only by that member, so $.choices[0] reads every choice; joining them
-// would interleave their tokens and split each choice's phrases. Only the
-// choice the path names is read.
+// passes an element of a choice array (choiceArrayKeys) whose own "index" member
+// names another position. An OpenAI stream with n>1 sends each choice in its own
+// event at choices[0], told apart only by that member, so $.choices[0] reads
+// every choice; joining them would interleave their tokens and split each
+// choice's phrases. Only the choice the path names is read.
 func readsAnotherChoice(doc interface{}, tokens []pathToken) bool {
 	node := doc
+	arrayKey := ""
 	for _, token := range tokens {
 		switch token.kind {
 		case tokenKey:
@@ -4154,15 +4164,17 @@ func readsAnotherChoice(doc interface{}, tokens []pathToken) bool {
 				return false
 			}
 			node = object[token.key]
+			arrayKey = token.key
 		case tokenIndex:
 			array, ok := node.([]interface{})
 			if !ok || token.index < 0 || token.index >= len(array) {
 				return false
 			}
 			node = array[token.index]
-			if choiceIndexDiffers(node, token.index) {
+			if choiceArrayKeys[arrayKey] && choiceIndexDiffers(node, token.index) {
 				return true
 			}
+			arrayKey = ""
 		default:
 			return false
 		}
@@ -4224,7 +4236,7 @@ func missedStreamedOutput(s, streamingJsonPath string) bool {
 			}
 			continue
 		}
-		if outputOffPath(doc, tokens, false) {
+		if outputOffPath(doc, tokens, false, "") {
 			return true
 		}
 	}
@@ -4232,8 +4244,10 @@ func missedStreamedOutput(s, streamingJsonPath string) bool {
 }
 
 // outputOffPath reports whether node carries model output anywhere the remaining
-// path tokens do not lead to text; output says node is beneath an output member.
-func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
+// path tokens do not lead to text; output says node is beneath an output member,
+// and arrayKey names the member node is the value of ("" for an array element or
+// the event itself).
+func outputOffPath(node interface{}, tokens []pathToken, output bool, arrayKey string) bool {
 	if len(tokens) == 0 {
 		switch node.(type) {
 		case string, json.Number, bool, nil:
@@ -4254,7 +4268,7 @@ func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
 			}
 		}
 		child, has := object[token.key]
-		return has && outputOffPath(child, tokens[1:], output || streamedOutputKeys[token.key])
+		return has && outputOffPath(child, tokens[1:], output || streamedOutputKeys[token.key], token.key)
 	case tokenWildcard:
 		// The SDK reads a wildcard as a list, which is not text: nothing beneath
 		// it is read.
@@ -4269,8 +4283,8 @@ func outputOffPath(node interface{}, tokens []pathToken, output bool) bool {
 			index += len(array)
 		}
 		for i, element := range array {
-			if i == index && !choiceIndexDiffers(element, index) {
-				if outputOffPath(element, tokens[1:], output) {
+			if i == index && !(choiceArrayKeys[arrayKey] && choiceIndexDiffers(element, index)) {
+				if outputOffPath(element, tokens[1:], output, "") {
 					return true
 				}
 			} else if carriesStreamedOutput(element, output) {
@@ -4728,10 +4742,10 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 		slog.Debug("AWSBedrockGuardrail: Validation passed", "isResponse", isResponse)
 		return noModification(isResponse, restoredBody(payload, restored))
 	}
-	if isResponse && extracted.root != nil {
+	if isResponse && extracted.stripLogprobs != nil {
 		// The masked value is also in the tokens of the response's log
 		// probabilities.
-		dropLogprobs(*extracted.root)
+		extracted.stripLogprobs()
 	}
 
 	modifiedPayload, err := extracted.rebuild()
