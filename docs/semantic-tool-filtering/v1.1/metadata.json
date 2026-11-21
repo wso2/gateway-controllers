@@ -1,7 +1,7 @@
 {
   "name": "semantic-tool-filtering",
   "displayName": "Semantic Tool Filtering",
-  "version": "1.0",
+  "version": "1.1",
   "provider": "Choreo Labs",
   "categories": [
     "Guardrails",
