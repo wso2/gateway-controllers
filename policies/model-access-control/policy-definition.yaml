@@ -1,0 +1,163 @@
+name: model-access-control
+version: v0.8.0
+displayName: Model Access Control
+description: |
+  Checks the requested model against an allow or deny list before the request
+  reaches the LLM provider. A denied model goes to a matching fallback model
+  (and provider) if one is configured; otherwise it is rejected with 404
+  model_not_found. Responses are not modified.
+
+parameters:
+  type: object
+  additionalProperties: false
+  required:
+    - access
+  properties:
+    access:
+      title: Access Rule
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: |
+        Rule applied to the client-requested model only. A fallback target is
+        an administrator-approved destination and is not checked
+        against this rule again.
+      x-wso2-policy-property-order: [mode, models, modelPatterns, onMissingModel]
+      required:
+        - mode
+        - models
+      properties:
+        mode:
+          title: Mode
+          type: string
+          enum: [allow, deny]
+          description: |
+            Action for the listed models. With allow, only the listed models
+            are permitted (an allow list). With deny, the listed models are
+            rejected and every other model is permitted (a deny list).
+        models:
+          title: Models
+          type: array
+          minItems: 1
+          description: |
+            Model names the mode applies to. Matching ignores case and
+            surrounding whitespace.
+          items:
+            type: string
+            minLength: 1
+            pattern: '\S'
+        modelPatterns:
+          title: Model Patterns
+          type: array
+          x-wso2-policy-advanced-param: true
+          maxItems: 50
+          description: |
+            Optional RE2 expressions for more models the mode applies to. Each
+            expression must match the whole model name and ignores case, like
+            models, for example claude-.* (start with (?-i) to make it
+            case-sensitive).
+          items:
+            type: string
+            minLength: 1
+            maxLength: 512
+        onMissingModel:
+          title: On Missing Model
+          type: string
+          enum: [deny, skip]
+          default: deny
+          x-wso2-policy-advanced-param: true
+          description: |
+            Action when the request carries no model. deny rejects it with
+            400. skip forwards only requests that cannot carry an inference
+            model: GET, HEAD, DELETE and OPTIONS requests, multipart or form
+            bodies without a model field, and bodies that are neither JSON nor
+            text. A body that looks like JSON (whatever its Content-Type) but
+            has no model or does not parse, an unreadable text body, an
+            ambiguous multipart form, a query string or path that cannot be
+            decoded, and a model given more than once (including a key that
+            differs only in case, such as MODEL, a model[] key, or a model
+            behind a ';' separator) are rejected either way. A model field in a
+            multipart or form body is always checked.
+    fallback:
+      title: Fallback
+      type: object
+      x-wso2-policy-advanced-param: false
+      additionalProperties: false
+      description: |
+        Optional. Sends a model the access rule denies to an approved model
+        instead of rejecting it. A fallback without mappingPatterns is ignored.
+        A model the access rule permits is never redirected.
+      x-wso2-policy-property-order: [mappingPatterns]
+      properties:
+        mappingPatterns:
+          title: Mapping Patterns
+          type: array
+          maxItems: 50
+          description: |
+            Fallbacks, tried in order; the first match wins. Each fromPattern
+            must match the whole requested model name. For one model, write its
+            name with dots escaped, for example (?i)gpt-4\.1.
+          items:
+            type: object
+            additionalProperties: false
+            x-wso2-policy-property-order: [fromPattern, to, provider]
+            required:
+              - fromPattern
+              - to
+            properties:
+              fromPattern:
+                title: Requested Model Pattern
+                type: string
+                minLength: 1
+                maxLength: 512
+                description: |
+                  RE2 expression that must match the whole requested model,
+                  so a plain name such as gpt-4o matches only that model. A
+                  dot matches any character, so escape it (\.) to match a
+                  literal dot. Start with (?i) to ignore case. Only a model
+                  the access rule denies is redirected. Examples:
+                  (?i)gpt-4o, gpt-4\.1, gpt-4o-(.*), claude-.*
+              to:
+                title: Fallback Model
+                type: string
+                minLength: 1
+                maxLength: 1024
+                pattern: '\S'
+                description: |
+                  Model sent to the provider instead, written as plain text
+                  (no escaping). $1 or ${name} inserts a capture group of
+                  fromPattern, for example my-deployment-$1. A target that
+                  inserts a capture group must itself be permitted by the
+                  access rule; a fixed target is not checked.
+              provider:
+                title: Provider
+                type: string
+                minLength: 1
+                pattern: '\S'
+                description: |
+                  Optional primary provider name or additional-provider alias of
+                  the LLM proxy, matched exactly. When omitted, the request goes
+                  to the proxy's primary provider.
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  required:
+    - requestModel
+  properties:
+    requestModel:
+      type: object
+      additionalProperties: false
+      description: |
+        Where the request carries the model. Injected by the gateway controller
+        from the LLM provider template, including resource-specific overrides.
+      required:
+        - location
+        - identifier
+      properties:
+        location:
+          type: string
+          enum: [payload, header, queryParam, pathParam]
+        identifier:
+          type: string
+          minLength: 1

@@ -281,6 +281,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendUntilStatusAt)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) with body:$`,
 		b.sendUntilStatusWithBody)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) and the response body contains "([^"]*)" with body:$`,
+		b.sendUntilStatusAndBodyContainsWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until header "([^"]*)" is( not)? "([^"]*)"$`,
 		func(ctx context.Context, method, path, name, negation, want string) error {
 			return b.sendUntilHeaderMatches(ctx, method, path, name, want, negation != "", nil)
@@ -940,6 +942,16 @@ func (b *Base) expandBody(ctx context.Context, body *godog.DocString, headers ma
 func (b *Base) sendUntilStatusWithBody(
 	ctx context.Context, method, path string, want int, body *godog.DocString,
 ) error {
+	return b.sendUntilStatusAndBodyContainsWithBody(ctx, method, path, want, "", body)
+}
+
+// sendUntilStatusAndBodyContainsWithBody polls a data-plane path until it answers with the wanted
+// status and, when contains is not empty, a body holding that text. The body check tells a
+// response from the deployed route apart from the router's own answer for a route not yet
+// deployed, which can share the status.
+func (b *Base) sendUntilStatusAndBodyContainsWithBody(
+	ctx context.Context, method, path string, want int, contains string, body *godog.DocString,
+) error {
 	resolved, err := stepscommon.Expand(ctx, path)
 	if err != nil {
 		return err
@@ -968,8 +980,18 @@ func (b *Base) sendUntilStatusWithBody(
 			}
 			return response, nil
 		},
-		func(r *httpx.Response) bool { return r != nil && r.StatusCode == want },
-		fmt.Sprintf("waiting for %s %s to return %d", strings.ToUpper(method), url, want))
+		func(r *httpx.Response) bool {
+			return r != nil && r.StatusCode == want &&
+				(contains == "" || strings.Contains(string(r.Body), contains))
+		},
+		fmt.Sprintf("waiting for %s %s to return %d%s", strings.ToUpper(method), url, want, bodyWaitSuffix(contains)))
+}
+
+func bodyWaitSuffix(contains string) string {
+	if contains == "" {
+		return ""
+	}
+	return fmt.Sprintf(" with a body containing %q", contains)
 }
 
 func (b *Base) sendUntilStatusOneOf(ctx context.Context, method, path string, wantA, wantB int) error {

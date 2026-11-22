@@ -1,0 +1,14 @@
+{
+  "body": {
+    "error": {
+      "code": "invalid_model",
+      "message": "The request must specify exactly one valid model.",
+      "param": "model",
+      "type": "invalid_request_error"
+    }
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 400
+}
