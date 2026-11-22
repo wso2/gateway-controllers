@@ -119,6 +119,12 @@ skipTlsVerify = false
 
 ### User Parameters (API Definition)
 
+From v1.7, a parameter this version does not know is accepted and ignored instead of failing the
+deployment, so an API configured for a newer jwt-auth v1 still deploys on a gateway running
+v1.7. The parameters below are still validated, including the keys inside `scopes` and `claims`.
+A misspelt top-level parameter name is ignored too, so check the names when the policy does not
+behave as configured.
+
 | Parameter | Type | Required | Description |
 | --- | --- | --- | --- |
 | `issuers` | array | No | List of key manager names (or issuer values) to use. If omitted, runtime matches token `iss` or tries all key managers. |
