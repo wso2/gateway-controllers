@@ -180,7 +180,8 @@ whose APIs use an Azure identity.
   uses the policy, so a typo is found at the first deployment.
 - Both lists are empty by default, which places no limit. They are gateway settings, at the root like the
   other `embedding_provider_*` keys, and are shared with the semantic-cache (v1.4 and later) and
-  semantic-prompt-guard (v1.2 and later) policies, so one setting limits all three. An API cannot set them in its params: the gateway rejects such an API.
+  semantic-prompt-guard (v1.2 and later) policies, so one setting limits all three. An API cannot set them
+  in its params: the gateway rejects such an API.
 - Both are checked when the route is built, before any embedding call, so a refused endpoint never receives
   the key or a token.
 
@@ -200,8 +201,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
 
 - The API's route answers `500`: look for `Failed to build policy chain for route, skipping` in the gateway
   log. Its reason names the refused setting or the missing environment variable. The gateway doesn't retry
-  that build on its own: after fixing the cause (the allowlists, the environment variables or the key),
-  redeploy or update the API so its route is built again.
+  that build on a timer. It builds the route again when an API on the gateway, this one or any other, is
+  created or updated, so after fixing the cause (the allowlists, the environment variables or the key),
+  redeploy or update the API.
 - The tools reach the LLM unfiltered: the embedding failed and the request went on with every tool. Look
   for the `ERROR` lines below.
 - Azure OpenAI answers `401`: the identity lacks the Cognitive Services OpenAI User role (role assignments
@@ -212,6 +214,10 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
   authentication type, the identity's client ID and the scope.
 - The `ERROR` log line `SemanticToolFiltering: could not obtain an access token for the embedding provider`
   carries the reason, such as the Microsoft Entra ID response, and the identity's client ID.
+- A `403` is reported as a refused token even when Azure OpenAI refused the call for another reason, such as
+  the resource's network rules (public network access disabled, or the gateway's address not allowed). The
+  `DEBUG` line `SemanticToolFiltering: Error generating query embedding` has Azure OpenAI's answer, which
+  says which.
 
 **Security considerations**
 
@@ -226,6 +232,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
   identities only the roles its APIs need.
 - **No stored secret**: with an Azure identity, no key is stored in the gateway's configuration or sent to
   Azure OpenAI, and the tokens are short lived.
+- **Removing a role doesn't cut an identity off at once**: Azure OpenAI can keep accepting an identity's
+  token for an hour or more after its role is removed, and the gateway keeps using a cached token until it
+  is close to expiry. To stop an API using an identity at once, update its `azureAuth` or remove the API.
 
 **Upgrading from v1.0**
 
@@ -240,7 +249,6 @@ v1.1 needs Go 1.26.10 or later to build. The latest gateway's builder has it. A 
 downloads a newer Go during the build, so the build machine needs internet access. A 1.1.0 gateway's builder
 can't build v1.1: pin the policy to `@v1.0.2` in `build.yaml` before rebuilding, because `@v1` would pick
 v1.1.
-
 
 ### build.yaml
 
