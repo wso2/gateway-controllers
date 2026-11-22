@@ -82,8 +82,7 @@ embedding_provider_dimension = 1024
 embedding_provider_api_key = "" # Optional when every API uses an Azure identity
 
 # Optional: limit what the gateway's APIs may use. Empty (the default) means no limit.
-# Meant to be shared with the semantic-prompt-guard and semantic-tool-filtering policies, but only
-# semantic-cache v1.4 reads them so far.
+# Shared with semantic-prompt-guard (v1.2 and later). semantic-tool-filtering doesn't read them yet.
 embedding_provider_allowed_auth_types = []
 embedding_provider_allowed_endpoints = []
 
@@ -237,9 +236,8 @@ whose APIs use an Azure identity.
   invalid. So is a host with non-ASCII characters. An invalid entry in either list refuses every API that
   uses the policy, so a typo is found at the first deployment.
 - Both lists are empty by default, which places no limit. They are gateway settings, at the root like the
-  other `embedding_provider_*` keys, and are meant to be shared with the semantic-prompt-guard and
-  semantic-tool-filtering policies. Only semantic-cache v1.4 reads them so far: semantic-prompt-guard and
-  semantic-tool-filtering aren't limited by them until their Azure identity versions.
+  other `embedding_provider_*` keys, and are shared with the semantic-prompt-guard policy (v1.2 and
+  later), so one setting limits both. semantic-tool-filtering doesn't read them yet.
   An API cannot set them in its params: the gateway rejects such an API.
 
 On gateways newer than 1.2.0, a refused authentication type or endpoint makes the API's route answer
