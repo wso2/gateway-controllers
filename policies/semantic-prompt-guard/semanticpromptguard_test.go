@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -921,4 +923,35 @@ func TestGetPolicyFailsWhenTheContainerAppIdentityIsUnavailable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `authentication type "container-apps" can't be used`) || !strings.Contains(err.Error(), "IDENTITY_ENDPOINT") {
 		t.Fatalf("expected the missing identity to fail the build, got %v", err)
 	}
+}
+
+func TestGetPolicyGivesUpOnASlowEmbeddingProvider(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reading the body lets the server see the client hang up, so Close doesn't wait 7 s.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(7 * time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"embeddingProvider": "OPENAI",
+		"embeddingModel":    "m",
+		"embeddingEndpoint": srv.URL,
+		"apiKey":            "k",
+		"deniedPhrases":     []interface{}{"hack the system"},
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected the build to fail on a provider slower than the timeout, but it built after %s", elapsed)
+	}
+	if elapsed > 6*time.Second {
+		t.Fatalf("expected the embedding request to stop after about 5 s, took %s: %v", elapsed, err)
+	}
+	t.Logf("build failed after %s: %v", elapsed, err)
 }

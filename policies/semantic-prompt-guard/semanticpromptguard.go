@@ -53,7 +53,7 @@ const (
 	GuardrailErrorCode              = 422
 	defaultAllowSimilarityThreshold = 0.65 // Similarity threshold (0-1), higher = stricter matching
 	defaultDenySimilarityThreshold  = 0.65 // Similarity threshold (0-1), higher = stricter blocking
-	defaultTimeoutMs                = 5000 // Default timeout in milliseconds
+	defaultTimeoutSeconds           = 5    // Timeout for each embedding request, in seconds (the SDK's unit)
 	defaultRequestJSONPath          = "$.messages[-1].content"
 )
 
@@ -110,7 +110,6 @@ func GetPolicy(
 
 	return p, nil
 }
-
 
 // Mode returns the processing mode for the semantic prompt guard policy.
 func (p *SemanticPromptGuardPolicy) Mode() policy.ProcessingMode {
@@ -177,7 +176,7 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticPromptGuardP
 		APIKey:             apiKey,
 		AuthHeaderName:     authHeaderName,
 		EmbeddingModel:     embeddingModel, // Empty string is allowed for AZURE_OPENAI (deployment name is in endpoint)
-		TimeOut:            strconv.Itoa(defaultTimeoutMs),
+		TimeOut:            strconv.Itoa(defaultTimeoutSeconds),
 		AuthenticationType: auth.typ,
 		ClientID:           auth.clientID,
 		TokenScope:         auth.tokenScope,
