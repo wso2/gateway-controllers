@@ -176,8 +176,10 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 	// Generate embedding for the user request
 	requestEmbedding, err := p.embeddingProvider.GetEmbedding(userText)
 	if err != nil {
-		slog.Debug("SemanticModelRouting: Failed to compute request embedding, using default model",
-			"error", err)
+		if !logIdentityFailure(ctx, err, p.auth, "Failed to compute request embedding, using default model") {
+			slog.Debug("SemanticModelRouting: Failed to compute request embedding, using default model",
+				"error", err)
+		}
 		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
