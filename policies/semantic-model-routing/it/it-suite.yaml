@@ -61,3 +61,14 @@ blocks:
         features:
           - features/semantic_model_routing_identity.feature
 
+  # A gateway with a key that allows APIs only workload identity and its own embedding resource.
+  - name: semantic-model-routing-allowlist
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/allowlist.toml
+      - name: testbench
+    runners:
+      - name: semantic-model-routing-allowlist
+        features:
+          - features/semantic_model_routing_allowlist.feature
