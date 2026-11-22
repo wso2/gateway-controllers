@@ -40,7 +40,7 @@ JWT Authentication requires two levels of configuration.
 | `leeway` | string | No | `"30s"` | Clock skew allowance for exp/nbf. |
 | `authheaderscheme` | string | No | `"Bearer"` | Expected authorization scheme prefix. |
 | `headername` | string | No | `"Authorization"` | Header name to extract the token from. |
-| `onfailurestatuscode` | integer | No | `401` | HTTP status code on authentication failure: no token, or a malformed, unverifiable or expired token. Scope and claim rejections use it too, unless the user parameter `onAuthorizationFailureStatusCode` is set. |
+| `onfailurestatuscode` | integer | No | `401` | HTTP status code on authentication failure: no token, or a malformed, unverifiable or expired token. Scope and claim rejections use the user parameter `onAuthorizationFailureStatusCode`. |
 | `errormessageformat` | string | No | `"json"` | Error format: `"json"`, `"plain"`, or `"minimal"`. |
 | `errormessage` | string | No | `"Authentication failed"` | Error message body for failures. |
 | `validateissuer` | boolean | No | `true` | Validate the token `iss` claim against key managers. |
@@ -125,7 +125,7 @@ skipTlsVerify = false
 | `audiences` | array | No | Acceptable audience values. Token must contain at least one. |
 | `scopes` | object | No | Scope requirements as `allOf` (every listed scope must be present) and/or `anyOf` (at least one must be present). When both are given they are AND-ed: `(all of allOf) AND (any of anyOf)`. Takes precedence over `requiredScopes`. See [Example 3](#example-3-scopes-and-claims-each-with-allof--anyof). |
 | `claims` | object | No | Claim requirements as `allOf` and/or `anyOf` lists of matchers, each `{ claim, values }`. A matcher is satisfied when the token's claim value is one of `values` (for a multi-valued claim, any overlap). `allOf` requires every matcher; `anyOf` requires at least one; both are AND-ed. Takes precedence over `requiredClaims`. See [Example 3](#example-3-scopes-and-claims-each-with-allof--anyof). |
-| `onAuthorizationFailureStatusCode` | integer | No | Status returned when a valid token does not satisfy `scopes`/`requiredScopes` or `claims`/`requiredClaims`. Unset by default: the rejection then uses `onFailureStatusCode` (default `401`), as before v1.6. Set `403`, the RFC 6750 status for an insufficient scope, to answer it as forbidden. Must be a `4xx`. |
+| `onAuthorizationFailureStatusCode` | integer | No | Status returned when a valid token does not satisfy `scopes`/`requiredScopes` or `claims`/`requiredClaims`. Default `403`, the RFC 6750 status for an insufficient scope. Set `401` to keep the pre-v1.6 behavior. |
 | `requiredScopes` | array | No | **Deprecated — use `scopes` (`anyOf`) instead.** Required scopes; at least one must be present (uses the space-delimited `scope` claim or the array `scp` claim). Ignored when `scopes` is configured. |
 | `requiredClaims` | object | No | **Deprecated — use `claims` instead.** Map of claim name to expected value; every pair must match (exact string). Ignored when `claims` is configured. |
 | `claimMappings` | object | No | Map of claim name to downstream header name. |
@@ -253,7 +253,6 @@ spec:
               anyOf:
                 - claim: department
                   values: ["platform", "engineering"]
-            onAuthorizationFailureStatusCode: 403
 ```
 
 The request is authorized only when **all** of the following hold:
@@ -264,8 +263,7 @@ CLAIMS = (status = active)          AND  (department ∈ {platform, engineering}
 
 ```
 
-Each rejection below is a `403` because the example sets `onAuthorizationFailureStatusCode: 403`.
-Without it, they are `401` (`onFailureStatusCode`).
+
 
 | Token scopes | `status` | `department` | Result | Reason |
 | --- | --- | --- | --- | --- |
@@ -510,10 +508,9 @@ From v1.4, every rejection this policy makes is also reported to the gateway as 
 a stable code and type alongside the response. A gateway that supports fault policies uses it
 for the analytics event and hands it to the API's fault policies (for example `log-message`, to
 log the failure). On a REST, MCP or LLM API the status and body the client receives are the same
-as in v1.3, except for the changes below: a scope or claim rejection uses
-`onAuthorizationFailureStatusCode` when it is set (whether or not the gateway supports fault
-policies), and when an authentication scheme is configured every rejection carries a
-`WWW-Authenticate` challenge (from v1.6). On an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
+as in v1.3, except for the v1.6 changes below: a scope or claim rejection defaults to `403` (set by
+`onAuthorizationFailureStatusCode`, whether or not the gateway supports fault policies), and when an
+authentication scheme is configured every rejection carries a `WWW-Authenticate` challenge. On an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
 envelope. A gateway without fault policy support ignores the fault, and the policy behaves
 exactly as v1.3.
 
@@ -522,43 +519,38 @@ exactly as v1.3.
 | The Authorization header is missing | `onFailureStatusCode` (default `401`) | `900902` | `authentication` |
 | The header or token is malformed, the signature or audience does not validate | `onFailureStatusCode` | `900901` | `authentication` |
 | The token has expired | `onFailureStatusCode` | `900903` | `authentication` |
-| Required scopes are not present | `onAuthorizationFailureStatusCode` if set, otherwise `onFailureStatusCode` | `900910` | `authorization` |
-| Required claims are not satisfied | `onAuthorizationFailureStatusCode` if set, otherwise `onFailureStatusCode` | `900908` | `authorization` |
+| Required scopes are not present | `onAuthorizationFailureStatusCode` (default `403`) | `900910` | `authorization` |
+| Required claims are not satisfied | `onAuthorizationFailureStatusCode` (default `403`) | `900908` | `authorization` |
 | The policy is misconfigured (no key managers, invalid scopes or claims configuration) | `onFailureStatusCode` | `900900` | `authentication` |
 
-### Status and `WWW-Authenticate`
+### Status and `WWW-Authenticate` (from v1.6)
 
 Up to v1.5 every rejection used `onFailureStatusCode` (default `401`), so a caller whose valid
-token lacked a scope was told it was unauthenticated. v1.6 answered scope and claim rejections
-with `onAuthorizationFailureStatusCode`, defaulting to `403`. From v1.7 that parameter is
-optional and has no default: unset, scope and claim rejections use `onFailureStatusCode`, as up
-to v1.5; set it to `403` to tell the two kinds apart, as RFC 6750 section 3.1 specifies. From
-v1.6, when an authentication scheme is configured every rejection carries a `WWW-Authenticate`
-challenge. The table shows the statuses with `onAuthorizationFailureStatusCode` unset and set to
-`403`; the body `error` applies to the `json` format (and is the whole body in `minimal`):
+token lacked a scope was told it was unauthenticated. From v1.6 the two kinds are told apart, as
+RFC 6750 section 3.1 specifies, and when an authentication scheme is configured every rejection
+carries a `WWW-Authenticate` challenge. The table shows the default statuses; the body `error`
+applies to the `json` format (and is the whole body in `minimal`):
 
-| Rejection | Status (unset) | Status (`403`) | `WWW-Authenticate` | Body `error` (unset / `403`) |
-|-----------|----------------|----------------|--------------------|------------------------------|
-| No credentials, or no token under the scheme (`Authorization: Bearer` alone, or another scheme) | `401` | `401` | `Bearer` | `Unauthorized` |
-| Malformed, unverifiable, expired or wrong-audience token | `401` | `401` | `Bearer error="invalid_token"` | `Unauthorized` |
-| Valid token without the required scopes | `401` | `403` | `Bearer error="insufficient_scope"` | `Unauthorized` / `Forbidden` |
-| Valid token failing the claim requirements | `401` | `403` | `Bearer` | `Unauthorized` / `Forbidden` |
-| The policy is misconfigured (no key managers, invalid scopes or claims configuration) | `401` | `401` | `Bearer` | `Unauthorized` |
-
-The `401` statuses are `onFailureStatusCode`'s default.
+| Rejection | Status | `WWW-Authenticate` | Body `error` |
+|-----------|--------|--------------------|--------------|
+| No credentials, or no token under the scheme (`Authorization: Bearer` alone, or another scheme) | `onFailureStatusCode` (`401`) | `Bearer` | `Unauthorized` |
+| Malformed, unverifiable, expired or wrong-audience token | `onFailureStatusCode` (`401`) | `Bearer error="invalid_token"` | `Unauthorized` |
+| Valid token without the required scopes | `onAuthorizationFailureStatusCode` (`403`) | `Bearer error="insufficient_scope"` | `Forbidden` |
+| Valid token failing the claim requirements | `onAuthorizationFailureStatusCode` (`403`) | `Bearer` | `Forbidden` |
+| The policy is misconfigured (no key managers, invalid scopes or claims configuration) | `onFailureStatusCode` (`401`) | `Bearer` | `Unauthorized` |
 
 The challenge names the configured scheme (`authHeaderScheme`, or the API's `authHeaderPrefix`)
 in place of `Bearer`. With no scheme configured, or a scheme that is not a valid HTTP token (for
 example one containing a quote or a space), the header is left out. The body `error` is the reason
-phrase of the status actually returned, so a scope rejection answered with `401` reads
-`Unauthorized`; an unknown status uses `Unauthorized`; the `plain` format returns
+phrase of the status actually returned, so with `onAuthorizationFailureStatusCode: 401` a scope
+rejection reads `Unauthorized`; an unknown status uses `Unauthorized`; the `plain` format returns
 `errorMessage` as the body.
-`onAuthorizationFailureStatusCode` must be a `4xx`; any other value is ignored, as if it were unset.
+`onAuthorizationFailureStatusCode` must be a `4xx`; any other value falls back to `403`.
 
 The required scopes are not listed in the challenge, so a probing caller is not told what to ask
-for. A client that treats any `401` as an expired session (and signs in again) cannot tell a
-permission denial from it while the parameter is unset; set
-`onAuthorizationFailureStatusCode: 403` on the API to answer permission denials with `403`.
+for. A client that treats any `401` as an expired session (and signs in again) now sees a
+permission denial as `403` instead. To keep the v1.5 status, set
+`onAuthorizationFailureStatusCode: 401` on the API.
 
 The fault's `Description` carries the internal reason, for example `missing authorization header`.
 It is passed to fault policies and analytics only, never to the client.
