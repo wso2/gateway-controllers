@@ -19,8 +19,14 @@ package semanticmodelrouting
 
 import (
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+
+	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
+	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
 // --- Cosine Similarity Tests ---
@@ -537,7 +543,7 @@ func TestParseEmbeddingConfig_Valid(t *testing.T) {
 		"apiKey":            "sk-test-key",
 	}
 
-	config, err := parseEmbeddingConfig(params)
+	config, _, err := parseEmbeddingConfig(params)
 	if err != nil {
 		t.Fatalf("Expected no error, got: %v", err)
 	}
@@ -561,7 +567,7 @@ func TestParseEmbeddingConfig_AzureOpenAI(t *testing.T) {
 		// Note: embeddingModel is optional for AZURE_OPENAI
 	}
 
-	config, err := parseEmbeddingConfig(params)
+	config, _, err := parseEmbeddingConfig(params)
 	if err != nil {
 		t.Fatalf("Azure OpenAI should not require embeddingModel, got: %v", err)
 	}
@@ -576,7 +582,7 @@ func TestParseEmbeddingConfig_MissingProvider(t *testing.T) {
 		"apiKey":            "sk-test-key",
 	}
 
-	_, err := parseEmbeddingConfig(params)
+	_, _, err := parseEmbeddingConfig(params)
 	if err == nil {
 		t.Fatal("Expected error for missing provider, got nil")
 	}
@@ -589,7 +595,7 @@ func TestParseEmbeddingConfig_InvalidProvider(t *testing.T) {
 		"apiKey":            "key",
 	}
 
-	_, err := parseEmbeddingConfig(params)
+	_, _, err := parseEmbeddingConfig(params)
 	if err == nil {
 		t.Fatal("Expected error for invalid provider, got nil")
 	}
@@ -603,7 +609,7 @@ func TestParseEmbeddingConfig_OpenAI_MissingModel(t *testing.T) {
 		// Missing embeddingModel
 	}
 
-	_, err := parseEmbeddingConfig(params)
+	_, _, err := parseEmbeddingConfig(params)
 	if err == nil {
 		t.Fatal("Expected error for missing embeddingModel with OPENAI, got nil")
 	}
@@ -689,5 +695,149 @@ func TestParseRouteConfig_NegativeThreshold(t *testing.T) {
 	// Negative threshold should fall back to default
 	if route.ScoreThreshold != DefaultSimilarityThreshold {
 		t.Errorf("Expected default threshold for negative value, got %.2f", route.ScoreThreshold)
+	}
+}
+
+// --- Azure Identity Tests ---
+
+const (
+	testAzureEndpoint = "https://res.openai.azure.com/openai/deployments/emb/embeddings?api-version=2024-10-21"
+	testIdentityID    = "00000000-0000-0000-0000-000000000001"
+)
+
+// azureParams is an API with one route on a gateway with an Azure OpenAI embedding deployment and
+// a key, plus extra.
+func azureParams(extra map[string]interface{}) map[string]interface{} {
+	params := map[string]interface{}{
+		"routes": []interface{}{
+			map[string]interface{}{"model": "coding-model", "utterances": []interface{}{"write a python function"}},
+		},
+		"defaultModel":      "default-model",
+		"requestModel":      map[string]interface{}{"location": "payload", "identifier": "$.model"},
+		"embeddingProvider": "AZURE_OPENAI",
+		"embeddingEndpoint": testAzureEndpoint,
+		"apiKey":            "gateway-key",
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	return params
+}
+
+func TestParseEmbeddingConfigIdentityModeNeedsNoKey(t *testing.T) {
+	params := azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "workload-identity"},
+	})
+	delete(params, "apiKey")
+	c, auth, err := parseEmbeddingConfig(params)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.AuthenticationType != "workload-identity" || c.TokenScope != embeddingproviders.DefaultTokenScope {
+		t.Fatalf("identity not passed on: %+v", c)
+	}
+	if c.APIKey != "" || c.AuthHeaderName != "" {
+		t.Fatalf("an identity mode must not carry a key: %+v", c)
+	}
+	if auth.typ != "workload-identity" {
+		t.Fatalf("expected auth.typ workload-identity, got %q", auth.typ)
+	}
+}
+
+func TestParseEmbeddingConfigIdentityModeDropsTheKey(t *testing.T) {
+	c, _, err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "managed-identity", "clientId": testIdentityID},
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.APIKey != "" || c.AuthHeaderName != "" {
+		t.Fatalf("the gateway's key must not be passed on in an identity mode: %+v", c)
+	}
+	if c.AuthenticationType != "managed-identity" || c.ClientID != testIdentityID {
+		t.Fatalf("identity not passed on: %+v", c)
+	}
+}
+
+func TestParseEmbeddingConfigAPIKeyModeStillNeedsAKey(t *testing.T) {
+	params := azureParams(nil)
+	delete(params, "apiKey")
+	if _, _, err := parseEmbeddingConfig(params); err == nil ||
+		!strings.Contains(err.Error(), "'apiKey' is required for AZURE_OPENAI provider") {
+		t.Fatalf("expected the key to be required, got %v", err)
+	}
+}
+
+func TestParseEmbeddingConfigAPIKeyModeIgnoresLeftoverIdentityFields(t *testing.T) {
+	c, _, err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "api-key", "clientId": testIdentityID, "scope": "x"},
+	}))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.AuthenticationType != "api-key" || c.ClientID != "" || c.TokenScope != "" ||
+		c.APIKey != "gateway-key" || c.AuthHeaderName != "api-key" {
+		t.Fatalf("unexpected config: %+v", c)
+	}
+}
+
+func TestParseEmbeddingConfigRefusesAnUnlistedType(t *testing.T) {
+	_, _, err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"embeddingAllowedAuthTypes": []interface{}{"api-key"},
+		"azureAuth":                 map[string]interface{}{"authenticationType": "container-apps"},
+	}))
+	if err == nil || !strings.Contains(err.Error(), `authentication type "container-apps" is not allowed on this gateway`) {
+		t.Fatalf("expected container-apps to be refused, got %v", err)
+	}
+}
+
+func TestGetPolicyChecksTheAllowlistBeforeEmbeddingTheUtterances(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := GetPolicy(policy.PolicyMetadata{}, azureParams(map[string]interface{}{
+		"embeddingEndpoint":         srv.URL + "/openai/deployments/d/embeddings?api-version=x",
+		"apiKey":                    "secret-key-value-123",
+		"embeddingAllowedEndpoints": []interface{}{"https://other.openai.azure.com"},
+	}))
+	if err == nil || !strings.Contains(err.Error(), "invalid embedding config:") ||
+		!strings.Contains(err.Error(), "is not allowed on this gateway") {
+		t.Fatalf("expected the endpoint to be refused, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-key-value-123") {
+		t.Fatalf("the error must not carry the key: %v", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("a refused endpoint must not be called, got %d calls", n)
+	}
+}
+
+func TestGetPolicyRejectsAnIdentityWithANonAzureProvider(t *testing.T) {
+	params := azureParams(map[string]interface{}{
+		"embeddingProvider": "OPENAI",
+		"embeddingModel":    "m",
+		"embeddingEndpoint": "https://api.openai.com/v1/embeddings",
+		"azureAuth":         map[string]interface{}{"authenticationType": "workload-identity"},
+	})
+	delete(params, "apiKey")
+	if _, err := GetPolicy(policy.PolicyMetadata{}, params); err == nil ||
+		!strings.Contains(err.Error(), "only supported for the AZURE_OPENAI embedding provider") {
+		t.Fatalf("expected the identity to be refused for OPENAI, got %v", err)
+	}
+}
+
+func TestGetPolicyFailsWhenTheContainerAppIdentityIsUnavailable(t *testing.T) {
+	t.Setenv("IDENTITY_ENDPOINT", "")
+	t.Setenv("IDENTITY_HEADER", "")
+	_, err := GetPolicy(policy.PolicyMetadata{}, azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "container-apps"},
+	}))
+	if err == nil || !strings.Contains(err.Error(), `authentication type "container-apps" can't be used`) ||
+		!strings.Contains(err.Error(), "IDENTITY_ENDPOINT") {
+		t.Fatalf("expected the missing identity to fail the build, got %v", err)
 	}
 }
