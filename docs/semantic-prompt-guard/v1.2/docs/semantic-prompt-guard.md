@@ -240,9 +240,10 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
 
 - The API's route answers `500`: look for `Failed to build policy chain for route, skipping` in the gateway
   log. Its reason names the refused setting, the missing environment variable, or the failed phrase
-  embeddings. The gateway doesn't retry that build on its own: after fixing the cause (the role, the
-  environment variables or the key), redeploy or update the API so its route is built again. A new role
-  assignment can take several minutes to apply, so redeploy after it has.
+  embeddings. The gateway doesn't retry that build on a timer. It builds the route again when an API on
+  the gateway, this one or any other, is created or updated, so after fixing the cause (the role, the
+  environment variables or the key), redeploy or update the API. A new role assignment can take several
+  minutes to apply, so redeploy after it has.
 - Azure OpenAI answers `401`: the identity lacks the Cognitive Services OpenAI User role (role assignments
   can take several minutes to apply), the endpoint is a regional one, or the token scope is for another
   resource, such as `https://management.azure.com/.default`. Use `https://cognitiveservices.azure.com/.default`,
@@ -251,6 +252,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
   authentication type, the identity's client ID and the scope.
 - The `ERROR` log line `SemanticPromptGuard: could not obtain an access token for the embedding provider`
   carries the reason, such as the Microsoft Entra ID response, and the identity's client ID.
+- A `403` is reported as a refused token even when Azure OpenAI refused the call for another reason, such as
+  the resource's network rules (public network access disabled, or the gateway's address not allowed). The
+  `DEBUG` line `Error fetching prompt embedding` has Azure OpenAI's answer, which says which.
 
 **Security considerations**
 
@@ -265,6 +269,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
   identities only the roles its APIs need.
 - **No stored secret**: with an Azure identity, no key is stored in the gateway's configuration or sent to
   Azure OpenAI, and the tokens are short lived.
+- **Removing a role doesn't cut an identity off at once**: Azure OpenAI can keep accepting an identity's
+  token for an hour or more after its role is removed, and the gateway keeps using a cached token until it
+  is close to expiry. To stop an API using an identity at once, update its `azureAuth` or remove the API.
 
 **Upgrading from v1.1**
 
@@ -481,9 +488,10 @@ operationPolicies:
           showAssessment: true
 ```
 
-### Example 4: Azure OpenAI with Custom Timeout
+### Example 4: Higher Deny Threshold
 
-Configure semantic prompt guardrail with Azure OpenAI and extended timeout:
+Block only prompts that closely match a denied phrase, by raising `denySimilarityThreshold` above its
+default of `0.65`:
 
 ```yaml
 operationPolicies:
