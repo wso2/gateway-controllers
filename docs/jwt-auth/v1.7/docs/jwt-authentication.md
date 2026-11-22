@@ -511,8 +511,9 @@ log the failure). On a REST, MCP or LLM API the status and body the client recei
 as in v1.3, except for the v1.6 changes below: a scope or claim rejection defaults to `403` (set by
 `onAuthorizationFailureStatusCode`, whether or not the gateway supports fault policies), and when an
 authentication scheme is configured every rejection carries a `WWW-Authenticate` challenge. On an Agent (A2A) API, a JSON-RPC caller receives the failure as a JSON-RPC error
-envelope. A gateway without fault policy support ignores the fault, and the policy behaves
-exactly as v1.3.
+envelope. A gateway without fault policy support ignores the fault; the client still receives
+the statuses and challenges described here, including the `403` default for scope and claim
+rejections.
 
 | When | Status | Code | Type |
 |------|--------|------|------|
