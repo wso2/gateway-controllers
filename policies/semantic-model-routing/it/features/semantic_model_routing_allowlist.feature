@@ -83,7 +83,7 @@ Feature: The gateway's lists of allowed authentication types and endpoints for e
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
   # Gateways up to 1.2.0 handle a policy that can't be built differently, so these run on newer ones.
-  # The same host on another port is another resource, so it isn't on the list.
+  # A trailing dot makes the testbench another resource: off the list, yet it would serve embeddings.
   Scenario Outline: An API whose authentication type or endpoint the gateway doesn't allow fails closed (<case>)
     Given the gateway version satisfies ">1.2.0"
     And I generate a unique value from "smr-refused" and store it as "apiName"
@@ -117,4 +117,4 @@ Feature: The gateway's lists of allowed authentication types and endpoints for e
       | case                                                          | params                                                                                                                                                       |
       | no azureAuth, so api-key                                      |                                                                                                                                                              |
       | an identity that isn't on the list                            | "azureAuth":{"authenticationType":"container-apps"},                                                                                                         |
-      | an allowed identity sent to a resource that isn't on the list | "embeddingEndpoint":"http://testbench:3002/openai/deployments/d/embeddings?api-version=2024-10-21","azureAuth":{"authenticationType":"workload-identity"}, |
+      | an allowed identity sent to a resource that isn't on the list | "embeddingEndpoint":"http://testbench.:3004/openai/deployments/d/embeddings?api-version=2024-10-21","azureAuth":{"authenticationType":"workload-identity"}, |
