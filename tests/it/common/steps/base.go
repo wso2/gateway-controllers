@@ -956,6 +956,10 @@ func (b *Base) sendUntilStatusAndBodyContainsWithBody(
 	if err != nil {
 		return err
 	}
+	contains, err = stepscommon.Expand(ctx, contains)
+	if err != nil {
+		return err
+	}
 	url, err := b.gatewayURL(resolved)
 	if err != nil {
 		return err

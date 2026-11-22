@@ -214,7 +214,7 @@ func parseModelPatterns(raw any) ([]*regexp.Regexp, error) {
 		// Listed models ignore case, and so do model patterns: a deny-list pattern that
 		// matched only one spelling could be bypassed on a provider whose model names
 		// ignore case. A pattern can still opt out with (?-i).
-		re, err := compileFullMatch("(?i)"+value, field)
+		re, err := compileFullMatch("(?i)", value, field)
 		if err != nil {
 			return nil, err
 		}
@@ -272,7 +272,7 @@ func parseMappingPatterns(raw any) ([]patternMapping, error) {
 		if err != nil {
 			return nil, err
 		}
-		re, err := compileFullMatch(fromPattern, field+".fromPattern")
+		re, err := compileFullMatch("", fromPattern, field+".fromPattern")
 		if err != nil {
 			return nil, err
 		}
@@ -297,11 +297,12 @@ func parseMappingPatterns(raw any) ([]patternMapping, error) {
 // model name. Without the anchors "gpt-4o" would also match "gpt-4o-preview" and
 // silently widen an allow list; the non-capturing group keeps an alternation inside
 // the expression from escaping them.
-func compileFullMatch(pattern, field string) (*regexp.Regexp, error) {
+func compileFullMatch(flags, pattern, field string) (*regexp.Regexp, error) {
+	// The limit applies to the pattern as configured, not to the flags added to it.
 	if len(pattern) > maxPatternLength {
 		return nil, fmt.Errorf("'%s' must be at most %d characters, got %d", field, maxPatternLength, len(pattern))
 	}
-	re, err := regexp.Compile(`^(?:` + pattern + `)$`)
+	re, err := regexp.Compile(`^(?:` + flags + pattern + `)$`)
 	if err != nil {
 		return nil, fmt.Errorf("'%s' is not a valid RE2 expression: %w", field, err)
 	}
@@ -349,14 +350,7 @@ func validateExpansion(re *regexp.Regexp, replacement, field string) (dynamic bo
 		}
 		i = next - 1
 		dynamic = true
-		if isAllDigits(ref) {
-			index := 0
-			for _, c := range ref {
-				index = index*10 + int(c-'0')
-				if index > numGroups {
-					break
-				}
-			}
+		if index := captureIndex(ref); index >= 0 {
 			if index > numGroups {
 				return false, fmt.Errorf("'%s' references capture group $%s, but the expression has %d group(s)", field, ref, numGroups)
 			}
@@ -376,8 +370,8 @@ func validateExpansion(re *regexp.Regexp, replacement, field string) (dynamic bo
 }
 
 // readCaptureRef reads the group name after a '$' at start, following the naming
-// rules of regexp.Expand: ${name}, or the longest run of letters, digits and
-// underscores.
+// rules of regexp.Expand: ${name}, or the longest run of Unicode letters, digits
+// and underscores.
 func readCaptureRef(s string, start int) (ref string, next int, braced, closed bool) {
 	if start >= len(s) {
 		return "", start, false, false
@@ -390,22 +384,31 @@ func readCaptureRef(s string, start int) (ref string, next int, braced, closed b
 		return s[start+1 : start+end], start + end + 1, true, true
 	}
 	i := start
-	for i < len(s) && (s[i] == '_' || ('0' <= s[i] && s[i] <= '9') || ('a' <= s[i] && s[i] <= 'z') || ('A' <= s[i] && s[i] <= 'Z')) {
-		i++
+	for i < len(s) {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
+			break
+		}
+		i += size
 	}
 	return s[start:i], i, false, false
 }
 
-func isAllDigits(s string) bool {
-	if s == "" {
-		return false
+// captureIndex returns the group number a reference names, or -1 when regexp.Expand
+// reads it as a group name: a reference with a non-digit, a leading zero ("01") or a
+// number of 1e8 or more is a name.
+func captureIndex(ref string) int {
+	if ref == "" || (ref[0] == '0' && len(ref) > 1) {
+		return -1
 	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
+	num := 0
+	for i := 0; i < len(ref); i++ {
+		if ref[i] < '0' || ref[i] > '9' || num >= 1e8 {
+			return -1
 		}
+		num = num*10 + int(ref[i]-'0')
 	}
-	return true
+	return num
 }
 
 // normalizeKey is the comparison key of listed model names.

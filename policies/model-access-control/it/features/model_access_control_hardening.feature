@@ -287,7 +287,7 @@ Feature: Model access control cannot be bypassed by the shape of a request
     # The key written with an escape is still the model key.
     When I send a "POST" request to "${CTX:providerContext}/chat/completions" with body:
       """
-      {"model":"gpt-4-32k","messages":[]}
+      {"\u006dodel":"gpt-4-32k","messages":[]}
       """
     Then the response should match the expected error response "model-access-control-denied"
 

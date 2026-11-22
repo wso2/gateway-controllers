@@ -105,7 +105,7 @@ override when the template has one. It is not a user-configurable parameter.
 | System parameter | Type | Required | Description |
 |---|---|---|---|
 | `requestModel.location` | string | Yes | `payload`, `header`, `queryParam` or `pathParam`. |
-| `requestModel.identifier` | string | Yes | A dotted JSONPath such as `$.model` for `payload`, a header name for `header`, a query parameter name for `queryParam`, or an RE2 expression for `pathParam`. When `mappingPatterns` is configured, a `pathParam` expression must have a capture group around the model, for example `/models/([^/]+)/chat`. |
+| `requestModel.identifier` | string | Yes | A dotted JSONPath such as `$.model` for `payload` (an array index such as `items[0]` cannot follow a key that contains `-`), a header name for `header`, a query parameter name for `queryParam`, or an RE2 expression for `pathParam`. When `mappingPatterns` is configured, a `pathParam` expression must have a capture group around the model, for example `/models/([^/]+)/chat`. |
 
 For `payload`, the policy buffers the request body. For the other locations it
 reads only the request headers and the path, and never buffers the body.
@@ -293,9 +293,13 @@ including the `model` field of a multipart or URL-encoded body.
   numbers and text keep their exact values. On a multipart or URL-encoded body,
   the model field is rewritten.
 - A header, query or path rewrite replaces only the model's bytes.
-- A fallback target of `.` or `..` is never written into a path, and a target
-  that contains the multipart boundary is never written into a multipart body.
-  Either is rejected with `500 routing_error`.
+- A fallback target of `.` or `..` is never written into a path, a target that
+  contains the multipart boundary is never written into a multipart body, and a
+  target that contains a comma is never written into a header. Each is rejected
+  with `500 routing_error`.
+- A JSON body that repeats an object member (outside the model's own object) is
+  forwarded as is when the model is permitted, but a fallback cannot rewrite it
+  without dropping one of the values, so it is rejected with `500 routing_error`.
 
 ## Responses and errors
 
@@ -416,4 +420,6 @@ Anything an upstream parser could read as a second model counts:
   could read differently: more than one `Content-Disposition` header, a
   repeated or malformed parameter, or an RFC 2231 encoded name (`name*=`);
 - a `model` part with a `Content-Transfer-Encoding`;
+- a JSON model that is present but is not a string (a number, array, object or
+  boolean), even on a `GET` request;
 - a model given more than once.

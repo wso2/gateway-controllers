@@ -19,9 +19,10 @@ parameters:
       x-wso2-policy-advanced-param: false
       additionalProperties: false
       description: |
-        Rule applied to the client-requested model only. A fallback target is
-        an administrator-approved destination and is not checked
-        against this rule again.
+        Rule applied to the client-requested model only. A fixed fallback
+        target is an administrator-approved destination and is not checked
+        against this rule again; a target that inserts a capture group is
+        checked, and the request is rejected with 404 if it is not permitted.
       x-wso2-policy-property-order: [mode, models, modelPatterns, onMissingModel]
       required:
         - mode

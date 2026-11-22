@@ -490,7 +490,8 @@ func TestConcurrentRequestsDoNotShareState(t *testing.T) {
 		{"denied", "", ""},
 	}
 	var wg sync.WaitGroup
-	errs := make(chan error, 400)
+	// A worker reports at most two errors, so the channel never blocks a worker.
+	errs := make(chan error, 2*400)
 	for i := 0; i < 400; i++ {
 		wg.Add(1)
 		go func(c struct{ requested, effective, provider string }) {

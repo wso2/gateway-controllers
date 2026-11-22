@@ -117,12 +117,12 @@ func TestHardening_JSONBodies(t *testing.T) {
 		body   string
 		status int
 	}{
-		{"key written with a unicode escape", "application/json", `{"model":"llama-3"}`, 404},
-		{"same key twice, once escaped", "application/json", `{"model":"gpt-4o","model":"llama-3"}`, 400},
-		{"case-variant key, escaped", "application/json", `{"model":"gpt-4o","MODEL":"llama-3"}`, 400},
+		{"key written with a unicode escape", "application/json", `{"\u006dodel":"llama-3"}`, 404},
+		{"same key twice, once escaped", "application/json", `{"model":"gpt-4o","\u006dodel":"llama-3"}`, 400},
+		{"case-variant key, escaped", "application/json", `{"model":"gpt-4o","\u004dODEL":"llama-3"}`, 400},
 		{"case-variant key next to null", "application/json", `{"model":null,"MODEL":"llama-3"}`, 400},
 		{"only a case-variant key", "application/json", `{"Model":"llama-3"}`, 400},
-		{"value written with a unicode escape", "application/json", `{"model":"gpt-4o"}`, forward},
+		{"value written with a unicode escape", "application/json", `{"model":"gpt-4\u006f"}`, forward},
 		{"top-level array", "application/json", `[{"model":"llama-3"}]`, 400},
 		{"two JSON documents", "application/json", `{"model":"gpt-4o"}{"model":"llama-3"}`, 400},
 		{"comment", "application/json", `{"model":"gpt-4o" /* "model":"llama-3" */}`, 400},
@@ -207,7 +207,11 @@ func TestHardening_DenyListVariants(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("%q", tt.model), func(t *testing.T) {
-			wantStatus(t, onBody(t, p, jsonBody(fmt.Sprintf(`{"model":%q}`, tt.model))), tt.status)
+			model, err := json.Marshal(tt.model)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantStatus(t, onBody(t, p, jsonBody(`{"model":`+string(model)+`}`)), tt.status)
 		})
 	}
 }
@@ -505,48 +509,74 @@ func TestHardening_CaptureTargetCannotForgeAMultipartBoundary(t *testing.T) {
 }
 
 // TestFallbackTargetIsReadBackExactly writes each fallback target into every model
-// location and reads it back with a standard parser: the upstream must read exactly the
-// target, or the rewrite must be refused. The targets include inputs that once broke a
-// location ("$$", "$0", a lone invalid byte, the multipart boundary, a 4 KB name).
+// location and reads it back with a standard parser. Each case states its outcome:
+// a configuration error, a status in a location, or else the exact target read back.
+// The targets include inputs that once broke a location ("$$", "$0", a lone invalid
+// byte, the multipart boundary, a 4 KB name).
 func TestFallbackTargetIsReadBackExactly(t *testing.T) {
-	targets := []string{
-		"gpt-4o", "a b", "a&b=c;d", "a/b", "..", "100%", "é", "a,b", "<x>",
-		"$$", "$0", "\xc5", "--b",
-		"00" + strings.Repeat("R", 4070) + "000000 " + strings.Repeat("!", 15) + "0" + strings.Repeat("!", 6),
+	tests := []struct {
+		target    string
+		configErr bool
+		want      string         // the model read back, when the rewrite succeeds
+		status    map[string]int // locations where the request is rejected instead
+	}{
+		{target: "gpt-4o", want: "gpt-4o"},
+		{target: "a b", want: "a b"},
+		{target: "a&b=c;d", want: "a&b=c;d"},
+		{target: "a/b", want: "a/b"},
+		{target: "..", want: "..", status: map[string]int{"path": statusRoutingError}},
+		{target: "100%", want: "100%"},
+		{target: "é", want: "é"},
+		{target: "a,b", want: "a,b", status: map[string]int{"header": statusRoutingError}},
+		{target: "<x>", want: "<x>"},
+		{target: "$$", want: "$"}, // "$$" is a literal dollar, not a capture reference
+		// "$0" inserts the client's own model, which must pass the access rule and does not.
+		{target: "$0", status: map[string]int{
+			"payload": statusModelNotFound, "form": statusModelNotFound, "multipart": statusModelNotFound,
+			"query": statusModelNotFound, "path": statusModelNotFound, "header": statusModelNotFound,
+		}},
+		{target: "\xc5", configErr: true},
+		{target: "--b", want: "--b", status: map[string]int{"multipart": statusRoutingError}},
+		{target: "00" + strings.Repeat("R", 4070) + "000000 " + strings.Repeat("!", 15) + "0" + strings.Repeat("!", 6), configErr: true},
 	}
-	for _, target := range targets {
-		policyFor := func(location map[string]any) *Policy {
+	for _, tt := range tests {
+		policyFor := func(location map[string]any) (*Policy, error) {
 			p, err := GetPolicy(policy.PolicyMetadata{}, map[string]any{
 				"requestModel": location,
 				"access":       map[string]any{"mode": "allow", "models": []any{"x"}},
-				"fallback":     map[string]any{"mappingPatterns": []any{map[string]any{"fromPattern": "old", "to": target}}},
+				"fallback":     map[string]any{"mappingPatterns": []any{map[string]any{"fromPattern": "old", "to": tt.target}}},
 			})
 			if err != nil {
-				return nil
+				return nil, err
 			}
-			return p.(*Policy)
+			return p.(*Policy), nil
 		}
-		p := policyFor(payloadModel())
-		if p == nil {
-			continue // the configuration refuses the target
+		p, err := policyFor(payloadModel())
+		if tt.configErr {
+			if err == nil {
+				t.Errorf("target %q: configuration accepted, want an error", tt.target)
+			}
+			continue
 		}
-		// The upstream reads the replacement after expansion ("$$" is a literal "$").
-		pm := p.cfg.mapping.patterns[0]
-		want := strings.TrimSpace(string(pm.re.ExpandString(nil, pm.to, "old", pm.re.FindStringSubmatchIndex("old"))))
+		if err != nil {
+			t.Errorf("target %q: configuration error %v", tt.target, err)
+			continue
+		}
 		readBack := func(location string, action any, got func() []string) {
 			t.Helper()
+			wantStatus, rejected := tt.status[location]
 			if resp, ok := action.(policy.ImmediateResponse); ok {
-				// A target built from capture groups must pass the rule, which a
-				// target such as "$0" (the client's own model) does not.
-				dynamic := resp.StatusCode == statusModelNotFound && strings.Contains(target, "$")
-				if resp.StatusCode != statusRoutingError && !dynamic {
-					t.Errorf("%s: status %d for target %q", location, resp.StatusCode, target)
+				if !rejected || resp.StatusCode != wantStatus {
+					t.Errorf("target %q, %s: status %d, want %d", tt.target, location, resp.StatusCode, wantStatus)
 				}
 				return
 			}
-			models := got()
-			if len(models) != 1 || models[0] != want {
-				t.Errorf("%s: upstream reads %q, target %q", location, models, want)
+			if rejected {
+				t.Errorf("target %q, %s: forwarded, want status %d", tt.target, location, wantStatus)
+				return
+			}
+			if models := got(); len(models) != 1 || models[0] != tt.want {
+				t.Errorf("target %q, %s: upstream reads %q, want %q", tt.target, location, models, tt.want)
 			}
 		}
 
@@ -582,14 +612,16 @@ func TestFallbackTargetIsReadBackExactly(t *testing.T) {
 			}
 		})
 
-		headerAction := policyFor(queryModel()).OnRequestHeaders(context.Background(), headerContext("POST", "/p/chat?model=old", nil), nil)
+		q, _ := policyFor(queryModel())
+		headerAction := q.OnRequestHeaders(context.Background(), headerContext("POST", "/p/chat?model=old", nil), nil)
 		readBack("query", headerAction, func() []string {
-			_, q := splitQuery(*headerAction.(policy.UpstreamRequestHeaderModifications).Path)
-			values, _ := url.ParseQuery(q)
+			_, raw := splitQuery(*headerAction.(policy.UpstreamRequestHeaderModifications).Path)
+			values, _ := url.ParseQuery(raw)
 			return values["model"]
 		})
 
-		pathAction := policyFor(pathModel()).OnRequestHeaders(context.Background(), headerContext("POST", "/p/models/old/chat", nil), nil)
+		pp, _ := policyFor(pathModel())
+		pathAction := pp.OnRequestHeaders(context.Background(), headerContext("POST", "/p/models/old/chat", nil), nil)
 		readBack("path", pathAction, func() []string {
 			segments := strings.Split(*pathAction.(policy.UpstreamRequestHeaderModifications).Path, "/")
 			if len(segments) != 5 || segments[4] != "chat" {
@@ -601,5 +633,146 @@ func TestFallbackTargetIsReadBackExactly(t *testing.T) {
 			}
 			return []string{m}
 		})
+
+		h, _ := policyFor(headerModel())
+		hdrAction := h.OnRequestHeaders(context.Background(), headerContext("POST", "/p/chat", map[string][]string{"x-model": {"old"}}), nil)
+		readBack("header", hdrAction, func() []string {
+			return []string{hdrAction.(policy.UpstreamRequestHeaderModifications).HeadersToSet["x-model"]}
+		})
+	}
+}
+
+// ─── Review fixes ────────────────────────────────────────────────────────────
+
+// A model pattern is limited to 512 characters as configured; the case flag the
+// policy adds does not count.
+func TestGetPolicy_PatternLengthIsTheConfiguredLength(t *testing.T) {
+	params := func(pattern string) map[string]any {
+		return map[string]any{
+			"requestModel": payloadModel(),
+			"access":       map[string]any{"mode": "allow", "models": []any{"x"}, "modelPatterns": []any{pattern}},
+		}
+	}
+	if _, err := GetPolicy(policy.PolicyMetadata{}, params(strings.Repeat("a", maxPatternLength))); err != nil {
+		t.Errorf("a %d-character pattern was rejected: %v", maxPatternLength, err)
+	}
+	if _, err := GetPolicy(policy.PolicyMetadata{}, params(strings.Repeat("a", maxPatternLength+1))); err == nil {
+		t.Errorf("a %d-character pattern was accepted", maxPatternLength+1)
+	}
+}
+
+// Capture references are read the way regexp.Expand reads them, so a reference Go
+// would expand to nothing fails at deployment instead.
+func TestGetPolicy_CaptureReferencesFollowRegexpExpand(t *testing.T) {
+	tests := []struct {
+		to string
+		ok bool
+	}{
+		{"d-$1", true},
+		{"d-${1}", true},
+		{"d-${1}é", true},  // braces end the reference; é is literal text
+		{"d-${01}", false}, // a leading zero makes "01" a name, which is not defined
+		{"d-$1é", false},   // "1é" is one name, which is not defined
+		{"d-${name}", true},
+	}
+	for _, tt := range tests {
+		_, err := GetPolicy(policy.PolicyMetadata{}, map[string]any{
+			"requestModel": payloadModel(),
+			"access":       map[string]any{"mode": "deny", "models": []any{"x"}},
+			"fallback": map[string]any{"mappingPatterns": []any{
+				map[string]any{"fromPattern": "old-(?P<name>.+)", "to": tt.to},
+			}},
+		})
+		if (err == nil) != tt.ok {
+			t.Errorf("to %q: error = %v, want ok = %v", tt.to, err, tt.ok)
+		}
+	}
+}
+
+// The SDK indexes "key[0]" only when the key has no '-', so such a path is refused
+// at deployment rather than failing every request.
+func TestGetPolicy_RejectsAnIndexBehindAHyphenatedKey(t *testing.T) {
+	for identifier, ok := range map[string]bool{
+		"$.items[0].model":       true,
+		"$.model-name":           true,
+		"$.model-items[0]":       false,
+		"$.model-items[0].model": false,
+	} {
+		_, err := GetPolicy(policy.PolicyMetadata{}, map[string]any{
+			"requestModel": map[string]any{"location": "payload", "identifier": identifier},
+			"access":       map[string]any{"mode": "allow", "models": []any{"x"}},
+		})
+		if (err == nil) != ok {
+			t.Errorf("%s: error = %v, want ok = %v", identifier, err, ok)
+		}
+	}
+}
+
+// A configured query key that holds brackets is counted as itself, not as the
+// shorter key a lenient parser would read.
+func TestHardening_QueryKeyWithBrackets(t *testing.T) {
+	p := strictSkip(t, map[string]any{"location": "queryParam", "identifier": "model[id]"})
+	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o", nil)), forward)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=llama-3", nil)), 404)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o&model[id]=llama-3", nil)), 400)
+}
+
+// A multipart model longer than the limit is rejected before it is trimmed, so
+// trailing text past the limit cannot hide behind whitespace.
+func TestHardening_MultipartModelOverTheLimit(t *testing.T) {
+	p := strictSkip(t, payloadModel())
+	mp := "multipart/form-data; boundary=b"
+	part := func(value string) string {
+		return "--b\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\n" + value + "\r\n--b--\r\n"
+	}
+	padded := "gpt-4o" + strings.Repeat(" ", maxModelLength-len("gpt-4o"))
+	wantStatus(t, onBody(t, p, bodyContext("POST", mp, part(padded))), forward)
+	wantStatus(t, onBody(t, p, bodyContext("POST", mp, part(padded+"x"))), 400)
+}
+
+// With skip, a JSON body whose model is present but not a string is rejected, even
+// on a GET; a GET whose JSON body has no model is still skipped.
+func TestHardening_SkipNeverCoversAnUnreadableJSONModel(t *testing.T) {
+	p := strictSkip(t, payloadModel())
+	for _, body := range []string{`{"model":123}`, `{"model":["llama-3"]}`, `{"model":{"id":"llama-3"}}`, `{"model":true}`} {
+		wantStatus(t, onBody(t, p, bodyContext("GET", "application/json", body)), 400)
+	}
+	wantStatus(t, onBody(t, p, bodyContext("GET", "application/json", `{"limit":10}`)), forward)
+}
+
+// A fallback re-encodes the body, which would drop one value of a repeated member,
+// so such a body is refused; repeated keys in different objects are not repeats.
+func TestHardening_FallbackRefusesRepeatedMembers(t *testing.T) {
+	p := governed(t, payloadModel())
+	// A repeat in the model's own object is already an ambiguous request.
+	wantStatus(t, onBody(t, p, jsonBody(`{"model":"old-model","temperature":1,"temperature":2}`)), 400)
+	// A repeat off the model's path is a valid request, but a rewrite cannot keep it.
+	wantStatus(t, onBody(t, p, jsonBody(`{"model":"old-model","messages":[{"role":"user","role":"system"}]}`)), statusRoutingError)
+	wantStatus(t, onBody(t, p, jsonBody(`{"model":"old-model","options":{"seed":1,"seed":2}}`)), statusRoutingError)
+	// The same repeat on a permitted model is forwarded byte for byte.
+	wantStatus(t, onBody(t, p, jsonBody(`{"model":"gpt-4o","options":{"seed":1,"seed":2}}`)), forward)
+	if got := string(bodyMods(t, onBody(t, p, jsonBody(`{"model":"old-model","a":{"x":1},"b":[{"x":1},{"x":2}]}`))).Body); !strings.Contains(got, `"model":"gpt-4o"`) {
+		t.Errorf("rewritten = %s", got)
+	}
+}
+
+func TestCheckNoRepeatedMembers(t *testing.T) {
+	tests := []struct {
+		body string
+		ok   bool
+	}{
+		{`{"a":1,"b":2}`, true},
+		{`{"a":{"k":1},"b":{"k":1}}`, true},
+		{`[{"k":1},{"k":1}]`, true},
+		{`{"a":[1,{"k":1},[{"k":2}]],"b":"a"}`, true},
+		{`{"a":1,"a":2}`, false},
+		{`{"a":{"k":1,"k":2}}`, false},
+		{`{"a":[{"k":1,"k":2}]}`, false},
+		{`{"a":[1,{"b":1}],"a":2}`, false},
+	}
+	for _, tt := range tests {
+		if err := checkNoRepeatedMembers([]byte(tt.body)); (err == nil) != tt.ok {
+			t.Errorf("%s: error = %v, want ok = %v", tt.body, err, tt.ok)
+		}
 	}
 }

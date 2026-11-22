@@ -148,6 +148,11 @@ func parseJSONPath(identifier string) ([]pathSegment, error) {
 			return nil, fmt.Errorf("must be a dotted JSONPath such as $.model, got %q", identifier)
 		}
 		seg := pathSegment{key: match[1]}
+		// The SDK reads "key[0]" as an array index only when the key has no '-', and
+		// as a literal key otherwise, so such a path could not be read or rewritten.
+		if match[2] != "" && strings.Contains(match[1], "-") {
+			return nil, fmt.Errorf("cannot index an array behind a key that contains '-', got %q", identifier)
+		}
 		if match[2] != "" {
 			index, err := strconv.Atoi(match[2])
 			if err != nil {
@@ -218,6 +223,11 @@ func (l modelLocation) extractFromRequestLine(headers *policy.Headers, rawPath s
 func (l modelLocation) rewriteRequestLine(rawPath, model string) (headers map[string]string, path *string, err error) {
 	switch l.kind {
 	case locationHeader:
+		// The header is read back as one model only when it holds no comma, the
+		// separator of repeated header values.
+		if strings.Contains(model, ",") {
+			return nil, nil, fmt.Errorf("the fallback model cannot be written into a header: it contains a comma")
+		}
 		return map[string]string{l.identifier: model}, nil, nil
 	case locationQuery:
 		match, err := findQueryValue(rawPath, l.identifier)
@@ -463,6 +473,11 @@ func lenientKeyCount(raw, key string) int {
 		if decoded, err := url.QueryUnescape(name); err == nil {
 			name = decoded
 		}
+		// The configured key itself counts as is, even when it holds a '['.
+		if name == key {
+			count++
+			continue
+		}
 		if open := strings.IndexByte(name, '['); open >= 0 {
 			name = name[:open]
 		}
@@ -569,7 +584,9 @@ func extractFromForm(kind formKind, boundary string, body []byte, key string) (s
 			}
 			// One byte over the limit is enough for evaluate to reject it as too long.
 			value, err := io.ReadAll(io.LimitReader(part, maxModelLength+1))
-			if err != nil {
+			if err != nil || len(value) > maxModelLength {
+				// A truncated value must not be trimmed and checked: the upstream reads
+				// the whole field.
 				return "", false, errMalformedModel
 			}
 			model = string(value)
@@ -704,6 +721,17 @@ func (l modelLocation) extractFromPayload(payload map[string]any) (string, bool)
 	return model, ok && strings.TrimSpace(model) != ""
 }
 
+// hasUnusableModel reports whether the JSONPath holds a value that is neither a
+// string nor null, such as a number, an array or an object.
+func (l modelLocation) hasUnusableModel(payload map[string]any) bool {
+	value, err := utils.ExtractValueFromJsonpath(payload, l.identifier)
+	if err != nil || value == nil {
+		return false
+	}
+	_, isString := value.(string)
+	return !isString
+}
+
 // rewritePayload sets the model at the JSONPath and re-encodes the body without
 // HTML escaping, so text the client sent is not rewritten as < and the like.
 func (l modelLocation) rewritePayload(payload map[string]any, model string) ([]byte, error) {
@@ -717,6 +745,55 @@ func (l modelLocation) rewritePayload(payload map[string]any, model string) ([]b
 		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// errRepeatedMember is a body with a repeated object member off the model's path. A
+// fallback rewrite decodes the body into a map, which keeps only one of the values.
+var errRepeatedMember = errors.New("the body repeats an object member, which a rewrite cannot preserve")
+
+// checkNoRepeatedMembers fails when any object in the body has the same key twice.
+func checkNoRepeatedMembers(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	// keys holds the members seen in each open object; nil marks an open array.
+	var keys []map[string]struct{}
+	expectKey := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return errMalformedModel
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{':
+				keys = append(keys, map[string]struct{}{})
+			case '[':
+				keys = append(keys, nil)
+			default:
+				keys = keys[:len(keys)-1]
+			}
+		case string:
+			if expectKey {
+				top := keys[len(keys)-1]
+				if _, seen := top[t]; seen {
+					return errRepeatedMember
+				}
+				top[t] = struct{}{}
+			}
+		}
+		// The next token is a key when the innermost open value is an object and the
+		// token just read was not itself a key.
+		inObject := len(keys) > 0 && keys[len(keys)-1] != nil
+		if _, isDelim := tok.(json.Delim); isDelim {
+			expectKey = inObject && (tok == json.Delim('{') || tok == json.Delim('}') || tok == json.Delim(']'))
+		} else {
+			expectKey = inObject && !expectKey
+		}
+	}
 }
 
 // checkDuplicateKeysOnPath walks the JSON tokens and fails when an object on the

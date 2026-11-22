@@ -450,10 +450,18 @@ func (p *Policy) OnRequestBody(_ context.Context, reqCtx *policy.RequestContext,
 	requested, found := p.cfg.requestModel.extractFromPayload(payload)
 	if !found {
 		// A body that parses as JSON is treated as JSON whatever its content type says.
-		return p.passOrReject(p.missing(facts, isBodylessMethod(reqCtx.Method), nil))
+		// A model that is present but not a string is unreadable, not absent, so it is
+		// never skipped, whatever the method.
+		skip := isBodylessMethod(reqCtx.Method) && !p.cfg.requestModel.hasUnusableModel(payload)
+		return p.passOrReject(p.missing(facts, skip, nil))
 	}
 
 	return p.applyBody(facts, requested, func(model string) ([]byte, error) {
+		// The rewrite re-encodes the body from a map, which would silently drop one
+		// value of a repeated member, so such a body is refused instead.
+		if err := checkNoRepeatedMembers(content); err != nil {
+			return nil, err
+		}
 		return p.cfg.requestModel.rewritePayload(payload, model)
 	})
 }
