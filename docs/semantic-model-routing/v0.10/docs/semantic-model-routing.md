@@ -159,7 +159,8 @@ The identity types need `embeddingProvider` set to `AZURE_OPENAI`: the gateway's
    Regional endpoints such as `https://eastus.api.cognitive.microsoft.com` don't accept Entra ID tokens.
 4. Once the identity works, you can turn key access off on the resource
    (`az resource update --ids <azure-openai-resource-id> --set properties.disableLocalAuth=true`), so that
-   only Entra ID tokens are accepted.
+   only Entra ID tokens are accepted. An API still in `api-key` mode then sends every prompt to
+   `defaultModel`, and its route answers `500` the next time it is built.
 
 ### Choosing the identity
 
