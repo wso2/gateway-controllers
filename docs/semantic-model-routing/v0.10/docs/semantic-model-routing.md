@@ -275,8 +275,9 @@ embedding_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
   chooses which of the gateway's identities its embedding calls use, the token scope, and the endpoint the
   token is sent to. Without `embedding_provider_allowed_endpoints`, they can have a token for any identity
   the gateway can use sent to a server of their choosing, just as they can have the gateway's key sent there
-  in `api-key` mode. List the gateway's Azure OpenAI resources in `embedding_provider_allowed_endpoints`, use
-  `embedding_provider_allowed_auth_types` to keep APIs to the types you intend, and give the gateway's
+  in `api-key` mode. In `[policy_configurations.semantic_model_routing_v1]`, list the gateway's Azure OpenAI
+  resources in `embedding_provider_allowed_endpoints` and use `embedding_provider_allowed_auth_types` to keep
+  APIs to the types you intend; the root keys of those names don't limit this policy. Give the gateway's
   identities only the roles its APIs need.
 - **No stored secret**: with an Azure identity, no key is stored in the gateway's configuration or sent to
   Azure OpenAI, and the tokens are short lived.
