@@ -1760,7 +1760,19 @@ func (p *AWSBedrockGuardrailPolicy) redactedFlush(
 	rp AWSBedrockGuardrailPolicyParams,
 	metadata map[string]interface{},
 ) (rewritten string, changed, leaked bool) {
-	rewrites := p.responseRewrites(output, rp, metadata, extractSSEDeltaContent(flush, rp.StreamingJsonPath))
+	return p.redactedFlushWith(flush,
+		p.responseRewrites(output, rp, metadata, extractSSEDeltaContent(flush, rp.StreamingJsonPath)), rp)
+}
+
+// redactedFlushWith is redactedFlush for a caller that already holds the
+// rewrites, such as an assessment made in several calls whose reported values
+// were merged (assessInUnits). The writer and the leak check are the same: a
+// value that survives the rewrite is a failure either way.
+func (p *AWSBedrockGuardrailPolicy) redactedFlushWith(
+	flush string,
+	rewrites []piiReplacement,
+	rp AWSBedrockGuardrailPolicyParams,
+) (rewritten string, changed, leaked bool) {
 	if len(rewrites) == 0 {
 		return flush, false, false
 	}
@@ -4615,19 +4627,10 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 		return noModification(isResponse, restoredBody(payload, restored))
 	}
 
-	output, stop := p.assessContents(contents, params, isResponse, payload, restored)
+	replacements, stop := p.assessInUnits(contents, params, isResponse, metadata,
+		strings.Join(contents, "\n"), payload, restored)
 	if stop != nil {
 		return stop
-	}
-
-	violation, replacements, err := p.decide(output, params, isResponse, metadata, strings.Join(contents, "\n"))
-	if err != nil {
-		return p.passOrBlock("Error evaluating guardrail response", err, params, isResponse, output,
-			checkFailureFault("Error evaluating guardrail response", isResponse), payload, restored)
-	}
-	if violation {
-		slog.Debug("AWSBedrockGuardrail: Violation detected", "isResponse", isResponse)
-		return p.buildErrorResponse("Violation of AWS Bedrock Guardrails detected", nil, isResponse, params.ShowAssessment, output)
 	}
 
 	changed := false
@@ -4648,7 +4651,7 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 		slog.Debug("AWSBedrockGuardrail: failed to rebuild masked payload", "error", err, "isResponse", isResponse)
 		// The guardrail's verdict allowed the content; what failed is this policy
 		// writing the masks back, so the fault is a mediation one.
-		return withFault(p.buildErrorResponse("Error updating payload with masked content", err, isResponse, params.ShowAssessment, output),
+		return withFault(p.buildErrorResponse("Error updating payload with masked content", err, isResponse, params.ShowAssessment, nil),
 			checkFailureFault("Error updating payload with masked content", isResponse))
 	}
 	slog.Debug("AWSBedrockGuardrail: Content modified by guardrail", "isResponse", isResponse)
@@ -4680,17 +4683,10 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 		return noModification(true, restoredBody(payload, restored))
 	}
 
-	output, stop := p.assessContents([]string{extractedValue}, params, true, payload, restored)
+	replacements, stop := p.assessInUnits([]string{extractedValue}, params, true, metadata,
+		extractedValue, payload, restored)
 	if stop != nil {
 		return stop
-	}
-	violation, replacements, err := p.decide(output, params, true, metadata, extractedValue)
-	if err != nil {
-		return p.passOrBlock("Error evaluating guardrail response", err, params, true, output,
-			checkFailureFault("Error evaluating guardrail response", true), payload, restored)
-	}
-	if violation {
-		return p.buildErrorResponse("Violation of AWS Bedrock Guardrails detected", nil, true, params.ShowAssessment, output)
 	}
 	if len(replacements) == 0 || applyPIIReplacements(extractedValue, replacements) == extractedValue {
 		return noModification(true, restoredBody(payload, restored))
@@ -4698,7 +4694,7 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 
 	// A value spanning several events is written back across them; one that still
 	// survives is a failure rather than something to deliver.
-	rewritten, _, leaked := p.redactedFlush(string(payload), output, params, metadata)
+	rewritten, _, leaked := p.redactedFlushWith(string(payload), replacements, params)
 	if leaked {
 		slog.Debug("AWSBedrockGuardrail: redaction could not be applied across events")
 		// No assessment in the body: it would carry the value that could not be
@@ -4712,17 +4708,17 @@ func (p *AWSBedrockGuardrailPolicy) validateStreamedBody(payload []byte, params 
 
 // assessContents calls ApplyGuardrail on every text in one request. A failure to
 // reach or configure AWS returns the action to take instead of an assessment.
-func (p *AWSBedrockGuardrailPolicy) assessContents(contents []string, params AWSBedrockGuardrailPolicyParams, isResponse bool, payload []byte, restored bool) (*bedrockruntime.ApplyGuardrailOutput, interface{}) {
+func (p *AWSBedrockGuardrailPolicy) assessContents(ctx context.Context, contents []string, params AWSBedrockGuardrailPolicyParams, isResponse bool, payload []byte, restored bool) (*bedrockruntime.ApplyGuardrailOutput, interface{}) {
 	loadConfig := p.loadAWSConfigFunc
 	if loadConfig == nil {
 		loadConfig = p.loadAWSConfig
 	}
-	awsCfg, err := loadConfig(context.Background(), p.region)
+	awsCfg, err := loadConfig(ctx, p.region)
 	if err != nil {
 		return nil, p.passOrBlock("Error loading AWS config", err, params, isResponse, nil,
 			checkFailureFault("Error loading AWS config", isResponse), payload, restored)
 	}
-	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, contents...)
+	output, err := p.applyBedrockGuardrail(ctx, awsCfg, p.guardrailID, p.guardrailVersion, contents...)
 	if err != nil {
 		return nil, p.passOrBlock("Error calling AWS Bedrock Guardrail", err, params, isResponse, nil,
 			checkFailureFault("Error calling AWS Bedrock Guardrail", isResponse), payload, restored)
