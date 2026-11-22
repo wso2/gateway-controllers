@@ -23,10 +23,8 @@ embedding_provider_endpoint = "http://testbench:3004/openai/deployments/text-emb
 embedding_provider_model = "text-embedding-ada-002"
 embedding_provider_dimension = 1536
 
-# Gateway 1.1.0's semantic-cache policy also reads these legacy Redis keys.
-# They are harmless to newer Gateway releases, which use the vector DB keys
-# below. Password values are supplied through the Redis dependency so every
-# topology retains an isolated per-run credential.
+# Gateway 1.1.0's semantic-cache reads these legacy Redis keys; newer gateways use the vector DB
+# keys below, with the Redis dependency's per-run password.
 redis_host = "redis"
 redis_port = 6379
 redis_db = 0

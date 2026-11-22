@@ -16,15 +16,10 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# Runs in the identity block, whose gateway has the testbench Azure OpenAI embedding deployment and
-# no API key. A request is only cached, and its repeat only a cache hit, when its embedding call
-# succeeded, so a hit shows the API's Azure identity authenticated that call. Each API chooses its
-# identity in azureAuth. The gateway gets its workload identity from the testbench Entra ID mock and
-# its container app's identity from the testbench Container Apps identity endpoint.
-#
-# This policy doesn't cache on gateway 1.1.0, which is why the suite's semantic-cache-policy runner
-# needs 1.2.0. So the scenarios that expect a cache hit run on 1.2.0 and later, and so do the two
-# that expect none, which mean something only beside a hit on the same gateway. The controller's
+# Runs on a gateway with the testbench Azure OpenAI deployment and no API key. Only a request whose
+# embedding call succeeded is cached, so a cache hit shows the API's identity authenticated.
+
+# This policy doesn't cache on gateway 1.1.0, so every cache scenario needs 1.2.0; the controller's
 # checks, the two outlines, run on every gateway.
 @semantic-cache-identity
 Feature: Semantic cache with the gateway's Azure identity
@@ -196,9 +191,8 @@ Feature: Semantic cache with the gateway's Azure identity
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  # The controller checks an API's params against the policy definition before deploying it.
-  # azureAuth is an object that takes a known type, a GUID client ID and a /.default scope, and
-  # nothing else. A rejected API is never deployed, so its route answers 404.
+  # The controller checks azureAuth (a known type, a GUID client ID, a /.default scope, nothing
+  # else) before deploying an API, so a rejected API's route answers 404.
   Scenario Outline: The controller rejects azureAuth settings that don't fit the policy (<case>)
     Given I generate a unique value from "sc-invalid-auth" and store it as "apiName"
     And I generate a unique API version from "sc-invalid-auth" and store it as "apiVersion"

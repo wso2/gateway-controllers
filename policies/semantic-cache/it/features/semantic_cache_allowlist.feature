@@ -16,11 +16,8 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# Runs in the allowlist block, whose gateway has the testbench Azure OpenAI embedding deployment and
-# an API key, allows its APIs only workload identity (embedding_provider_allowed_auth_types =
-# ["workload-identity"]), and only that deployment's resource (embedding_provider_allowed_endpoints =
-# ["http://testbench:3004"]). An API the lists refuse can't build its policy, and the gateway then
-# answers the route that has the policy with 500.
+# Runs on a gateway with a key that allows only workload identity and the testbench's resource. An
+# API the lists refuse can't build its policy, so the gateway answers its route with 500.
 @semantic-cache-allowlist
 Feature: The gateway's lists of allowed authentication types and endpoints for embeddings
   As a gateway operator
@@ -91,9 +88,8 @@ Feature: The gateway's lists of allowed authentication types and endpoints for e
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  # Gateways up to 1.2.0 handle a policy that can't be built differently, so these run on newer ones.
-  # The endpoint list matches on scheme, host and port, so the same host on another port is another
-  # resource, and not on the list.
+  # Gateways up to 1.2.0 handle an unbuildable policy differently. The endpoint list matches on
+  # scheme, host and port, so the same host on another port isn't on it.
   Scenario Outline: An API whose authentication type or endpoint the gateway doesn't allow fails closed (<case>)
     Given the gateway version satisfies ">1.2.0"
     And I generate a unique value from "sc-refused" and store it as "apiName"

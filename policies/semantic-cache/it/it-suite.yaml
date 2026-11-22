@@ -57,11 +57,8 @@ blocks:
         features:
           - features/semantic_cache_error_compatibility.feature
 
-  # The gateway's embedding provider is the testbench Azure OpenAI deployment with no API key, and
-  # each API chooses its Azure identity in azureAuth, so one gateway serves every identity. A cache
-  # hit needs an embedding, so a hit shows the identity authenticated the embedding call. The
-  # gateway gets its identities from the testbench Entra ID and Container Apps mocks. The database
-  # plays no part in authentication, so this block runs on sqlite only.
+  # A gateway with no API key, so a cache hit shows the API's Azure identity authenticated. The
+  # database plays no part in authentication, so this block runs on sqlite only.
   - name: semantic-cache-identity
     parallel: 1
     components:

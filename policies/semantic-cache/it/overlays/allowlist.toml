@@ -16,9 +16,8 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The testbench embeddings service's Azure OpenAI deployment and its API key, on a gateway that
-# allows its APIs only workload identity, and only that deployment's resource. An API without
-# azureAuth uses api-key, which is not on the list.
+# The testbench Azure OpenAI deployment and its key, on a gateway that allows only workload identity
+# and that resource. An API without azureAuth uses api-key, which isn't allowed.
 embedding_provider = "AZURE_OPENAI"
 embedding_provider_endpoint = "http://testbench:3004/openai/deployments/text-embedding/embeddings?api-version=2024-10-21"
 embedding_provider_model = "text-embedding-ada-002"
@@ -27,10 +26,8 @@ embedding_provider_api_key = "test-api-key"
 embedding_provider_allowed_auth_types = ["workload-identity"]
 embedding_provider_allowed_endpoints = ["http://testbench:3004"]
 
-# Gateway 1.1.0's semantic-cache policy also reads these legacy Redis keys.
-# They are harmless to newer Gateway releases, which use the vector DB keys
-# below. Password values are supplied through the Redis dependency so every
-# topology retains an isolated per-run credential.
+# Gateway 1.1.0's semantic-cache reads these legacy Redis keys; newer gateways use the vector DB
+# keys below, with the Redis dependency's per-run password.
 redis_host = "redis"
 redis_port = 6379
 redis_db = 0
