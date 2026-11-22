@@ -61,3 +61,15 @@ blocks:
       - name: semantic-tool-filtering-identity
         features:
           - features/semantic_tool_filtering_identity.feature
+
+  # A gateway with a key that allows APIs only workload identity and its own embedding resource.
+  - name: semantic-tool-filtering-allowlist
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/allowlist.toml
+      - name: testbench
+    runners:
+      - name: semantic-tool-filtering-allowlist
+        features:
+          - features/semantic_tool_filtering_allowlist.feature
