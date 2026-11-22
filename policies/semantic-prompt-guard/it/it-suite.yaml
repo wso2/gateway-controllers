@@ -59,3 +59,15 @@ blocks:
       - name: semantic-prompt-guard-identity
         features:
           - features/semantic_prompt_guard_identity.feature
+
+  # A gateway with a key that allows APIs only workload identity and its own embedding resource.
+  - name: semantic-prompt-guard-allowlist
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/allowlist.toml
+      - name: testbench
+    runners:
+      - name: semantic-prompt-guard-allowlist
+        features:
+          - features/semantic_prompt_guard_allowlist.feature
