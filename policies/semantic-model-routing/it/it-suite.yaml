@@ -47,9 +47,8 @@ blocks:
         features:
           - features/semantic_model_routing.feature
 
-  # A gateway with no API key, so a prompt routed to its route's model shows the API's Azure identity
-  # authenticated both the utterance embeddings, made when the route is built, and the prompt's: a
-  # failed prompt embedding falls back to the default model.
+  # A gateway with no API key: a routed prompt shows the API's Azure identity authenticated the
+  # utterance embeddings, made at build time, and the prompt's, which falls back if it fails.
   - name: semantic-model-routing-identity
     parallel: 1
     components:

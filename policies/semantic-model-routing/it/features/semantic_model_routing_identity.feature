@@ -16,9 +16,8 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# Runs on a gateway with the testbench Azure OpenAI deployment and no API key. The policy embeds every
-# utterance while the route is built and the prompt at request time, and a failed prompt embedding
-# falls back to the default model, so a prompt routed to its route's model shows both authenticated.
+# Runs on a gateway with the testbench Azure OpenAI deployment and no API key. A routed prompt shows
+# both the utterance and the prompt embeddings authenticated: a failed one falls back.
 @semantic-model-routing-identity
 Feature: Semantic model routing with the gateway's Azure identity
   As an API developer
@@ -82,9 +81,8 @@ Feature: Semantic model routing with the gateway's Azure identity
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  # A token scope the testbench Container Apps identity endpoint always refuses, so the utterances
-  # can't be embedded and the policy can't be built. Gateways up to 1.2.0 handle a policy that
-  # can't be built differently.
+  # The testbench identity endpoint refuses this scope, so the utterances can't be embedded and the
+  # policy can't be built. Gateways up to 1.2.0 handle that differently.
   Scenario: An identity that gets no access token fails the route's build
     Given the gateway version satisfies ">1.2.0"
     And I generate a unique value from "smr-no-token" and store it as "apiName"
