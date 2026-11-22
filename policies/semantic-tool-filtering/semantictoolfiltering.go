@@ -36,8 +36,9 @@ const (
 	SelectionModeTopK      = "By Rank"
 	SelectionModeThreshold = "By Threshold"
 
-	// Internal timeout for embedding provider (not exposed in policy definition)
-	DefaultTimeoutMs = 5000
+	// Internal timeout for each embedding request, in seconds as the SDK reads it (not exposed
+	// in policy definition)
+	DefaultTimeoutSeconds = 5
 )
 
 // ToolWithScore represents a tool with its similarity score
@@ -307,7 +308,7 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticToolFilterin
 		APIKey:             apiKey,
 		AuthHeaderName:     authHeaderName,
 		EmbeddingModel:     embeddingModel,
-		TimeOut:            strconv.Itoa(DefaultTimeoutMs),
+		TimeOut:            strconv.Itoa(DefaultTimeoutSeconds),
 		AuthenticationType: auth.typ,
 		ClientID:           auth.clientID,
 		TokenScope:         auth.tokenScope,

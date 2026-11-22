@@ -17,8 +17,11 @@
 package semantictoolfiltering
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -165,6 +168,44 @@ func TestGetPolicyFailsWhenTheContainerAppIdentityIsUnavailable(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), `authentication type "container-apps" can't be used`) ||
 		!strings.Contains(err.Error(), "IDENTITY_ENDPOINT") {
 		t.Fatalf("expected the missing identity to fail the build, got %v", err)
+	}
+}
+
+// A slow embedding request must stop at the policy's 5 s timeout, so the policy can fall back
+// before the gateway gives up on the whole request.
+func TestEmbeddingRequestStopsAtTheTimeout(t *testing.T) {
+	const timeout = 5 * time.Second
+	done := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(timeout + 2*time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		case <-done:
+		}
+	}))
+	defer slow.Close()
+	defer close(done)
+
+	got, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"embeddingProvider": "OPENAI",
+		"embeddingModel":    "text-embedding-3-small",
+		"embeddingEndpoint": slow.URL,
+		"apiKey":            "k",
+		"selectionMode":     SelectionModeTopK,
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	start := time.Now()
+	_, err = got.(*SemanticToolFilteringPolicy).embeddingProvider.GetEmbedding("weather in London")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected the request to stop at %s, but it waited %s for the answer", timeout, elapsed.Round(100*time.Millisecond))
+	}
+	if elapsed > timeout+time.Second {
+		t.Fatalf("expected the request to stop at about %s, it stopped after %s", timeout, elapsed.Round(100*time.Millisecond))
 	}
 }
 
