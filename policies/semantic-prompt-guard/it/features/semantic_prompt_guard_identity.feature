@@ -16,13 +16,9 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# Runs in the identity block, whose gateway has the testbench Azure OpenAI embedding deployment and
-# no API key. The policy embeds its phrases when the gateway builds the API's route and each prompt
-# when it arrives, so a prompt that passes and a denied one that is blocked show the API's Azure
-# identity authenticated both calls. Each API chooses its identity in azureAuth. The gateway gets its
-# workload identity from the testbench Entra ID mock and its container app's identity from the
-# testbench Container Apps identity endpoint.
-#
+# Runs on a gateway with the testbench Azure OpenAI deployment and no API key. A verdict needs the
+# phrases' embeddings (made at build) and the prompt's, so it shows the API's identity got both.
+
 # The scenarios that expect a route's build to fail run on gateways newer than 1.2.0, which answer
 # that route with 500; gateways up to 1.2.0 handle a policy that can't be built differently.
 @semantic-prompt-guard-identity
@@ -219,9 +215,8 @@ Feature: Semantic prompt guard with the gateway's Azure identity
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
-  # The controller checks an API's params against the policy definition before deploying it.
-  # azureAuth is an object that takes a known type, a GUID client ID and a /.default scope, and
-  # nothing else. A rejected API is never deployed, so its route answers 404.
+  # The controller checks azureAuth (a known type, a GUID client ID, a /.default scope, nothing
+  # else) before deploying an API, so a rejected API's route answers 404.
   Scenario Outline: The controller rejects azureAuth settings that don't fit the policy (<case>)
     Given I generate a unique value from "pg-invalid-auth" and store it as "apiName"
     And I generate a unique API version from "pg-invalid-auth" and store it as "apiVersion"

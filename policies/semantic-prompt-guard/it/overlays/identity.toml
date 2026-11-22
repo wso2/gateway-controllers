@@ -17,9 +17,8 @@
 # --------------------------------------------------------------------
 
 
-# semantic-prompt-guard: the testbench embeddings service's Azure OpenAI deployment, with no API key:
-# every API on this gateway has to authenticate with an Azure identity it chooses in azureAuth, or
-# bring its own key.
+# semantic-prompt-guard: the testbench Azure OpenAI deployment, with no API key, so each API uses an
+# Azure identity it chooses in azureAuth, or brings its own key.
 embedding_provider = "AZURE_OPENAI"
 embedding_provider_endpoint = "http://testbench:3004/openai/deployments/text-embedding/embeddings?api-version=2024-10-21"
 embedding_provider_model = "text-embedding-ada-002"

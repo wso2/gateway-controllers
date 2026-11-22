@@ -94,10 +94,8 @@ func parseAuthentication(params map[string]interface{}) (authentication, error) 
 	return auth, nil
 }
 
-// readAzureAuth reads the API's azureAuth. Without it, or without a type, the policy sends the
-// gateway's key. In api-key mode the identity fields are ignored, since a console form can leave
-// them behind when the type changes. In an identity mode the client ID, when set, must be a GUID
-// and the scope one resource's /.default scope; nothing comes from the gateway's settings.
+// readAzureAuth reads the API's azureAuth; without a type it means api-key. In api-key mode the
+// identity fields are ignored, since a console form can leave them behind when the type changes.
 func readAzureAuth(params map[string]interface{}) (authentication, error) {
 	raw, ok := params[azureAuthParam]
 	if !ok || raw == nil {
@@ -137,9 +135,8 @@ func readAzureAuth(params map[string]interface{}) (authentication, error) {
 	return authentication{typ: typ, clientID: clientID, tokenScope: scope}, nil
 }
 
-// checkAllowedType checks typ against the gateway's list of allowed authentication types. An
-// empty or absent list allows every type. An entry that isn't a type fails every API, so a typo
-// in the gateway's config is found at the first deployment instead of locking types out unseen.
+// checkAllowedType checks typ against the gateway's allowed types; an empty list allows all. An
+// entry that isn't a type fails every API, so a typo shows at the first deployment.
 func checkAllowedType(params map[string]interface{}, typ string) error {
 	allowed, err := stringList(params, allowedAuthTypesParam)
 	if err != nil {
@@ -157,15 +154,8 @@ func checkAllowedType(params map[string]interface{}, typ string) error {
 		typ, allowedAuthTypesParam, quotedList(allowed), azureAuthParam)
 }
 
-// checkAllowedEndpoint checks the endpoint in effect against the gateway's list of allowed
-// resources. An API can override the endpoint, and the policy engine merges the API's params over
-// the gateway's, so the policy can't tell whose endpoint it has: the list is what keeps the
-// gateway's key, and tokens for its identity, from going to a resource the gateway hasn't listed.
-// An empty or absent list allows every endpoint. Entries are resource URLs, such as
-// https://<resource>.openai.azure.com, and match on scheme, host and port, ignoring case, so any
-// deployment and API version on a listed resource is allowed. An entry that isn't an http or
-// https URL with no path, query or fragment fails every API, so a typo is found at the first
-// deployment.
+// checkAllowedEndpoint checks the endpoint in effect, the API's or the gateway's, against the
+// gateway's resource URLs (scheme, host and port); an empty list allows all, a bad entry none.
 func checkAllowedEndpoint(params map[string]interface{}, endpoint string) error {
 	allowed, err := stringList(params, allowedEndpointsParam)
 	if err != nil {
@@ -188,9 +178,8 @@ func checkAllowedEndpoint(params map[string]interface{}, endpoint string) error 
 	return fmt.Errorf("endpoint %q is not allowed on this gateway: '%s' allows %s", endpoint, allowedEndpointsParam, quotedList(allowed))
 }
 
-// resourceOf returns the lower-cased scheme, host and port of an absolute http or https URL, with
-// the scheme's default port filled in. With bare, the URL must have no path (other than "/"),
-// query or fragment, as a resource URL has none.
+// resourceOf returns the lower-cased scheme, host and port of an http(s) URL, default port filled
+// in. With bare, the URL must have no path (other than "/"), query or fragment.
 func resourceOf(raw string, bare bool) (string, bool) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
@@ -199,9 +188,8 @@ func resourceOf(raw string, bare bool) (string, bool) {
 	if bare && ((u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.ForceQuery) {
 		return "", false
 	}
-	// Fail closed on a non-ASCII host: Go's lower-casing folds some characters to ASCII, while the
-	// HTTP client dials the IDNA form of the host, so a look-alike would pass the check and be
-	// dialed as a different host.
+	// Fail closed on a non-ASCII host: lower-casing can fold it to an ASCII look-alike, while the
+	// HTTP client dials its IDNA form, a different host.
 	for i := 0; i < len(u.Hostname()); i++ {
 		if u.Hostname()[i] >= 0x80 {
 			return "", false
