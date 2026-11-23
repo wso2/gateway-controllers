@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -162,6 +163,7 @@ func TestCheckAllowedEndpoint(t *testing.T) {
 		{name: "other scheme", entries: []string{"http://res.openai.azure.com"}, endpoint: e, wantErr: "is not allowed on this gateway"},
 		{name: "endpoint is not a URL", entries: []string{"https://res.openai.azure.com"}, endpoint: "not a url", wantErr: "is not allowed on this gateway"},
 		{name: "userinfo before another host", entries: []string{"https://res.openai.azure.com"}, endpoint: "https://res.openai.azure.com@evil.example/openai/deployments/d/chat/completions?api-version=x", wantErr: "is not allowed on this gateway"},
+		{name: "trailing dot makes another host", entries: []string{"http://testbench:3008"}, endpoint: "http://testbench.:3008/openai/deployments/d/chat/completions?api-version=x", wantErr: "is not allowed on this gateway"},
 		{name: "unicode look-alike host", entries: []string{"https://myai.openai.azure.com"}, endpoint: "https://myaİ.openai.azure.com/openai/deployments/d/chat/completions?api-version=x", wantErr: "is not allowed on this gateway"},
 		{name: "non-ASCII entry", entries: []string{"https://myaİ.openai.azure.com"}, endpoint: e, wantErr: "is not a resource URL"},
 		{name: "entry with path", entries: []string{"https://res.openai.azure.com/openai"}, endpoint: e, wantErr: "is not a resource URL"},
@@ -520,12 +522,19 @@ func TestCallLLMRefusesARedirect(t *testing.T) {
 	for name, auth := range map[string]map[string]interface{}{"api-key": nil, "workload-identity": identity("workload-identity")} {
 		t.Run(name, func(t *testing.T) {
 			target := newLLMServer(t, http.StatusOK, answering("coding"))
-			redirect := httptest.NewServer(http.RedirectHandler(endpointOf(target.Server), http.StatusTemporaryRedirect))
+			var redirects atomic.Int32
+			redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				redirects.Add(1)
+				http.Redirect(w, r, endpointOf(target.Server), http.StatusTemporaryRedirect)
+			}))
 			t.Cleanup(redirect.Close)
 			p := identityPolicy(t, redirect, auth, &fakeTokens{token: "tok-123"})
 
 			if got := classify(t, context.Background(), p); got != "default-model" {
 				t.Errorf("routed to %q, want default-model", got)
+			}
+			if got := redirects.Load(); got != 1 {
+				t.Errorf("the redirecting endpoint got %d requests, want 1", got)
 			}
 			if target.hits != 0 {
 				t.Errorf("the redirect target got %d requests, want none", target.hits)
@@ -593,23 +602,27 @@ func TestOnRequestBodyEndedRequestLogsOnlyAtDebug(t *testing.T) {
 }
 
 func TestOnRequestBodyRefusedTokenKeepsTheAnswerAtDebug(t *testing.T) {
-	server := newLLMServer(t, http.StatusUnauthorized, refusedAnswer)
-	p := identityPolicy(t, server.Server, identity("workload-identity"), &fakeTokens{token: "tok-123"})
-	buf := captureLogs(t)
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			server := newLLMServer(t, status, refusedAnswer)
+			p := identityPolicy(t, server.Server, identity("workload-identity"), &fakeTokens{token: "tok-123"})
+			buf := captureLogs(t)
 
-	if got := classify(t, context.Background(), p); got != "default-model" {
-		t.Errorf("routed to %q, want default-model", got)
-	}
-	recs := logRecords(t, buf)
-	errs := recordsAt(recs, "ERROR")
-	if len(errs) != 1 || errs[0]["msg"] != refusedMsg || errs[0]["status"] != float64(http.StatusUnauthorized) {
-		t.Errorf("ERROR records = %v, want one %q with status 401", errs, refusedMsg)
-	}
-	if loud := mentioning(t, append(recordsAt(recs, "ERROR"), recordsAt(recs, "WARN")...), refusedAnswer); len(loud) != 0 {
-		t.Errorf("Azure's answer reached ERROR/WARN: %v", loud)
-	}
-	if got := mentioning(t, recordsAt(recs, "DEBUG"), refusedAnswer); len(got) == 0 {
-		t.Error("Azure's answer is not at DEBUG")
+			if got := classify(t, context.Background(), p); got != "default-model" {
+				t.Errorf("routed to %q, want default-model", got)
+			}
+			recs := logRecords(t, buf)
+			errs := recordsAt(recs, "ERROR")
+			if len(errs) != 1 || errs[0]["msg"] != refusedMsg || errs[0]["status"] != float64(status) {
+				t.Errorf("ERROR records = %v, want one %q with status %d", errs, refusedMsg, status)
+			}
+			if loud := mentioning(t, append(recordsAt(recs, "ERROR"), recordsAt(recs, "WARN")...), refusedAnswer); len(loud) != 0 {
+				t.Errorf("Azure's answer reached ERROR/WARN: %v", loud)
+			}
+			if got := mentioning(t, recordsAt(recs, "DEBUG"), refusedAnswer); len(got) == 0 {
+				t.Error("Azure's answer is not at DEBUG")
+			}
+		})
 	}
 }
 
