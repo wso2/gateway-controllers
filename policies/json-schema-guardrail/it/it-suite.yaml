@@ -46,18 +46,12 @@ blocks:
       - name: json-schema-guardrail
         features:
           - features/json_schema_guardrail.feature
-      - name: json-schema-guardrail-request
-        features:
-          - features/json_schema_guardrail_request.feature
       - name: json-schema-guardrail-schema-keywords
         features:
           - features/json_schema_guardrail_schema_keywords.feature
       - name: json-schema-guardrail-response
         features:
           - features/json_schema_guardrail_response.feature
-      - name: json-schema-guardrail-payloads
-        features:
-          - features/json_schema_guardrail_payloads.feature
       - name: json-schema-guardrail-api-lifecycle
         features:
           - features/json_schema_guardrail_api_lifecycle.feature

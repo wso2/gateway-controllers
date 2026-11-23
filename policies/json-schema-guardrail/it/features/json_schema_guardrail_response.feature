@@ -22,14 +22,38 @@ Feature: JSON Schema guardrail policy on responses
   I want upstream and LLM responses checked against a JSON Schema before they reach the client
   So that responses that break the contract are not returned
 
-  # Response validation: violating responses, both phases together, the LLM content path, unusable
-  # JSONPaths, and malformed, error and streamed upstream bodies. A "response" object turns response
-  # validation on, since "enabled" defaults to true there. The LLM mock replies with the body or raw
-  # text named in the request's x_testbench_reply field.
+  # Response validation: valid and violating responses, both phases, the LLM content path, unusable
+  # JSONPaths, a response contract, and malformed, error and streamed upstream bodies. A "response"
+  # object turns response validation on, since "enabled" defaults to true there. The LLM mock
+  # replies with the body or raw text named in the request's x_testbench_reply field.
 
   Background:
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
+
+  Scenario: Configure the guardrail on the response flow and return a response matching the schema
+    Given I generate a unique value from "jsg-response-valid" and store it as "apiName"
+    And I generate a unique API version from "jsg-response-valid" and store it as "apiVersion"
+    And I generate a unique API context from "/jsg-response-valid" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3008/scripted |
+      | spec.operations        | [{"method":"POST","path":"/reply","policies":[{"name":"json-schema-guardrail","version":"v1","params":{"response":{"jsonPath":"","schema":"{\"type\":\"object\",\"properties\":{\"status\":{\"enum\":[\"approved\"]}},\"required\":[\"status\"]}"}}}]}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/reply" until status 200 with body:
+      """
+      {"x_testbench_reply":{"body":{"status":"approved"}}}
+      """
+    Then the JSON response field "status" should be "approved"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/reply" until status 404
 
   # showAssessment is left at its default, false, so the error body does not carry the upstream
   # value.
@@ -106,6 +130,39 @@ Feature: JSON Schema guardrail policy on responses
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/reply" until status 404
+
+  Scenario: Both request and response are validated against their own schemas
+    Given I generate a unique value from "jsg-both-validation" and store it as "apiName"
+    And I generate a unique API version from "jsg-both-validation" and store it as "apiVersion"
+    And I generate a unique API context from "/jsg-both-validation" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}       |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"POST","path":"/validate","policies":[{"name":"json-schema-guardrail","version":"v1","params":{"request":{"enabled":true,"jsonPath":"","schema":"{\"type\":\"object\",\"properties\":{\"input\":{\"type\":\"string\"}},\"required\":[\"input\"]}"},"response":{"jsonPath":"","schema":"{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\"}},\"required\":[\"method\"]}"}}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"input": "test data"}
+      """
+    Then the response status code should be 200
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/validate" with body:
+      """
+      {"other": "test data"}
+      """
+    Then the response status code should be 422
+    And the JSON response field "message.actionReason" should be "Violation of JSON schema detected."
+    And the JSON response field "message.direction" should be "REQUEST"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
 
   # On chat-echo the LLM mock replies with the last user message as choices[0].message.content. The
   # jsonPath selects the whole message object, whose content must start with "ANSWER: ". The default
@@ -258,3 +315,31 @@ Feature: JSON Schema guardrail policy on responses
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat-echo" until status 404
+
+  # /echo-status requires a status field, which the backend's reflected request never has.
+  Scenario: API response contract enforcement
+    Given I generate a unique value from "jsg-response-contract" and store it as "apiName"
+    And I generate a unique API version from "jsg-response-contract" and store it as "apiVersion"
+    And I generate a unique API context from "/jsg-response-contract" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}       |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/get"},{"method":"GET","path":"/echo","policies":[{"name":"json-schema-guardrail","version":"v1","params":{"response":{"jsonPath":"","schema":"{\"type\":\"object\",\"properties\":{\"method\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"headers\":{\"type\":\"object\"}},\"required\":[\"method\",\"path\",\"headers\"]}","showAssessment":true}}}]},{"method":"GET","path":"/echo-status","policies":[{"name":"json-schema-guardrail","version":"v1","params":{"response":{"jsonPath":"","schema":"{\"type\":\"object\",\"required\":[\"status\"]}","showAssessment":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
+
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/echo"
+    Then the response status code should be 200
+
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/echo-status"
+    Then the response status code should be 422
+    And the JSON response field "message.actionReason" should be "Violation of JSON schema detected."
+    And the JSON response field "message.direction" should be "RESPONSE"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 404
