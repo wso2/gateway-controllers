@@ -326,6 +326,7 @@ Feature: MCP proxies governed by mcp-authz
     Then the response should be successful
 
   # MAZ #24: a specific rule and a * rule both apply, and both must pass.
+  # MAZ #25: when both rules fail on different scopes, the 403 names the missing scope of each.
   @gateway-v1.2
   Scenario: mcp-authz requires all matching rules to pass (specific rule and wildcard rule)
     Given I generate a unique resource name from "mcp-authz-multirule" and store it as "mcpName"
@@ -371,6 +372,15 @@ Feature: MCP proxies governed by mcp-authz
     And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
     Then the response status code should be 403
     And the response header "WWW-Authenticate" should contain "add-scope"
+
+    # Both rules fail (no base-scope, no add-scope) -> 403, and the challenge names the missing
+    # scope of each rule, in either order (\x22 is a double quote, which a step's quoted text
+    # cannot hold).
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "unrelated" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 403
+    And the response header "WWW-Authenticate" should match pattern "scope=\x22(base-scope add-scope|add-scope base-scope)\x22,"
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -635,6 +645,111 @@ Feature: MCP proxies governed by mcp-authz
       | list claim, requiredClaims  | {"name":"add","requiredClaims":{"groups":"b"}}                                                                | {"groups":["a","b"]}         |
       # MAZ #20 (control): the number 4 is not "5".
       | different number            | {"name":"add","claims":{"allOf":[{"claim":"level","values":["5"]},{"claim":"admin","values":["true"]}]}}     | {"level":4,"admin":true}     |
+
+  # Which rules apply to a call. Here mcp-authz runs alone, with no mcp-auth, so no caller ever has
+  # an identity: a call some rule names gets mcp-authz's own 401 before the MCP server, and a call no
+  # rule names passes to the server. The answer therefore shows whether a rule applied, with no
+  # token needed. Each row sends its request as written JSON, so tool, resource and prompt calls
+  # share one outline. An initialize polled until 200 waits until the route is live and the server
+  # is reachable; initialize is a method, which these rules do not govern.
+  Scenario Outline: A call a rule names is governed (<case>)
+    Given I generate a unique resource name from "mcp-authz-governed" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-governed" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-governed" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-governed" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-authz","version":"v1","params":<rules>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <request>
+      """
+    Then the response status code should be 401
+    And the JSON response field "message" should be "Unauthorized: authentication required for this MCP capability"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: calls a rule names
+      | case                            | rules                                                                        | request                                                                                              |
+      # MAZ #23: a * tool rule governs add.
+      | * rule, add                     | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}     |
+      # MAZ #23: the same * rule governs echo.
+      | * rule, echo                    | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hi"}}} |
+      # MAZ #23: the same * rule governs headers.
+      | * rule, headers                 | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"headers","arguments":{"name":"Accept"}}} |
+      # MAZ #27 (control): the rule Add governs a call to Add, so the rule is live.
+      | rule Add, call Add              | {"tools":[{"name":"Add","scopes":{"allOf":["maz-x"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"Add","arguments":{"a":2,"b":3}}}     |
+      # MAZ #27 (control): the resource rule file:///docs/* governs a read of exactly file:///docs/*.
+      | rule file:///docs/*, same URI   | {"resources":[{"name":"file:///docs/*","scopes":{"allOf":["maz-x"]}}]}       | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/*"}}                 |
+      # MAZ #28 (control): the tool rule greeting governs a tool call named greeting.
+      | tool rule greeting, tool call   | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}                 | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting","arguments":{}}}           |
+
+  # A call no rule names passes to the MCP server. Each row has a control row above with the same
+  # rules, which shows those rules are live: the 200 here comes from the name not matching, not from
+  # a rule that never loaded.
+  Scenario Outline: A call no rule names passes to the MCP server (<case>)
+    Given I generate a unique resource name from "mcp-authz-ungoverned" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-ungoverned" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-ungoverned" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-ungoverned" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-authz","version":"v1","params":<rules>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <request>
+      """
+    Then the response status code should be 200
+    And the JSON response should have field "result"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: calls no rule names
+      | case                            | rules                                                                        | request                                                                                              |
+      # MAZ #27: the rule Add does not govern add; names must match exactly, case included.
+      | rule Add, call add              | {"tools":[{"name":"Add","scopes":{"allOf":["maz-x"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}     |
+      # MAZ #27: a * inside a rule name is plain text, not a pattern, so file:///docs/readme.txt is not governed.
+      | rule file:///docs/*, other URI  | {"resources":[{"name":"file:///docs/*","scopes":{"allOf":["maz-x"]}}]}       | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}        |
+      # MAZ #28: a tool rule does not govern a prompt with the same name.
+      | tool rule greeting, prompt      | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}                 | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} |
 
   # mcp-authz must decide governance by rule matching BEFORE consulting identity. A capability
   # no rule targets is not governed and passes through untouched, even with no authenticated
