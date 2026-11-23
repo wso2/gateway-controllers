@@ -751,6 +751,140 @@ Feature: MCP proxies governed by mcp-authz
       # MAZ #28: a tool rule does not govern a prompt with the same name.
       | tool rule greeting, prompt      | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}                 | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} |
 
+  # Rules beyond tools. A resource rule names a URI and a prompt rule a prompt; a method rule names
+  # a whole JSON-RPC method, such as tools/call or tools/list, and governs every call of it. A list
+  # call names no single tool, resource or prompt, so per-name rules, even *, never govern it; only
+  # a method rule can. When a method rule and a tool rule both apply, both must pass. mcp-auth sits
+  # in front of mcp-authz, and each row sends its request with a token holding the row's scopes.
+  # Each refused row of the next outline has a row here with the same rules, which shows those rules
+  # can be met at all.
+  Scenario Outline: A token that meets the rule may make the call (<case>)
+    Given I generate a unique resource name from "mcp-authz-rule-allowed" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-rule-allowed" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-rule-allowed" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-rule-allowed" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"]}},{"name":"mcp-authz","version":"v1","params":<rules>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "<token scopes>" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <request>
+      """
+    Then the response status code should be 200
+    And the JSON response should have field "<answer>"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: tokens that meet the rules
+      | case                     | rules                                                                                                                                                               | token scopes     | request                                                                                                 | answer |
+      # MAZ #29: a resource rule and a token with its scope; the file is read.
+      | resource rule, read      | {"resources":[{"name":"file:///docs/readme.txt","scopes":{"allOf":["maz-read"]}}]}                                                                                  | maz-read         | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}           | result |
+      # MAZ #29: the same rule governs a subscribe to the URI. The testbench does not support subscribe, so its
+      # own JSON-RPC error -32601 shows the call got past mcp-authz.
+      | resource rule, subscribe | {"resources":[{"name":"file:///docs/readme.txt","scopes":{"allOf":["maz-read"]}}]}                                                                                  | maz-read         | {"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"file:///docs/readme.txt"}}      | error  |
+      # MAZ #30: a * resource rule and a token with its scope.
+      | * resource rule, read    | {"resources":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                                                                         | maz-all          | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}           | result |
+      # MAZ #31: a prompt rule and a token with its scope.
+      | prompt rule, get         | {"prompts":[{"name":"greeting","scopes":{"allOf":["maz-prompt"]}}]}                                                                                                 | maz-prompt       | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} | result |
+      # MAZ #32: tools/list is not governed by per-name rules, even *, so a token without their scope lists.
+      | * rules, tools/list      | {"tools":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-x"]}}]} | maz-none         | {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}                                              | result |
+      # MAZ #32: the same for resources/list.
+      | * rules, resources/list  | {"tools":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-x"]}}]} | maz-none         | {"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}                                          | result |
+      # MAZ #32: the same for prompts/list.
+      | * rules, prompts/list    | {"tools":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-x"]}}]} | maz-none         | {"jsonrpc":"2.0","id":1,"method":"prompts/list","params":{}}                                            | result |
+      # MAZ #34: a method rule on tools/call and a token with its scope.
+      | tools/call method rule   | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}]}                                                                                                 | maz-call         | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | result |
+      # MAZ #35: a method rule on tools/list and a token with its scope.
+      | tools/list method rule   | {"methods":[{"name":"tools/list","scopes":{"allOf":["maz-list"]}}]}                                                                                                 | maz-list         | {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}                                              | result |
+      # MAZ #37: a method rule and a tool rule both apply; a token with both scopes.
+      | method and tool rule     | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}],"tools":[{"name":"add","scopes":{"allOf":["maz-add"]}}]}                                         | maz-call maz-add | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | result |
+
+  # A token that does not meet a rule gets mcp-authz's 403 without reaching the MCP server, and
+  # WWW-Authenticate names exactly the scope still missing. \x22 is a double quote, which a step's
+  # quoted text cannot hold.
+  Scenario Outline: A token that does not meet the rule is refused (<case>)
+    Given I generate a unique resource name from "mcp-authz-rule-refused" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-rule-refused" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-rule-refused" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-rule-refused" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"]}},{"name":"mcp-authz","version":"v1","params":<rules>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "<token scopes>" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <request>
+      """
+    Then the response status code should be 403
+    And the JSON response field "message" should be "Forbidden: insufficient permissions to access this MCP resource"
+    And the response header "WWW-Authenticate" should match pattern "error=\x22insufficient_scope\x22"
+    And the response header "WWW-Authenticate" should match pattern "scope=\x22<named scope>\x22,"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: tokens that do not meet the rules
+      | case                               | rules                                                                                                                                                               | token scopes | request                                                                                                 | named scope |
+      # MAZ #29: a read without the resource rule's scope.
+      | resource rule, read                | {"resources":[{"name":"file:///docs/readme.txt","scopes":{"allOf":["maz-read"]}}]}                                                                                  | maz-none     | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}           | maz-read    |
+      # MAZ #29: a subscribe without the resource rule's scope.
+      | resource rule, subscribe           | {"resources":[{"name":"file:///docs/readme.txt","scopes":{"allOf":["maz-read"]}}]}                                                                                  | maz-none     | {"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"file:///docs/readme.txt"}}      | maz-read    |
+      # MAZ #30: a * resource rule governs readme.txt.
+      | * resource rule, readme            | {"resources":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                                                                         | maz-none     | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}           | maz-all     |
+      # MAZ #30: the same * resource rule governs changelog.txt.
+      | * resource rule, changelog         | {"resources":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                                                                         | maz-none     | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/changelog.txt"}}        | maz-all     |
+      # MAZ #31: a prompt get without the prompt rule's scope.
+      | prompt rule, get                   | {"prompts":[{"name":"greeting","scopes":{"allOf":["maz-prompt"]}}]}                                                                                                 | maz-none     | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} | maz-prompt  |
+      # MAZ #32 (control): the * tool rule is live, so tools/list passes only because it names no tool.
+      | * rules, tools/call                | {"tools":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-x"]}}]} | maz-none     | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | maz-x       |
+      # MAZ #32 (control): the * resource rule is live.
+      | * rules, resources/read            | {"tools":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-x"]}}]} | maz-none     | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}           | maz-x       |
+      # MAZ #32 (control): the * prompt rule is live.
+      | * rules, prompts/get               | {"tools":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-x"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-x"]}}]} | maz-none     | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} | maz-x       |
+      # MAZ #34: a method rule on tools/call governs add.
+      | tools/call method rule, add        | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}]}                                                                                                 | maz-none     | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | maz-call    |
+      # MAZ #34: the same method rule governs echo.
+      | tools/call method rule, echo       | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}]}                                                                                                 | maz-none     | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hi"}}}    | maz-call    |
+      # MAZ #35: tools/list without the method rule's scope.
+      | tools/list method rule             | {"methods":[{"name":"tools/list","scopes":{"allOf":["maz-list"]}}]}                                                                                                 | maz-none     | {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}                                              | maz-list    |
+      # MAZ #37: the token meets only the method rule; the 403 names the tool rule's scope.
+      | method and tool rule, method scope | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}],"tools":[{"name":"add","scopes":{"allOf":["maz-add"]}}]}                                         | maz-call     | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | maz-add     |
+      # MAZ #37: the token meets only the tool rule; the 403 names the method rule's scope.
+      | method and tool rule, tool scope   | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}],"tools":[{"name":"add","scopes":{"allOf":["maz-add"]}}]}                                         | maz-add      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | maz-call    |
+
   # mcp-authz must decide governance by rule matching BEFORE consulting identity. A capability
   # no rule targets is not governed and passes through untouched, even with no authenticated
   # context, while a governed capability still fails closed. Here mcp-authz alone (no
