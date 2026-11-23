@@ -7,7 +7,7 @@ title: "Overview"
 
 The MCP Authorization policy provides fine-grained access control for Model Context Protocol (MCP) server resources. It enables API administrators to define authorization rules based on user claims and scopes extracted from validated JWT tokens, controlling access to specific MCP tools, resources, prompts, and JSON-RPC methods.
 
-> **Prerequisite**: The MCP Authorization policy requires the [MCP Authentication policy](./mcp-authentication.md) to be applied first. The MCP Authentication policy validates and extracts JWT claims that are used by the authorization policy for access control decisions.
+> **Prerequisite**: The MCP Authorization policy requires the [MCP Authentication policy](../../../mcp-auth/v0.1/docs/mcp-authentication.md) to be applied first. The MCP Authentication policy validates and extracts JWT claims that are used by the authorization policy for access control decisions.
 
 ## Features
 
@@ -281,5 +281,5 @@ When authorization fails, the policy returns:
 
 ## Related Policies
 
-- [MCP Authentication Policy](./mcp-authentication.md) - Validates JWT tokens and is a prerequisite for MCP Authorization
-- [JWT Authentication Policy](../../../gateway/policies/jwt-authentication.md) - Base JWT token validation mechanism
+- [MCP Authentication Policy](../../../mcp-auth/v0.1/docs/mcp-authentication.md) - Validates JWT tokens and is a prerequisite for MCP Authorization
+- [JWT Authentication Policy](../../../jwt-auth/v0.1/docs/jwt-authentication.md) - Base JWT token validation mechanism

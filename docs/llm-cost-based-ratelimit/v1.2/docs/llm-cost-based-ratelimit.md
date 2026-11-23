@@ -7,7 +7,7 @@ title: "Overview"
 
 The LLM Cost Based Ratelimit policy enforces monetary spending budgets on LLM API usage. Rather than limiting by request count or token count, it limits by the actual dollar cost of each call, allowing you to cap spending within configurable time windows (for example, $10 per hour or $100 per day).
 
-This policy reads the pre-calculated cost from `SharedContext.Metadata`, which is set by the [LLM Cost](../../llm-cost/v0.1/docs/llm-cost.md) policy. The `llm-cost` policy must be applied on the same path for this policy to function correctly.
+This policy reads the pre-calculated cost from `SharedContext.Metadata`, which is set by the [LLM Cost](../../../llm-cost/v0.1/docs/llm-cost.md) policy. The `llm-cost` policy must be applied on the same path for this policy to function correctly.
 
 Use this policy when you need to:
 
