@@ -16,7 +16,7 @@
 # under the License.
 # --------------------------------------------------------------------
 
-.PHONY: generate-catalog validate-catalog unit-coverage coverage-summary generate-codecov-config validate-codecov-config itit-unit it-standards it-scaffold it-framework-pin it-workspace
+.PHONY: generate-catalog validate-catalog it-coverage coverage-summary generate-codecov-config validate-codecov-config itit-unit it-standards it-scaffold it-framework-pin it-workspace
 
 generate-catalog: ## Generate docs/README.md policy catalog from metadata.json files
 	python3 scripts/generate-policy-catalog.py
@@ -24,12 +24,14 @@ generate-catalog: ## Generate docs/README.md policy catalog from metadata.json f
 validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 	python3 scripts/generate-policy-catalog.py --validate
 
-# Policy unit-test coverage. Each policy is a Go module of its own, so the script runs every
-# module's unit tests and merges the profiles into coverage/coverage.txt, the report Codecov
-# uploads. POLICIES narrows the run (comma-separated, e.g. POLICIES=basic-auth,backend-jwt/v2);
-# COVERAGE_JOBS sets how many modules run at once.
-unit-coverage: ## Run every policy's unit tests and write coverage/coverage.txt
-	scripts/coverage/run-unit-coverage.sh $(subst $(comma),$(space),$(POLICIES))
+# Policy coverage comes from the integration suites, not from unit tests: `make it-coverage` builds the
+# gateway with every policy's code instrumented, runs the suites against it, and writes the coverage
+# of each policy to coverage/coverage.txt, the report Codecov uploads. The instrumented policy engine
+# exists only on the latest gateway, so it runs there. POLICIES, DB, BLOCK_PARALLEL and GATEWAY_POLICIES
+# work as for `make it`. Raw counters are kept in coverage/raw.
+it-coverage: ## Run the integration suites with coverage and write coverage/coverage.txt
+	$(MAKE) it GATEWAY_VERSION=latest IT_COVERAGE_DIR=coverage/raw
+	scripts/coverage/it-coverage-report.sh coverage/raw coverage
 
 coverage-summary: ## Print policy-wise and global coverage from coverage/coverage.txt
 	python3 scripts/coverage/summarize-coverage.py coverage/coverage.txt
@@ -62,6 +64,8 @@ ifeq ($(strip $(BLOCK_PARALLEL)),)
 override BLOCK_PARALLEL := 12
 endif
 IT_TIMELINE ?=
+# A folder: build the gateway with coverage instrumentation and collect the suites' counters there.
+IT_COVERAGE_DIR ?=
 comma := ,
 space := $(subst ,, )
 IT_POLICIES = $(if $(POLICIES),$(subst $(comma),$(space),$(POLICIES)),$(patsubst policies/%/it/it-suite.yaml,%,$(wildcard policies/*/it/it-suite.yaml policies/*/v*/it/it-suite.yaml)))
@@ -75,11 +79,12 @@ it: ## Build the gateway once, then run the integration suites of the selected p
 	@envfile=$$(mktemp); \
 	(cd tests/it && go run ./cmd/build-gateway -policies-dir ../../policies -version $(GATEWAY_VERSION) \
 		$(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(GATEWAY_POLICIES),-policies "$(GATEWAY_POLICIES)") \
-		-env-file "$$envfile") || { rm -f "$$envfile"; exit 1; }; \
+		$(if $(IT_COVERAGE_DIR),-coverage) -env-file "$$envfile") || { rm -f "$$envfile"; exit 1; }; \
 	set -a; . "$$envfile"; set +a; rm -f "$$envfile"; \
 	cd tests/it && go run ./cmd/run-suites -policies-dir ../../policies -policies "$(subst $(space),$(comma),$(IT_POLICIES))" \
 		-version $(GATEWAY_VERSION) $(if $(GATEWAY_HOST),-host $(GATEWAY_HOST)) $(if $(DB),-db $(DB)) \
-		$(if $(BLOCK_PARALLEL),-block-parallel $(BLOCK_PARALLEL)) $(if $(IT_TIMELINE),-timeline "$(abspath $(IT_TIMELINE))")
+		$(if $(BLOCK_PARALLEL),-block-parallel $(BLOCK_PARALLEL)) $(if $(IT_TIMELINE),-timeline "$(abspath $(IT_TIMELINE))") \
+		$(if $(IT_COVERAGE_DIR),-coverage-out "$(abspath $(IT_COVERAGE_DIR))")
 
 it-unit: ## Run the unit tests of the shared steps and of the selected policies' own steps
 	cd tests/it && go test ./... -count=1

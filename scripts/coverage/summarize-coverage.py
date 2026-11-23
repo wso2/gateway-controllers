@@ -18,7 +18,7 @@
 # --------------------------------------------------------------------
 """Summarise Go coverage profiles as a policy-wise Markdown table plus the global figure.
 
-Reads the merged profile written by run-unit-coverage.sh (or any Go cover profile whose file
+Reads the merged profile written by it-coverage-report.sh (or any Go cover profile whose file
 paths are module paths under github.com/wso2/gateway-controllers/policies/) and prints Markdown
 suitable for $GITHUB_STEP_SUMMARY. This mirrors what Codecov reports per component, so the same
 figures are readable straight from the run, including on pull requests from forks where the
@@ -96,7 +96,7 @@ def render(totals, collapse=False):
         key=lambda p: (percent(*totals[p]), p),
     )
     out = [
-        "## Policy unit-test coverage",
+        "## Policy integration-test coverage",
         "",
         f"**Global coverage: {percent(covered, total):.1f}%** "
         f"({covered:,} of {total:,} statements, {len(totals)} policies)",

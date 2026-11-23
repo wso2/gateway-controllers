@@ -1,10 +1,25 @@
 name: Policy Code Coverage
 
-# Runs the unit tests of every policy and reports their coverage to Codecov: per policy (one
-# Codecov component each, see codecov.yml) and as the repository-wide global figure. Pull
-# requests are compared with the coverage of main, which the push trigger keeps current.
+# Reports the coverage the policies get from their integration suites, to Codecov and on the pull
+# request: per policy (one Codecov component each, see codecov.yml) and as the repository-wide
+# global figure. The gateway is built with every policy's code instrumented, the suites run against
+# it, and the counters the gateway writes when it stops are merged into one report. Pull requests
+# are compared with the coverage of main, which the push trigger keeps current.
+#
+# The instrumented policy engine exists only on the latest gateway, so this runs there, and on
+# SQLite alone: the database does not change which policy code runs. The pass/fail gate of the
+# suites on every gateway version and database is it.yml.
 on:
   workflow_dispatch:
+    inputs:
+      policies:
+        description: "Comma-separated policies to run, or 'all'. A partial run reports the coverage of those suites only."
+        required: true
+        default: all
+      block_parallel:
+        description: "Most blocks that run at the same time across the selected suites; empty uses the IT_BLOCK_PARALLEL variable, then the Makefile default"
+        required: false
+        default: ""
   push:
     branches:
       - main
@@ -13,8 +28,10 @@ on:
       - main
     paths:
       - 'policies/**'
-      - 'codecov.yml'
+      - 'tests/it/**'
+      - 'scripts/it/**'
       - 'scripts/coverage/**'
+      - 'codecov.yml'
       - 'Makefile'
       - '.github/workflows/coverage.yml'
 
@@ -27,10 +44,13 @@ concurrency:
 
 jobs:
   coverage:
-    name: Unit tests with coverage
+    name: Integration coverage (latest gateway)
     runs-on: ubuntu-24.04
+    # packages: read lets GITHUB_TOKEN pull the testbench image from GHCR; pull-requests: write
+    # lets the report be commented on the pull request.
     permissions:
       contents: read
+      packages: read
       pull-requests: write
     steps:
       - name: Checkout gateway-controllers
@@ -43,21 +63,71 @@ jobs:
         with:
           go-version: '1.26.10'
           cache-dependency-path: |
-            policies/*/go.sum
-            policies/*/v*/go.sum
+            tests/it/go.sum
+            policies/*/it/go.sum
+            policies/*/v*/it/go.sum
 
       - name: Check the coverage tooling
         run: |
           python3 scripts/coverage/test_summarize_coverage.py
           make validate-codecov-config
 
-      # Every policy module runs and the script lists the ones that failed. This job reports
-      # coverage and is not the unit-test gate, so a failing test is shown but does not turn the
-      # check red; remove continue-on-error to make it one. A module whose tests crash writes no
-      # profile and is missing from the report.
-      - name: Run policy unit tests with coverage
+      - name: Raise the conntrack table limit
+        run: sudo sysctl -w net.netfilter.nf_conntrack_max=524288
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         continue-on-error: true
-        run: make unit-coverage
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same testbench image as it.yml: the one published with the framework release that
+      # tests/it/go.mod pins, built from the module's source when it cannot be pulled.
+      - name: Provide the testbench image
+        working-directory: tests/it
+        run: |
+          set -euo pipefail
+          module=github.com/wso2/api-platform/tests/framework
+          go mod download "$module"
+          version="$(go list -m -f '{{.Version}}' "$module")"
+          image="ghcr.io/wso2/api-platform/testbench:${version#v}"
+          if docker pull "$image"; then
+            exit 0
+          fi
+          echo "::warning::Could not pull $image; building it from the pinned module source instead"
+          dir="$(go list -m -f '{{.Dir}}' "$module")"
+          docker build -f "$dir/testbench/Dockerfile" -t "$image" "$dir"
+
+      # Builds the latest gateway with every policy instrumented, runs the selected suites on
+      # SQLite and fails if a block fails. The report and the upload below run either way: a
+      # failing block leaves its counters out of the report, not the whole report.
+      - name: Run the integration suites with coverage
+        shell: bash
+        env:
+          BLOCK_PARALLEL: ${{ inputs.block_parallel || vars.IT_BLOCK_PARALLEL }}
+          REQUESTED_POLICIES: ${{ inputs.policies }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_POLICIES" && "$REQUESTED_POLICIES" != "all" ]]; then
+            policies="$REQUESTED_POLICIES"
+          else
+            # The selection script writes its result to $GITHUB_OUTPUT: every policy with a suite.
+            selected="$(mktemp)"
+            GITHUB_OUTPUT="$selected" python3 scripts/it/changed-policies.py --policies all > /dev/null
+            policies="$(sed -n 's/^policies=//p' "$selected")"
+          fi
+          make it POLICIES="$policies" GATEWAY_VERSION=latest DB=sqlite IT_COVERAGE_DIR=coverage/raw \
+            ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} \
+            2>&1 | tee policy-it-coverage.log
+
+      - name: Merge the coverage of the suites
+        if: always()
+        run: scripts/coverage/it-coverage-report.sh coverage/raw coverage
 
       - name: Summarise policy-wise and global coverage
         if: always()
@@ -113,5 +183,16 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           disable_search: true
           files: coverage/coverage.txt
-          flags: unit
+          flags: integration
           fail_ci_if_error: false
+
+      - name: Upload the test output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: policy-coverage-output
+          path: |
+            policy-it-coverage.log
+            coverage/coverage.txt
+          if-no-files-found: ignore
+          retention-days: 7

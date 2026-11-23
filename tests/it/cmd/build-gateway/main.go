@@ -39,6 +39,7 @@ func main() {
 	policies := flag.String("policies", "", "comma-separated policies to build in (default: every policy)")
 	version := flag.String("version", "", "the released gateway version to build on, or latest")
 	host := flag.String("host", "", "the image repository prefix of the gateway's base images")
+	coverage := flag.Bool("coverage", false, "instrument the policies' code for coverage; needs -version latest")
 	envFile := flag.String("env-file", "", "the file to write the NAME=value lines to")
 	flag.Parse()
 
@@ -52,6 +53,7 @@ func main() {
 		Policies:    splitList(*policies),
 		Version:     *version,
 		Host:        *host,
+		Coverage:    *coverage,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "build-gateway:", err)

@@ -4,6 +4,10 @@
 # component per policy (and one per major version released beside v1). Codecov rolls the
 # components up into the repository-wide figure it reports as the global coverage.
 #
+# The coverage is that of the integration suites (policies/*/it): the gateway is built with every
+# policy's code instrumented, the suites run against it, and the counters are uploaded under the
+# `integration` flag. A policy without an integration suite reports 0%.
+#
 # The component list below is generated from the policy modules under policies/. Run
 # `make generate-codecov-config` after adding or removing a policy; CI runs
 # `make validate-codecov-config` and fails when the list is out of date.
@@ -19,7 +23,7 @@ ignore:
   - "policies/**/it/**"
   - "tests/**"
 
-# One upload carries the unit-test report of every policy (the workflow sets disable_search).
+# One upload carries the integration-test coverage of every policy (the workflow sets disable_search).
 # Carry the last known report forward if a run uploads nothing, instead of reading that
 # absence as lost coverage.
 flag_management:

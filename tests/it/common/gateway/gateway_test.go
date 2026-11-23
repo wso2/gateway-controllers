@@ -22,6 +22,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -239,4 +240,106 @@ func TestCopyTreeKeepsAVersionFolderOutsideAPolicyTree(t *testing.T) {
 	require.NoError(t, CopyTree(source, destination))
 
 	require.FileExists(t, filepath.Join(destination, "v2", "policy-definition.yaml"), "an overlay tree is copied whole")
+}
+
+func stagePoliciesForBuild(t *testing.T) string {
+	t.Helper()
+	policies := t.TempDir()
+	writePolicy(t, policies, "a-policy")
+	return policies
+}
+
+func TestCoverageBuildInstrumentsThePolicyEngineOnLatestOnly(t *testing.T) {
+	policies := stagePoliciesForBuild(t)
+	runner := &writingRunner{t: t}
+	_, err := Build(context.Background(), BuildOptions{PoliciesDir: policies, Version: "latest", Runner: runner, Coverage: true})
+	require.NoError(t, err)
+
+	var builderRuns, others int
+	for _, command := range runner.commands {
+		joined := strings.Join(command.Args, " ")
+		if len(command.Args) > 1 && command.Args[1] == "run" {
+			builderRuns++
+			require.Contains(t, joined, "-e COVERAGE=true")
+			require.Contains(t, joined, "-e COVERPKG="+CoveragePackages)
+			continue
+		}
+		others++
+		require.NotContains(t, joined, "COVERAGE=true", "only the builder run is instrumented: %s", joined)
+	}
+	require.Equal(t, 1, builderRuns)
+	require.Positive(t, others)
+
+	_, err = Build(context.Background(), BuildOptions{PoliciesDir: policies, Version: "1.2.0", Runner: &recordingRunner{}, Coverage: true})
+	require.ErrorContains(t, err, "coverage needs gateway version latest")
+}
+
+func TestBuildWithoutCoverageLeavesTheBuilderRunAlone(t *testing.T) {
+	policies := stagePoliciesForBuild(t)
+	runner := &recordingRunner{}
+	_, err := Build(context.Background(), BuildOptions{PoliciesDir: policies, Version: "latest", Runner: runner})
+	require.NoError(t, err)
+	for _, command := range runner.commands {
+		require.NotContains(t, strings.Join(command.Args, " "), "COVERAGE")
+	}
+}
+
+// writingRunner records the commands like recordingRunner and, like the gateway-builder, writes
+// the Dockerfile of the runtime image into the workspace it is given.
+type writingRunner struct {
+	recordingRunner
+	t *testing.T
+}
+
+func (r *writingRunner) Run(ctx context.Context, command builder.Command) error {
+	if len(command.Args) > 1 && command.Args[1] == "run" {
+		for i, arg := range command.Args {
+			if arg == "-v" && i+1 < len(command.Args) {
+				workspace, _, _ := strings.Cut(command.Args[i+1], ":")
+				writeFile(r.t, filepath.Join(workspace, "output", "gateway-runtime", "Dockerfile"), "FROM runtime\n")
+			}
+		}
+	}
+	return r.recordingRunner.Run(ctx, command)
+}
+
+func TestCoverageBuildDeclaresTheCoverageVolumeInTheRuntimeDockerfile(t *testing.T) {
+	policies := stagePoliciesForBuild(t)
+	runner := &writingRunner{t: t}
+	var dockerfile string
+	_, err := Build(context.Background(), BuildOptions{PoliciesDir: policies, Version: "latest", Runner: runner, Coverage: true})
+	require.NoError(t, err)
+	for _, command := range runner.commands {
+		if i := slices.Index(command.Args, "-f"); i >= 0 && isRuntimeDockerfile(command.Args[i+1]) {
+			dockerfile = command.Args[i+1]
+		}
+	}
+	require.NotEmpty(t, dockerfile, "the runtime image build names its Dockerfile")
+}
+
+func TestDeclareCoverageVolumeAppendsToTheDockerfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "gateway-runtime", "Dockerfile")
+	writeFile(t, path, "FROM runtime\nENTRYPOINT [\"/entry\"]\n")
+
+	require.NoError(t, declareCoverageVolume(path))
+
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(string(content), "FROM runtime\nENTRYPOINT"))
+	require.True(t, strings.HasSuffix(string(content), "VOLUME /coverage\n"))
+	require.ErrorContains(t, declareCoverageVolume(path+".missing"), "declaring the coverage volume")
+}
+
+func TestOnlyTheRuntimeImageBuildIsRecognised(t *testing.T) {
+	require.True(t, isRuntimeDockerfile("/tmp/ws/output/gateway-runtime/Dockerfile"))
+	require.False(t, isRuntimeDockerfile("/tmp/ws/output/gateway-controller/Dockerfile"))
+}
+
+func TestCollectCoverageReadsTheEnvironment(t *testing.T) {
+	t.Setenv(EnvCollectCoverage, "")
+	require.False(t, CollectCoverage())
+	t.Setenv(EnvCollectCoverage, "1")
+	require.True(t, CollectCoverage())
+	t.Setenv(EnvCollectCoverage, "true")
+	require.True(t, CollectCoverage())
 }
