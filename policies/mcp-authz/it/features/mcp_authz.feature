@@ -522,6 +522,120 @@ Feature: MCP proxies governed by mcp-authz
       # MAZ #13 (control): requiredScopes is still enforced; a token with none of its scopes.
       | requiredScopes, no scope | {"name":"add","requiredScopes":["maz-a","maz-b"]}   | maz-c        | (maz-a maz-b\|maz-b maz-a) |
 
+  # Claim rules the scenarios above leave out: any one of several different claims, the standard
+  # claims sub, iss and aud, a list claim, and number and true/false claims. The mock JWKS server
+  # can only sign text claims, so these tokens come from the testbench OIDC provider, which signs
+  # any JSON; mcp-auth trusts it through the oidc-km key manager. The provider adds iss itself, so
+  # a token with no claims still has the provider's issuer. Each refused row of the next outline
+  # has a row here with the same rule, which shows that rule can be met at all.
+  Scenario Outline: A token whose claims meet the claim rule may call the tool (<case>)
+    Given I generate a unique resource name from "mcp-authz-claim-allowed" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-claim-allowed" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-claim-allowed" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-claim-allowed" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["oidc-km"]}},{"name":"mcp-authz","version":"v1","params":{"tools":[<rule>]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I mint a JWT token from the testbench OIDC provider expiring in 300 seconds and store it as "token" with claims:
+      """
+      <claims>
+      """
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 200
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: tokens whose claims meet the rule
+      | case                         | rule                                                                                                          | claims                         |
+      # MAZ #16: anyOf over two different claims; team does not match but dept does.
+      | anyOf, the second claim      | {"name":"add","claims":{"anyOf":[{"claim":"team","values":["red"]},{"claim":"dept","values":["sales"]}]}}    | {"team":"blue","dept":"sales"} |
+      # MAZ #18: the subject matches.
+      | sub matches                  | {"name":"add","claims":{"allOf":[{"claim":"sub","values":["alice"]}]}}                                       | {"sub":"alice"}                |
+      # MAZ #18: the issuer matches; the provider adds its own iss.
+      | iss matches                  | {"name":"add","claims":{"allOf":[{"claim":"iss","values":["https://testbench:3015/oauth2/token"]}]}}         | {}                             |
+      # MAZ #18: one audience of the token's aud list matches.
+      | one audience matches         | {"name":"add","claims":{"allOf":[{"claim":"aud","values":["api-b"]}]}}                                       | {"aud":["api-a","api-b"]}      |
+      # MAZ #19: the new claims field finds b in the list claim groups.
+      | list claim, claims field     | {"name":"add","claims":{"allOf":[{"claim":"groups","values":["b"]}]}}                                        | {"groups":["a","b"]}           |
+      # MAZ #19 (control): the old requiredClaims field matches a single text value.
+      | single value, requiredClaims | {"name":"add","requiredClaims":{"groups":"b"}}                                                                | {"groups":"b"}                 |
+      # MAZ #20: a number claim and a true/false claim match the rule's text values "5" and "true".
+      | number and true/false        | {"name":"add","claims":{"allOf":[{"claim":"level","values":["5"]},{"claim":"admin","values":["true"]}]}}     | {"level":5,"admin":true}       |
+
+  # A token whose claims do not meet the rule gets mcp-authz's 403 without reaching the MCP server.
+  # A new scope would not help, so the challenge names none: it has error="insufficient_scope" but
+  # no scope= part.
+  Scenario Outline: A token whose claims do not meet the claim rule is refused (<case>)
+    Given I generate a unique resource name from "mcp-authz-claim-refused" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-claim-refused" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-claim-refused" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-claim-refused" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["oidc-km"]}},{"name":"mcp-authz","version":"v1","params":{"tools":[<rule>]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+
+    When I mint a JWT token from the testbench OIDC provider expiring in 300 seconds and store it as "token" with claims:
+      """
+      <claims>
+      """
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 403
+    And the JSON response field "message" should be "Forbidden: insufficient permissions to access this MCP resource"
+    And the response header "WWW-Authenticate" should contain "insufficient_scope"
+    And the response header "WWW-Authenticate" should not contain "scope="
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: tokens whose claims do not meet the rule
+      | case                        | rule                                                                                                          | claims                       |
+      # MAZ #16: anyOf over two different claims; neither matches.
+      | anyOf, no claim             | {"name":"add","claims":{"anyOf":[{"claim":"team","values":["red"]},{"claim":"dept","values":["sales"]}]}}    | {"team":"blue","dept":"hr"}  |
+      # MAZ #18: the subject differs.
+      | sub differs                 | {"name":"add","claims":{"allOf":[{"claim":"sub","values":["alice"]}]}}                                       | {"sub":"bob"}                |
+      # MAZ #18 (control): a rule naming another issuer refuses the same kind of token.
+      | iss differs                 | {"name":"add","claims":{"allOf":[{"claim":"iss","values":["https://other.example/token"]}]}}                 | {}                           |
+      # MAZ #18: no audience of the token's aud list matches.
+      | no audience matches         | {"name":"add","claims":{"allOf":[{"claim":"aud","values":["api-b"]}]}}                                       | {"aud":["api-a"]}            |
+      # MAZ #19 (control): the list claim groups does not hold b.
+      | list claim without b        | {"name":"add","claims":{"allOf":[{"claim":"groups","values":["b"]}]}}                                        | {"groups":["a"]}             |
+      # MAZ #19: the old requiredClaims field cannot look inside the list claim groups.
+      | list claim, requiredClaims  | {"name":"add","requiredClaims":{"groups":"b"}}                                                                | {"groups":["a","b"]}         |
+      # MAZ #20 (control): the number 4 is not "5".
+      | different number            | {"name":"add","claims":{"allOf":[{"claim":"level","values":["5"]},{"claim":"admin","values":["true"]}]}}     | {"level":4,"admin":true}     |
+
   # mcp-authz must decide governance by rule matching BEFORE consulting identity. A capability
   # no rule targets is not governed and passes through untouched, even with no authenticated
   # context, while a governed capability still fails closed. Here mcp-authz alone (no
