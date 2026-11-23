@@ -27,6 +27,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,12 +126,9 @@ func run() int {
 	stopSampling := r.recorder.StartSampling(sampleInterval)
 	failed := runsuites.Schedule(jobs, *blockParallel, r.run)
 	stopSampling()
+	coverageIncomplete := false
 	if collector != nil {
-		copied, err := collector.Collect(context.Background())
-		r.say("coverage: collected the counters of %d gateway runtimes into %s\n", copied, r.coverageOut)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "run-suites: collecting coverage:", err)
-		}
+		coverageIncomplete = finishCoverage(collector, r.coverageOut, r.say, os.Stderr)
 	}
 	failed = append(failed, broken...)
 	if *timeline != "" {
@@ -143,7 +141,30 @@ func run() int {
 		fmt.Printf("Failed integration blocks: %s\n", strings.Join(failed, " "))
 		return 1
 	}
+	if coverageIncomplete {
+		// Every block passed, but the report would miss the counters of some gateway runtimes and
+		// understate the coverage. The counters that were copied are kept for the report.
+		fmt.Println("Coverage collection was incomplete: the report misses the counters of some gateway runtimes")
+		return 1
+	}
 	return 0
+}
+
+// coverageCollector collects the counters of the gateway runtimes once the suites have run.
+type coverageCollector interface {
+	Collect(ctx context.Context) (int, error)
+}
+
+// finishCoverage collects the counters, says how many runtimes they came from and reports a
+// failure to errOut. It returns true when the collection was incomplete.
+func finishCoverage(collector coverageCollector, dir string, say func(string, ...any), errOut io.Writer) bool {
+	copied, err := collector.Collect(context.Background())
+	say("coverage: collected the counters of %d gateway runtimes into %s\n", copied, dir)
+	if err != nil {
+		fmt.Fprintln(errOut, "run-suites: collecting coverage:", err)
+		return true
+	}
+	return false
 }
 
 // item is the policy and block a job runs.

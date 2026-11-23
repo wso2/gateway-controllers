@@ -28,8 +28,10 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 # gateway with every policy's code instrumented, runs the suites against it, and writes the coverage
 # of each policy to coverage/coverage.txt, the report Codecov uploads. The instrumented policy engine
 # exists only on the latest gateway, so it runs there. POLICIES, DB, BLOCK_PARALLEL and GATEWAY_POLICIES
-# work as for `make it`. Raw counters are kept in coverage/raw.
+# work as for `make it`. Raw counters are kept in coverage/raw, which is emptied first: the report
+# merges everything beneath it, so counters of an earlier run would be counted again.
 it-coverage: ## Run the integration suites with coverage and write coverage/coverage.txt
+	rm -rf coverage/raw
 	$(MAKE) it GATEWAY_VERSION=latest IT_COVERAGE_DIR=coverage/raw
 	scripts/coverage/it-coverage-report.sh coverage/raw coverage
 

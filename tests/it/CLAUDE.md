@@ -124,6 +124,13 @@ is `make it` on the latest gateway with three additions, none of which touch the
   outlives the runtime, and the counters are copied out of the helpers when the run ends.
   `scripts/coverage/it-coverage-report.sh` merges them into `coverage/coverage.txt`.
 
+The folder given to `run-suites -coverage-out` (`IT_COVERAGE_DIR`) must be missing or empty, because the
+report merges everything beneath it: the run refuses a folder that holds counters of an earlier run
+instead of counting them again. `make it-coverage` empties `coverage/raw` for you. A run whose counters
+could not all be collected (a helper that could not start, a copy that failed, a `docker events`
+stream that ended early) exits non-zero even when every block passed, so a partial report is never
+mistaken for a complete one.
+
 If the report says there are no counters, look for `coverage:` lines in the run output: a runtime
 without the volume, a helper that could not start, or a block that never booted its gateway leave
 none. A block that fails still writes its counters when its gateway stops cleanly. The helpers carry

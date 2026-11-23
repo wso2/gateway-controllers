@@ -170,3 +170,92 @@ func TestARuntimeWithoutACoverageVolumeIsReported(t *testing.T) {
 
 	require.ErrorContains(t, err, "has no /coverage volume")
 }
+
+func TestStartRefusesAFolderThatAlreadyHoldsCounters(t *testing.T) {
+	out := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(out, "1", "coverage"), 0o755))
+
+	_, err := Start(context.Background(), "local/runtime:latest", out, nil)
+
+	require.ErrorContains(t, err, "is not empty")
+	require.DirExists(t, filepath.Join(out, "1"), "nothing is deleted to make room")
+}
+
+func TestARunFolderThatIsMissingOrEmptyIsAccepted(t *testing.T) {
+	require.NoError(t, requireEmpty(filepath.Join(t.TempDir(), "missing")))
+	require.NoError(t, requireEmpty(t.TempDir()))
+}
+
+func TestAFolderThatCannotBeMadeStillGetsItsHelperAndVolumeRemoved(t *testing.T) {
+	// The output path runs through a regular file, so no folder can be made beneath it.
+	blocker := filepath.Join(t.TempDir(), "file")
+	require.NoError(t, os.WriteFile(blocker, nil, 0o644))
+	docker := &fakeDocker{}
+	c := newCollector("local/runtime:latest", blocker, docker.run, nil)
+	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
+	docker.calls = nil
+
+	copied, err := c.Collect(context.Background())
+
+	require.Zero(t, copied)
+	require.ErrorContains(t, err, "making the folder for the counters of helper helper-abc")
+	calls := strings.Join(docker.joined(), "\n")
+	require.NotContains(t, calls, "cp ", "nothing to copy into")
+	require.Contains(t, calls, "rm -f helper-abc")
+	require.Contains(t, calls, "volume rm -f vol-abc")
+}
+
+func TestTheEventStreamEndingByItselfIsAFailureButCollectEndingItIsNot(t *testing.T) {
+	c := newCollector("local/runtime:latest", t.TempDir(), (&fakeDocker{}).run, nil)
+	c.streamEnded(errors.New("exit status 1"))
+	c.stopping.Store(true)
+	c.streamEnded(errors.New("signal: killed"))
+
+	_, err := c.Collect(context.Background())
+
+	require.ErrorContains(t, err, "the docker events stream ended before the run did")
+	require.ErrorContains(t, err, "exit status 1")
+	require.NotContains(t, err.Error(), "signal: killed", "the end Collect asked for is not reported")
+}
+
+func TestAStreamThatClosesWithoutAnErrorIsStillReported(t *testing.T) {
+	c := newCollector("local/runtime:latest", t.TempDir(), (&fakeDocker{}).run, nil)
+	c.streamEnded(nil)
+
+	_, err := c.Collect(context.Background())
+
+	require.ErrorContains(t, err, "the stream closed")
+}
+
+func TestWatchReturnsTheErrorThatEndedTheReading(t *testing.T) {
+	c := newCollector("local/runtime:latest", t.TempDir(), (&fakeDocker{}).run, nil)
+
+	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
+	require.ErrorIs(t, c.watch(context.Background(), failingReader{}), errReadFailed)
+}
+
+var errReadFailed = errors.New("read failed")
+
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errReadFailed }
+
+func TestEveryDockerCommandOfTheCollectorHasATimeLimit(t *testing.T) {
+	var unbounded []string
+	docker := &fakeDocker{}
+	c := newCollector("local/runtime:latest", t.TempDir(), func(ctx context.Context, args ...string) ([]byte, error) {
+		if _, bounded := ctx.Deadline(); !bounded {
+			unbounded = append(unbounded, args[0])
+		}
+		return docker.run(ctx, args...)
+	}, nil)
+
+	// A context that is not cancelled and has no deadline, as the caller's: the limit must come
+	// from the collector, now that stopping the event stream no longer bounds the attachments.
+	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
+	_, err := c.Collect(context.Background())
+
+	require.NoError(t, err)
+	require.Empty(t, unbounded, "these docker commands could wait forever")
+	require.Len(t, c.helpers, 1)
+}
