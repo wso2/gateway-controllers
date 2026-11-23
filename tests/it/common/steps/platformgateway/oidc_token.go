@@ -16,7 +16,7 @@
  * under the License.
  */
 
-package steps
+package platformgateway
 
 import (
 	"context"
@@ -31,28 +31,18 @@ import (
 	"github.com/cucumber/godog"
 
 	"github.com/wso2/api-platform/tests/framework/core/catalog/shared"
-	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
 
 	stepscommon "github.com/wso2/gateway-controllers/tests/it/common/steps/common"
 )
 
-// policySteps holds what the mcp-auth policy's steps share within one runner.
-type policySteps struct {
-	topo *frameworkruntime.Topology
-	now  func() time.Time
-}
-
-func newPolicySteps(topo *frameworkruntime.Topology) *policySteps {
-	return &policySteps{topo: topo, now: time.Now}
-}
-
-// register binds the steps below. Add a step here only when no shared step expresses the
-// behaviour, and give it a unit test in steps_test.go.
-func (s *policySteps) register(sc *godog.ScenarioContext) {
+// registerOIDCTokenSteps binds the step that mints a token from the testbench OIDC provider. The
+// JWKS mock's token step can only add text claims; this one signs any JSON, so a scenario can hold
+// list, number and boolean claims, or a token that has already expired.
+func (g *Gateway) registerOIDCTokenSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I mint a JWT token from the testbench OIDC provider expiring in (-?\d+) seconds and store it as "([^"]*)" with claims:$`,
-		s.mintOIDCToken)
+		g.mintOIDCToken)
 }
 
 // mintOIDCToken asks the testbench OIDC provider to sign a token with the given claims and stores
@@ -60,12 +50,12 @@ func (s *policySteps) register(sc *godog.ScenarioContext) {
 // with no extra claims is valid, and each test token can differ from it in exactly one claim. The
 // step sets exp to the given number of seconds from now (negative for a token that has already
 // expired) and iat to one hour before exp, so the claims must not set them.
-func (s *policySteps) mintOIDCToken(ctx context.Context, expiresIn int, key string, claims *godog.DocString) error {
+func (g *Gateway) mintOIDCToken(ctx context.Context, expiresIn int, key string, claims *godog.DocString) error {
 	resolved, err := stepscommon.Expand(ctx, claims.Content)
 	if err != nil {
 		return err
 	}
-	base, err := s.topo.URL("testbench", "oidc")
+	base, err := g.topo.URL("testbench", "oidc")
 	if err != nil {
 		return err
 	}
@@ -73,7 +63,7 @@ func (s *policySteps) mintOIDCToken(ctx context.Context, expiresIn int, key stri
 	if err != nil {
 		return err
 	}
-	token, err := mintToken(ctx, client, base, resolved, s.now().Add(time.Duration(expiresIn)*time.Second))
+	token, err := mintOIDCTokenAt(ctx, client, base, resolved, time.Now().Add(time.Duration(expiresIn)*time.Second))
 	if err != nil {
 		return err
 	}
@@ -106,8 +96,9 @@ func identityProviderTLSConfig(certPEM []byte) (*tls.Config, error) {
 	return &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}, nil
 }
 
-// mintToken posts the claims, with exp and iat added, to <base>/mint and returns the signed token.
-func mintToken(ctx context.Context, client *httpx.Client, base, claimsJSON string, exp time.Time) (string, error) {
+// mintOIDCTokenAt posts the claims, with exp and iat added, to <base>/mint and returns the signed
+// token.
+func mintOIDCTokenAt(ctx context.Context, client *httpx.Client, base, claimsJSON string, exp time.Time) (string, error) {
 	claims := map[string]any{}
 	if strings.TrimSpace(claimsJSON) != "" {
 		if err := json.Unmarshal([]byte(claimsJSON), &claims); err != nil {

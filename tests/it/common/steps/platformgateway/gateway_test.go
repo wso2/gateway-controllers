@@ -24,6 +24,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -4395,4 +4396,115 @@ func TestUntilEventSatisfiesFindsTheRightEventBehindALateOne(t *testing.T) {
 	}
 	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", forPath, check))
 	require.Equal(t, 1, reads)
+}
+
+// TestOIDCTokenStepIsBound runs the mint step through godog to show it is bound: with no testbench
+// in the topology it fails. An unbound step would fail with the same status, so the output must
+// not report it as undefined.
+func TestOIDCTokenStepIsBound(t *testing.T) {
+	dir := t.TempDir()
+	feature := "Feature: the OIDC token step\n  Scenario: the mint step is bound\n" +
+		"    When I mint a JWT token from the testbench OIDC provider expiring in 60 seconds and store it as \"token\" with claims:\n" +
+		"      \"\"\"\n      {}\n      \"\"\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "steps.feature"), []byte(feature), 0o600))
+	var out strings.Builder
+	gateway := &Gateway{topo: &frameworkruntime.Topology{}}
+	suite := godog.TestSuite{
+		ScenarioInitializer: gateway.registerOIDCTokenSteps,
+		Options:             &godog.Options{Format: "pretty", Paths: []string{dir}, Strict: true, NoColors: true, Output: &out},
+	}
+	require.Equal(t, 1, suite.Run(), "expected the bound step to fail without a testbench")
+	require.NotContains(t, out.String(), "undefined", "the mint step is not bound")
+}
+
+// TestMintOIDCTokenSendsClaimsWithExpiry checks the request the step sends and the token it returns.
+func TestMintOIDCTokenSendsClaimsWithExpiry(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/mint" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		dec := json.NewDecoder(r.Body)
+		dec.UseNumber()
+		if err := dec.Decode(&got); err != nil {
+			t.Errorf("decoding the claims: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"token":"a.b.c"}`))
+	}))
+	defer srv.Close()
+
+	exp := time.Unix(1_800_000_000, 0)
+	token, err := mintOIDCTokenAt(context.Background(), oidcTestClient(t, srv), srv.URL+"/",
+		`{"iss":"https://nobody.example.com","groups":["a","b"],"level":5}`, exp)
+	require.NoError(t, err)
+	require.Equal(t, "a.b.c", token)
+	require.Equal(t, "https://nobody.example.com", got["iss"])
+	require.Equal(t, []any{"a", "b"}, got["groups"], "a list claim must reach the provider as a list")
+	require.Equal(t, "5", got["level"].(json.Number).String(), "a number claim must reach the provider as a number")
+	require.Equal(t, "1800000000", got["exp"].(json.Number).String())
+	require.Equal(t, "1799996400", got["iat"].(json.Number).String(), "iat must be one hour before exp")
+}
+
+// TestMintOIDCTokenAllowsEmptyClaims shows an empty DocString mints a token with only exp and iat.
+func TestMintOIDCTokenAllowsEmptyClaims(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		_, _ = w.Write([]byte(`{"token":"x.y.z"}`))
+	}))
+	defer srv.Close()
+	_, err := mintOIDCTokenAt(context.Background(), oidcTestClient(t, srv), srv.URL, "", time.Now())
+	require.NoError(t, err)
+	require.Len(t, got, 2, "only exp and iat are expected, got %v", got)
+}
+
+// TestMintOIDCTokenRejectsBadInput covers claims the step refuses and answers it cannot use.
+func TestMintOIDCTokenRejectsBadInput(t *testing.T) {
+	ok := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"token":"a.b.c"}`))
+	}))
+	defer ok.Close()
+	failing := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	empty := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer empty.Close()
+
+	cases := []struct {
+		name, claims, want string
+		srv                *httptest.Server
+	}{
+		{"exp set", `{"exp":1}`, `must not set "exp"`, ok},
+		{"iat set", `{"iat":1}`, `must not set "iat"`, ok},
+		{"not JSON", `{`, "parsing the claims", ok},
+		{"server error", `{}`, "failed: 500", failing},
+		{"no token", `{}`, "has no token", empty},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := mintOIDCTokenAt(context.Background(), oidcTestClient(t, c.srv), c.srv.URL, c.claims, time.Now())
+			require.ErrorContains(t, err, c.want)
+		})
+	}
+}
+
+// TestIdentityProviderTLSConfig shows the framework certificate loads and anything else is refused.
+func TestIdentityProviderTLSConfig(t *testing.T) {
+	_, err := identityProviderClient()
+	require.NoError(t, err)
+	_, err = identityProviderTLSConfig([]byte("not a certificate"))
+	require.Error(t, err)
+}
+
+// oidcTestClient returns an httpx client that trusts only the test server's certificate, the way
+// the step trusts only the identity provider's.
+func oidcTestClient(t *testing.T, srv *httptest.Server) *httpx.Client {
+	t.Helper()
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	tlsConfig, err := identityProviderTLSConfig(certPEM)
+	require.NoError(t, err)
+	return httpx.NewClient(httpx.Options{TLSClientConfig: tlsConfig})
 }
