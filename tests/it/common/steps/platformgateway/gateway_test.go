@@ -4335,3 +4335,24 @@ func TestAwaitUpstreamForwardingFailsFastForARouteWithoutAKnownCluster(t *testin
 	require.Less(t, time.Since(start), 5*time.Second)
 	require.Error(t, g.awaitUpstreamForwarding(ctx, "${CTX:missing}"))
 }
+
+func TestUntilEventSatisfiesWaitsForTheEventThatCarriesTheField(t *testing.T) {
+	check := func(event *analyticsEvent) error {
+		if _, ok := traverseJSON(event.Metadata, "isGuardrailHit"); !ok {
+			return fmt.Errorf("latest analytics event metadata has no field %q", "isGuardrailHit")
+		}
+		return nil
+	}
+	var reads int
+	// The first read finds a late event of an earlier request on the same path; the next finds the
+	// event the scenario caused.
+	latest := func(context.Context) (*analyticsEvent, error) {
+		reads++
+		if reads == 1 {
+			return &analyticsEvent{Metadata: map[string]any{"other": "x"}}, nil
+		}
+		return &analyticsEvent{Metadata: map[string]any{"isGuardrailHit": "true"}}, nil
+	}
+	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", latest, check))
+	require.Equal(t, 2, reads)
+}
