@@ -85,6 +85,8 @@ type IntelligentModelRoutingPolicy struct {
 	contentPath     string
 	requestModel    RequestModelConfig
 	llmConfig       LLMClientConfig
+	auth            authentication
+	tokens          tokenSource // identity modes only
 	httpClient      *http.Client
 }
 
@@ -102,11 +104,19 @@ func GetPolicy(
 	if err := parseParams(params, p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
+	if p.auth.usesIdentity() {
+		tokens, err := useIdentity(p.auth)
+		if err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		p.tokens = tokens
+	}
 
 	slog.Debug("IntelligentModelRouting: Policy initialized",
 		"rules", len(p.routingRules),
 		"defaultModel", p.defaultModel,
 		"llmProvider", p.llmConfig.Provider,
+		"authenticationType", p.auth.typ,
 	)
 
 	return p, nil
@@ -534,6 +544,22 @@ func parseLLMConfig(params map[string]interface{}, p *IntelligentModelRoutingPol
 		p.llmConfig.Model = model
 	} else if provider == "OPENAI" {
 		return fmt.Errorf("'llmModel' is required for OPENAI provider")
+	}
+
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return err
+	}
+	if auth.usesIdentity() && provider != "AZURE_OPENAI" {
+		return fmt.Errorf("%s authentication is only supported for the AZURE_OPENAI LLM provider", auth.typ)
+	}
+	if err := checkAllowedEndpoint(params, endpoint); err != nil {
+		return err
+	}
+	p.auth = auth
+	// An identity mode never sends a key, so the gateway's key is not read.
+	if auth.usesIdentity() {
+		return nil
 	}
 
 	apiKey, ok := params["llmApiKey"].(string)
