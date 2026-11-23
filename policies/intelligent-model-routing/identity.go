@@ -19,7 +19,10 @@ package intelligentmodelrouting
 import (
 	"cmp"
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -284,4 +287,68 @@ func useIdentity(auth authentication) (tokenSource, error) {
 		return nil, fmt.Errorf("authentication type %q can't be used: %w", auth.typ, err)
 	}
 	return tokens, nil
+}
+
+// accessToken returns a token for the gateway's identity, fetched with the request's context. Its
+// error wraps the *azureauthentication.TokenError and never contains a token.
+func (p *IntelligentModelRoutingPolicy) accessToken(ctx context.Context) (string, error) {
+	token, err := p.tokens.Token(ctx, p.auth.tokenScope, azureauthentication.DefaultTokenTimeout)
+	if err != nil {
+		return "", fmt.Errorf("could not obtain an access token for the LLM provider: %w", err)
+	}
+	return token, nil
+}
+
+// logTokenFailure logs a failure to get a token for the gateway's identity and reports whether err
+// was one. A cached failure, already logged, or a request that ended while waiting logs at DEBUG.
+func logTokenFailure(ctx context.Context, err error, auth authentication) bool {
+	var tokenErr *azureauthentication.TokenError
+	if !errors.As(err, &tokenErr) {
+		return false
+	}
+	attrs := []any{"authenticationType", auth.typ, "clientId", auth.logClientID(), "scope", auth.tokenScope}
+	if ctx.Err() != nil {
+		slog.Debug("IntelligentModelRouting: the request ended before an access token was available", attrs...)
+		return true
+	}
+	level := slog.LevelError
+	if tokenErr.Cached {
+		level = slog.LevelDebug
+	}
+	slog.Log(ctx, level, "IntelligentModelRouting: could not obtain an access token for the LLM provider",
+		append([]any{"reason", tokenErr.Reason, "error", err.Error()}, attrs...)...)
+	return true
+}
+
+// logRefusedToken logs an identity's token the LLM refused with 401 or 403, without the LLM's
+// answer, which can name the identity, and reports whether err was one.
+func logRefusedToken(ctx context.Context, err error, auth authentication) bool {
+	if !auth.usesIdentity() {
+		return false
+	}
+	var statusErr *llmStatusError
+	if !errors.As(err, &statusErr) ||
+		(statusErr.StatusCode != http.StatusUnauthorized && statusErr.StatusCode != http.StatusForbidden) {
+		return false
+	}
+	slog.Log(ctx, slog.LevelError, "IntelligentModelRouting: the LLM provider refused the access token",
+		"status", statusErr.StatusCode,
+		"authenticationType", auth.typ,
+		"clientId", auth.logClientID(),
+		"scope", auth.tokenScope)
+	return true
+}
+
+// logIdentityFailure logs a classifier error caused by the gateway's identity and reports whether it
+// did, so the caller skips its own line, which would carry the LLM's answer above DEBUG.
+func logIdentityFailure(ctx context.Context, err error, auth authentication, message string) bool {
+	if logTokenFailure(ctx, err, auth) {
+		return true
+	}
+	if !logRefusedToken(ctx, err, auth) {
+		return false
+	}
+	// Only this DEBUG line keeps the LLM's answer, which tells the causes apart.
+	slog.Debug("IntelligentModelRouting: "+message, "error", err)
+	return true
 }
