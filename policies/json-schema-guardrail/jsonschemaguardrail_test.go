@@ -718,3 +718,48 @@ func TestJSONSchemaGuardrail_ValidateErrorDeclaresFault(t *testing.T) {
 		assertNoVerdictFault(t, got, wantBody, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
 	})
 }
+
+// Mode must buffer a body only for a phase that is configured and enabled. Buffering the response body
+// of a phase that never validates it holds back every streamed (SSE) response until it is complete, so
+// a request-only schema check would silently turn streaming into one buffered reply.
+func TestMode_BuffersOnlyEnabledPhases(t *testing.T) {
+	schema := `{"type":"object"}`
+	cases := []struct {
+		name     string
+		params   map[string]interface{}
+		request  policy.BodyProcessingMode
+		response policy.BodyProcessingMode
+	}{
+		{"request only", map[string]interface{}{
+			"request": map[string]interface{}{"enabled": true, "schema": schema},
+		}, policy.BodyModeBuffer, policy.BodyModeSkip},
+		{"request enabled, response disabled", map[string]interface{}{
+			"request":  map[string]interface{}{"enabled": true, "schema": schema},
+			"response": map[string]interface{}{"enabled": false},
+		}, policy.BodyModeBuffer, policy.BodyModeSkip},
+		{"response only, enabled by default", map[string]interface{}{
+			"response": map[string]interface{}{"schema": schema},
+		}, policy.BodyModeSkip, policy.BodyModeBuffer},
+		{"request disabled, response enabled", map[string]interface{}{
+			"request":  map[string]interface{}{"enabled": false},
+			"response": map[string]interface{}{"enabled": true, "schema": schema},
+		}, policy.BodyModeSkip, policy.BodyModeBuffer},
+		{"both enabled", map[string]interface{}{
+			"request":  map[string]interface{}{"enabled": true, "schema": schema},
+			"response": map[string]interface{}{"enabled": true, "schema": schema},
+		}, policy.BodyModeBuffer, policy.BodyModeBuffer},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := GetPolicy(policy.PolicyMetadata{}, tc.params)
+			if err != nil {
+				t.Fatalf("GetPolicy: %v", err)
+			}
+			m := p.Mode()
+			if m.RequestBodyMode != tc.request || m.ResponseBodyMode != tc.response {
+				t.Fatalf("Mode() = request %v, response %v; want request %v, response %v",
+					m.RequestBodyMode, m.ResponseBodyMode, tc.request, tc.response)
+			}
+		})
+	}
+}

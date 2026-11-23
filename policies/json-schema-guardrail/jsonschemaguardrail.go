@@ -106,13 +106,23 @@ func GetPolicy(
 	return p, nil
 }
 
-
+// Mode buffers a body only for a phase that is configured and enabled. A phase that never validates
+// must not ask for its body: buffering the response body holds back every streamed (SSE) response until
+// it is complete, so a request-only schema check would otherwise turn streaming into one buffered reply.
 func (p *JSONSchemaGuardrailPolicy) Mode() policy.ProcessingMode {
+	requestBodyMode := policy.BodyModeSkip
+	if p.hasRequestParams && p.requestParams.Enabled {
+		requestBodyMode = policy.BodyModeBuffer
+	}
+	responseBodyMode := policy.BodyModeSkip
+	if p.hasResponseParams && p.responseParams.Enabled {
+		responseBodyMode = policy.BodyModeBuffer
+	}
 	return policy.ProcessingMode{
 		RequestHeaderMode:  policy.HeaderModeSkip,
-		RequestBodyMode:    policy.BodyModeBuffer,
+		RequestBodyMode:    requestBodyMode,
 		ResponseHeaderMode: policy.HeaderModeSkip,
-		ResponseBodyMode:   policy.BodyModeBuffer,
+		ResponseBodyMode:   responseBodyMode,
 	}
 }
 
