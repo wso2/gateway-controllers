@@ -66,11 +66,11 @@ Feature: mcp-authz rule sets are checked when a proxy is deployed
       # MAZ #4: a rule name of 257 characters, one over the limit.
       | name of 257 characters   | {"tools":[{"name":"ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt","scopes":{"allOf":["maz-add"]}}]} | params.tools.0.name: String length must be less than or equal to 256 |
 
-  # A valid rule set deploys, and the deployed rule is enforced. "Deployed" is only the
-  # controller's view, so the scenario also sends traffic: the governed tool gets mcp-authz's own
-  # 401 (no mcp-auth is attached, so no identity exists) without reaching the backend, and a tool
-  # no rule names reaches the backend. The 256-character row keeps the 257-character rejection
-  # above honest: the limit is exactly 256.
+  # A rule name of exactly 256 characters deploys, which keeps the 257-character rejection above
+  # honest: the limit is exactly 256. "Deployed" is only the controller's view, so the scenario
+  # also sends traffic: the governed tool gets mcp-authz's own 401 (no mcp-auth is attached, so no
+  # identity exists) without reaching the backend, and a tool no rule names reaches the backend.
+  # A valid rule with an ordinary name (MAZ #1) is shown by every scenario of mcp_authz.feature.
   Scenario Outline: A valid mcp-authz rule set deploys and is enforced (<case>)
     Given I generate a unique resource name from "mcp-authz-valid-rules" and store it as "mcpName"
     And I generate a unique value from "mcp-authz-valid-rules" and store it as "mcpDisplayName"
@@ -87,7 +87,9 @@ Feature: mcp-authz rule sets are checked when a proxy is deployed
       | spec.policies     | [{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"<tool>","scopes":{"allOf":["maz-add"]}}]}}] |
     Then the resource creation response should indicate successful deployment
 
-    When I set header "Content-Type" to "application/json"
+    # Clear the admin login first, so the traffic carries no credentials at all.
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
     And I set header "Accept" to "application/json, text/event-stream"
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401 with body:
       """
@@ -109,8 +111,6 @@ Feature: mcp-authz rule sets are checked when a proxy is deployed
 
     Examples: rule sets the schema accepts
       | case                   | tool     |
-      # MAZ #1: a valid tool rule, with a name and a scope condition.
-      | valid tool rule        | add      |
       # MAZ #4: a rule name of exactly 256 characters is still accepted.
       | name of 256 characters | tttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt |
 

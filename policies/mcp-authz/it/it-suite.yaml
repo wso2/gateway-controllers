@@ -43,8 +43,9 @@ blocks:
         overlay: overlays/mcp-jwt-auth.toml
       - name: testbench
     runners:
+      # No gateway tag: the one scenario that needs a gateway newer than 1.2.0 (a 2026-07-28 request)
+      # gates itself with "the gateway version satisfies".
       - name: mcp-authz-policy
-        tags: "gateway-version>1.2.0"
         features:
           - features/mcp_authz.feature
       - name: mcp-authz
@@ -56,7 +57,3 @@ blocks:
       - name: mcp-authz-validation
         features:
           - features/mcp_authz_validation.feature
-      # No gateway tag, for the same reason as mcp-authz-validation.
-      - name: mcp-authz-rules
-        features:
-          - features/mcp_authz_rules.feature
