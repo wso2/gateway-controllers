@@ -82,6 +82,12 @@ def parse(lines):
     return totals
 
 
+def safe(name):
+    """A policy name made of characters that cannot form markdown or HTML. Names come from the
+    paths in the profile, which a pull request controls, and end up in a pull request comment."""
+    return re.sub(r"[^A-Za-z0-9._/-]", "?", name)
+
+
 def percent(covered, total):
     return 100.0 * covered / total if total else 0.0
 
@@ -105,7 +111,7 @@ def render(totals, collapse=False):
     if below:
         out.append(f"**{len(below)} of {len(totals)} policies are below the {MINIMUM:.0f}% minimum:**")
         out.append("")
-        out.extend(f"- {p}: {percent(*totals[p]):.1f}%" for p in below)
+        out.extend(f"- {safe(p)}: {percent(*totals[p]):.1f}%" for p in below)
     else:
         out.append(f"Every policy meets the {MINIMUM:.0f}% minimum.")
     out.append("")
@@ -114,7 +120,7 @@ def render(totals, collapse=False):
     out.extend(["| Policy | Coverage | Covered / statements |", "| --- | ---: | ---: |"])
     for policy in sorted(totals):
         c, t = totals[policy]
-        out.append(f"| {policy} | {percent(c, t):.1f}% | {c:,} / {t:,} |")
+        out.append(f"| {safe(policy)} | {percent(c, t):.1f}% | {c:,} / {t:,} |")
     out.append("")
     if collapse:
         out.extend(["</details>", ""])

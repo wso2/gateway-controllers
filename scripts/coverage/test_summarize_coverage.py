@@ -85,6 +85,13 @@ class SummarizeTest(unittest.TestCase):
         self.assertLess(report.index("<details>"), report.index("| basic-auth |"))
         self.assertTrue(report.rstrip().endswith("</details>"))
 
+    def test_policy_names_cannot_inject_markdown_or_html(self):
+        profile = [f"{MOD}/evil|<img src=x>[a](http://x)/a.go:1.1,2.1 5 0"]
+        report = summarize.render(summarize.parse(profile))
+        for forbidden in ("<img", "](http", "|<"):
+            self.assertNotIn(forbidden, report)
+        self.assertIn("evil?", report)
+
 
 if __name__ == "__main__":
     unittest.main()

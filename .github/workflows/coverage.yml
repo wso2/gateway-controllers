@@ -46,12 +46,15 @@ jobs:
   coverage:
     name: Integration coverage (latest gateway)
     runs-on: ubuntu-24.04
-    # packages: read lets GITHUB_TOKEN pull the testbench image from GHCR; pull-requests: write
-    # lets the report be commented on the pull request.
+    # packages: read lets GITHUB_TOKEN pull the testbench image from GHCR. This job runs the code
+    # of the pull request (the Makefile, the suites, the scripts), so its token can only read:
+    # docker/login-action leaves it in the runner's docker config for that code to find. The pull
+    # request comment is posted by the separate job below, which runs none of that code.
     permissions:
       contents: read
       packages: read
-      pull-requests: write
+    outputs:
+      comment: ${{ steps.comment.outputs.ready }}
     steps:
       - name: Checkout gateway-controllers
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -113,6 +116,15 @@ jobs:
           REQUESTED_POLICIES: ${{ inputs.policies }}
         run: |
           set -euo pipefail
+          # The values reach the Makefile's shell commands, so only the shapes they may have get in.
+          if [[ -n "$REQUESTED_POLICIES" && ! "$REQUESTED_POLICIES" =~ ^[A-Za-z0-9._/,-]+$ ]]; then
+            echo "::error::policies must be 'all' or a comma-separated list of policy names"
+            exit 1
+          fi
+          if [[ -n "$BLOCK_PARALLEL" && ! "$BLOCK_PARALLEL" =~ ^[0-9]+$ ]]; then
+            echo "::error::block_parallel must be a whole number"
+            exit 1
+          fi
           if [[ -n "$REQUESTED_POLICIES" && "$REQUESTED_POLICIES" != "all" ]]; then
             policies="$REQUESTED_POLICIES"
           else
@@ -138,31 +150,29 @@ jobs:
             echo "No coverage report was produced" | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      # A sticky comment (updated in place on every push) with the global figure, the policies
-      # under the minimum and the full per-policy table. Codecov's own comment (see `comment` in
-      # codecov.yml) needs the Codecov app and CODECOV_TOKEN; this one needs neither. A pull
-      # request from a fork gets a read-only token, so it is skipped there and Codecov's comment
-      # is the report.
-      - name: Comment coverage on the pull request
+      # The text of the pull request comment: the global figure, the policies under the minimum and
+      # the full per-policy table. It is only written here and handed to the job below as a file,
+      # so that the job holding the write permission runs no code of the pull request. A pull
+      # request from a fork gets a read-only token and no comment; Codecov's own comment (see
+      # `comment` in codecov.yml, which needs the Codecov app and CODECOV_TOKEN) is its report.
+      - name: Prepare the pull request comment
+        id: comment
         if: >-
           always() && github.event_name == 'pull_request'
           && github.event.pull_request.head.repo.full_name == github.repository
           && hashFiles('coverage/coverage.txt') != ''
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          marker='<!-- policy-code-coverage -->'
-          { echo "$marker"; python3 scripts/coverage/summarize-coverage.py --collapse coverage/coverage.txt; } > coverage/comment.md
-          id=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
-            --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n 1)
-          if [ -n "$id" ]; then
-            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@coverage/comment.md > /dev/null
-          else
-            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@coverage/comment.md > /dev/null
-          fi
+          mkdir -p coverage/comment
+          { echo '<!-- policy-code-coverage -->'; python3 scripts/coverage/summarize-coverage.py --collapse coverage/coverage.txt; } > coverage/comment/comment.md
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the pull request comment
+        if: always() && steps.comment.outputs.ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-comment
+          path: coverage/comment/comment.md
+          retention-days: 1
 
       - name: Warn when the Codecov token is missing
         if: always()
@@ -196,3 +206,40 @@ jobs:
             coverage/coverage.txt
           if-no-files-found: ignore
           retention-days: 7
+
+  # Posts the comment prepared above. It checks out nothing and runs no code of the pull request:
+  # it downloads one text file and sends it with the gh CLI, so the pull-requests: write token it
+  # holds is out of reach of the pull request. It runs only for a pull request from this
+  # repository; a fork's token cannot write.
+  comment:
+    name: Pull request comment
+    needs: coverage
+    if: >-
+      always() && needs.coverage.outputs.comment == 'true'
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Download the comment
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-comment
+
+      # One comment per pull request, updated in place. Only the bot's own comment is ever
+      # updated: a comment by anyone else that starts with the marker is ignored.
+      - name: Post or update the comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- policy-code-coverage -->'
+          id=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@comment.md > /dev/null
+          fi
