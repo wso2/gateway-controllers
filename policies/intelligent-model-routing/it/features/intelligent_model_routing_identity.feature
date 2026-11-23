@@ -149,7 +149,7 @@ Feature: Intelligent model routing with the gateway's Azure identity
       | spec.version           | ${CTX:apiVersion}          |
       | spec.context           | ${CTX:apiContext}/$version |
       | spec.upstream.main.url | http://testbench:3002      |
-      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"intelligent-model-routing","version":"v0","params":{"llmEndpoint":"http://testbench:3008/openai/deployments/own/chat/completions?api-version=2024-10-21","llmApiKey":"sk-testbench-valid-key","routingRules":[{"name":"own","context":"Programming questions","model":"coding-model"}],"defaultModel":"default-model","requestModel":{"location":"payload","identifier":"$.model"}}}]},{"method":"GET","path":"/health"}] |
+      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"intelligent-model-routing","version":"v0","params":{"llmEndpoint":"http://testbench:3008/openai-azure/openai/deployments/own/chat/completions?api-version=2024-10-21","llmApiKey":"sk-testbench-valid-key","routingRules":[{"name":"own","context":"Programming questions","model":"coding-model"}],"defaultModel":"default-model","requestModel":{"location":"payload","identifier":"$.model"}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 

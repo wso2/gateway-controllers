@@ -20,5 +20,5 @@
 # name, so the policy picks the rule named "coding". The gateway sends its key.
 [policy_configurations.intelligent_model_routing_v1]
 llm_provider = "AZURE_OPENAI"
-llm_provider_endpoint = "http://testbench:3008/openai/deployments/coding/chat/completions?api-version=2024-10-21"
+llm_provider_endpoint = "http://testbench:3008/openai-azure/openai/deployments/coding/chat/completions?api-version=2024-10-21"
 llm_provider_api_key = "sk-testbench-valid-key"

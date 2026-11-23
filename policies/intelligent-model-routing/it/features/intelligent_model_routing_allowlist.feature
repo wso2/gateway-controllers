@@ -67,7 +67,7 @@ Feature: The gateway's lists of allowed authentication types and endpoints for t
       | spec.version           | ${CTX:apiVersion}          |
       | spec.context           | ${CTX:apiContext}/$version |
       | spec.upstream.main.url | http://testbench:3002      |
-      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"intelligent-model-routing","version":"v0","params":{"llmEndpoint":"http://testbench:3008/openai/deployments/assistant/chat/completions?api-version=2024-10-21","azureAuth":{"authenticationType":"workload-identity"},"routingRules":[{"name":"assistant","context":"Programming questions","model":"coding-model"}],"defaultModel":"default-model","requestModel":{"location":"payload","identifier":"$.model"}}}]},{"method":"GET","path":"/health"}] |
+      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"intelligent-model-routing","version":"v0","params":{"llmEndpoint":"http://testbench:3008/openai-azure/openai/deployments/assistant/chat/completions?api-version=2024-10-21","azureAuth":{"authenticationType":"workload-identity"},"routingRules":[{"name":"assistant","context":"Programming questions","model":"coding-model"}],"defaultModel":"default-model","requestModel":{"location":"payload","identifier":"$.model"}}}]},{"method":"GET","path":"/health"}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
@@ -117,4 +117,4 @@ Feature: The gateway's lists of allowed authentication types and endpoints for t
       | case                                                          | params                                                                                                                                                           |
       | no azureAuth, so api-key                                      |                                                                                                                                                                  |
       | an identity that isn't on the list                            | "azureAuth":{"authenticationType":"container-apps"},                                                                                                             |
-      | an allowed identity sent to a resource that isn't on the list | "llmEndpoint":"http://testbench.:3008/openai/deployments/coding/chat/completions?api-version=2024-10-21","azureAuth":{"authenticationType":"workload-identity"}, |
+      | an allowed identity sent to a resource that isn't on the list | "llmEndpoint":"http://testbench.:3008/openai-azure/openai/deployments/coding/chat/completions?api-version=2024-10-21","azureAuth":{"authenticationType":"workload-identity"}, |
