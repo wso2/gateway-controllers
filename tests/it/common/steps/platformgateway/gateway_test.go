@@ -4345,14 +4345,36 @@ func TestUntilEventSatisfiesWaitsForTheEventThatCarriesTheField(t *testing.T) {
 	}
 	var reads int
 	// The first read finds a late event of an earlier request on the same path; the next finds the
-	// event the scenario caused.
-	latest := func(context.Context) (*analyticsEvent, error) {
+	// event the scenario caused as well.
+	forPath := func(context.Context) ([]analyticsEvent, error) {
 		reads++
+		stale := analyticsEvent{Metadata: map[string]any{"other": "x"}}
 		if reads == 1 {
-			return &analyticsEvent{Metadata: map[string]any{"other": "x"}}, nil
+			return []analyticsEvent{stale}, nil
 		}
-		return &analyticsEvent{Metadata: map[string]any{"isGuardrailHit": "true"}}, nil
+		return []analyticsEvent{stale, {Metadata: map[string]any{"isGuardrailHit": "true"}}}, nil
 	}
-	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", latest, check))
+	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", forPath, check))
 	require.Equal(t, 2, reads)
+}
+
+func TestUntilEventSatisfiesFindsTheRightEventBehindALateOne(t *testing.T) {
+	check := func(event *analyticsEvent) error {
+		if _, ok := traverseJSON(event.Metadata, "isGuardrailHit"); !ok {
+			return fmt.Errorf("latest analytics event metadata has no field %q", "isGuardrailHit")
+		}
+		return nil
+	}
+	var reads int
+	// Both events are already buffered, and the late event of the earlier request was stored last:
+	// the newest event of the path is the wrong one, and the step must still find the right one.
+	forPath := func(context.Context) ([]analyticsEvent, error) {
+		reads++
+		return []analyticsEvent{
+			{Metadata: map[string]any{"isGuardrailHit": "true"}},
+			{Metadata: map[string]any{"other": "x"}},
+		}, nil
+	}
+	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", forPath, check))
+	require.Equal(t, 1, reads)
 }

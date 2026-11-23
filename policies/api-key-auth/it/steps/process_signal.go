@@ -128,12 +128,17 @@ func (s *Steps) sendProcessSignal(ctx context.Context, signal, process, service 
 	if err != nil {
 		return err
 	}
+	if signal == "STOP" {
+		// Recorded before the script runs: it can stop some matches and then fail, and the
+		// after-scenario hook must still resume them.
+		if err := s.rememberStoppedProcess(ctx, service, process); err != nil {
+			return err
+		}
+	}
 	if _, err := stack.Exec(ctx, resolved, []string{"bash", "-c", processSignalScript(signal, process)}); err != nil {
 		return fmt.Errorf("sending %s to process %q in service %q: %w", signal, process, service, err)
 	}
 	switch signal {
-	case "STOP":
-		return s.rememberStoppedProcess(ctx, service, process)
 	case "CONT":
 		return s.forgetStoppedProcess(ctx, service, process)
 	default:
