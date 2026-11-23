@@ -640,7 +640,10 @@ Feature: Basic auth policy
 
     When I clear all headers
     And I set header "Authorization" to "Basic YmEtdXNlcjpiYS1zZWNyZXQ/MQ=="
-    And I send a "<method>" request to "${CTX:apiContext}/${CTX:apiVersion}/resource"
+    # The 401 above is answered by the policy before the request reaches the upstream, so it does not
+    # show that the route to the upstream is ready; the first request that gets through can still be
+    # answered with an empty 503. Poll for the 200; the poll still fails if it never comes.
+    And I send a "<method>" request to "${CTX:apiContext}/${CTX:apiVersion}/resource" until status 200
     Then the response status code should be 200
     And the JSON response field "method" should be "<method>"
 
