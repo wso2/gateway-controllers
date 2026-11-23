@@ -221,7 +221,7 @@ const coverageVolume = "/coverage"
 // starts the gateway-builder without the coverage switches, and offers no option to add them to a
 // build from a released gateway, so the command is changed on its way to docker:
 //   - the builder run, which compiles the policy engine, gets COVERAGE and COVERPKG;
-//   - the build of the runtime image has the volume declared in its Dockerfile.
+//   - the build of the runtime image is given a copy of its Dockerfile that declares the volume.
 //
 // Every other command passes through.
 type coverageRunner struct{ builder.Runner }
@@ -233,9 +233,13 @@ func (r coverageRunner) Run(ctx context.Context, command builder.Command) error 
 		command.Args = append([]string{"docker", "run", "-e", "COVERAGE=true", "-e", "COVERPKG=" + CoveragePackages}, args[2:]...)
 	case len(args) >= 3 && args[0] == "docker" && args[1] == "buildx":
 		if i := slices.Index(args, "-f"); i >= 0 && i+1 < len(args) && isRuntimeDockerfile(args[i+1]) {
-			if err := declareCoverageVolume(args[i+1]); err != nil {
+			patched, err := dockerfileWithCoverageVolume(args[i+1])
+			if err != nil {
 				return err
 			}
+			defer os.RemoveAll(filepath.Dir(patched))
+			command.Args = slices.Clone(args)
+			command.Args[i+1] = patched
 		}
 	}
 	return r.Runner.Run(ctx, command)
@@ -248,18 +252,25 @@ func isRuntimeDockerfile(path string) bool {
 	return strings.HasSuffix(path, "/gateway-runtime/Dockerfile")
 }
 
-// declareCoverageVolume appends the coverage volume to the runtime image's Dockerfile.
-func declareCoverageVolume(dockerfile string) error {
-	file, err := os.OpenFile(dockerfile, os.O_WRONLY|os.O_APPEND, 0)
+// dockerfileWithCoverageVolume writes a copy of the Dockerfile with the coverage volume declared
+// and returns its path, in a folder of its own that the caller removes. The original is left
+// alone: the gateway-builder runs as root in its container, so on Linux the file it wrote is
+// not writable by this process. The build context stays the folder of the original, so the copy
+// finds the same files.
+func dockerfileWithCoverageVolume(dockerfile string) (string, error) {
+	content, err := os.ReadFile(dockerfile)
 	if err != nil {
-		return fmt.Errorf("declaring the coverage volume: %w", err)
+		return "", fmt.Errorf("declaring the coverage volume: %w", err)
 	}
-	_, werr := fmt.Fprintf(file, "\n# Added for a coverage run: counters survive the container.\nVOLUME %s\n", coverageVolume)
-	if cerr := file.Close(); werr == nil {
-		werr = cerr
+	dir, err := os.MkdirTemp("", "gateway-runtime-coverage-")
+	if err != nil {
+		return "", fmt.Errorf("declaring the coverage volume: %w", err)
 	}
-	if werr != nil {
-		return fmt.Errorf("declaring the coverage volume: %w", werr)
+	patched := filepath.Join(dir, "Dockerfile")
+	content = append(content, fmt.Appendf(nil, "\n# Added for a coverage run: counters survive the container.\nVOLUME %s\n", coverageVolume)...)
+	if err := os.WriteFile(patched, content, 0o644); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("declaring the coverage volume: %w", err)
 	}
-	return nil
+	return patched, nil
 }

@@ -289,6 +289,11 @@ func TestBuildWithoutCoverageLeavesTheBuilderRunAlone(t *testing.T) {
 type writingRunner struct {
 	recordingRunner
 	t *testing.T
+
+	// keep makes it read the Dockerfile the runtime image build is given, before the build ends.
+	keep        bool
+	dockerfiles string
+	patchedPath string
 }
 
 func (r *writingRunner) Run(ctx context.Context, command builder.Command) error {
@@ -300,34 +305,57 @@ func (r *writingRunner) Run(ctx context.Context, command builder.Command) error 
 			}
 		}
 	}
+	if r.keep && len(command.Args) > 1 && command.Args[1] == "buildx" {
+		if i := slices.Index(command.Args, "-f"); i >= 0 && strings.Contains(strings.Join(command.Args, " "), "gateway-runtime") {
+			if content, err := os.ReadFile(command.Args[i+1]); err == nil {
+				r.dockerfiles = string(content)
+				r.patchedPath = command.Args[i+1]
+			}
+		}
+	}
 	return r.recordingRunner.Run(ctx, command)
 }
 
-func TestCoverageBuildDeclaresTheCoverageVolumeInTheRuntimeDockerfile(t *testing.T) {
+func TestCoverageBuildGivesTheRuntimeImageADockerfileWithTheVolumeAndLeavesTheOriginalAlone(t *testing.T) {
 	policies := stagePoliciesForBuild(t)
-	runner := &writingRunner{t: t}
-	var dockerfile string
+	runner := &writingRunner{t: t, keep: true}
 	_, err := Build(context.Background(), BuildOptions{PoliciesDir: policies, Version: "latest", Runner: runner, Coverage: true})
 	require.NoError(t, err)
+
+	var original string
 	for _, command := range runner.commands {
-		if i := slices.Index(command.Args, "-f"); i >= 0 && isRuntimeDockerfile(command.Args[i+1]) {
-			dockerfile = command.Args[i+1]
+		if i := slices.Index(command.Args, "-f"); i >= 0 && command.Args[1] == "buildx" && strings.Contains(strings.Join(command.Args, " "), "gateway-runtime") {
+			original = command.Args[i+1]
 		}
 	}
-	require.NotEmpty(t, dockerfile, "the runtime image build names its Dockerfile")
+	require.NotEmpty(t, original, "the runtime image build names its Dockerfile")
+	require.Contains(t, runner.dockerfiles, "VOLUME /coverage", "the build was given a Dockerfile that declares the volume")
+	require.NotContains(t, runner.dockerfiles, "FROM runtime\nVOLUME", "the volume line follows the original content")
+	require.True(t, strings.HasPrefix(runner.dockerfiles, "FROM runtime\n"))
+	require.NotEqual(t, "", runner.patchedPath)
+	require.NoFileExists(t, runner.patchedPath, "the copy is removed after the build")
 }
 
-func TestDeclareCoverageVolumeAppendsToTheDockerfile(t *testing.T) {
+func TestDockerfileWithCoverageVolumeCopiesAndLeavesTheOriginalAlone(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gateway-runtime", "Dockerfile")
 	writeFile(t, path, "FROM runtime\nENTRYPOINT [\"/entry\"]\n")
+	// The gateway-builder writes as root: the original must not need to be writable.
+	require.NoError(t, os.Chmod(path, 0o444))
 
-	require.NoError(t, declareCoverageVolume(path))
+	patched, err := dockerfileWithCoverageVolume(path)
+	require.NoError(t, err)
+	defer os.RemoveAll(filepath.Dir(patched))
 
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(patched)
 	require.NoError(t, err)
 	require.True(t, strings.HasPrefix(string(content), "FROM runtime\nENTRYPOINT"))
 	require.True(t, strings.HasSuffix(string(content), "VOLUME /coverage\n"))
-	require.ErrorContains(t, declareCoverageVolume(path+".missing"), "declaring the coverage volume")
+	original, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "FROM runtime\nENTRYPOINT [\"/entry\"]\n", string(original))
+
+	_, err = dockerfileWithCoverageVolume(path + ".missing")
+	require.ErrorContains(t, err, "declaring the coverage volume")
 }
 
 func TestOnlyTheRuntimeImageBuildIsRecognised(t *testing.T) {
