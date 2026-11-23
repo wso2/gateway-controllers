@@ -4,7 +4,7 @@
 
 Apply this rule whenever adding a new policy under `policies/`, adding a new version module beside v1 (`policies/<name>/v<N>`), adding source files or packages to an existing policy, or changing the code of a policy that is going to `main`.
 
-Coverage is reported to Codecov per policy: `codecov.yml` holds one component for each policy Go module, and Codecov rolls them up into the repository-wide (global) figure. A policy that has no component is not tracked, and its coverage is missing from the per-policy report on the pull request. The component list is generated from the policy modules by `scripts/coverage/generate-codecov-config.py`; CI (`.github/workflows/coverage.yml`) fails when `codecov.yml` is out of date.
+Coverage is that of the integration suites (`policies/<name>/it`), not of unit tests. The gateway is built with every policy's code instrumented, the suites run against it, and the counters the gateway writes when it stops are merged into one report that is uploaded to Codecov. `codecov.yml` holds one component for each policy Go module, and Codecov rolls them up into the repository-wide (global) figure. A policy that has no component is not tracked, and its coverage is missing from the per-policy report on the pull request. A policy with no integration suite reports 0%. The component list is generated from the policy modules by `scripts/coverage/generate-codecov-config.py`; CI (`.github/workflows/coverage.yml`) fails when `codecov.yml` is out of date.
 
 ## Directives
 
@@ -16,23 +16,21 @@ Coverage is reported to Codecov per policy: `codecov.yml` holds one component fo
    - Policy code outside `policies/<name>/` (a new shared directory, a new top-level module) is not tracked by any component. Extend `scripts/coverage/generate-codecov-config.py` to emit one; do not add a hand-written component that the generator would drop.
    - Code under `policies/*/it/` and `tests/` is test code and is deliberately ignored by `codecov.yml`; do not put policy logic there.
 
-3. **Run the coverage locally before submitting.** For every policy the change adds or modifies, run:
+3. **Run the coverage locally before submitting.** Docker is required (see `tests/it/CLAUDE.md`). For every policy the change adds or modifies, run:
 
    ```bash
-   make unit-coverage POLICIES=<name>[,<name>/v<N>,...]
+   make it-coverage POLICIES=<name>[,<name>/v<N>,...] DB=sqlite
    make coverage-summary
    ```
 
-   `POLICIES` is a comma-separated list; a version module is `<name>/v<N>`. The first command runs the unit tests of those modules and writes `coverage/coverage.txt` (ignored by git); the second prints the policy-wise percentage. With `POLICIES` narrowed, the global figure covers only the selected policies. Run `make unit-coverage` with no `POLICIES` to see the repository-wide figure the change leaves behind.
+   `it-coverage` builds the latest gateway with every policy instrumented, runs the named policies' integration suites against it, and writes `coverage/coverage.txt` (ignored by git); `coverage-summary` prints the policy-wise percentage. The instrumented policy engine exists only on the latest gateway, so this always runs there, and `DB=sqlite` limits the run to one database, which does not change which policy code runs. The summary lists every policy that ran or was built into the gateway, so read the row of the policy you changed. With `POLICIES` narrowed, the global figure covers only the suites that ran; run `make it-coverage` with no `POLICIES` to see the repository-wide figure the change leaves behind. See "Policy code coverage" in `tests/it/CLAUDE.md` for how it works and for what to do when it fails.
 
-4. **Reach at least 80% coverage for each policy.** Every new or modified policy must show 80% or more in `make coverage-summary` before the change is submitted to `main`. A policy below 80% is not ready: add tests for the uncovered paths, starting with the rejection and error branches.
-   - Do not lower the bar to pass it: no ignoring files or packages in `codecov.yml`, no moving logic into an ignored directory, no tests that run code without asserting on it.
-   - Unit tests must also pass. A module whose tests fail or crash writes no usable report, and a policy missing from the summary is a failure to fix, not a pass.
-   - A policy with no tests reports 0% and fails this directive.
+4. **Reach at least 80% coverage for each policy.** Every new or modified policy must show 80% or more in `make coverage-summary` before the change is submitted to `main`. A policy below 80% is not ready: add scenarios for the uncovered paths, starting with the rejection and error branches.
+   - Do not lower the bar to pass it: no ignoring files or packages in `codecov.yml`, no moving logic into an ignored directory, no scenarios that send requests without asserting on the result.
+   - The suites must also pass. A block that fails or whose gateway does not stop cleanly writes no counters, so a policy missing from the summary or far below its usual figure is a failure to fix, not a pass.
+   - A policy with no integration suite reports 0% and fails this directive; add its suite first (`make it-scaffold POLICY=<name>`).
 
 5. **State the numbers in the pull request.** List each touched policy with its local coverage percentage, and note any policy that stays under 80% with the reason.
-
-6. **Know what the figure measures.** The percentage comes from the policies' unit tests (`make unit-coverage`). The integration suites under `policies/*/it` run against a built gateway and are not part of it, so they neither raise nor replace this figure; a policy still needs its integration suite as the other rules require.
 
 ## Example
 
@@ -40,15 +38,15 @@ Coverage is reported to Codecov per policy: `codecov.yml` holds one component fo
 # New policy "my-policy" and a change to "backend-jwt/v2"
 make generate-codecov-config                      # adds the my-policy component to codecov.yml
 make validate-codecov-config                      # must print: codecov.yml is up to date
-make unit-coverage POLICIES=my-policy,backend-jwt/v2
+make it-coverage POLICIES=my-policy,backend-jwt/v2 DB=sqlite
 make coverage-summary
 # | my-policy      | 86.4% | ...   -> at least 80%, ready
-# | backend-jwt/v2 | 74.0% | ...   -> below 80%, add tests before submitting
+# | backend-jwt/v2 | 74.0% | ...   -> below 80%, add scenarios before submitting
 ```
 
 > **Verification Checklist before outputting code:**
 > * Is a new policy or version module in `codecov.yml`, produced by `make generate-codecov-config`, and does `make validate-codecov-config` pass?
 > * Is every new source file or package covered by a component, with the nested-version-module and outside-`policies/` cases checked?
-> * Did `make unit-coverage POLICIES=...` and `make coverage-summary` run locally for every new or modified policy?
-> * Is each of those policies at 80% or more, with passing tests, and not reached by ignoring code or writing assertion-free tests?
+> * Did `make it-coverage POLICIES=...` and `make coverage-summary` run locally for every new or modified policy?
+> * Is each of those policies at 80% or more, with passing suites, and not reached by ignoring code or writing scenarios that assert nothing?
 > * Does the pull request description state the per-policy coverage?

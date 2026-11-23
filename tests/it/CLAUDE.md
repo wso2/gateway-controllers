@@ -101,6 +101,35 @@ module, which the workspace does not list. Run `make it-workspace` again after a
   suite file against the framework standards; `make it-unit` runs the unit tests of the shared
   steps and of each policy's own steps. Both take `POLICIES` too.
 
+## Policy code coverage
+
+```bash
+make it-coverage POLICIES=<name> DB=sqlite     # run the suites with coverage, write coverage/coverage.txt
+make coverage-summary                          # the policy-wise percentages and the global figure
+```
+
+The coverage of a policy is the part of its code that the integration scenarios run. `make it-coverage`
+is `make it` on the latest gateway with three additions, none of which touch the framework:
+
+- `build-gateway -coverage` has the gateway-builder compile the policy engine with every policy's
+  code instrumented (`COVERAGE` and `COVERPKG`, see `tests/it/common/gateway/build.go`). The
+  runtime image also declares `/coverage` a volume. Only the builder of the latest gateway can do
+  this, so a coverage run needs `GATEWAY_VERSION=latest`.
+- `run-suites -coverage-out` sets `IT_COLLECT_COVERAGE`, which makes each suite give the gateway
+  `GOCOVERDIR=/coverage` (`gateway.EnableCoverageCollection`). The policy engine writes its counters
+  there when it stops, at the end of the block.
+- The framework removes a block's containers at its end, and its own coverage collector works only
+  for gateways it builds from source. So `run-suites` starts, beside each runtime container, a small
+  helper that mounts the runtime's `/coverage` volume (`tests/it/common/itcoverage`). The volume
+  outlives the runtime, and the counters are copied out of the helpers when the run ends.
+  `scripts/coverage/it-coverage-report.sh` merges them into `coverage/coverage.txt`.
+
+If the report says there are no counters, look for `coverage:` lines in the run output: a runtime
+without the volume, a helper that could not start, or a block that never booted its gateway leave
+none. A block that fails still writes its counters when its gateway stops cleanly. The helpers carry
+the label `gateway-controllers.it-coverage=helper`; `docker ps -a --filter label=gateway-controllers.it-coverage=helper`
+lists any a killed run left behind.
+
 ## How long the suites took
 
 `BLOCK_PARALLEL` is a number of lanes. Each lane runs one block at a time and takes the next waiting
