@@ -30,10 +30,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// owners is the block-to-policy table the tests give a collector; block is the block every fake
+// runtime sits in.
+var owners = map[string]string{"blk": "pol", "backend-jwt-v2-x": "backend-jwt/v2"}
+
 type fakeDocker struct {
 	mu    sync.Mutex
 	calls [][]string
 	fail  map[string]error
+	// block is the label of the fake block network; "blk" when empty.
+	block string
 }
 
 func (f *fakeDocker) run(_ context.Context, args ...string) ([]byte, error) {
@@ -45,7 +51,16 @@ func (f *fakeDocker) run(_ context.Context, args ...string) ([]byte, error) {
 	}
 	switch args[0] {
 	case "inspect":
+		if strings.Contains(args[2], "NetworkID") {
+			return []byte("net-" + args[len(args)-1] + " \n"), nil
+		}
 		return []byte("vol-" + args[len(args)-1] + "\n"), nil
+	case "network":
+		block := f.block
+		if block == "" {
+			block = "blk"
+		}
+		return []byte(block + "\n"), nil
 	case "run":
 		// run -d -u 0 --label L -v vol:/coverage ...
 		volume, _, _ := strings.Cut(args[7], ":")
@@ -66,7 +81,7 @@ func (f *fakeDocker) joined() []string {
 
 func TestEveryRuntimeGetsAHelperThatSharesItsVolume(t *testing.T) {
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", t.TempDir(), docker.run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, docker.run, nil)
 
 	c.watch(context.Background(), strings.NewReader("abc\n\ndef\n"))
 
@@ -82,7 +97,7 @@ func TestEveryRuntimeGetsAHelperThatSharesItsVolume(t *testing.T) {
 func TestCollectCopiesTheCountersOutOfEachHelperAndRemovesThemWithTheirVolumes(t *testing.T) {
 	out := t.TempDir()
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", out, docker.run, nil)
+	c := newCollector("local/runtime:latest", out, owners, docker.run, nil)
 	c.watch(context.Background(), strings.NewReader("abc\ndef\n"))
 	docker.calls = nil
 
@@ -97,7 +112,7 @@ func TestCollectCopiesTheCountersOutOfEachHelperAndRemovesThemWithTheirVolumes(t
 		require.Contains(t, calls, "volume rm -f vol-"+strings.TrimPrefix(helper, "helper-"))
 	}
 	for _, n := range []string{"1", "2"} {
-		info, err := os.Stat(filepath.Join(out, n))
+		info, err := os.Stat(filepath.Join(out, "pol", n))
 		require.NoError(t, err)
 		require.True(t, info.IsDir())
 	}
@@ -105,7 +120,7 @@ func TestCollectCopiesTheCountersOutOfEachHelperAndRemovesThemWithTheirVolumes(t
 
 func TestAHelperThatCannotBeStartedIsReportedAndTheOthersStillCollect(t *testing.T) {
 	docker := &fakeDocker{fail: map[string]error{"run": errors.New("no such container")}}
-	c := newCollector("local/runtime:latest", t.TempDir(), docker.run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, docker.run, nil)
 	c.watch(context.Background(), strings.NewReader("abc\n"))
 
 	copied, err := c.Collect(context.Background())
@@ -115,10 +130,12 @@ func TestAHelperThatCannotBeStartedIsReportedAndTheOthersStillCollect(t *testing
 }
 
 func TestStartNeedsAnImageAndAFolder(t *testing.T) {
-	_, err := Start(context.Background(), "", "out", nil)
+	_, err := Start(context.Background(), "", "out", owners, nil)
 	require.Error(t, err)
-	_, err = Start(context.Background(), "image", " ", nil)
+	_, err = Start(context.Background(), "image", " ", owners, nil)
 	require.Error(t, err)
+	_, err = Start(context.Background(), "image", "out", nil, nil)
+	require.ErrorContains(t, err, "owner of every block")
 }
 
 func TestEventsArePrintedAsContainerIds(t *testing.T) {
@@ -131,7 +148,7 @@ func TestEventsArePrintedAsContainerIds(t *testing.T) {
 
 func TestAHelperStartingIsNotFollowedAsARuntime(t *testing.T) {
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", t.TempDir(), docker.run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, docker.run, nil)
 
 	// The helper is made from the runtime image, so its own start is in the stream too.
 	c.watch(context.Background(), strings.NewReader("abc \nhelper-abc "+labelValue+"\n"))
@@ -143,7 +160,7 @@ func TestAHelperStartingIsNotFollowedAsARuntime(t *testing.T) {
 
 func TestARuntimeThatStartsAgainIsFollowedOnce(t *testing.T) {
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", t.TempDir(), docker.run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, docker.run, nil)
 
 	c.watch(context.Background(), strings.NewReader("abc \nabc \n"))
 
@@ -158,7 +175,7 @@ func TestARuntimeThatStartsAgainIsFollowedOnce(t *testing.T) {
 
 func TestARuntimeWithoutACoverageVolumeIsReported(t *testing.T) {
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", t.TempDir(), func(ctx context.Context, args ...string) ([]byte, error) {
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, func(ctx context.Context, args ...string) ([]byte, error) {
 		if args[0] == "inspect" {
 			return []byte("\n"), nil
 		}
@@ -175,7 +192,7 @@ func TestStartRefusesAFolderThatAlreadyHoldsCounters(t *testing.T) {
 	out := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(out, "1", "coverage"), 0o755))
 
-	_, err := Start(context.Background(), "local/runtime:latest", out, nil)
+	_, err := Start(context.Background(), "local/runtime:latest", out, owners, nil)
 
 	require.ErrorContains(t, err, "is not empty")
 	require.DirExists(t, filepath.Join(out, "1"), "nothing is deleted to make room")
@@ -191,7 +208,7 @@ func TestAFolderThatCannotBeMadeStillGetsItsHelperAndVolumeRemoved(t *testing.T)
 	blocker := filepath.Join(t.TempDir(), "file")
 	require.NoError(t, os.WriteFile(blocker, nil, 0o644))
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", blocker, docker.run, nil)
+	c := newCollector("local/runtime:latest", blocker, owners, docker.run, nil)
 	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
 	docker.calls = nil
 
@@ -206,7 +223,7 @@ func TestAFolderThatCannotBeMadeStillGetsItsHelperAndVolumeRemoved(t *testing.T)
 }
 
 func TestTheEventStreamEndingByItselfIsAFailureButCollectEndingItIsNot(t *testing.T) {
-	c := newCollector("local/runtime:latest", t.TempDir(), (&fakeDocker{}).run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, (&fakeDocker{}).run, nil)
 	c.streamEnded(errors.New("exit status 1"))
 	c.stopping.Store(true)
 	c.streamEnded(errors.New("signal: killed"))
@@ -219,7 +236,7 @@ func TestTheEventStreamEndingByItselfIsAFailureButCollectEndingItIsNot(t *testin
 }
 
 func TestAStreamThatClosesWithoutAnErrorIsStillReported(t *testing.T) {
-	c := newCollector("local/runtime:latest", t.TempDir(), (&fakeDocker{}).run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, (&fakeDocker{}).run, nil)
 	c.streamEnded(nil)
 
 	_, err := c.Collect(context.Background())
@@ -228,7 +245,7 @@ func TestAStreamThatClosesWithoutAnErrorIsStillReported(t *testing.T) {
 }
 
 func TestWatchReturnsTheErrorThatEndedTheReading(t *testing.T) {
-	c := newCollector("local/runtime:latest", t.TempDir(), (&fakeDocker{}).run, nil)
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, (&fakeDocker{}).run, nil)
 
 	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
 	require.ErrorIs(t, c.watch(context.Background(), failingReader{}), errReadFailed)
@@ -243,7 +260,7 @@ func (failingReader) Read([]byte) (int, error) { return 0, errReadFailed }
 func TestEveryDockerCommandOfTheCollectorHasATimeLimit(t *testing.T) {
 	var unbounded []string
 	docker := &fakeDocker{}
-	c := newCollector("local/runtime:latest", t.TempDir(), func(ctx context.Context, args ...string) ([]byte, error) {
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, func(ctx context.Context, args ...string) ([]byte, error) {
 		if _, bounded := ctx.Deadline(); !bounded {
 			unbounded = append(unbounded, args[0])
 		}
@@ -258,4 +275,45 @@ func TestEveryDockerCommandOfTheCollectorHasATimeLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, unbounded, "these docker commands could wait forever")
 	require.Len(t, c.helpers, 1)
+}
+
+func TestCountersAreKeptInTheFolderOfThePolicyWhoseSuiteStartedTheRuntime(t *testing.T) {
+	out := t.TempDir()
+	docker := &fakeDocker{block: "backend-jwt-v2-x"}
+	c := newCollector("local/runtime:latest", out, owners, docker.run, nil)
+	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
+
+	copied, err := c.Collect(context.Background())
+
+	require.NoError(t, err)
+	require.Equal(t, 1, copied)
+	require.DirExists(t, filepath.Join(out, "backend-jwt__v2", "1"), "a version module's slash is not a folder separator")
+	require.Equal(t, "backend-jwt__v2", PolicyDir("backend-jwt/v2"))
+}
+
+func TestARuntimeOfABlockNobodyOwnsIsReportedAndGetsNoHelper(t *testing.T) {
+	docker := &fakeDocker{block: "somebody-elses-block"}
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, docker.run, nil)
+	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
+
+	copied, err := c.Collect(context.Background())
+
+	require.Zero(t, copied)
+	require.ErrorContains(t, err, `its block "somebody-elses-block" is not a block of this run`)
+	require.NotContains(t, strings.Join(docker.joined(), "\n"), "run -d", "its counters would belong to no policy")
+}
+
+func TestARuntimeOnNoBlockNetworkIsReported(t *testing.T) {
+	docker := &fakeDocker{}
+	c := newCollector("local/runtime:latest", t.TempDir(), owners, func(ctx context.Context, args ...string) ([]byte, error) {
+		if args[0] == "network" {
+			return []byte("\n"), nil
+		}
+		return docker.run(ctx, args...)
+	}, nil)
+	require.NoError(t, c.watch(context.Background(), strings.NewReader("abc \n")))
+
+	_, err := c.Collect(context.Background())
+
+	require.ErrorContains(t, err, "carries the "+blockLabel+" label")
 }

@@ -18,6 +18,8 @@ on:
       - 'policies/**'
       - 'tests/it/**'
       - 'scripts/it/**'
+      - 'scripts/coverage/**'
+      - 'codecov.yml'
       - 'Makefile'
       - '.github/workflows/it.yml'
 
@@ -52,6 +54,9 @@ jobs:
           python3 scripts/it/test_check_framework_pin.py
           python3 scripts/it/test_generate_workspace.py
           python3 scripts/it/test_render_timeline.py
+          python3 scripts/coverage/test_summarize_coverage.py
+          python3 scripts/coverage/test_own_suite_profile.py
+          make validate-codecov-config
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
             python3 scripts/it/changed-policies.py --policies all
           else
@@ -103,7 +108,10 @@ jobs:
           - gateway_version: "1.2.0"
           - gateway_version: "1.1.0"
             gateway_host: docker.io/isurangaws
+          # The latest gateway is the one whose policy engine can be built with coverage, so this leg
+          # also reports the coverage of the policies (see "Policy code coverage" in tests/it/CLAUDE.md).
           - gateway_version: "latest"
+            coverage: true
 
     steps:
       - name: Checkout gateway-controllers
@@ -170,6 +178,9 @@ jobs:
           POLICIES: ${{ needs.detect.outputs.policies }}
           BLOCK_PARALLEL: ${{ inputs.block_parallel || vars.IT_BLOCK_PARALLEL }}
           IT_TIMELINE: ${{ github.workspace }}/it-timeline-${{ matrix.gateway_version }}.json
+          # Set on the coverage leg only: builds the gateway with every policy instrumented and
+          # collects the counters of the runs there.
+          IT_COVERAGE_DIR: ${{ matrix.coverage && 'coverage/raw' || '' }}
         run: |
           set -euo pipefail
           # Record the runner's memory and load while the suites run, to choose BLOCK_PARALLEL from.
@@ -182,6 +193,7 @@ jobs:
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           make it POLICIES="$POLICIES" GATEWAY_VERSION="$GATEWAY_VERSION" GATEWAY_HOST="$GATEWAY_HOST" \
             ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} IT_TIMELINE="$IT_TIMELINE" \
+            ${IT_COVERAGE_DIR:+IT_COVERAGE_DIR="$IT_COVERAGE_DIR"} \
             2>&1 | tee "$GITHUB_WORKSPACE/policy-it-$GATEWAY_VERSION.log"
 
       # The time each policy suite took on this gateway version, in the run summary. It is best
@@ -196,6 +208,71 @@ jobs:
           python3 gateway-controllers/scripts/it/render-timeline.py \
             --input "$GITHUB_WORKSPACE/it-timeline-$GATEWAY_VERSION.json" >> "$GITHUB_STEP_SUMMARY"
 
+      # The coverage of the policies on this leg, taken from the counters the suites collected. The
+      # steps below only report: they never fail the job, which the suites and their collection above
+      # decide. Each policy is credited with the runs of its own suite alone.
+      - name: Merge the coverage of the suites
+        if: always() && matrix.coverage
+        id: coverage
+        continue-on-error: true
+        working-directory: gateway-controllers
+        run: scripts/coverage/it-coverage-report.sh coverage/raw coverage
+
+      - name: Summarise policy-wise and global coverage
+        if: always() && matrix.coverage && steps.coverage.outcome == 'success'
+        continue-on-error: true
+        working-directory: gateway-controllers
+        run: python3 scripts/coverage/summarize-coverage.py coverage/coverage.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
+      # The text of the pull request comment: the global figure, the policies under the minimum and
+      # the full per-policy table. It is only written here and handed to the comment job below as a
+      # file, so that the job holding the write permission runs no code of the pull request. A pull
+      # request from a fork gets a read-only token and no comment; Codecov's own comment (see
+      # `comment` in codecov.yml, which needs the Codecov app and CODECOV_TOKEN) is its report.
+      - name: Prepare the pull request comment
+        id: comment
+        if: >-
+          always() && matrix.coverage && steps.coverage.outcome == 'success'
+          && github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository
+        continue-on-error: true
+        working-directory: gateway-controllers
+        run: |
+          mkdir -p coverage/comment
+          { echo '<!-- policy-code-coverage -->'; python3 scripts/coverage/summarize-coverage.py --collapse coverage/coverage.txt; } > coverage/comment/comment.md
+
+      - name: Upload the pull request comment
+        if: always() && steps.comment.outcome == 'success'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage-comment
+          path: gateway-controllers/coverage/comment/comment.md
+          retention-days: 1
+
+      - name: Warn when the Codecov token is missing
+        if: always() && matrix.coverage && steps.coverage.outcome == 'success'
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -z "$CODECOV_TOKEN" ]; then
+            echo "::warning::CODECOV_TOKEN is not available, so the Codecov upload is rejected and Codecov posts no pull request comment. Add the CODECOV_TOKEN secret and install the Codecov app on this repository (pull requests from forks never receive the secret)."
+          fi
+
+      # The report is one file holding every policy; Codecov splits it into per-policy
+      # components by path. Listed explicitly, with search off, so that only this report is
+      # uploaded. The checkout is in a subfolder, which is where Codecov finds the repository.
+      - name: Upload coverage to Codecov
+        if: always() && matrix.coverage && steps.coverage.outcome == 'success'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          working-directory: gateway-controllers
+          disable_search: true
+          files: coverage/coverage.txt
+          flags: integration
+          fail_ci_if_error: false
+
       - name: Upload the test output
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -205,6 +282,7 @@ jobs:
             policy-it-${{ matrix.gateway_version }}.log
             resource-usage-${{ matrix.gateway_version }}.log
             it-timeline-${{ matrix.gateway_version }}.json
+            gateway-controllers/coverage/coverage.txt
           if-no-files-found: ignore
           retention-days: 7
 
@@ -239,3 +317,42 @@ jobs:
           path: docker-diagnostics-${{ matrix.gateway_version }}
           if-no-files-found: ignore
           retention-days: 7
+
+  # Posts the comment prepared by the coverage leg. It checks out nothing and runs no code of the
+  # pull request: it downloads one text file and sends it with the gh CLI, so the
+  # pull-requests: write token it holds is out of reach of the pull request. It runs only for a pull
+  # request from this repository; a fork's token cannot write.
+  coverage-comment:
+    name: Coverage pull request comment
+    needs: integration-test
+    if: >-
+      always() && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      pull-requests: write
+    steps:
+      # The comment exists only when the coverage leg got as far as writing it.
+      - name: Download the comment
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: coverage-comment
+
+      # One comment per pull request, updated in place. Only the bot's own comment is ever
+      # updated: a comment by anyone else that starts with the marker is ignored.
+      - name: Post or update the comment
+        if: hashFiles('comment.md') != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker='<!-- policy-code-coverage -->'
+          id=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -F body=@comment.md > /dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@comment.md > /dev/null
+          fi

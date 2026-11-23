@@ -6,7 +6,10 @@
 #
 # The coverage is that of the integration suites (policies/*/it): the gateway is built with every
 # policy's code instrumented, the suites run against it, and the counters are uploaded under the
-# `integration` flag. A policy without an integration suite reports 0%.
+# `integration` flag. Every suite runs on the same gateway, which carries all the policies, so the
+# counters of a run also record policies the suite only uses (set-headers on another policy's API) and
+# code that runs at start-up. The profile therefore credits each policy with the runs of its own suite
+# alone: a policy without a suite of its own reports 0%.
 #
 # The component list below is generated from the policy modules under policies/. Run
 # `make generate-codecov-config` after adding or removing a policy; CI runs

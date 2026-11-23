@@ -116,8 +116,13 @@ func run() int {
 
 	var collector *itcoverage.Collector
 	if r.coverageOut != "" {
+		owners, err := blockOwners(r.items)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "run-suites:", err)
+			return 1
+		}
 		runtime := os.Getenv(gateway.EnvRuntime)
-		if collector, err = itcoverage.Start(context.Background(), runtime, r.coverageOut, r.say); err != nil {
+		if collector, err = itcoverage.Start(context.Background(), runtime, r.coverageOut, owners, r.say); err != nil {
 			fmt.Fprintln(os.Stderr, "run-suites:", err)
 			return 1
 		}
@@ -148,6 +153,21 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+// blockOwners maps the name of every block of the run to the policy whose suite it belongs to. The
+// collector traces a gateway runtime to its block by the block's name, and credits its counters to
+// that block's policy alone, so two suites with a block of the same name would make that
+// attribution a guess: it is refused instead.
+func blockOwners(items map[string]item) (map[string]string, error) {
+	owners := map[string]string{}
+	for _, it := range items {
+		if other, taken := owners[it.block]; taken && other != it.policy {
+			return nil, fmt.Errorf("the suites of %s and %s both have a block named %q; rename one, because coverage is credited to the policy that owns the block", other, it.policy, it.block)
+		}
+		owners[it.block] = it.policy
+	}
+	return owners, nil
 }
 
 // coverageCollector collects the counters of the gateway runtimes once the suites have run.

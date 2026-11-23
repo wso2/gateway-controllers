@@ -26,7 +26,8 @@ validate-catalog: ## Verify docs/README.md is up to date (used in CI)
 
 # Policy coverage comes from the integration suites, not from unit tests: `make it-coverage` builds the
 # gateway with every policy's code instrumented, runs the suites against it, and writes the coverage
-# of each policy to coverage/coverage.txt, the report Codecov uploads. The instrumented policy engine
+# of each policy to coverage/coverage.txt, the report Codecov uploads. A policy is credited with what
+# its own suite runs, not with what other suites run of it. The instrumented policy engine
 # exists only on the latest gateway, so it runs there. POLICIES, DB, BLOCK_PARALLEL and GATEWAY_POLICIES
 # work as for `make it`. Raw counters are kept in coverage/raw, which is emptied first: the report
 # merges everything beneath it, so counters of an earlier run would be counted again.

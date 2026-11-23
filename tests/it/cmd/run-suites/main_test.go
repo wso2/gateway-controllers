@@ -70,3 +70,23 @@ func TestACompleteCoverageCollectionIsNotAFailure(t *testing.T) {
 	require.False(t, finishCoverage(fakeCollector{copied: 5}, "out", say, &stderr))
 	require.Empty(t, stderr.String())
 }
+
+func TestBlockOwnersMapsEachBlockToItsPolicy(t *testing.T) {
+	owners, err := blockOwners(map[string]item{
+		"basic-auth":            {policy: "basic-auth", block: "basic-auth"},
+		"basic-auth-restart":    {policy: "basic-auth", block: "basic-auth-restart"},
+		"backend-jwt/v2/claims": {policy: "backend-jwt/v2", block: "claims"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"basic-auth": "basic-auth", "basic-auth-restart": "basic-auth", "claims": "backend-jwt/v2"}, owners)
+}
+
+func TestBlockOwnersRefusesABlockNameTwoSuitesShare(t *testing.T) {
+	_, err := blockOwners(map[string]item{
+		"a/shared": {policy: "a", block: "shared"},
+		"b/shared": {policy: "b", block: "shared"},
+	})
+
+	require.ErrorContains(t, err, `both have a block named "shared"`)
+}

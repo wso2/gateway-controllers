@@ -62,6 +62,17 @@ const (
 	label      = labelKey + "=" + labelValue
 )
 
+// blockLabel is the label the framework puts on the network of every block, with the block's name
+// as its value (framework v0.4.4, core/runtime/container.go). The gateway runtime of a block joins
+// that network, which is how a runtime is traced back to the block, and so to the suite, that
+// started it.
+const blockLabel = "io.wso2.apip.it.block"
+
+// PolicyDir is the folder, beneath the output folder, that holds the counters of the runtimes the
+// suite of policy started. A version module's name has a slash in it, which cannot be one folder
+// name.
+func PolicyDir(policy string) string { return strings.ReplaceAll(policy, "/", "__") }
+
 // Docker runs a docker command and returns its standard output.
 type Docker func(ctx context.Context, args ...string) ([]byte, error)
 
@@ -81,6 +92,7 @@ func ExecDocker(ctx context.Context, args ...string) ([]byte, error) {
 type Collector struct {
 	image  string
 	out    string
+	owners map[string]string
 	docker Docker
 	logf   func(format string, args ...any)
 
@@ -98,23 +110,29 @@ type Collector struct {
 	stopping atomic.Bool
 }
 
-// helper is a container that keeps the /coverage volume of one runtime.
-type helper struct{ id, volume string }
+// helper is a container that keeps the /coverage volume of one runtime, and the policy whose suite
+// started that runtime.
+type helper struct{ id, volume, policy string }
 
 // Start begins watching for containers of image and returns the collector. Counters are copied
-// into folders beneath out by Collect. logf receives progress and problems.
+// into folders beneath out by Collect, one folder per policy (PolicyDir), so that the coverage of a
+// policy can be taken from its own suite alone. owners maps the name of every block of the run to
+// the policy that owns its suite. logf receives progress and problems.
 //
 // out must be missing or empty: the report merges every counter beneath it, so counters left by an
 // earlier run would be counted as this run's. Start does not delete anything to make it so, as out
 // is a path the caller chose.
-func Start(ctx context.Context, image, out string, logf func(string, ...any)) (*Collector, error) {
+func Start(ctx context.Context, image, out string, owners map[string]string, logf func(string, ...any)) (*Collector, error) {
 	if strings.TrimSpace(image) == "" || strings.TrimSpace(out) == "" {
 		return nil, errors.New("itcoverage: the runtime image and the output folder are required")
+	}
+	if len(owners) == 0 {
+		return nil, errors.New("itcoverage: the owner of every block is required")
 	}
 	if err := requireEmpty(out); err != nil {
 		return nil, err
 	}
-	c := newCollector(image, out, ExecDocker, logf)
+	c := newCollector(image, out, owners, ExecDocker, logf)
 
 	// The events process is stopped by cancelling watchCtx. The helpers are attached under ctx, the
 	// caller's, so that stopping the stream cannot cut an attachment short.
@@ -173,11 +191,11 @@ func eventsArgs(image string) []string {
 		"--filter", "image=" + image, "--format", `{{.Actor.ID}} {{index .Actor.Attributes "` + labelKey + `"}}`}
 }
 
-func newCollector(image, out string, docker Docker, logf func(string, ...any)) *Collector {
+func newCollector(image, out string, owners map[string]string, docker Docker, logf func(string, ...any)) *Collector {
 	if logf == nil {
 		logf = func(string, ...any) {}
 	}
-	return &Collector{image: image, out: out, docker: docker, logf: logf, seen: map[string]bool{}}
+	return &Collector{image: image, out: out, owners: owners, docker: docker, logf: logf, seen: map[string]bool{}}
 }
 
 // watch attaches a helper to every container id read from the event stream, under ctx, and
@@ -217,8 +235,13 @@ func (c *Collector) attach(ctx context.Context, id string) {
 		`{{range .Mounts}}{{if eq .Destination "`+guestDir+`"}}{{.Name}}{{end}}{{end}}`, id)
 	volume := strings.TrimSpace(string(out))
 	if err == nil && volume == "" {
-		err = fmt.Errorf("it has no %s volume, so its image was not built for coverage", guestDir)
+		err = fmt.Errorf("it has no %s volume, so its image was not built for coverage (%s)", guestDir, c.describe(ctx, id))
 	}
+	if err != nil {
+		c.fail(fmt.Errorf("attaching to the runtime %s: %w", short(id), err))
+		return
+	}
+	policy, err := c.policyOf(ctx, id)
 	if err != nil {
 		c.fail(fmt.Errorf("attaching to the runtime %s: %w", short(id), err))
 		return
@@ -229,11 +252,47 @@ func (c *Collector) attach(ctx context.Context, id string) {
 		c.fail(fmt.Errorf("attaching to the runtime %s: %w", short(id), err))
 		return
 	}
-	h := helper{id: strings.TrimSpace(string(out)), volume: volume}
+	h := helper{id: strings.TrimSpace(string(out)), volume: volume, policy: policy}
 	c.mu.Lock()
 	c.helpers = append(c.helpers, h)
 	c.mu.Unlock()
-	c.logf("coverage: following runtime %s with helper %s\n", short(id), short(h.id))
+	c.logf("coverage: following runtime %s of %s with helper %s\n", short(id), policy, short(h.id))
+}
+
+// describe says what container id is, for an error message: its name, state and command.
+func (c *Collector) describe(ctx context.Context, id string) string {
+	out, err := c.run(ctx, "inspect", "-f", "name {{.Name}}, {{.State.Status}}, command {{.Config.Cmd}}, started {{.State.StartedAt}}", id)
+	if err != nil {
+		return "it can no longer be inspected: " + err.Error()
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// policyOf names the policy whose suite started runtime id. The runtime is on the network of its
+// block, which carries the block's name; the owners table says whose block that is. A runtime that
+// cannot be traced to a block of this run is an error: its counters would belong to no policy.
+func (c *Collector) policyOf(ctx context.Context, id string) (string, error) {
+	out, err := c.run(ctx, "inspect", "-f", `{{range .NetworkSettings.Networks}}{{.NetworkID}} {{end}}`, id)
+	if err != nil {
+		return "", err
+	}
+	networks := strings.Fields(string(out))
+	if len(networks) == 0 {
+		return "", errors.New("it is on no network, so its block is unknown")
+	}
+	out, err = c.run(ctx, append([]string{"network", "inspect", "-f", `{{index .Labels "` + blockLabel + `"}}`}, networks...)...)
+	if err != nil {
+		return "", err
+	}
+	blocks := strings.Fields(string(out))
+	if len(blocks) == 0 {
+		return "", fmt.Errorf("none of its networks carries the %s label, so its block is unknown", blockLabel)
+	}
+	policy, ok := c.owners[blocks[0]]
+	if !ok {
+		return "", fmt.Errorf("its block %q is not a block of this run, so the suite that started it is unknown", blocks[0])
+	}
+	return policy, nil
 }
 
 // run runs one docker command, bounded by dockerTimeout.
@@ -270,7 +329,7 @@ func (c *Collector) Collect(ctx context.Context) (int, error) {
 
 	copied := 0
 	for i, h := range helpers {
-		dst := filepath.Join(c.out, strconv.Itoa(i+1))
+		dst := filepath.Join(c.out, PolicyDir(h.policy), strconv.Itoa(i+1))
 		// A folder that cannot be made costs this runtime's counters, not the removal of its
 		// helper and volume below.
 		if err := os.MkdirAll(dst, 0o755); err != nil {
