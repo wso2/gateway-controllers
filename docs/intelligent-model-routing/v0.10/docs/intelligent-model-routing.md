@@ -242,6 +242,9 @@ llm_provider_allowed_endpoints = ["https://<resource>.openai.azure.com"]
 - Every request goes to `defaultModel`: look for the `ERROR` lines above. A classifier call that fails for
   any other reason is logged only at `DEBUG`, as
   `IntelligentModelRouting: LLM call failed, using default model`.
+- Some requests go to `defaultModel` at random: the classifier deployment may be rate-limiting the policy.
+  Azure OpenAI then answers `429`, logged only at `DEBUG` as above. The policy makes one chat completion
+  call per request, so give the deployment a request rate above the APIs' peak request rate.
 - Azure OpenAI answers `401`: the identity lacks the Cognitive Services OpenAI User role (role assignments
   can take several minutes to apply), the endpoint is a regional one, or the token scope is for another
   resource, such as `https://management.azure.com/.default`. Use `https://cognitiveservices.azure.com/.default`,
