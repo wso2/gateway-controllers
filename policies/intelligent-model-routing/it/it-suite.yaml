@@ -46,3 +46,17 @@ blocks:
       - name: intelligent-model-routing
         features:
           - features/intelligent_model_routing.feature
+
+  # A gateway with no API key: a request routed to the rule's model shows the API's Azure identity
+  # authenticated the classifier call, since any classifier failure goes to the default model.
+  - name: intelligent-model-routing-identity
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/identity.toml
+      - name: testbench
+    runners:
+      - name: intelligent-model-routing-identity
+        features:
+          - features/intelligent_model_routing_identity.feature
+
