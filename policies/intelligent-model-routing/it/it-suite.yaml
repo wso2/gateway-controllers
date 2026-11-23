@@ -60,3 +60,14 @@ blocks:
         features:
           - features/intelligent_model_routing_identity.feature
 
+  # A gateway with a key that allows APIs only workload identity and its own classifier resource.
+  - name: intelligent-model-routing-allowlist
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/allowlist.toml
+      - name: testbench
+    runners:
+      - name: intelligent-model-routing-allowlist
+        features:
+          - features/intelligent_model_routing_allowlist.feature
