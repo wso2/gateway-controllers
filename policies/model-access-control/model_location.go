@@ -473,8 +473,9 @@ func lenientKeyCount(raw, key string) int {
 		if decoded, err := url.QueryUnescape(name); err == nil {
 			name = decoded
 		}
-		// The configured key itself counts as is, even when it holds a '['.
-		if name == key {
+		// The whole key is compared first, ignoring case and surrounding spaces, so a
+		// configured key that holds a '[' still matches its own variants.
+		if strings.EqualFold(strings.TrimSpace(name), key) {
 			count++
 			continue
 		}

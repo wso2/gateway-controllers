@@ -715,6 +715,10 @@ func TestHardening_QueryKeyWithBrackets(t *testing.T) {
 	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o", nil)), forward)
 	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=llama-3", nil)), 404)
 	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o&model[id]=llama-3", nil)), 400)
+	// A variant of the whole key that differs in case or spacing is a second model.
+	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o&MODEL[id]=llama-3", nil)), 400)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o&Model[ID]=llama-3", nil)), 400)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/p/chat?model[id]=gpt-4o&%20model[id]=llama-3", nil)), 400)
 }
 
 // A multipart model longer than the limit is rejected before it is trimmed, so
