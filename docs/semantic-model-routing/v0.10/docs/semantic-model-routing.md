@@ -176,7 +176,7 @@ The identity types need `embeddingProvider` set to `AZURE_OPENAI`: the gateway's
   have: unlike IMDS, Container Apps doesn't fall back to an app's only user-assigned identity, and answers
   `400`. Container Apps sets `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` only while the app has a managed
   identity, and a container sees the values it started with: when a running app gets its first identity,
-  Container Apps can replace its containers, which restarts the gateway; if the API still fails to deploy
+  Container Apps can replace its containers, which restarts the gateway; if the API's route still answers `500`
   because the variables are not set, restart the revision with `az containerapp revision restart`.
 
 ### How the token is used
@@ -201,7 +201,8 @@ The identity types need `embeddingProvider` set to `AZURE_OPENAI`: the gateway's
   status, the authentication type, the identity's client ID and the scope. Azure OpenAI's answer, which can
   name the identity, is logged only at `DEBUG`, where it tells a missing role from a wrong scope or endpoint.
 - APIs on the same gateway can authenticate differently: a key, the API's own or the gateway's, is sent only
-  by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored.
+  by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored, but a value
+  that is set must still be valid, because the gateway checks it when the API is created.
 - The token goes to the endpoint in effect: the API's `embeddingEndpoint` if it sets one, otherwise the
   gateway's. An API can use its own Azure OpenAI resource this way, with an identity that has the role on
   it, or with its own `apiKey` in `api-key` mode, and the allowlists below apply to the endpoint it uses.
@@ -219,7 +220,7 @@ refused, and an API without `azureAuth` counts as `api-key`.
 `embedding_provider_allowed_endpoints` lists the embedding resources the gateway's APIs may call. An API can
 set its own `embeddingEndpoint`, so without this list an API could have the gateway's key, or a token for the
 gateway's identity, sent to a server of its choosing. The list is checked against the endpoint in effect, the
-API's or the gateway's, so include the gateway's own `embedding_provider_endpoint`. Set it on every gateway
+API's or the gateway's, so include the resource of the gateway's own `embedding_provider_endpoint`: its scheme, host and port. Set it on every gateway
 whose APIs use an Azure identity.
 
 - Entries are resource URLs: a scheme, a host and optionally a port, such as
