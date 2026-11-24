@@ -33,10 +33,10 @@ These parameters are usually set at the gateway level and automatically applied,
 |-----------|------|----------|-------------|
 | `embeddingProvider` | string | Yes | Embedding provider type. Must be one of: `OPENAI`, `MISTRAL`, `AZURE_OPENAI` |
 | `embeddingEndpoint` | string | Yes | Endpoint URL for the embedding service. Examples: OpenAI: `https://api.openai.com/v1/embeddings`, Mistral: `https://api.mistral.ai/v1/embeddings`, Azure OpenAI: Your Azure OpenAI endpoint URL |
-| `embeddingModel` | string | Conditional | - | Embedding model name. **Required for OPENAI and MISTRAL**, not required for AZURE_OPENAI (deployment name is in endpoint URL). Examples: OpenAI: `text-embedding-ada-002` or `text-embedding-3-small`, Mistral: `mistral-embed` |
+| `embeddingModel` | string | Conditional | Embedding model name. **Required for OPENAI and MISTRAL**, not required for AZURE_OPENAI (deployment name is in endpoint URL). Examples: OpenAI: `text-embedding-ada-002` or `text-embedding-3-small`, Mistral: `mistral-embed` |
 | `apiKey` | string | Conditional | API key for the embedding service authentication, sent by every API whose `azureAuth.authenticationType` is `api-key` (the default), unless the API has its own. The authentication header is automatically set to `api-key` for Azure OpenAI and `Authorization` for other providers. Not needed when every API uses an Azure identity. |
 | `embeddingAllowedAuthTypes` | array of strings | No | If non-empty, the authentication types this gateway's APIs may choose in `azureAuth.authenticationType`: `api-key`, `workload-identity`, `managed-identity`, `container-apps`. An API without `azureAuth` counts as `api-key`. Empty (the default) places no limit. Set from the gateway's `embedding_provider_allowed_auth_types`; an API cannot set it. See [Limiting what APIs can use](#limiting-what-apis-can-use). |
-| `embeddingAllowedEndpoints` | array of strings | No | If non-empty, the embedding resources this gateway's APIs may call, including the gateway's own `embedding_provider_endpoint`. Entries are resource URLs such as `https://<resource>.openai.azure.com`, with no path, query or fragment. Empty (the default) places no limit. Set from the gateway's `embedding_provider_allowed_endpoints`; an API cannot set it. See [Limiting what APIs can use](#limiting-what-apis-can-use). |
+| `embeddingAllowedEndpoints` | array of strings | No | If non-empty, the embedding resources this gateway's APIs may call, including the resource of the gateway's own `embedding_provider_endpoint`. Entries are resource URLs such as `https://<resource>.openai.azure.com`, with no path, query or fragment. Empty (the default) places no limit. Set from the gateway's `embedding_provider_allowed_endpoints`; an API cannot set it. See [Limiting what APIs can use](#limiting-what-apis-can-use). |
 
 #### Sample System Configuration
 
@@ -167,7 +167,7 @@ operationPolicies:
   have: unlike IMDS, Container Apps doesn't fall back to an app's only user-assigned identity, and answers
   `400`. Container Apps sets `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` only while the app has a managed
   identity, and a container sees the values it started with: when a running app gets its first identity,
-  Container Apps can replace its containers, which restarts the gateway; if the API still fails to deploy
+  Container Apps can replace its containers, which restarts the gateway; if the API's route still answers `500`
   because the variables are not set, restart the revision with `az containerapp revision restart`.
 
 **How the token is used**
@@ -192,7 +192,8 @@ operationPolicies:
   the status. Azure OpenAI's answer, which can name the identity, is not passed on; it is logged only at
   `DEBUG`, where it tells a missing role from a wrong scope or endpoint.
 - APIs on the same gateway can authenticate differently: a key, the API's own or the gateway's, is sent only
-  by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored.
+  by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored, but a value
+  that is set must still be valid, because the gateway checks it when the API is created.
 - The token goes to the endpoint in effect: the API's `embeddingEndpoint` if it sets one, otherwise the
   gateway's. An API can use its own Azure OpenAI resource this way, with an identity that has the role on
   it, or with its own `apiKey` in `api-key` mode, and the allowlists below apply to the endpoint it uses.
@@ -210,7 +211,7 @@ refused, and an API without `azureAuth` counts as `api-key`.
 `embedding_provider_allowed_endpoints` lists the embedding resources the gateway's APIs may call. An API can
 set its own `embeddingEndpoint`, so without this list an API could have the gateway's key, or a token for the
 gateway's identity, sent to a server of its choosing. The list is checked against the endpoint in effect, the
-API's or the gateway's, so include the gateway's own `embedding_provider_endpoint`. Set it on every gateway
+API's or the gateway's, so include the resource of the gateway's own `embedding_provider_endpoint`: its scheme, host and port. Set it on every gateway
 whose APIs use an Azure identity.
 
 - Entries are resource URLs: a scheme, a host and optionally a port, such as
