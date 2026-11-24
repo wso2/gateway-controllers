@@ -2,7 +2,7 @@
   "name": "nvidia-switchyard-router",
   "displayName": "NVIDIA Switchyard Router",
   "version": "0.8",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI"
   ],
