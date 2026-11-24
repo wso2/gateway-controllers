@@ -79,7 +79,7 @@ params:
 | `managed-identity` | An Azure VM, VM scale set or AKS node with a managed identity | The Azure Instance Metadata Service (IMDS) |
 | `container-apps` | An Azure Container Apps app with a managed identity | The identity endpoint Container Apps runs beside the app |
 
-**Azure setup**
+##### Azure setup
 
 1. Give the gateway an identity, as for the `azure-authentication` policy: Workload Identity for
    the gateway runtime's service account on AKS, a managed identity assigned to the VM or node
@@ -98,7 +98,7 @@ params:
    (`az resource update --ids <content-safety-resource-id> --set properties.disableLocalAuth=true`),
    so that only Entra ID tokens are accepted.
 
-**Choosing the identity**
+##### Choosing the identity
 
 - `workload-identity` uses `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and `AZURE_FEDERATED_TOKEN_FILE`,
   which the AKS Workload Identity webhook sets. `azureAuth.clientId` overrides the client ID; the
@@ -113,19 +113,21 @@ params:
   and answers `400`. Container Apps sets `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` only while the
   app has a managed identity, and a container sees the values it started with: when a running app
   gets its first identity, Container Apps can replace its containers, which restarts the gateway;
-  if the API still fails to deploy because the variables are not set, restart the revision with
+  if the API's route still answers `500` because the variables are not set, restart the revision with
   `az containerapp revision restart`.
 
-**How the token is used**
+##### How the token is used
 
 - The token is fetched once per check, before the call to Content Safety and its retries, within
   10 seconds. The Azure Identity SDK caches it and refreshes it before it expires, so most checks
   don't make a token request. Every policy on the gateway that uses the same identity shares the
   cache.
-- An API fails to deploy when its settings are invalid, when the gateway doesn't allow its
-  authentication type, or when the gateway's host can't provide the identity, for example
-  `container-apps` without `IDENTITY_ENDPOINT`. The error names the setting or the missing
-  environment variable.
+- Invalid settings, such as a client ID that isn't a GUID, are rejected when the API is created.
+- On gateways newer than 1.2.0, an API whose policy can't be built is still created, and its route
+  answers `500`: when the gateway doesn't allow its authentication type or endpoint, or when the
+  gateway's host can't provide the identity, for example `container-apps` without
+  `IDENTITY_ENDPOINT`. The gateway logs `Failed to build policy chain for route, skipping` at
+  `ERROR`, with the reason, which names the setting or the missing environment variable.
 - A check that can't get a token fails the way a failed Content Safety call does:
   `passthroughOnError` lets the content through, and otherwise the policy answers `422`. With
   `showAssessment`, the client sees only `Could not obtain an access token for Azure Content Safety`;
@@ -134,20 +136,21 @@ params:
   quietly turn moderation off. A token request the identity service refused is answered again
   from a short cache for about two seconds, and logged at `DEBUG` while it is.
 - APIs on the same gateway can authenticate differently: a key, the API's own or the gateway's, is
-  sent only by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored, so a
-  form that keeps them when the type changes does no harm.
+  sent only by the APIs that use `api-key`. With `api-key`, `clientId` and `scope` are ignored, but a
+  value that is set must still be valid, because the gateway checks it when the API is created. A
+  form that keeps an identity's values when the type changes does no harm.
 - The token goes to the endpoint in effect: the API's `azureContentSafetyEndpoint` if it sets one,
   otherwise the gateway's.
 - APIs that use the same identity share one credential, and its token cache, across the gateway.
 
-**Limiting what APIs can use**
+##### Limiting what APIs can use
 
 `azurecontentsafety_allowed_auth_types` lists the types the gateway's APIs may use. An API whose
-type isn't listed fails to deploy, with an error that names the allowed types; an API without
-`azureAuth` counts as `api-key`.
+type isn't listed gets a route that answers `500`, and the gateway log names the allowed types; an
+API without `azureAuth` counts as `api-key`.
 
-- To stop APIs from sending the key, leave `api-key` out, for example `["workload-identity"]`. APIs
-  that don't choose an identity then fail to deploy instead of sending the key.
+- To stop APIs from sending the key, leave `api-key` out, for example `["workload-identity"]`. The routes
+  of APIs that don't choose an identity then answer `500` instead of sending the key.
 - To keep APIs off the gateway's identities, list only `api-key`.
 
 `azurecontentsafety_allowed_endpoints` lists the endpoints the gateway's APIs may call. An API can
@@ -159,7 +162,7 @@ of case and of a trailing slash. Set it on every gateway whose APIs use an Azure
 An entry in either list that isn't a type or an `http` or `https` URL fails every API that uses the
 policy, so a typo is found at the first deployment.
 
-**Troubleshooting**
+##### Troubleshooting
 
 - Content Safety answers `401`: the identity lacks the Cognitive Services User role (role
   assignments can take several minutes to apply), the endpoint is a regional one, or the token
@@ -170,7 +173,7 @@ policy, so a typo is found at the first deployment.
   carries the reason, such as `Microsoft Entra ID rejected the token request (HTTP 401,
   invalid_client)`, and the identity's client ID.
 
-**Security considerations**
+##### Security considerations
 
 - **Least privilege**: grant the identity the Cognitive Services User role on the Content Safety
   resource only, rather than on a resource group or subscription.
@@ -185,14 +188,14 @@ policy, so a typo is found at the first deployment.
 - **No stored secret**: with an Azure identity, no key is stored in the gateway's configuration or
   sent to Content Safety, and the tokens are short lived.
 
-**Upgrading from v1.1**
+##### Upgrading from v1.1
 
 - An API that sets nothing keeps sending the gateway's key, and an API that sets its own endpoint
   or key keeps using them.
 - v1.2 accepts only the parameters listed under User Parameters, so an API definition that carries
-  any other parameter fails to deploy.
+  any other parameter is rejected when the API is created.
 
-**Gateway versions**
+##### Gateway versions
 
 v1.2 needs Go 1.26.10 or later to build. The latest gateway's builder has it. A 1.2.0 gateway's
 builder downloads a newer Go during the build, so the build machine needs internet access. A 1.1.0 gateway's

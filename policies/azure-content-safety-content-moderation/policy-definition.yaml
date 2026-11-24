@@ -68,14 +68,15 @@ parameters:
             types. With workload-identity, defaults to AZURE_CLIENT_ID. With
             managed-identity or container-apps, selects a user-assigned identity;
             leave it unset for the host's or app's system-assigned identity.
-            Ignored with api-key.
+            Ignored with api-key, but a value that is set must still be a GUID.
         scope:
           type: string
           x-wso2-policy-advanced-param: false
           pattern: "^\\S+/\\.default$"
           description: |
             Scope of the access token, for the Azure identity types. Defaults to
-            "https://cognitiveservices.azure.com/.default". Ignored with api-key.
+            "https://cognitiveservices.azure.com/.default". Ignored with api-key,
+            but a value that is set must still end in /.default.
     request:
       type: object
       x-wso2-policy-advanced-param: false

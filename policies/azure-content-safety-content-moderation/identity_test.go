@@ -205,7 +205,7 @@ func TestAuthenticationSettingsAreChecked(t *testing.T) {
 		{"an empty azureAuth means api-key", checkParams(endpoint, map[string]interface{}{})},
 		{"an empty type means api-key", checkParams(endpoint, azureAuth(""))},
 		{"a null type means api-key", checkParams(endpoint, map[string]interface{}{"authenticationType": nil})},
-		// A console form can leave an identity's fields behind when the selector changes.
+		// The policy ignores an identity's fields with api-key; the schema still checks their format.
 		{"api-key ignores identity fields", checkParams(endpoint, azureAuth("api-key", "clientId", "not-a-guid", "scope", "not-a-scope"))},
 		{"workload identity without a gateway key", checkParams(endpoint, azureAuth("workload-identity"), "azureContentSafetyKey", nil)},
 		{"managed identity with a client ID", checkParams(endpoint, azureAuth("managed-identity", "clientId", testClientID))},
