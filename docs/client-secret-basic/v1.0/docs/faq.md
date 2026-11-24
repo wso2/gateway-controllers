@@ -75,13 +75,13 @@ No. Both the `Authorization` and `Subscription-Key` headers are added to `Header
 
 ## How does the dynamic-mode cache work?
 
-On a successful token request the policy stores a SHA-256 hash of `clientId:clientSecret` to `expiresAt` in an in-process cache. `expiresAt` is `now + min(expires_in - expiryBuffer, maxCacheTTL)`. On subsequent requests for the same credential pair, the cache entry is checked first; if it is present and not yet expired, the token endpoint is skipped entirely.
+On a successful token request the policy stores a SHA-256 hash of the credential pair to `expiresAt` in an in-process cache. `expiresAt` is `now + min(expires_in - expiryBuffer, maxCacheTTL)` when `expires_in` is present and greater than `expiryBuffer`; a 1-hour fallback applies when `expires_in` is absent; and the token is not cached at all when `expires_in` is present but ≤ `expiryBuffer`. On subsequent requests for the same credential pair, the cache entry is checked first; if it is present and not yet expired, the token endpoint is skipped entirely.
 
 When the cache entry expires, the next request triggers a fresh token call and refreshes the entry if the credentials are still valid. Concurrent first requests for the same credential pair are deduplicated (singleflight) so that only one IdP call is made regardless of burst concurrency.
 
 Failed credential attempts are tracked in two layers to prevent IdP hammering without blocking legitimate traffic:
 
-1. **Wrong-credential pair cache**: A confirmed bad `(clientId, secret)` pair is stored so repeats of the exact same wrong secret never reach the IdP — they return `401` immediately from the cache.
+1. **Wrong-credential pair cache**: A confirmed bad `(clientId, secret)` pair is stored so repeats of the same wrong secret return `401` immediately from the cache without an IdP call. When the cache is full and no entries have expired, a new bad pair is not stored; in that case the per-clientId throttle counter (below) still increments, so throttling continues to engage even when the specific pair cannot be cached.
 2. **Per-clientId throttle counter**: Each distinct new wrong secret for a clientId increments a counter. When the counter reaches `failureRateLimit` (default 3) within `failureWindow` (default 30s), further requests for that clientId return `429 Too Many Requests` until the window resets.
 
 The key difference from a pure clientId-level block: the first few requests with the **correct** secret still reach the IdP as long as the per-clientId counter has not been exhausted. Only HTTP 400/401 responses from the IdP are cached as rejections; 429 and other 4xx/5xx return `503` and are not cached.
@@ -114,7 +114,13 @@ A `401 Unauthorized` means the credentials were checked and found invalid (the t
 
 ## If I revoke a credential at the IdP, how quickly does the gateway reject it?
 
-The gateway continues to accept requests for that credential until the cache entry expires. The effective hold time is `min(expires_in - expiryBuffer, maxCacheTTL)`. To reduce the revocation window, set a short `maxCacheTTL` (e.g. `"1m"`). There is no purge API — for immediate revocation after a cache entry is written, restart the gateway pod.
+The gateway continues to accept requests for that credential until the cache entry expires. The effective hold time depends on what the token response includes:
+
+- **`expires_in` present and greater than `expiryBuffer`**: `min(expires_in - expiryBuffer, maxCacheTTL)`
+- **`expires_in` absent**: `min(1h - expiryBuffer, maxCacheTTL)` (1-hour fallback). If `expiryBuffer` is at least 1 hour, the hold time falls back to `failureWindow`.
+- **`expires_in` present but ≤ `expiryBuffer`** (or ≤ 0): the token is not cached — the entry expires immediately and the next request goes to the IdP.
+
+To reduce the revocation window, set a short `maxCacheTTL` (e.g. `"1m"`). There is no purge API — for immediate revocation after a cache entry is written, restart the gateway pod.
 
 **Secret rotation note:** when using `{{ secret "handle" }}` references, updating the secret store value does not take effect until the API is redeployed or the controller is restarted. Static mode has no in-process cache — the old value stays in the deployed API definition until it is redeployed with the new value; the new value is not picked up at rotation time alone.
 
@@ -187,7 +193,7 @@ curl -s -X PUT http://localhost:9090/api/management/v1/rest-apis/orders-api-v1 \
   --data-binary @orders-api.yaml
 ```
 
-There is no zero-downtime rotation path — the old secret becomes invalid as soon as the new definition is applied. Use `{{ secret }}` references to decouple the value from the YAML so only the secret store needs updating.
+There is no zero-downtime rotation path — the old secret becomes invalid as soon as the new definition is applied. Use `{{ secret }}` references to decouple the value from the YAML; then after updating the secret store value, **redeploy the API or restart the controller** for the new value to take effect.
 
 ---
 
