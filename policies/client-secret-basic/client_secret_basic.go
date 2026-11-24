@@ -164,6 +164,13 @@ type overflowThrottleEntry struct {
 	windowEnd time.Time
 }
 
+// reservation identifies which counter was incremented by checkAndReserve so that
+// releaseReservation can decrement the correct counter and verify the window is still active.
+type reservation struct {
+	isOverflow bool
+	windowEnd  time.Time
+}
+
 // isWrongCred returns true if key is a confirmed bad credential pair still within its TTL.
 func (f *failureTracker) isWrongCred(key string) bool {
 	f.mu.Lock()
@@ -217,10 +224,12 @@ func (f *failureTracker) isThrottled(clientId string, limit int, _ time.Duration
 // singleflight fn() so that each distinct IdP call is counted exactly once,
 // regardless of how many goroutines are waiting on the same credential pair.
 //
-// Returns (retryAfter, throttleError) if throttled, or (0, nil) on success.
+// Returns (reservation, nil) on success. The reservation identifies which counter was
+// incremented and its active window so releaseReservation can release the right one.
+// Returns (zero, throttleError) if the limit is reached.
 // The caller MUST call releaseReservation if the IdP accepts the credentials or
 // returns a network error so successful requests don't consume failure quota.
-func (f *failureTracker) checkAndReserve(clientId string, limit int, window time.Duration) (time.Duration, error) {
+func (f *failureTracker) checkAndReserve(clientId string, limit int, window time.Duration) (reservation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.clientCounters == nil {
@@ -237,11 +246,11 @@ func (f *failureTracker) checkAndReserve(clientId string, limit int, window time
 			if remaining < time.Second {
 				remaining = time.Second
 			}
-			return remaining, throttleError{clientId: clientId, retryAfter: remaining}
+			return reservation{}, throttleError{clientId: clientId, retryAfter: remaining}
 		}
 		e.count++
 		f.clientCounters[ckey] = e
-		return 0, nil
+		return reservation{windowEnd: e.windowEnd}, nil
 	}
 
 	// No entry or window expired: start a fresh window. Sweep map if at capacity.
@@ -261,36 +270,46 @@ func (f *failureTracker) checkAndReserve(clientId string, limit int, window time
 			// Overflow window expired — start fresh.
 			ov = overflowThrottleEntry{count: 1, windowEnd: now.Add(window)}
 			f.overflowCounter = ov
-			return 0, nil
+			return reservation{isOverflow: true, windowEnd: ov.windowEnd}, nil
 		}
 		if ov.count >= limit {
 			remaining := ov.windowEnd.Sub(now)
 			if remaining < time.Second {
 				remaining = time.Second
 			}
-			return remaining, throttleError{clientId: clientId, retryAfter: remaining}
+			return reservation{}, throttleError{clientId: clientId, retryAfter: remaining}
 		}
 		ov.count++
 		f.overflowCounter = ov
-		return 0, nil
+		return reservation{isOverflow: true, windowEnd: ov.windowEnd}, nil
 	}
 	exp := now.Add(window)
 	f.clientCounters[ckey] = clientThrottleEntry{count: 1, windowEnd: exp}
-	return 0, nil
+	return reservation{windowEnd: exp}, nil
 }
 
-// releaseReservation decrements the per-clientId counter by one. Call this when the
+// releaseReservation decrements the counter identified by rsv. Call this when the
 // IdP accepts the credentials or returns a network error — those outcomes should not
-// consume a failure slot.
-func (f *failureTracker) releaseReservation(clientId string) {
+// consume a failure slot. Only releases if the stored window still matches the
+// reservation's window to avoid corrupting a later window when a slow request outlasts
+// its failureWindow.
+func (f *failureTracker) releaseReservation(clientId string, rsv reservation) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if rsv.isOverflow {
+		ov := f.overflowCounter
+		if ov.windowEnd == rsv.windowEnd && ov.count > 0 {
+			ov.count--
+			f.overflowCounter = ov
+		}
+		return
+	}
 	if f.clientCounters == nil {
 		return
 	}
 	ckey := clientCounterKey(clientId)
 	e, ok := f.clientCounters[ckey]
-	if !ok || time.Now().After(e.windowEnd) {
+	if !ok || e.windowEnd != rsv.windowEnd {
 		return
 	}
 	if e.count > 0 {
@@ -332,9 +351,11 @@ func (f *failureTracker) storeWrongCred(key string, window time.Duration) {
 }
 
 // sfResult carries the outcome of one successful singleflight token call.
+// expiresAt is the absolute cache expiry computed inside the callback so all waiting
+// goroutines share the same value instead of each computing it at their own resume time.
 type sfResult struct {
 	accessToken string
-	expiresIn   int64
+	expiresAt   time.Time
 }
 
 // sfCall is an in-flight singleflight request.
@@ -445,18 +466,23 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 	if v, ok := params["failureRateLimit"]; ok {
 		switch n := v.(type) {
 		case float64:
-			if int(n) >= 1 {
-				cfg.FailureRateLimit = int(n)
+			if int(n) < 1 {
+				return cfg, fmt.Errorf("client-secret-basic: 'failureRateLimit' must be at least 1, got %d", int(n))
 			}
+			cfg.FailureRateLimit = int(n)
 		case int:
-			if n >= 1 {
-				cfg.FailureRateLimit = n
+			if n < 1 {
+				return cfg, fmt.Errorf("client-secret-basic: 'failureRateLimit' must be at least 1, got %d", n)
 			}
+			cfg.FailureRateLimit = n
 		}
 	}
 
 	cfg.TokenMetadataKey = defaultTokenMetadataKey
 	if s := stringParam(params, "tokenMetadataKey"); s != "" {
+		if s == applicationIDMetadataKey {
+			return cfg, fmt.Errorf("client-secret-basic: 'tokenMetadataKey' cannot be %q — it is reserved for the authenticated application identity", applicationIDMetadataKey)
+		}
 		cfg.TokenMetadataKey = s
 	}
 
@@ -465,6 +491,9 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 	_, hasClientId := params["clientId"]
 	_, hasClientSecret := params["clientSecret"]
 	ep := stringParam(params, "tokenEndpoint")
+	if hasCredentials && (hasClientId || hasClientSecret) {
+		return cfg, fmt.Errorf("client-secret-basic: 'credentials' and flat 'clientId'/'clientSecret' are mutually exclusive — configure one form only")
+	}
 	if (hasCredentials || hasClientId || hasClientSecret) && ep != "" {
 		return cfg, fmt.Errorf("client-secret-basic: 'tokenEndpoint' and static credentials (credentials/clientId/clientSecret) are mutually exclusive — configure one mode only")
 	}
@@ -493,13 +522,21 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 			if !ok {
 				return cfg, fmt.Errorf("client-secret-basic: credentials[%d] must be an object", i)
 			}
-			id := strings.TrimSpace(fmt.Sprintf("%v", entry["clientId"]))
-			secret := strings.TrimSpace(fmt.Sprintf("%v", entry["clientSecret"]))
-			if id == "" || id == "<nil>" {
-				return cfg, fmt.Errorf("client-secret-basic: credentials[%d].clientId is missing or empty", i)
+			idRaw, hasID := entry["clientId"]
+			secretRaw, hasSecret := entry["clientSecret"]
+			if !hasID || idRaw == nil {
+				return cfg, fmt.Errorf("client-secret-basic: credentials[%d].clientId is missing", i)
 			}
-			if secret == "" || secret == "<nil>" {
-				return cfg, fmt.Errorf("client-secret-basic: credentials[%d].clientSecret is missing or empty", i)
+			if !hasSecret || secretRaw == nil {
+				return cfg, fmt.Errorf("client-secret-basic: credentials[%d].clientSecret is missing", i)
+			}
+			id, idOk := idRaw.(string)
+			secret, secretOk := secretRaw.(string)
+			if !idOk || id == "" {
+				return cfg, fmt.Errorf("client-secret-basic: credentials[%d].clientId must be a non-empty string", i)
+			}
+			if !secretOk || secret == "" {
+				return cfg, fmt.Errorf("client-secret-basic: credentials[%d].clientSecret must be a non-empty string", i)
 			}
 			if _, dup := cfg.Credentials[id]; dup {
 				return cfg, fmt.Errorf("client-secret-basic: duplicate clientId %q in credentials", id)
@@ -509,12 +546,12 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 		return cfg, nil
 	}
 
-	id := strings.TrimSpace(stringParam(params, "clientId"))
-	secret := strings.TrimSpace(stringParam(params, "clientSecret"))
-	if id == "" {
+	id, idOk := params["clientId"].(string)
+	secret, secretOk := params["clientSecret"].(string)
+	if !idOk || id == "" {
 		return cfg, fmt.Errorf("client-secret-basic: required param 'clientId' is missing or empty")
 	}
-	if secret == "" {
+	if !secretOk || secret == "" {
 		return cfg, fmt.Errorf("client-secret-basic: required param 'clientSecret' is missing or empty")
 	}
 	cfg.Credentials[id] = secret
@@ -705,7 +742,8 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 		}
 		// Atomically check and reserve a failure slot. Each singleflight group is one
 		// distinct credential attempt, so the counter increments once per IdP call.
-		if _, reserveErr := p.failures.checkAndReserve(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow); reserveErr != nil {
+		rsv, reserveErr := p.failures.checkAndReserve(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow)
+		if reserveErr != nil {
 			return sfResult{}, reserveErr
 		}
 
@@ -714,7 +752,7 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 			var netErr networkError
 			if errors.As(err, &netErr) {
 				// Network/server error: return the slot so it doesn't count as a failure.
-				p.failures.releaseReservation(clientId)
+				p.failures.releaseReservation(clientId, rsv)
 			} else {
 				// Auth rejection: keep the slot, store the specific bad pair.
 				p.failures.storeWrongCred(key, p.cfg.FailureWindow)
@@ -722,41 +760,53 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 			return sfResult{}, err
 		}
 		// Success: return the slot (it was a speculative increment).
-		p.failures.releaseReservation(clientId)
-		return sfResult{accessToken: accessToken, expiresIn: expiresIn}, nil
+		p.failures.releaseReservation(clientId, rsv)
+
+		// Compute absolute cache expiry inside the callback so all waiting goroutines
+		// reuse the same value rather than each computing it at their own resume time.
+		//
+		// Three cases:
+		//   expiresIn absent (nil)   → 1-hour fallback minus buffer
+		//   expiresIn ≤ 0            → token is already expired; store with past expiry
+		//                              so the entry is treated as a cache miss immediately
+		//   expiresIn > 0            → use it minus buffer (minimum 1 second)
+		now := time.Now()
+		var expiresAt time.Time
+		if expiresIn == nil {
+			ttl := defaultTokenTTLFallback - p.cfg.ExpiryBuffer
+			if ttl <= 0 {
+				ttl = defaultFailureWindow
+			}
+			expiresAt = now.Add(ttl)
+		} else if *expiresIn <= 0 {
+			expiresAt = now // immediate expiry — do not cache
+		} else {
+			ttl := time.Duration(*expiresIn*float64(time.Second)) - p.cfg.ExpiryBuffer
+			if ttl <= 0 {
+				ttl = time.Second
+			}
+			expiresAt = now.Add(ttl)
+		}
+		if p.cfg.MaxCacheTTL > 0 {
+			if maxExpiry := now.Add(p.cfg.MaxCacheTTL); expiresAt.After(maxExpiry) {
+				expiresAt = maxExpiry
+			}
+		}
+		return sfResult{accessToken: accessToken, expiresAt: expiresAt}, nil
 	})
 	if err != nil {
 		return "", err
 	}
 
-	// Compute cache TTL.
-	// Use the 1-hour fallback only when expires_in was absent (zero) in the token
-	// response. When expires_in is present but shorter than expiryBuffer, clamp to
-	// a minimal positive TTL rather than falling back to 1 hour — a short-lived
-	// token should not be cached as if it were long-lived.
-	var ttl time.Duration
-	if result.expiresIn == 0 {
-		ttl = defaultTokenTTLFallback - p.cfg.ExpiryBuffer
-		if ttl <= 0 {
-			ttl = defaultFailureWindow
-		}
-	} else {
-		ttl = time.Duration(result.expiresIn)*time.Second - p.cfg.ExpiryBuffer
-		if ttl <= 0 {
-			ttl = time.Second
-		}
-	}
-	if p.cfg.MaxCacheTTL > 0 && ttl > p.cfg.MaxCacheTTL {
-		ttl = p.cfg.MaxCacheTTL
-	}
-	p.cache.Store(key, validationEntry{expiresAt: time.Now().Add(ttl), accessToken: result.accessToken})
+	p.cache.Store(key, validationEntry{expiresAt: result.expiresAt, accessToken: result.accessToken})
 	return result.accessToken, nil
 }
 
 // tokenResponseJSON is the subset of an RFC 6749 §5.1 response this policy needs.
+// ExpiresIn is a pointer to distinguish an absent field from an explicit zero value.
 type tokenResponseJSON struct {
-	AccessToken string  `json:"access_token"`
-	ExpiresIn   float64 `json:"expires_in"`
+	AccessToken string   `json:"access_token"`
+	ExpiresIn   *float64 `json:"expires_in"`
 }
 
 // doTokenRequest POSTs a client_credentials grant to the token endpoint, forwarding
@@ -765,50 +815,52 @@ type tokenResponseJSON struct {
 // 4xx/5xx responses return networkError (maps to 503 and are not cached). Only HTTP
 // 400 and 401 (the statuses RFC 6749 §5.2 defines for invalid_client) return a plain
 // error (maps to 401 and is cached per clientId).
-func (p *ClientSecretBasicPolicy) doTokenRequest(ctx context.Context, rawAuth string) (string, int64, error) {
+func (p *ClientSecretBasicPolicy) doTokenRequest(ctx context.Context, rawAuth string) (string, *float64, error) {
 	form := url.Values{"grant_type": {"client_credentials"}}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.TokenEndpoint,
 		strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", 0, networkError{fmt.Errorf("building token request: %w", err)}
+		return "", nil, networkError{fmt.Errorf("building token request: %w", err)}
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Authorization", rawAuth)
 
 	resp, err := p.httpClient.Do(req)
 	if err != nil {
-		return "", 0, networkError{fmt.Errorf("token request failed: %w", err)}
+		return "", nil, networkError{fmt.Errorf("token request failed: %w", err)}
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxTokenResponseBytes))
 	if err != nil {
-		return "", 0, networkError{fmt.Errorf("reading token response: %w", err)}
+		return "", nil, networkError{fmt.Errorf("reading token response: %w", err)}
 	}
 
 	if resp.StatusCode == http.StatusOK {
 		var tok tokenResponseJSON
 		if err := json.Unmarshal(body, &tok); err != nil {
-			return "", 0, networkError{fmt.Errorf("parsing token response: %w", err)}
+			return "", nil, networkError{fmt.Errorf("parsing token response: %w", err)}
 		}
 		if tok.AccessToken == "" {
-			return "", 0, networkError{fmt.Errorf("token endpoint returned no access_token")}
+			return "", nil, networkError{fmt.Errorf("token endpoint returned no access_token")}
 		}
-		return tok.AccessToken, int64(tok.ExpiresIn), nil
+		return tok.AccessToken, tok.ExpiresIn, nil
 	}
 
 	// RFC 6749 §5.2: 400 Bad Request and 401 Unauthorized signal an invalid client.
 	// These are cacheable auth rejections. All other failures (429 Too Many Requests,
 	// other 4xx, 5xx) are transient and must not be cached.
 	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized {
-		return "", 0, fmt.Errorf("token endpoint rejected credentials: HTTP %d", resp.StatusCode)
+		return "", nil, fmt.Errorf("token endpoint rejected credentials: HTTP %d", resp.StatusCode)
 	}
-	return "", 0, networkError{fmt.Errorf("token endpoint returned status %d", resp.StatusCode)}
+	return "", nil, networkError{fmt.Errorf("token endpoint returned status %d", resp.StatusCode)}
 }
 
 // cacheKey returns a stable, non-reversible key for the (clientId, clientSecret) pair.
+// Length-prefixed encoding avoids collisions when clientId or clientSecret contains the
+// separator character — e.g. ("a:b", "c") and ("a", "b:c") must hash to different keys.
 func cacheKey(clientId, clientSecret string) string {
-	h := sha256.Sum256([]byte(clientId + ":" + clientSecret))
+	h := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", len(clientId), clientId, clientSecret)))
 	return fmt.Sprintf("%x", h)
 }
 
