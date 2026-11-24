@@ -513,12 +513,8 @@ func (p *AzureContentSafetyContentModerationPolicy) getValidCategories(categoryM
 // callAzureContentSafetyAPI calls Azure Content Safety API, sending credential in credentialHeader:
 // the subscription key in Ocp-Apim-Subscription-Key, or a bearer token in Authorization.
 func (p *AzureContentSafetyContentModerationPolicy) callAzureContentSafetyAPI(endpoint, credentialHeader, credential, text string, categories []string) ([]map[string]interface{}, error) {
-	// Ensure endpoint doesn't end with /
-	if strings.HasSuffix(endpoint, "/") {
-		endpoint = strings.TrimSuffix(endpoint, "/")
-	}
-
-	serviceURL := endpoint + endpointSuffix
+	// Every trailing slash goes, as the endpoint allowlist ignores them all.
+	serviceURL := strings.TrimRight(endpoint, "/") + endpointSuffix
 
 	requestBody := map[string]interface{}{
 		"text":               text,

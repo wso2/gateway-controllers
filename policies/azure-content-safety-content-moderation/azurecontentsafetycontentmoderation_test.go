@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -285,6 +286,32 @@ func TestAzureContentSafetyPolicy_APISuccess_NoViolation(t *testing.T) {
 	action := p.OnRequestBody(context.Background(), azureRequestContext(`{"messages":"hello"}`), nil)
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications on non-violation, got %T", action)
+	}
+}
+
+// The endpoint allowlist ignores every trailing slash, so the request URL must too.
+func TestAzureContentSafetyPolicy_EndpointTrailingSlashes(t *testing.T) {
+	for _, slashes := range []string{"", "/", "//"} {
+		t.Run("endpoint+"+strconv.Quote(slashes), func(t *testing.T) {
+			srv := azureMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/contentsafety/text:analyze" {
+					t.Errorf("unexpected path: %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"categoriesAnalysis":[{"category":"Hate","severity":0}]}`))
+			})
+			defer srv.Close()
+
+			p := mustGetAzurePolicy(t, map[string]interface{}{
+				"azureContentSafetyEndpoint": srv.URL + slashes,
+				"azureContentSafetyKey":      "k",
+				"request":                    map[string]interface{}{"jsonPath": "$.messages"},
+			})
+			action := p.OnRequestBody(context.Background(), azureRequestContext(`{"messages":"hello"}`), nil)
+			if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+				t.Fatalf("expected UpstreamRequestModifications, got %T", action)
+			}
+		})
 	}
 }
 
