@@ -41,57 +41,101 @@ Provide either `credentials` (multi-client) or `clientId` + `clientSecret` (sing
 
 ## Examples
 
-### Static — multi-client (recommended)
+### Example 1: Static — multi-client (recommended)
 
 Register multiple credential pairs. The policy matches the `clientId` decoded from the `Authorization: Basic` header and validates the corresponding secret.
 
 ```yaml
-policies:
-  - name: client-secret-basic
-    version: v1
-    params:
-      credentials:
-        - clientId: app-one
-          clientSecret: '{{ secret "app-one-secret" }}'
-        - clientId: app-two
-          clientSecret: '{{ secret "app-two-secret" }}'
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: orders-api-v1
+spec:
+  displayName: Orders API
+  version: v1.0.0
+  context: /orders/v1
+  upstream:
+    main:
+      url: http://orders-backend.internal/api
+  policies:
+    - name: client-secret-basic
+      version: v1
+      params:
+        credentials:
+          - clientId: app-one
+            clientSecret: '{{ secret "app-one-secret" }}'
+          - clientId: app-two
+            clientSecret: '{{ secret "app-two-secret" }}'
+  operations:
+    - method: GET
+      path: /items
+    - method: POST
+      path: /items
 ```
 
 **app-one request (accepted):**
 ```bash
 CREDS=$(echo -n "app-one:secret1" | base64)
-curl -H "Authorization: Basic $CREDS" https://gateway.example.com/api/path
+curl -H "Authorization: Basic $CREDS" https://gateway.example.com/orders/v1/items
 ```
 
 Rotate one client's secret by updating its gateway secret and redeploying — the other client is unaffected.
 
 ---
 
-### Static — single-client
+### Example 2: Static — single-client
 
 ```yaml
-policies:
-  - name: client-secret-basic
-    version: v1
-    params:
-      clientId: my-service-account
-      clientSecret: '{{ secret "my-service-secret" }}'
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: orders-api-v1
+spec:
+  displayName: Orders API
+  version: v1.0.0
+  context: /orders/v1
+  upstream:
+    main:
+      url: http://orders-backend.internal/api
+  policies:
+    - name: client-secret-basic
+      version: v1
+      params:
+        clientId: my-service-account
+        clientSecret: '{{ secret "my-service-secret" }}'
+  operations:
+    - method: GET
+      path: /items
 ```
 
 ---
 
-### Dynamic — validate via OAuth2 token endpoint
+### Example 3: Dynamic — validate via OAuth2 token endpoint
 
 The policy forwards the `Authorization: Basic` header unchanged to the configured token endpoint as an OAuth2 `client_credentials` grant. If the endpoint issues a token, the credentials are valid. The result is cached in-process for `expires_in − expiryBuffer` seconds to avoid a token call on every request.
 
 ```yaml
-policies:
-  - name: client-secret-basic
-    version: v1
-    params:
-      tokenEndpoint: https://idp.example.com/realms/wso2/protocol/openid-connect/token
-      tokenRequestTimeout: 10s
-      expiryBuffer: 30s
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: orders-api-v1
+spec:
+  displayName: Orders API
+  version: v1.0.0
+  context: /orders/v1
+  upstream:
+    main:
+      url: http://orders-backend.internal/api
+  policies:
+    - name: client-secret-basic
+      version: v1
+      params:
+        tokenEndpoint: https://idp.example.com/realms/wso2/protocol/openid-connect/token
+        tokenRequestTimeout: 10s
+        expiryBuffer: 30s
+  operations:
+    - method: GET
+      path: /items
 ```
 
 **Request (accepted — token endpoint returns 200):**
@@ -109,7 +153,7 @@ The dynamic mode is useful when client credentials are managed in an external id
 
 ---
 
-### Dynamic — custom timeout
+### Example 4: Dynamic — custom timeout
 
 ```yaml
 policies:
@@ -123,7 +167,7 @@ policies:
 
 ---
 
-### Dynamic — forward the access token to the backend
+### Example 5: Dynamic — forward the access token to the backend
 
 After a successful dynamic validation, the IdP-issued access token is stored in `SharedContext.Metadata` under the key `upstream-access-token` by default (configurable via `tokenMetadataKey`). A downstream `header-transform` policy can read it with `${meta.upstream-access-token}` and add it as an `Authorization` header on the upstream request.
 
@@ -148,65 +192,65 @@ The original `Authorization: Basic` header is stripped by `client-secret-basic` 
 
 ---
 
-### Full API definition example
+### Example 6: Full API definition with per-plan routing
+
+Combines `client-secret-basic`, `subscription-validation`, and `dynamic-endpoint` to authenticate callers and route each request to the backend tier that matches the caller's subscription plan.
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1
 kind: RestApi
 metadata:
-  name: TC5API
+  name: orders-api-v1
 spec:
-  displayName: TC5 API
-  context: /api5
+  displayName: Orders API
+  context: /orders/v1
   version: v1.0.0
   subscriptionPlans:
     - gold
     - silver
   upstream:
     main:
-      url: http://mock-silver.apip.svc.cluster.local
+      url: http://silver-backend.internal/orders
   upstreamDefinitions:
     - name: gold
       upstreams:
-        - url: http://mock-gold.apip.svc.cluster.local
+        - url: http://gold-backend.internal/orders
     - name: silver
       upstreams:
-        - url: http://mock-silver.apip.svc.cluster.local
+        - url: http://silver-backend.internal/orders
   policies:
     - name: client-secret-basic
       version: v1
       params:
-        clientId: tc5-client
-        clientSecret: '{{ secret "tc5-secret" }}'
+        clientId: my-client
+        clientSecret: '{{ secret "my-api-secret" }}'
     - name: subscription-validation
       version: v1
     - name: dynamic-endpoint
       version: v1
       executionCondition: >-
         "x-wso2-subscription-plan-name" in request.Metadata &&
-        (request.Metadata["x-wso2-subscription-plan-name"] == "gold" ||
-         request.Metadata["x-wso2-subscription-plan-name"] == "platinum")
+        request.Metadata["x-wso2-subscription-plan-name"] == "gold"
       params:
         targetUpstream: gold
     - name: dynamic-endpoint
       version: v1
       executionCondition: >-
         "x-wso2-subscription-plan-name" in request.Metadata &&
-        (request.Metadata["x-wso2-subscription-plan-name"] == "silver" ||
-         request.Metadata["x-wso2-subscription-plan-name"] == "bronze")
+        request.Metadata["x-wso2-subscription-plan-name"] == "silver"
       params:
         targetUpstream: silver
   operations:
     - method: GET
-      path: /api/map
-    - method: GET
-      path: /api/healthcheck
+      path: /items
+    - method: POST
+      path: /items
 ```
 
 **Caller request:**
 ```bash
-CREDS=$(echo -n "tc5-client:my-secret" | base64)
-curl -H "Authorization: Basic $CREDS" https://gateway.example.com/api5/api/map
+CREDS=$(echo -n "my-client:my-secret" | base64)
+curl -H "Authorization: Basic $CREDS" https://gateway.example.com/orders/v1/items
 ```
 
 ---

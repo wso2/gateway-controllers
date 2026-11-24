@@ -30,7 +30,7 @@ Concatenate `clientId`, a literal colon, and `clientSecret`, then base64-encode 
 
 ```bash
 CREDS=$(echo -n "my-client:my-secret" | base64)
-curl -H "Authorization: Basic $CREDS" https://gateway.example.com/api/path
+curl -H "Authorization: Basic $CREDS" https://gateway.example.com/orders/v1/items
 ```
 
 In most HTTP client libraries this is the standard Basic auth mechanism — set `auth=("my-client", "my-secret")` or equivalent and the library handles base64 encoding automatically. **Note:** per RFC 6749 §2.3.1, any `+`, `%`, `&`, or `=` characters in the client ID or secret must be percent-encoded *before* base64 encoding. Not all HTTP libraries do this automatically — if your credentials contain special characters, verify that your library percent-encodes them or encode manually with `urllib.parse.quote_plus` (Python), `URLEncoder.encode` (Java), or `encodeURIComponent` (JavaScript).
@@ -161,10 +161,10 @@ This requires a subscription to exist with `applicationId` matching the `clientI
 curl -s -X POST "http://localhost:9090/api/management/v1/subscriptions" -u admin:admin \
   -H "Content-Type: application/json" \
   -d '{
-    "apiId": "TC5API",
+    "apiId": "orders-api-v1",
     "subscriptionPlanId": "<plan-uuid>",
     "subscriptionToken": "any-unique-value",
-    "applicationId": "my-client-id"
+    "applicationId": "my-client"
   }'
 ```
 
@@ -181,10 +181,10 @@ Yes — in static mode using the `credentials` array. Each entry has a unique `c
 Update the `clientSecret` param (or the gateway secret it references) in the API definition YAML and redeploy:
 
 ```bash
-curl -s -X PUT http://localhost:9090/api/management/v1/rest-apis/TC5API \
+curl -s -X PUT http://localhost:9090/api/management/v1/rest-apis/orders-api-v1 \
   -u admin:admin \
   -H "Content-Type: application/yaml" \
-  --data-binary @tc5-api.yaml
+  --data-binary @orders-api.yaml
 ```
 
 There is no zero-downtime rotation path — the old secret becomes invalid as soon as the new definition is applied. Use `{{ secret }}` references to decouple the value from the YAML so only the secret store needs updating.
