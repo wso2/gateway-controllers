@@ -733,6 +733,17 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 	// reservation happens inside fn() so exactly one slot is consumed per IdP call,
 	// regardless of how many goroutines are waiting on this credential pair.
 	result, err := p.sf.do(key, func() (sfResult, error) {
+		// Re-check the success cache at callback start. A request that passed the
+		// outer cache check before a completed flight published its entry can enter
+		// here after the flight is removed but before the outer store runs. Finding
+		// the entry now avoids a redundant token request.
+		if v, ok := p.cache.Load(key); ok {
+			entry := v.(validationEntry)
+			if time.Now().Before(entry.expiresAt) {
+				return sfResult{accessToken: entry.accessToken, expiresAt: entry.expiresAt}, nil
+			}
+			p.cache.Delete(key)
+		}
 		// Re-check wrongCreds inside the singleflight fn. A request that arrives just
 		// as a prior IdP call for the same wrong credential finishes can miss both the
 		// singleflight group and the outer wrongCreds check; checking here closes that
@@ -792,13 +803,16 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 				expiresAt = maxExpiry
 			}
 		}
+		// Store the entry inside the callback — before singleflight removes the flight
+		// from its work map — so any concurrent request that misses the flight finds
+		// the populated cache entry instead of starting another token request.
+		p.cache.Store(key, validationEntry{expiresAt: expiresAt, accessToken: accessToken})
 		return sfResult{accessToken: accessToken, expiresAt: expiresAt}, nil
 	})
 	if err != nil {
 		return "", err
 	}
 
-	p.cache.Store(key, validationEntry{expiresAt: result.expiresAt, accessToken: result.accessToken})
 	return result.accessToken, nil
 }
 

@@ -120,7 +120,7 @@ The gateway continues to accept requests for that credential until the cache ent
 - **`expires_in` absent**: `min(1h - expiryBuffer, maxCacheTTL)` (1-hour fallback). If `expiryBuffer` is at least 1 hour, the hold time falls back to `failureWindow`.
 - **`expires_in` present but ≤ `expiryBuffer`** (or ≤ 0): the token is not cached — the entry expires immediately and the next request goes to the IdP.
 
-To reduce the revocation window, set a short `maxCacheTTL` (e.g. `"1m"`). There is no purge API — for immediate revocation after a cache entry is written, restart the gateway pod.
+To reduce the revocation window, set a short `maxCacheTTL` (e.g. `"1m"`). There is no purge API. For immediate revocation after a cache entry is written, restart every gateway replica that may hold the entry — each replica keeps its own independent in-process cache, so restarting one replica does not clear the others.
 
 **Secret rotation note:** when using `{{ secret "handle" }}` references, updating the secret store value does not take effect until the API is redeployed or the controller is restarted. Static mode has no in-process cache — the old value stays in the deployed API definition until it is redeployed with the new value; the new value is not picked up at rotation time alone.
 
