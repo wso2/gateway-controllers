@@ -1,5 +1,5 @@
 name: interceptor-service
-version: v1.1.0
+version: v1.2.0
 description: |
   Calls a user-defined HTTP interceptor service for request and/or response
   phases. The interceptor can mutate headers, body, path, route to a dynamic
@@ -10,6 +10,7 @@ parameters:
   properties:
     endpoint:
       type: string
+      format: uri
       x-wso2-policy-advanced-param: false
       description: |
         Base URL of the interceptor service (e.g. https://my-svc:8443/api/v1).
@@ -59,7 +60,7 @@ parameters:
     tlsSkipVerify:
       type: boolean
       x-wso2-policy-advanced-param: true
-      description: Skip TLS verification for the interceptor service (dev only).
+      description: Skip TLS verification for the interceptor service (dev only). Takes effect only when the gateway runs without its shared outbound HTTP client; otherwise configure TLS roots and client certificates under [policy_engine.http_client].
       default: false
   required:
     - endpoint

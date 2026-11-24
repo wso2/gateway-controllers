@@ -1,5 +1,5 @@
 name: typesafe-jev-tool-filtering
-version: v0.8.0
+version: v0.9.0
 displayName: TypeSafe Jev Tool Filtering
 description: |
   Narrows the tools array of an LLM request down to the tools that are actually relevant to the current user

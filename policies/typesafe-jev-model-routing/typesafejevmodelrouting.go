@@ -107,7 +107,7 @@ func GetPolicy(
 ) (policy.Policy, error) {
 	// No client-level timeout: each Jev call is bounded by the configured
 	// timeout via context instead.
-	p := &TypesafeJevModelRoutingPolicy{client: &http.Client{}}
+	p := &TypesafeJevModelRoutingPolicy{client: newPolicyHTTPClient(0, false)}
 	if err := parseParams(params, p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}

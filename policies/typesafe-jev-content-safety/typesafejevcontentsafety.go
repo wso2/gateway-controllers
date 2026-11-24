@@ -196,7 +196,7 @@ func GetPolicy(
 		apiKey:  apiKey,
 		baseURL: stringParamOrDefault(params, "baseURL", defaultBaseURL),
 		model:   stringParamOrDefault(params, "model", defaultModel),
-		client:  &http.Client{},
+		client:  newPolicyHTTPClient(0, false),
 	}
 
 	if requestParamsRaw, ok := params["request"].(map[string]interface{}); ok {

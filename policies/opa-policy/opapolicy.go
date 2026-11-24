@@ -112,10 +112,21 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		return nil, err
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.MaxConnsPerHost = maxConns
-	transport.MaxIdleConnsPerHost = maxConns
-	transport.MaxIdleConns = maxConns
+	// The connection limit applies only on the fallback client; with the
+	// gateway's shared client it is the engine's responsibility. A redirect is
+	// never followed: the request carries the OPA access key and the
+	// request-derived input.
+	if maxConns != defaultMaxOpenConnections && sharedClientInstalled() {
+		slog.Warn("OPA Policy: maxOpenConnections is ignored because the gateway's shared HTTP client is in use; configure pooling in [policy_engine.http_client]")
+	}
+	client := derivedClient(time.Duration(timeoutSecs)*time.Second, func(t *http.Transport) {
+		t.MaxConnsPerHost = maxConns
+		t.MaxIdleConnsPerHost = maxConns
+		t.MaxIdleConns = maxConns
+	})
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 
 	return &OPAPolicy{
 		requestURL:         buildRequestURL(serverURL, policyName, rule),
@@ -125,13 +136,7 @@ func GetPolicy(_ policy.PolicyMetadata, params map[string]interface{}) (policy.P
 		additionalProps:    additional,
 		policyName:         policyName,
 		maxResponseSizeCap: maxOPAResponseSize,
-		client: &http.Client{
-			Timeout:   time.Duration(timeoutSecs) * time.Second,
-			Transport: transport,
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client:             client,
 	}, nil
 }
 

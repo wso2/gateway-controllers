@@ -1,5 +1,5 @@
 name: typesafe-jev-model-routing
-version: v0.8.0
+version: v0.9.0
 displayName: TypeSafe Jev Model Routing
 description: |
   Routes AI/LLM requests to different models using TypeSafe AI's Jev "System

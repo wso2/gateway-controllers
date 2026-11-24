@@ -19,8 +19,6 @@ package oauth2generator
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -190,7 +188,7 @@ func (t tokenJSON) expiresInSeconds() (int64, bool) {
 // is applied last, skipping Authorization/Content-Type so it can never override them.
 // clientID/clientSecret are form-urlencoded before being combined into the Basic credential
 // (RFC 6749 Appendix B) - a raw base64(id+":"+secret) would mishandle a colon in either value.
-func doTokenRequest(ctx context.Context, httpClient *http.Client, tokenEndpoint string, style clientAuthStyle,
+func doTokenRequest(ctx context.Context, getClient func() (*http.Client, error), tokenEndpoint string, style clientAuthStyle,
 	clientID, clientSecret string, form url.Values, extraHeaders map[string]string) (*Token, error) {
 	if style == authStyleInParams {
 		form.Set("client_id", clientID)
@@ -213,7 +211,11 @@ func doTokenRequest(ctx context.Context, httpClient *http.Client, tokenEndpoint 
 		req.SetBasicAuth(url.QueryEscape(clientID), url.QueryEscape(clientSecret))
 	}
 
-	resp, err := httpClient.Do(req)
+	client, err := getClient()
+	if err != nil {
+		return nil, &nonRetryableTokenError{err: fmt.Errorf("invalid token endpoint transport config: %w", err)}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("token request failed: %w", err)
 	}
@@ -264,7 +266,7 @@ func doTokenRequest(ctx context.Context, httpClient *http.Client, tokenEndpoint 
 
 // fetchClientCredentialsToken implements RFC 6749 §4.4. tokenRequestParams (e.g. scope, audience)
 // is forwarded verbatim into the request body.
-func fetchClientCredentialsToken(ctx context.Context, httpClient *http.Client, p oauth2Params, style clientAuthStyle) (*Token, error) {
+func fetchClientCredentialsToken(ctx context.Context, httpClient func() (*http.Client, error), p oauth2Params, style clientAuthStyle) (*Token, error) {
 	form := toURLValues(p.tokenRequestParams)
 	if form == nil {
 		form = url.Values{}
@@ -275,7 +277,7 @@ func fetchClientCredentialsToken(ctx context.Context, httpClient *http.Client, p
 
 // fetchPasswordToken implements the Resource Owner Password Credentials grant (RFC 6749 §4.3).
 // grant_type/username/password are set after merging tokenRequestParams so they can't be overridden.
-func fetchPasswordToken(ctx context.Context, httpClient *http.Client, p oauth2Params, style clientAuthStyle) (*Token, error) {
+func fetchPasswordToken(ctx context.Context, httpClient func() (*http.Client, error), p oauth2Params, style clientAuthStyle) (*Token, error) {
 	form := toURLValues(p.tokenRequestParams)
 	if form == nil {
 		form = url.Values{}
@@ -531,13 +533,23 @@ func GetPolicy(metadata policy.PolicyMetadata, params map[string]interface{}) (p
 func buildTokenSource(p oauth2Params) (TokenSource, error) {
 	style := authStyleFor(p.clientAuthMethod)
 
-	// The Transport itself is shared across policy instances/rebuilds; only the *http.Client
-	// wrapper (cheap) is rebuilt here.
-	transport, err := getOrCreateTokenEndpointTransport(p)
-	if err != nil {
+	opts := outboundOptions{proxyURL: p.proxyURL, tlsCACert: p.tlsCaCert, insecure: p.tlsInsecureSkipVerify}
+	if err := opts.validate(); err != nil {
 		return nil, fmt.Errorf("invalid token endpoint transport config: %w", err)
 	}
-	httpClient := &http.Client{Timeout: p.tokenRequestTimeout, Transport: transport}
+	if opts.needsOverride() && sharedClientInstalled() {
+		slog.Warn("OAuth2Generator: proxyURL/tlsCaCert/tlsInsecureSkipVerify are ignored because the gateway's shared HTTP client is in use; configure proxy, TLS roots and client certificates in [policy_engine.http_client]")
+	}
+	// The request body/header carries the client secret (and password), so a redirect to another
+	// origin must never be followed. The client is resolved per request so it tracks the
+	// engine's shared client; its transport clone is cached, so connections are still pooled.
+	httpClient := func() (*http.Client, error) {
+		client, err := outboundClient(opts, p.tokenRequestTimeout)
+		if err != nil {
+			return nil, err
+		}
+		return redirectGuardedClient(client), nil
+	}
 
 	switch p.grantType {
 	case GrantTypeClientCredentials:
@@ -556,76 +568,6 @@ func buildTokenSource(p oauth2Params) (TokenSource, error) {
 		// Unreachable - validateAndExtractParams already rejects any other value.
 		return nil, fmt.Errorf("unsupported grantType %q", p.grantType)
 	}
-}
-
-// tokenEndpointTransportKey identifies a distinct token-endpoint HTTP client configuration.
-// tlsCACert is the raw PEM content, not hashed - it's not sensitive like a client secret.
-type tokenEndpointTransportKey struct {
-	proxyURL              string
-	tlsCACert             string
-	tlsInsecureSkipVerify bool
-}
-
-// tokenEndpointTransports is the process-wide registry of shared *http.Transport values for the
-// token-endpoint HTTP client, keyed by proxy/TLS configuration - mirrors redisClients (redis_clients.go).
-var tokenEndpointTransports = newKeyedSingleton[tokenEndpointTransportKey, *http.Transport]()
-
-// getOrCreateTokenEndpointTransport returns the process-wide shared Transport for this
-// proxy/TLS configuration, building it on first use.
-func getOrCreateTokenEndpointTransport(p oauth2Params) (*http.Transport, error) {
-	key := tokenEndpointTransportKey{
-		proxyURL:              p.proxyURL,
-		tlsCACert:             p.tlsCaCert,
-		tlsInsecureSkipVerify: p.tlsInsecureSkipVerify,
-	}
-
-	// build runs outside keyedSingleton's lock, so a slow build can't stall other instances.
-	transport, _, err := tokenEndpointTransports.getOrCreate(key, func() (*http.Transport, error) {
-		return buildTokenEndpointTransport(p)
-	})
-	return transport, err
-}
-
-// buildTokenEndpointTransport wires proxyURL and TLS settings into one Transport, setting Proxy
-// explicitly alongside TLSClientConfig - an unset Transport.Proxy means "never proxy", it does
-// not fall back to ProxyFromEnvironment. jwt-auth and opaque-token-auth each lost proxy support
-// this exact way by setting only TLSClientConfig.
-func buildTokenEndpointTransport(p oauth2Params) (*http.Transport, error) {
-	proxyFunc := http.ProxyFromEnvironment
-	if p.proxyURL != "" {
-		proxyURL, err := url.Parse(p.proxyURL)
-		if err != nil {
-			// url.Error embeds the raw input verbatim, which could leak proxyURL's userinfo - scrub before wrapping.
-			return nil, fmt.Errorf("invalid proxyURL: %s", redactURLCredentials(err.Error()))
-		}
-		proxyFunc = http.ProxyURL(proxyURL)
-	}
-
-	transport := &http.Transport{Proxy: proxyFunc}
-
-	if p.tlsCaCert != "" || p.tlsInsecureSkipVerify {
-		tlsConfig := &tls.Config{InsecureSkipVerify: p.tlsInsecureSkipVerify} //nolint:gosec // opt-in, logged at extraction time
-		if p.tlsCaCert != "" {
-			pool, err := parseCACertPool(p.tlsCaCert)
-			if err != nil {
-				return nil, fmt.Errorf("tlsCaCert: %w", err)
-			}
-			tlsConfig.RootCAs = pool
-		}
-		transport.TLSClientConfig = tlsConfig
-	}
-
-	return transport, nil
-}
-
-// parseCACertPool parses PEM-encoded CA certificate content into a pool that trusts only these
-// CA(s), not the system's default public CAs - a deliberate, tighter trust boundary.
-func parseCACertPool(pemContent string) (*x509.CertPool, error) {
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM([]byte(pemContent)) {
-		return nil, fmt.Errorf("no valid PEM certificates found in tlsCaCert")
-	}
-	return pool, nil
 }
 
 // resilientTokenSource wraps a real, IDP-fetching TokenSource with bounded retry for transient
