@@ -5,14 +5,31 @@ title: "Overview"
 
 ## Overview
 
-The Set Headers policy sets or appends HTTP headers on upstream requests and/or downstream responses. The behavior is controlled by the `mode` parameter:
+The Set Headers policy dynamically sets or appends HTTP headers on incoming requests before they are forwarded to upstream services, and/or on outgoing responses before they are returned to clients. The behavior is controlled by the `mode` parameter:
 
 - **`set` mode (default):** Headers are set/replaced. Existing headers with the same name are overwritten with the new value.
 - **`append` mode:** Configured values are appended to the header, preserving any existing values for that header.
 
-Starting with v1.3, header values can embed context-variable expressions that are resolved at request time. This enables header forwarding, credential relay, subscription plan propagation, and value composition across the gateway call chain.
+The `mode` parameter applies to the whole policy instance — it governs both the request and response phases together. Per-header or per-phase mode selection is not supported; attach the policy more than once (for example, at different levels) if you need different modes.
 
-## Expression syntax
+Starting with v1.3, header values can embed context-variable expressions that are resolved at request time, enabling header forwarding, credential relay, subscription plan propagation, and value composition across the gateway call chain.
+
+## Features
+
+- Sets or appends custom headers on requests before forwarding to upstream services
+- Sets or appends custom headers on responses before returning to clients
+- Supports both request and response phases independently or simultaneously
+- **Selectable behavior via `mode`**: overwrite existing headers (`set`) or add to them (`append`)
+- **Dynamic expression support** (v1.3+): header values can reference request headers, upstream response headers, and gateway metadata at runtime
+- **Source header removal** (v1.3+): `removeSource: true` strips referenced source headers after reading
+- **Spoof prevention** (v1.3+): when a dynamic expression cannot be resolved, the target header is actively removed to prevent client-supplied values from reaching the backend
+- Proper header name normalization (lowercase conversion for HTTP/2 compatibility)
+- Static value assignment with support for special characters and complex values
+- Works with any HTTP method and request type
+- Last-value-wins behavior for duplicate header names in `set` mode; all values preserved in order in `append` mode
+- Comprehensive validation of header configurations
+
+## Expression syntax (v1.3+)
 
 | Expression | Available in | Replaced with |
 |---|---|---|
@@ -28,45 +45,66 @@ Expressions may appear anywhere in the value string — surrounded by literal te
 "plan=${meta.x-wso2-subscription-plan-name}/region=${req.header.x-region}"
 ```
 
-**When a referenced header or metadata key is absent**, or when the template contains a `${...}` expression with an unrecognised scope or unclosed delimiter, the target header is **removed** from the upstream request or downstream response. This prevents a client-supplied value from reaching the backend unchallenged.
+If a referenced header or metadata key is absent, or if the template contains an unrecognised scope or unclosed delimiter, the target header is **removed** to prevent a client-supplied value from reaching the backend. Static values (no expressions) are never removed.
 
-**Static values (no expressions) are never removed** — they behave exactly as in v1.2.
+### Metadata keys written by platform policies
+
+| Key | Written by | Value |
+|---|---|---|
+| `x-wso2-subscription-plan-name` | `subscription-validation` | Subscription plan name (e.g. `gold`, `silver`). Requires subscription-validation v1.0.2 or later. |
+| `x-wso2-application-id` | `jwt-auth` / `api-key-auth` | API consumer application ID |
+| `x-wso2-billing-customer-id` | `subscription-validation` | Billing customer ID (if set on the subscription). Requires subscription-validation v1.0.2 or later. |
+| `x-wso2-billing-subscription-id` | `subscription-validation` | Billing subscription ID (if set on the subscription). |
+| `x-wso2-subscription-status` | `subscription-validation` | Subscription status (e.g. `ACTIVE`). |
 
 ## Configuration
 
+The Set Headers policy can be configured for request phase, response phase, or both.
+This policy does not require system-level configuration and operates entirely based on the configured header arrays.
+
+
 ### User Parameters (API Definition)
 
+These parameters are configured per-API/route by the API developer:
+
 | Parameter | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `mode` | string | No | `set` | Controls how headers are applied. `set` overwrites existing headers; `append` adds values while preserving existing ones. Applies to both request and response phases. |
-| `request` | object | No* | — | Headers to set on the upstream request. Must contain a `headers` array. |
-| `request.phase` | string | No | `header` | Controls when request headers are applied. `body` applies them after body-derived metadata is available. |
-| `response` | object | No* | — | Headers to set on the downstream response. Must contain a `headers` array. |
+|-----------|------|----------|---------|-------------|
+| `mode` | string | No | `set` | Controls how configured headers are applied. `set` overwrites any existing header with the same name; `append` adds the configured value while preserving existing values. Applies to both the request and response phases. Allowed values: `set`, `append`. |
+| `request` | object | No | - | Specifies request-phase header settings. Must contain a `headers` array. At least one of `request` or `response` must be specified. |
+| `request.phase` | string | No | `header` | Controls when request headers are applied. Use `body` when header values depend on metadata produced while processing the request body. Allowed values: `header`, `body`. |
+| `response` | object | No | - | Specifies response-phase header settings. Must contain a `headers` array. At least one of `request` or `response` must be specified. |
 
-*At least one of `request` or `response` must be specified.
+### Request / Response Header Configuration
 
-### Header entry fields
+Each header entry in the `request.headers` or `response.headers` array must contain:
 
 | Field | Type | Required | Default | Description |
-|---|---|---|---|---|
-| `name` | string | Yes | — | Header name. Normalized to lowercase. Pattern: `^[a-zA-Z0-9\-_]+$`, max 256 chars. |
-| `value` | string | Yes | — | Static value or value template. Max 8192 chars. |
-| `removeSource` | boolean | No | `false` | When `true`, removes source headers referenced by `${req.header.*}` (request phase) or `${resp.header.*}` (response phase) expressions after reading their values. Has no effect on `${meta.<key>}` sources. |
+|-------|------|----------|---------|-------------|
+| `name` | string | Yes | — | The name of the HTTP header to set. Header names are automatically normalized to lowercase for consistency. Must match pattern `^[a-zA-Z0-9-_]+$` and be between 1 and 256 characters. |
+| `value` | string | Yes | — | The value to set. Can be a static string or a template with embedded `${...}` expressions (v1.3+). Maximum length is 8192 characters. |
+| `removeSource` | boolean | No | `false` | When `true`, removes source headers referenced via `${req.header.*}` (request phase) or `${resp.header.*}` (response phase) expressions after reading their values. Has no effect on `${meta.<key>}` sources or static values. (v1.3+) |
 
-## Configuration notes
+**Note:**
+At least one of `request` or `response` must be specified in the policy configuration. The policy will fail validation if both are omitted. If `mode` is specified, it must be either `set` or `append`. When using expressions, `${resp.header.*}` is not permitted in request-phase entries and fails validation at deploy time.
 
-Inside `gateway/build.yaml`, ensure the policy module is added under `policies:`:
+Request headers use the `header` phase by default. Set `request.phase` to `body`
+when a body-processing policy must run first, for example when model routing
+selects a provider and the provider-specific credentials are resolved from the
+resulting metadata. In body phase, the policy applies the configured request
+headers after the request body has been processed.
+
+Inside the `gateway/build.yaml`, ensure the policy module is added under `policies:`:
 
 ```yaml
 - name: set-headers
   gomodule: github.com/wso2/gateway-controllers/policies/set-headers@v1
 ```
 
-## Reference scenarios
+## Reference Scenarios:
 
-### Example 1: Static — setting request headers
+### Example 1: Setting Request Headers for Authentication
 
-Set static headers on upstream requests (unchanged from v1.2):
+Set authentication headers on all requests sent to upstream:
 
 ```yaml
 apiVersion: gateway.api-platform.wso2.com/v1
@@ -93,67 +131,422 @@ spec:
   operations:
     - method: GET
       path: /{country_code}/{city}
+    - method: GET
+      path: /alerts/active
+    - method: POST
+      path: /alerts/active
 ```
 
-### Example 2: Static — setting response headers for security
+**Request transformation (header set):**
+
+Original client request
+```http
+GET /weather/v1.0/US/NewYork HTTP/1.1
+Host: api-gateway.company.com
+Accept: application/json
+User-Agent: WeatherApp/1.0
+```
+
+Resulting upstream request
+```http
+GET /api/v2/US/NewYork HTTP/1.1
+Host: sample-backend:5000
+Accept: application/json
+User-Agent: WeatherApp/1.0
+x-api-key: 12345-abcde-67890-fghij
+x-client-version: 1.2.3
+```
+
+### Example 2: Setting Response Headers for Security
+
+Set security headers on all responses returned to clients:
 
 ```yaml
-policies:
-  - name: set-headers
-    version: v1
-    params:
-      response:
-        headers:
-          - name: X-Content-Type-Options
-            value: "nosniff"
-          - name: X-Frame-Options
-            value: "DENY"
-          - name: X-XSS-Protection
-            value: "1; mode=block"
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: weather-api-v1.0
+spec:
+  displayName: Weather-API
+  version: v1.0
+  context: /weather/$version
+  upstream:
+    main:
+      url: http://sample-backend:5000/api/v2
+  policies:
+    - name: set-headers
+      version: v1
+      params:
+        response:
+          headers:
+            - name: X-Content-Type-Options
+              value: "nosniff"
+            - name: X-Frame-Options
+              value: "DENY"
+            - name: X-XSS-Protection
+              value: "1; mode=block"
+  operations:
+    - method: GET
+      path: /{country_code}/{city}
+    - method: GET
+      path: /alerts/active
+    - method: POST
+      path: /alerts/active
 ```
 
-### Example 3: Append mode
+**Response transformation (header set):**
 
-Set `mode: append` to add values without removing values already present. Useful for multi-valued headers such as `Vary`, `Via`, or custom headers that accumulate context:
+Original upstream response
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+Resulting client response
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Content-Length: 256
+x-content-type-options: nosniff
+x-frame-options: DENY
+x-xss-protection: 1; mode=block
+
+{"temperature": 22, "humidity": 65}
+```
+
+### Example 3: Setting Headers on Both Request and Response
+
+Set headers on both requests (for upstream) and responses (for clients):
 
 ```yaml
-policies:
-  - name: set-headers
-    version: v1
-    params:
-      mode: append
-      request:
-        headers:
-          - name: Via
-            value: "1.1 api-gateway"
-      response:
-        headers:
-          - name: Vary
-            value: "Accept-Encoding"
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: weather-api-v1.0
+spec:
+  displayName: Weather-API
+  version: v1.0
+  context: /weather/$version
+  upstream:
+    main:
+      url: http://sample-backend:5000/api/v2
+  policies:
+    - name: set-headers
+      version: v1
+      params:
+        request:
+          headers:
+            - name: X-Source
+              value: "api-gateway"
+            - name: X-Request-ID
+              value: "req-12345"
+        response:
+          headers:
+            - name: X-Cache-Status
+              value: "HIT"
+            - name: X-Server-Version
+              value: "2.1.0"
+  operations:
+    - method: GET
+      path: /{country_code}/{city}
+    - method: GET
+      path: /alerts/active
+    - method: POST
+      path: /alerts/active
 ```
 
-### Example 4: Forward subscription plan name to upstream
+**Bidirectional transformation sample:**
 
-After `subscription-validation` runs, the resolved plan name is available as `${meta.x-wso2-subscription-plan-name}`. Forward it to the upstream service:
+Incoming client request headers
+```http
+GET /weather/v1.0/US/NewYork HTTP/1.1
+Host: api-gateway.company.com
+Accept: application/json
+```
+
+Forwarded upstream request headers
+```http
+GET /api/v2/US/NewYork HTTP/1.1
+Host: sample-backend:5000
+Accept: application/json
+x-source: api-gateway
+x-request-id: req-12345
+```
+
+Returned upstream response headers
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+```
+
+Final client response headers
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+x-cache-status: HIT
+x-server-version: 2.1.0
+```
+
+### Example 4: Route-Specific Headers
+
+Apply different headers to different routes:
 
 ```yaml
-policies:
-  - name: jwt-auth
-    version: v1
-  - name: subscription-validation
-    version: v1
-  - name: set-headers
-    version: v1
-    params:
-      request:
-        headers:
-          - name: x-subscription-plan
-            value: "${meta.x-wso2-subscription-plan-name}"
-          - name: x-billing-customer-id
-            value: "${meta.x-wso2-billing-customer-id}"
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: weather-api-v1.0
+spec:
+  displayName: Weather-API
+  version: v1.0
+  context: /weather/$version
+  upstream:
+    main:
+      url: http://sample-backend:5000/api/v2
+  operations:
+    - method: GET
+      path: /{country_code}/{city}
+      policies:
+        - name: set-headers
+          version: v1
+          params:
+            request:
+              headers:
+                - name: X-Operation-Type
+                  value: "weather-query"
+            response:
+              headers:
+                - name: X-Data-Source
+                  value: "weather-service"
+    - method: GET
+      path: /alerts/active
+      policies:
+        - name: set-headers
+          version: v1
+          params:
+            request:
+              headers:
+                - name: X-Operation-Type
+                  value: "alert-query"
+            response:
+              headers:
+                - name: X-Real-Time
+                  value: "true"
+    - method: POST
+      path: /alerts/active
+      policies:
+        - name: set-headers
+          version: v1
+          params:
+            request:
+              headers:
+                - name: X-Operation-Type
+                  value: "alert-create"
+            response:
+              headers:
+                - name: X-Processing-Mode
+                  value: "sync"
 ```
 
-`subscription-validation` must run before `set-headers` so that `x-wso2-subscription-plan-name` and related metadata keys are populated.
+**Route-level transformation sample:**
+
+For `GET /{country_code}/{city}`
+```http
+Request to upstream includes: x-operation-type: weather-query
+Response to client includes: x-data-source: weather-service
+```
+
+For `GET /alerts/active`
+```http
+Request to upstream includes: x-operation-type: alert-query
+Response to client includes: x-real-time: true
+```
+
+For `POST /alerts/active`
+```http
+Request to upstream includes: x-operation-type: alert-create
+Response to client includes: x-processing-mode: sync
+```
+
+### Example 5: Overwriting Existing Headers (Set Behavior)
+
+Demonstrate the default `set` behavior where existing headers with the same name are replaced. The `mode` parameter is omitted here, so it defaults to `set`:
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: weather-api-v1.0
+spec:
+  displayName: Weather-API
+  version: v1.0
+  context: /weather/$version
+  upstream:
+    main:
+      url: http://sample-backend:5000/api/v2
+  policies:
+    - name: set-headers
+      version: v1
+      params:
+        mode: set
+        response:
+          headers:
+            - name: Cache-Control
+              value: "public, max-age=3600"
+            - name: Server
+              value: "API-Gateway/2.1.0"
+            - name: Content-Type
+              value: "application/json; charset=utf-8"
+  operations:
+    - method: GET
+      path: /{country_code}/{city}
+    - method: GET
+      path: /alerts/active
+    - method: POST
+      path: /alerts/active
+```
+
+**Response transformation (header overwrite):**
+
+Original upstream response
+```http
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Server: Apache/2.4.41
+Cache-Control: no-cache
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+Resulting client response (headers overwritten)
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Server: API-Gateway/2.1.0
+Cache-Control: public, max-age=3600
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+### Example 6: Appending Headers (Append Behavior)
+
+Set `mode: append` to add header values without removing values already present on the request or response. This is useful for multi-valued headers such as `Vary`, `Via`, or custom headers that accumulate context as a request passes through intermediaries.
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: weather-api-v1.0
+spec:
+  displayName: Weather-API
+  version: v1.0
+  context: /weather/$version
+  upstream:
+    main:
+      url: http://sample-backend:5000/api/v2
+  policies:
+    - name: set-headers
+      version: v1
+      params:
+        mode: append
+        request:
+          headers:
+            - name: Via
+              value: "1.1 api-gateway"
+        response:
+          headers:
+            - name: Vary
+              value: "Accept-Encoding"
+  operations:
+    - method: GET
+      path: /{country_code}/{city}
+    - method: GET
+      path: /alerts/active
+    - method: POST
+      path: /alerts/active
+```
+
+**Request transformation (header append):**
+
+Original client request
+```http
+GET /weather/v1.0/US/NewYork HTTP/1.1
+Host: api-gateway.company.com
+Accept: application/json
+Via: 1.0 client-proxy
+```
+
+Resulting upstream request (value appended, existing value preserved)
+```http
+GET /api/v2/US/NewYork HTTP/1.1
+Host: sample-backend:5000
+Accept: application/json
+via: 1.0 client-proxy, 1.1 api-gateway
+```
+
+**Response transformation (header append):**
+
+Original upstream response
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+Vary: Accept
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+Resulting client response (value appended, existing value preserved)
+```http
+HTTP/1.1 200 OK
+Content-Type: application/json
+vary: Accept, Accept-Encoding
+Content-Length: 256
+
+{"temperature": 22, "humidity": 65}
+```
+
+When the same header name is configured multiple times in `append` mode, all configured values are appended in the order they appear in the array. For example, configuring `X-Roles: editor` and `X-Roles: viewer` on a request that already carries `X-Roles: admin` results in `x-roles: admin, editor, viewer`.
+
+### Example 7: Forward Subscription Plan Name to Upstream (v1.3+)
+
+After `subscription-validation` runs, the resolved plan name is available via `${meta.x-wso2-subscription-plan-name}`. Forward it to the upstream service so it can apply plan-specific behaviour.
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: RestApi
+metadata:
+  name: orders-api-v1
+spec:
+  displayName: Orders API
+  version: v1.0.0
+  context: /orders/v1
+  upstream:
+    main:
+      url: http://orders-backend.internal/api
+  policies:
+    - name: jwt-auth
+      version: v1
+    - name: subscription-validation
+      version: v1
+    - name: set-headers
+      version: v1
+      params:
+        request:
+          headers:
+            - name: x-subscription-plan
+              value: "${meta.x-wso2-subscription-plan-name}"
+            - name: x-billing-customer-id
+              value: "${meta.x-wso2-billing-customer-id}"
+  operations:
+    - method: GET
+      path: /items
+```
 
 **Result (upstream request receives):**
 ```
@@ -161,7 +554,9 @@ x-subscription-plan: gold
 x-billing-customer-id: cust-4821
 ```
 
-### Example 5: Provider credential relay
+`subscription-validation` must run before `set-headers` so that the metadata keys are populated.
+
+### Example 8: Provider Credential Relay (v1.3+)
 
 Forward a caller-supplied credential header as the upstream `Authorization` and remove the original so it is not visible to the upstream service:
 
@@ -179,9 +574,9 @@ policies:
             removeSource: true
 ```
 
-### Example 6: Promote upstream response header to client
+### Example 9: Promote Upstream Response Header to Client (v1.3+)
 
-Forward an internal trace ID from the upstream response as a standard correlation header, then strip the internal header:
+Forward an internal trace ID from the upstream response as a standard correlation header, then strip the internal header from the downstream response:
 
 ```yaml
 policies:
@@ -195,7 +590,9 @@ policies:
             removeSource: true
 ```
 
-### Example 7: Mixed literal and expression
+### Example 10: Mixed Literal and Expression (v1.3+)
+
+Expressions can be combined with literal text anywhere in the value string:
 
 ```yaml
 policies:
@@ -204,103 +601,46 @@ policies:
     params:
       request:
         headers:
-          - name: Authorization
+          - name: authorization
             value: "Bearer ${req.header.x-provider-token}"
             removeSource: true
 ```
 
-### Example 8: Both phases simultaneously
 
-```yaml
-policies:
-  - name: set-headers
-    version: v1
-    params:
-      request:
-        headers:
-          - name: Authorization
-            value: "${req.header.x-provider-authorization}"
-            removeSource: true
-          - name: x-subscription-plan
-            value: "${meta.x-wso2-subscription-plan-name}"
-      response:
-        headers:
-          - name: X-Served-By
-            value: "internal-gateway"
-```
+## How it Works
 
-### Example 9: Route-specific headers
+* The policy reads the `mode` parameter (defaulting to `set`) to decide whether configured headers overwrite or append.
+* It reads `request.headers` and `response.headers` arrays and applies them independently on the request and response flows, using the selected mode for both.
+* Header names are normalized (trimmed and lowercased) before application to ensure consistent behavior across HTTP versions.
+* In `set` mode, headers are applied using set semantics: if a header already exists, its value is replaced rather than appended. If the same header is configured multiple times in the same array, the last configured value wins.
+* In `append` mode, configured values are appended to existing headers, preserving any values already present. If the same header is configured multiple times in the same array, all configured values are appended in order.
+* **Expression resolution (v1.3+):** when a value contains `${...}` expressions, each is resolved from the matching source (request headers, response headers, or metadata). If any expression fails to resolve — source absent, unknown scope, or unclosed delimiter — the target header is actively removed to prevent a client-supplied value from reaching the backend. Static values are never removed.
+* **`removeSource` (v1.3+):** when `true`, source headers referenced by `${req.header.*}` (request phase) or `${resp.header.*}` (response phase) are removed after their values are read. A header being set by the same policy is never simultaneously removed.
+* Request flow modifies outbound headers to upstream; response flow modifies outbound headers to clients.
+* If no headers are configured for a flow, that flow passes through without header modification.
 
-Apply different headers to different routes:
-
-```yaml
-operations:
-  - method: GET
-    path: /{country_code}/{city}
-    policies:
-      - name: set-headers
-        version: v1
-        params:
-          request:
-            headers:
-              - name: X-Operation-Type
-                value: "weather-query"
-  - method: POST
-    path: /alerts/active
-    policies:
-      - name: set-headers
-        version: v1
-        params:
-          request:
-            headers:
-              - name: X-Operation-Type
-                value: "alert-create"
-```
-
-## Metadata keys written by platform policies
-
-These keys are written to `SharedContext.Metadata` by their respective policies and are readable via `${meta.<key>}`:
-
-| Key | Written by | Value |
-|---|---|---|
-| `x-wso2-subscription-plan-name` | `subscription-validation` | Subscription plan name (e.g. `gold`, `silver`). Requires subscription-validation v1.0.2 or later. |
-| `x-wso2-application-id` | `jwt-auth` / `api-key-auth` | API consumer application ID |
-| `x-wso2-billing-customer-id` | `subscription-validation` | Billing customer ID (if set on the subscription). |
-| `x-wso2-billing-subscription-id` | `subscription-validation` | Billing subscription ID (if set on the subscription). |
-| `x-wso2-subscription-status` | `subscription-validation` | Subscription status (e.g. `ACTIVE`). |
-
-## How it works
-
-1. The policy reads the `mode` parameter (defaulting to `set`) to decide whether configured values overwrite or append.
-2. It processes `request.headers` and `response.headers` arrays independently.
-3. For each header entry:
-   - **Static value** (no `${...}`): applied using the configured `mode` (set or append). Never removed.
-   - **Dynamic value** (contains `${...}`): each expression is resolved from the matching source (request headers, response headers, or metadata). If any expression fails to resolve — source absent, unrecognised scope, or unclosed delimiter — the target header is **removed** from the upstream request or downstream response to prevent a client-supplied value from reaching the backend.
-4. When `removeSource: true`:
-   - **Request phase:** `${req.header.<name>}` source headers are removed from the upstream request.
-   - **Response phase:** `${resp.header.<name>}` source headers are removed from the downstream response. `${req.header}` and `${meta}` sources are never removed in this phase.
-5. A header that is being set by this policy is never simultaneously removed (self-remove protection).
-6. Header names are normalized (trimmed, lowercased) before being set or removed.
-
-## Policy ordering
-
-Place `set-headers` **after** any policy that writes to `SharedContext.Metadata` it needs to read. The typical order for subscription-aware APIs:
-
-```
-jwt-auth → subscription-validation → set-headers → dynamic-endpoint
-```
 
 ## Limitations
 
-1. **Policy-wide mode**: `mode` applies to the entire policy instance. Mixing set and append within one instance is not supported — attach the policy multiple times if needed.
-2. **No conditional logic**: Value resolution is unconditional — entries either set or remove based on source presence.
-3. **`${resp.header.*}` not allowed in request phase**: Entries using this scope in `request.headers` are rejected at configuration time.
-4. **Response phase `removeSource` limited to `${resp.header.*}`**: Request headers and metadata keys cannot be removed in the response phase.
-5. **At least one phase required**: Specifying neither `request` nor `response` fails validation.
+1. **Policy-Wide Mode**: The `mode` parameter applies to the entire policy instance (both request and response phases). Mixing set and append behavior within a single policy instance is not supported — attach the policy multiple times if different modes are required.
+2. **No Conditional Logic**: Header setting/appending is unconditional per policy configuration and cannot be conditional on runtime content.
+3. **Configuration Dependency**: At least one of `request` or `response` must be configured; omitting both fails validation.
+4. **Ordering Sensitivity**: Policy order affects final header values when combined with other header manipulation policies. When using expressions, place `set-headers` after any policy that writes the metadata keys it needs to read: `jwt-auth → subscription-validation → set-headers → dynamic-endpoint`.
+5. **Header Constraints Apply**: Header names and values must satisfy schema constraints (name pattern `^[a-zA-Z0-9-_]+$`, name max length 256, value max length 8192).
+6. **`${resp.header.*}` not allowed in request phase (v1.3+)**: Entries using this scope in `request.headers` are rejected at configuration time.
+7. **`removeSource` limited by phase (v1.3+)**: In the response phase, only `${resp.header.*}` sources can be removed; `${req.header.*}` and `${meta.*}` sources cannot.
 
-## Security notes
 
-- Use `removeSource: true` for any header carrying a credential or routing token that should not be visible to the upstream service.
-- When a dynamic expression fails to resolve, the target header is actively **removed** — not merely skipped — to prevent a caller from pre-setting the target with a spoofed value.
-- `${meta.<key>}` values are written by the gateway; they originate from validated JWT claims or the subscription store and are authoritative. Do not confuse them with request headers that a client could supply.
-- Avoid placing long-lived secrets in API definition YAML; prefer per-request relay patterns over static credential injection.
+## Notes
+
+**Security and Data Handling**
+
+Avoid placing secrets, credentials, or personally identifiable data in headers unless strictly necessary, since headers can be logged or forwarded across multiple intermediaries. When using expressions, use `removeSource: true` for any header that carries a credential or routing token that should not be visible to the upstream service. When a dynamic expression fails to resolve, the target header is actively removed — not merely skipped — to prevent a caller from pre-setting the target with a spoofed value. `${meta.<key>}` values originate from validated JWT claims or the subscription store and are authoritative; do not confuse them with request headers that a client could supply. For response headers exposed to clients, ensure values do not reveal sensitive internal topology or implementation details. When using `append` mode, be aware that values accumulate alongside any existing values, which may include client-supplied data.
+
+**Performance and Operational Impact**
+
+Header setting is lightweight and local, but excessive or oversized headers increase request/response size and can impact proxy or load balancer limits. Keep header sets minimal and purposeful, especially on high-throughput APIs. Monitor for rejected requests caused by upstream or intermediary header-size constraints. Note that `append` mode can grow a header's overall size, particularly when it already carries values.
+
+**Operational Best Practices**
+
+Use clear naming conventions and document which headers are enforced at API level versus operation level to avoid conflicts. Apply route-specific policies when different operations require different header contracts. Choose `append` mode only for headers whose semantics permit multiple values (for example, `Vary`, `Via`, `Accept`); use the default `set` mode for single-valued headers like `content-type`, `cache-control`, and `server`. Test the selected behavior explicitly to ensure downstream systems and clients behave as expected.
