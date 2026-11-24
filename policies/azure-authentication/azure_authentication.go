@@ -21,7 +21,6 @@
 package azureauthentication
 
 import (
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +33,7 @@ import (
 	"strings"
 	"time"
 
+	sdkauth "github.com/wso2/api-platform/sdk/ai/azureauthentication"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
 
@@ -53,9 +53,6 @@ const (
 )
 
 var (
-	// scopePattern accepts a single client-credentials scope: a resource followed by /.default.
-	scopePattern = regexp.MustCompile(`^\S+/\.default$`)
-
 	// guidPattern matches an Entra application (client) ID.
 	guidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 
@@ -72,12 +69,12 @@ var (
 // Policy injects an Entra ID access token for the gateway's workload identity or managed identity
 // into the Authorization header before the request is forwarded upstream.
 type Policy struct {
-	kind       *authenticationKind
-	scope      string
-	tenantID   string // only for a kind that usesTenant
-	clientID   string // "" for a host's identity without clientId: the host's default
-	timeout    time.Duration
-	credential *credential
+	kind     *authenticationKind
+	scope    string
+	tenantID string // only for a kind that usesTenant
+	clientID string // "" for a host's identity without clientId: the host's default
+	timeout  time.Duration
+	tokens   tokenSource
 }
 
 type params struct {
@@ -100,21 +97,27 @@ func GetPolicy(metadata policy.PolicyMetadata, rawParams map[string]interface{})
 		// The credential would fall back to the AZURE_* variables itself. Resolving them first
 		// gives a route that leaves them out and a route that names the same identity one
 		// credential, and gives the AuthContext and the log the identity in use.
-		p.clientID = cmp.Or(p.clientID, os.Getenv("AZURE_CLIENT_ID"))
-		p.tenantID = cmp.Or(p.tenantID, os.Getenv("AZURE_TENANT_ID"))
+		if p.clientID, err = fromEnvironment(p.clientID, "AZURE_CLIENT_ID", "clientId", guidPattern,
+			"an application (client) ID in GUID form"); err != nil {
+			return nil, err
+		}
+		if p.tenantID, err = fromEnvironment(p.tenantID, "AZURE_TENANT_ID", "tenantId", tenantPattern,
+			"a tenant ID (GUID) or a domain name"); err != nil {
+			return nil, err
+		}
 	}
-	cred, err := credentials.get(identity{authenticationType: p.kind.name, clientID: p.clientID, tenantID: p.tenantID})
+	tokens, err := getTokenSource(sdkauth.Identity{Type: p.kind.name, ClientID: p.clientID, TenantID: p.tenantID})
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", p.kind.unavailable, err)
+		return nil, err
 	}
 
 	pol := &Policy{
-		kind:       p.kind,
-		scope:      p.scope,
-		tenantID:   p.tenantID,
-		clientID:   p.clientID,
-		timeout:    p.tokenRequestTimeout,
-		credential: cred,
+		kind:     p.kind,
+		scope:    p.scope,
+		tenantID: p.tenantID,
+		clientID: p.clientID,
+		timeout:  p.tokenRequestTimeout,
+		tokens:   tokens,
 	}
 
 	slog.Debug("AzureAuthentication: policy initialized", append([]any{
@@ -131,6 +134,19 @@ func (p *Policy) identityAttrs() []any {
 		return []any{"clientId", p.credentialID(), "scope", p.scope}
 	}
 	return []any{"tenantId", p.tenantID, "clientId", p.clientID, "scope", p.scope}
+}
+
+// fromEnvironment returns value, or else the variable name's value, which must have the form the
+// param would. An unset variable is left for the SDK to report.
+func fromEnvironment(value, name, param string, pattern *regexp.Regexp, form string) (string, error) {
+	if value != "" {
+		return value, nil
+	}
+	value = os.Getenv(name)
+	if value != "" && !pattern.MatchString(value) {
+		return "", fmt.Errorf("%s must be %s; workload identity uses it when '%s' is not set", name, form, param)
+	}
+	return value, nil
 }
 
 // credentialID is the identity's client ID, or host-default for a host's identity without one.
@@ -175,7 +191,7 @@ func extractParams(raw map[string]interface{}) (params, error) {
 	if p.scope, err = optionalString(raw, "scope", defaultScope); err != nil {
 		return p, err
 	}
-	if !scopePattern.MatchString(p.scope) {
+	if sdkauth.ValidateScope(p.scope) != nil {
 		return p, fmt.Errorf("'scope' must be a single scope ending in /.default, e.g. %s", defaultScope)
 	}
 
@@ -286,7 +302,7 @@ func (p *Policy) Mode() policy.ProcessingMode {
 // OnRequestHeaders sets the access token as "Authorization: Bearer <token>", the only form in
 // which Azure AI Foundry and Azure OpenAI accept an Entra ID token.
 func (p *Policy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHeaderContext, _ map[string]interface{}) policy.RequestHeaderAction {
-	token, err := p.credential.token(ctx, p.scope, p.timeout)
+	token, err := p.tokens.Token(ctx, p.scope, p.timeout)
 	switch {
 	case err == nil:
 		p.recordAuth(reqCtx, true)
@@ -303,20 +319,26 @@ func (p *Policy) OnRequestHeaders(ctx context.Context, reqCtx *policy.RequestHea
 // authFailure returns 502: the caller's request was fine, it is the gateway's own upstream
 // credential that could not be obtained. The client sees a generic message; the reason goes to
 // fault policies (Description), and the reason and the SDK's error go to the log.
-func (p *Policy) authFailure(reqCtx *policy.RequestHeaderContext, err *tokenError) policy.RequestHeaderAction {
-	attrs := append([]any{"reason", err.reason, "error", err.loggable()}, p.identityAttrs()...)
+func (p *Policy) authFailure(reqCtx *policy.RequestHeaderContext, err error) policy.RequestHeaderAction {
+	failure := "could not obtain an access token from " + p.tokens.Service()
+	reason, level := failure, slog.LevelError
+	var terr *sdkauth.TokenError
+	if errors.As(err, &terr) {
+		reason = terr.Reason
+		// A rejection served from the cache was logged at ERROR when its token request failed.
+		if terr.Cached {
+			level = slog.LevelDebug
+		}
+	}
+	// A TokenError's text is the SDK's error with any token withheld.
+	attrs := append([]any{"reason", reason, "error", err.Error()}, p.identityAttrs()...)
 	if reqCtx != nil && reqCtx.SharedContext != nil {
 		attrs = append(attrs, "requestId", reqCtx.RequestID, "apiName", reqCtx.APIName)
 	}
-	// A rejection served from the cache was logged at ERROR when its token request failed.
-	level := slog.LevelError
-	if err.cached {
-		level = slog.LevelDebug
-	}
-	slog.Log(context.Background(), level, "AzureAuthentication: could not obtain an access token from "+p.kind.service, attrs...)
+	slog.Log(context.Background(), level, "AzureAuthentication: "+failure, attrs...)
 
 	p.recordAuth(reqCtx, false)
-	return failureResponse(err.reason)
+	return failureResponse(reason)
 }
 
 // requestEnded answers a request whose own context ended while it waited for a token, such as a

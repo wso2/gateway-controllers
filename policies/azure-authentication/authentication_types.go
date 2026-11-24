@@ -20,23 +20,23 @@ package azureauthentication
 import (
 	"strconv"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	sdkauth "github.com/wso2/api-platform/sdk/ai/azureauthentication"
 )
 
 const (
 	// AuthenticationTypeWorkloadIdentity exchanges the pod's AKS Workload Identity federated
 	// token for an access token.
-	AuthenticationTypeWorkloadIdentity = "workload-identity"
+	AuthenticationTypeWorkloadIdentity = sdkauth.WorkloadIdentity
 
 	// AuthenticationTypeManagedIdentity gets the access token for an identity assigned to the host:
 	// from the Azure Instance Metadata Service (IMDS) on a VM, VM scale set or AKS node, or from the
 	// host's own managed identity endpoint on App Service, Container Apps or Azure Arc.
-	AuthenticationTypeManagedIdentity = "managed-identity"
+	AuthenticationTypeManagedIdentity = sdkauth.ManagedIdentity
 
 	// AuthenticationTypeContainerApps gets the access token for a managed identity of the Azure
 	// Container Apps app the gateway runs in, from the identity endpoint Container Apps sets in
 	// IDENTITY_ENDPOINT.
-	AuthenticationTypeContainerApps = "container-apps"
+	AuthenticationTypeContainerApps = sdkauth.ContainerApps
 
 	// AuthType is the AuthContext.AuthType value recorded for workload-identity.
 	AuthType = "azure-workload-identity"
@@ -48,62 +48,22 @@ const (
 	AuthTypeContainerApps = "azure-container-apps"
 )
 
-// authenticationKind describes an authenticationType: how its credential is built, how its
-// identity is named, and how its token service behaves.
+// authenticationKind is what the policy records and checks for an authenticationType; sdk/ai
+// builds and runs its credential.
 type authenticationKind struct {
 	name     string // the authenticationType value
 	authType string // AuthContext.AuthType
-	service  string // the token service, as fault reasons and the failure log name it
-
-	// unavailable begins GetPolicy's error when the credential can't be built.
-	unavailable string
 
 	// usesTenant: the identity is named by a tenant and a client ID, which default to
-	// AZURE_TENANT_ID and AZURE_CLIENT_ID, so tenantId is a parameter and the tenant is logged and
-	// recorded. Otherwise the identity is the host's, named by clientId or the host's default.
+	// AZURE_TENANT_ID and AZURE_CLIENT_ID. Otherwise it is the host's, named by its client ID.
 	usesTenant bool
-
-	// oneFetchAtATime: the SDK fetches one token at a time per credential, behind a lock that
-	// doesn't watch the caller's context, so all of a credential's scopes share one admission slot.
-	oneFetchAtATime bool
-
-	// imds: the token service may be IMDS, which answers 404 and 410 while it starts or updates,
-	// and whose refusal of the host's default identity the SDK passes on without the response.
-	imds bool
-
-	newCredential func(identity) (azcore.TokenCredential, error)
 }
 
-// authenticationKinds are the supported authenticationTypes, in the order the docs list them.
+// authenticationKinds are the supported authenticationTypes, in the order sdk/ai lists them.
 var authenticationKinds = []*authenticationKind{
-	{
-		name:     AuthenticationTypeWorkloadIdentity,
-		authType: AuthType,
-		service:  "Microsoft Entra ID",
-		unavailable: "workload identity is not available (the AKS Workload Identity webhook normally sets " +
-			"AZURE_CLIENT_ID, AZURE_TENANT_ID and AZURE_FEDERATED_TOKEN_FILE)",
-		usesTenant:      true,
-		oneFetchAtATime: true,
-		newCredential:   newWorkloadIdentityCredential,
-	},
-	{
-		// A managed identity token comes from IMDS on a VM or AKS node, or from the host's own
-		// endpoint on App Service, Container Apps or Arc.
-		name:          AuthenticationTypeManagedIdentity,
-		authType:      AuthTypeManagedIdentity,
-		service:       "the managed identity endpoint",
-		unavailable:   "managed identity is not available",
-		imds:          true,
-		newCredential: newManagedIdentityCredential,
-	},
-	{
-		name:     AuthenticationTypeContainerApps,
-		authType: AuthTypeContainerApps,
-		service:  "the Container Apps identity endpoint",
-		unavailable: "Container Apps managed identity is not available (Container Apps sets " +
-			"IDENTITY_ENDPOINT and IDENTITY_HEADER when the container app has a managed identity)",
-		newCredential: newContainerAppsCredential,
-	},
+	{name: AuthenticationTypeWorkloadIdentity, authType: AuthType, usesTenant: true},
+	{name: AuthenticationTypeManagedIdentity, authType: AuthTypeManagedIdentity},
+	{name: AuthenticationTypeContainerApps, authType: AuthTypeContainerApps},
 }
 
 // kindOf returns the authenticationType called name, or nil if there is none.
