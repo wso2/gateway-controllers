@@ -86,6 +86,10 @@ endpoint through the variables those platforms set.
 | `AZURE_FEDERATED_TOKEN_FILE` | Yes | Path of the projected service account token. Read again at least every 10 minutes, so rotation is picked up. |
 | `AZURE_AUTHORITY_HOST` | No | Entra ID host, `https://login.microsoftonline.com/` by default. Set by the webhook for sovereign clouds. Must use `https`. |
 
+A variable the policy uses in place of a parameter must have the parameter's form. If
+`AZURE_CLIENT_ID` isn't a GUID, or `AZURE_TENANT_ID` isn't a tenant ID or a domain name, the policy
+fails when it is created, and the gateway runtime log names the variable.
+
 The token file path and the authority host are deliberately never policy parameters. If both
 could be set on an API, whoever writes that API could make the gateway send any file it can read
 to a host of their choosing.
@@ -451,7 +455,8 @@ All error responses are returned as JSON with `Content-Type: application/json`.
 The gateway runtime logs the reason with the Azure Identity SDK's error, which includes the
 response from Entra ID (its error code, `AADSTS` codes and correlation ID, which Microsoft support
 asks for) or from the managed identity endpoint. The access token, the service account token and
-`IDENTITY_HEADER` are never logged.
+`IDENTITY_HEADER` are never logged. A response body the SDK can't decode is not logged either, as
+it can carry a token.
 
 ## Fault reporting
 

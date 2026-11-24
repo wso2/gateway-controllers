@@ -19,19 +19,125 @@ package azureauthentication
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	sdkauth "github.com/wso2/api-platform/sdk/ai/azureauthentication"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
+
+const (
+	testTenantID = "72f988bf-86f1-41af-91ab-2d7cd011db47"
+	testClientID = "11111111-2222-3333-4444-555555555555"
+
+	// What Container Apps sets in a container app with a managed identity.
+	testIdentityEndpoint = "http://localhost:12356/msi/token"
+	testIdentityHeader   = "4f8c2b6e-9d31-4a7e-b5c0-identity-hdr"
+)
+
+// tokenCall is one Token call a fake token source answered.
+type tokenCall struct {
+	scope   string
+	timeout time.Duration
+}
+
+// fakeTokens stands in for an identity's credential. It answers with token or err, or, when block
+// is set, waits for the request to end.
+type fakeTokens struct {
+	token   string
+	err     error
+	block   bool
+	service string
+
+	mu    sync.Mutex
+	calls []tokenCall
+}
+
+func (f *fakeTokens) Token(ctx context.Context, scope string, timeout time.Duration) (string, error) {
+	f.mu.Lock()
+	f.calls = append(f.calls, tokenCall{scope: scope, timeout: timeout})
+	f.mu.Unlock()
+	if f.block {
+		<-ctx.Done()
+		return "", &sdkauth.TokenError{Reason: "timed out obtaining an access token from " + f.Service()}
+	}
+	if f.err != nil {
+		return "", f.err
+	}
+	return f.token, nil
+}
+
+func (f *fakeTokens) Service() string { return cmp.Or(f.service, "Microsoft Entra ID") }
+
+func (f *fakeTokens) tokenCalls() []tokenCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]tokenCall(nil), f.calls...)
+}
+
+// useFakeTokens gives every policy the test builds f as its credential, and returns the identities
+// the policies asked for.
+func useFakeTokens(t *testing.T, f *fakeTokens) *[]sdkauth.Identity {
+	t.Helper()
+	var asked []sdkauth.Identity
+	prev := getTokenSource
+	getTokenSource = func(id sdkauth.Identity) (tokenSource, error) {
+		asked = append(asked, id)
+		return f, nil
+	}
+	t.Cleanup(func() { getTokenSource = prev })
+	return &asked
+}
+
+// setWorkloadIdentityEnv sets what the AKS Workload Identity webhook injects, and writes the
+// federated token to a file.
+func setWorkloadIdentityEnv(t *testing.T, clientID string) {
+	t.Helper()
+	tokenFile := filepath.Join(t.TempDir(), "azure-identity-token")
+	if err := os.WriteFile(tokenFile, []byte("federated-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AZURE_TENANT_ID", testTenantID)
+	t.Setenv("AZURE_CLIENT_ID", clientID)
+	t.Setenv("AZURE_FEDERATED_TOKEN_FILE", tokenFile)
+}
+
+// clearHostIdentityEnv removes the variables that point the SDK at a managed identity endpoint
+// other than IMDS.
+func clearHostIdentityEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"IDENTITY_ENDPOINT", "IDENTITY_HEADER", "IDENTITY_SERVER_THUMBPRINT", "IMDS_ENDPOINT", "MSI_ENDPOINT", "MSI_SECRET"} {
+		unsetEnv(t, name)
+	}
+}
+
+var clientCount atomic.Int64
+
+// uniqueClientID returns a client ID no other test uses. The SDK keeps one credential per identity
+// for the whole process, so a test that must build its own credential needs its own identity.
+func uniqueClientID() string {
+	return fmt.Sprintf("00000000-0000-0000-0000-%012d", clientCount.Add(1))
+}
+
+// unsetEnv removes name for one test and restores it afterwards.
+func unsetEnv(t *testing.T, name string) {
+	t.Helper()
+	t.Setenv(name, "")
+	os.Unsetenv(name)
+}
 
 func newRequestHeaderContext(shared *policy.SharedContext) *policy.RequestHeaderContext {
 	if shared == nil {
@@ -101,8 +207,8 @@ func captureLogs(t *testing.T) *lockedBuffer {
 }
 
 func TestGetPolicyRejectsInvalidParams(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, answer(http.StatusOK, entraToken("tok")))
+	setWorkloadIdentityEnv(t, testClientID)
+	useFakeTokens(t, &fakeTokens{token: "tok"})
 
 	valid := func(extra map[string]interface{}) map[string]interface{} {
 		params := map[string]interface{}{"authenticationType": "workload-identity"}
@@ -177,8 +283,8 @@ func TestUnknownParamErrorListsTheParameters(t *testing.T) {
 // The gateway controller adds attachedTo to the params of every policy it attaches, so it must not
 // be rejected as an unknown parameter.
 func TestGetPolicyAcceptsTheGatewaysAttachedToParam(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+	setWorkloadIdentityEnv(t, testClientID)
+	useFakeTokens(t, &fakeTokens{token: "tok-1"})
 
 	for _, level := range []string{"api", "route"} {
 		p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "attachedTo": level})
@@ -239,23 +345,100 @@ func TestTokenRequestTimeoutFormats(t *testing.T) {
 	}
 }
 
+// Every authentication type sdk/ai offers needs an AuthContext.AuthType here.
+func TestEveryAuthenticationTypeHasAnAuthType(t *testing.T) {
+	var names, authTypes []string
+	for _, k := range authenticationKinds {
+		names = append(names, k.name)
+		authTypes = append(authTypes, k.authType)
+	}
+	if !reflect.DeepEqual(names, sdkauth.Types()) {
+		t.Fatalf("authentication types = %v, sdk/ai has %v", names, sdkauth.Types())
+	}
+	if want := []string{"azure-workload-identity", "azure-managed-identity", "azure-container-apps"}; !reflect.DeepEqual(authTypes, want) {
+		t.Fatalf("AuthTypes = %v, want %v", authTypes, want)
+	}
+	if k := kindOf(AuthenticationTypeWorkloadIdentity); k == nil || !k.usesTenant {
+		t.Fatal("workload-identity must take a tenant")
+	}
+	for _, name := range []string{AuthenticationTypeManagedIdentity, AuthenticationTypeContainerApps} {
+		if k := kindOf(name); k == nil || k.usesTenant {
+			t.Fatalf("%s must not take a tenant", name)
+		}
+	}
+}
+
 func TestGetPolicyFailsWithoutWorkloadIdentityEnvironment(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
+	setWorkloadIdentityEnv(t, uniqueClientID())
 	unsetEnv(t, "AZURE_FEDERATED_TOKEN_FILE")
-	useFakeAzure(t, answer(http.StatusOK, entraToken("tok")))
 
 	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "workload-identity"})
-	if err == nil || !strings.Contains(err.Error(), "AZURE_FEDERATED_TOKEN_FILE") {
-		t.Fatalf("error = %v, want one naming AZURE_FEDERATED_TOKEN_FILE", err)
+	if err == nil || !strings.Contains(err.Error(), "workload identity is not available") || !strings.Contains(err.Error(), "AZURE_FEDERATED_TOKEN_FILE") {
+		t.Fatalf("error = %v, want workload identity not available, naming AZURE_FEDERATED_TOKEN_FILE", err)
+	}
+}
+
+// The AZURE_* variables are optional: a value that is set is checked, because workload identity
+// would use it, while an unset one is left to the SDK, and params make them unnecessary.
+func TestAMalformedAzureEnvironmentFailsTheDeployment(t *testing.T) {
+	tests := []struct {
+		name   string
+		env    map[string]string // "" unsets the variable
+		params map[string]interface{}
+		fake   bool
+		want   string // "" means GetPolicy succeeds
+	}{
+		{name: "AZURE_CLIENT_ID not a GUID", env: map[string]string{"AZURE_CLIENT_ID": "not-a-guid"}, fake: true, want: "AZURE_CLIENT_ID"},
+		{name: "AZURE_TENANT_ID with a slash", env: map[string]string{"AZURE_TENANT_ID": "a/b"}, fake: true, want: "AZURE_TENANT_ID"},
+		{
+			name:   "both malformed but both params set",
+			env:    map[string]string{"AZURE_CLIENT_ID": "not-a-guid", "AZURE_TENANT_ID": "a/b"},
+			params: map[string]interface{}{"clientId": testClientID, "tenantId": testTenantID},
+			fake:   true,
+		},
+		{name: "AZURE_CLIENT_ID unset", env: map[string]string{"AZURE_CLIENT_ID": ""}, params: map[string]interface{}{"tenantId": "unset-client.example.com"}, want: "no client ID specified"},
+		{name: "AZURE_TENANT_ID unset", env: map[string]string{"AZURE_TENANT_ID": ""}, params: map[string]interface{}{"clientId": uniqueClientID()}, want: "no tenant ID specified"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setWorkloadIdentityEnv(t, uniqueClientID())
+			for name, value := range tt.env {
+				if value == "" {
+					unsetEnv(t, name)
+				} else {
+					t.Setenv(name, value)
+				}
+			}
+			if tt.fake {
+				useFakeTokens(t, &fakeTokens{token: "tok"})
+			}
+			params := map[string]interface{}{"authenticationType": "workload-identity"}
+			for k, v := range tt.params {
+				params[k] = v
+			}
+
+			_, err := GetPolicy(policy.PolicyMetadata{}, params)
+			switch {
+			case tt.want == "" && err != nil:
+				t.Fatalf("GetPolicy: %v", err)
+			case tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)):
+				t.Fatalf("error = %v, want one naming %s", err, tt.want)
+			}
+		})
 	}
 }
 
 func TestOnRequestHeadersSetsBearerToken(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+	setWorkloadIdentityEnv(t, testClientID)
+	logs := captureLogs(t)
+	f := &fakeTokens{token: "tok-1"}
+	asked := useFakeTokens(t, f)
 
 	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "  workload-identity  "})
 	mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+	if strings.Contains(logs.String(), "tok-1") {
+		t.Fatalf("the access token was logged:\n%s", logs)
+	}
 
 	if len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Authorization"] != "Bearer tok-1" {
 		t.Fatalf("HeadersToSet = %v, want Authorization: Bearer tok-1", mods.HeadersToSet)
@@ -263,14 +446,18 @@ func TestOnRequestHeadersSetsBearerToken(t *testing.T) {
 	if len(mods.HeadersToRemove) != 0 || len(mods.HeadersToAppend) != 0 {
 		t.Fatalf("unexpected header changes: %+v", mods)
 	}
-	if reqs := f.tokenRequests(); len(reqs) != 1 || !strings.HasPrefix(reqs[0].form.Get("scope"), "https://ai.azure.com/.default") {
-		t.Fatalf("token requests = %+v, want one for the Foundry default scope", reqs)
+	if want := []tokenCall{{scope: "https://ai.azure.com/.default", timeout: 10 * time.Second}}; !reflect.DeepEqual(f.tokenCalls(), want) {
+		t.Fatalf("token calls = %+v, want %+v", f.tokenCalls(), want)
+	}
+	if want := []sdkauth.Identity{{Type: "workload-identity", ClientID: testClientID, TenantID: testTenantID}}; !reflect.DeepEqual(*asked, want) {
+		t.Fatalf("identities = %+v, want %+v", *asked, want)
 	}
 }
 
 func TestOnRequestHeadersUsesConfiguredScope(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+	setWorkloadIdentityEnv(t, testClientID)
+	f := &fakeTokens{token: "tok-1"}
+	useFakeTokens(t, f)
 
 	p := mustGetPolicy(t, map[string]interface{}{
 		"authenticationType": "workload-identity",
@@ -281,50 +468,43 @@ func TestOnRequestHeadersUsesConfiguredScope(t *testing.T) {
 	if len(mods.HeadersToSet) != 1 || mods.HeadersToSet["Authorization"] != "Bearer tok-1" {
 		t.Fatalf("HeadersToSet = %v, want Authorization: Bearer tok-1", mods.HeadersToSet)
 	}
-	if scope := f.tokenRequests()[0].form.Get("scope"); strings.Fields(scope)[0] != "https://cognitiveservices.azure.com/.default" {
-		t.Fatalf("scope = %q, want https://cognitiveservices.azure.com/.default first", scope)
+	if calls := f.tokenCalls(); len(calls) != 1 || calls[0].scope != "https://cognitiveservices.azure.com/.default" {
+		t.Fatalf("token calls = %+v, want one for https://cognitiveservices.azure.com/.default", calls)
 	}
 }
 
 func TestIdentityParamsOverrideTheEnvironment(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+	setWorkloadIdentityEnv(t, testClientID)
+	asked := useFakeTokens(t, &fakeTokens{token: "tok-1"})
 
-	p := mustGetPolicy(t, map[string]interface{}{
+	mustGetPolicy(t, map[string]interface{}{
 		"authenticationType": "workload-identity",
 		"clientId":           "99999999-8888-7777-6666-555555555555",
 		"tenantId":           "contoso.onmicrosoft.com",
 	})
-	requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
 
-	r := f.tokenRequests()[0]
-	if !strings.HasPrefix(r.url.Path, "/contoso.onmicrosoft.com/") || r.form.Get("client_id") != "99999999-8888-7777-6666-555555555555" {
-		t.Fatalf("token request to %s for client %q, want the overrides", r.url, r.form.Get("client_id"))
+	want := []sdkauth.Identity{{Type: "workload-identity", ClientID: "99999999-8888-7777-6666-555555555555", TenantID: "contoso.onmicrosoft.com"}}
+	if !reflect.DeepEqual(*asked, want) {
+		t.Fatalf("identities = %+v, want %+v", *asked, want)
 	}
 }
 
 func TestTokenRequestTimeoutParamBoundsTheFetch(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, func(ctx context.Context, _ tokenRequest) (int, any) {
-		<-ctx.Done()
-		return http.StatusOK, entraToken("too-late")
-	})
+	setWorkloadIdentityEnv(t, testClientID)
+	f := &fakeTokens{token: "tok-1"}
+	useFakeTokens(t, f)
 
-	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "tokenRequestTimeout": "100ms"})
-	start := time.Now()
-	resp := requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "tokenRequestTimeout": "2500ms"})
+	requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
 
-	if resp.Fault == nil || resp.Fault.Description != "timed out obtaining an access token from Microsoft Entra ID" {
-		t.Fatalf("fault = %+v, want a timeout", resp.Fault)
-	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("the request took %v, want about 100ms", elapsed)
+	if calls := f.tokenCalls(); len(calls) != 1 || calls[0].timeout != 2500*time.Millisecond {
+		t.Fatalf("token calls = %+v, want one bounded by 2.5s", calls)
 	}
 }
 
 func TestOnRequestHeadersRecordsAuthContext(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+	setWorkloadIdentityEnv(t, testClientID)
+	useFakeTokens(t, &fakeTokens{token: "tok-1"})
 	inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey", CredentialID: "app-1"}
 	shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
 
@@ -349,9 +529,9 @@ func TestOnRequestHeadersRecordsAuthContext(t *testing.T) {
 }
 
 func TestOnRequestHeadersFailureReturnsDeclaredFault(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, answer(http.StatusUnauthorized, oauthError("invalid_client",
-		"AADSTS700016: Application with identifier 'x' was not found in the directory 'contoso'.", 700016)))
+	setWorkloadIdentityEnv(t, testClientID)
+	const reason = "Microsoft Entra ID rejected the token request (HTTP 401, invalid_client)"
+	useFakeTokens(t, &fakeTokens{err: &sdkauth.TokenError{Reason: reason, Rejected: true}})
 	inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey"}
 	shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
 
@@ -361,7 +541,7 @@ func TestOnRequestHeadersFailureReturnsDeclaredFault(t *testing.T) {
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Errorf("status = %d, want 502", resp.StatusCode)
 	}
-	if resp.Headers["Content-Type"] != "application/json" {
+	if !reflect.DeepEqual(resp.Headers, map[string]string{"Content-Type": "application/json"}) {
 		t.Errorf("headers = %v", resp.Headers)
 	}
 	if got, want := string(resp.Body), `{"error":"Bad Gateway","message":"failed to authenticate request to upstream Azure service"}`; got != want {
@@ -377,23 +557,41 @@ func TestOnRequestHeadersFailureReturnsDeclaredFault(t *testing.T) {
 	if f.Message != "failed to authenticate request to upstream Azure service" {
 		t.Errorf("fault message = %q", f.Message)
 	}
-	if f.Description != "Microsoft Entra ID rejected the token request (HTTP 401, invalid_client)" {
-		t.Errorf("fault description = %q", f.Description)
+	if f.Description != reason {
+		t.Errorf("fault description = %q, want %q", f.Description, reason)
 	}
 	if shared.AuthContext == nil || shared.AuthContext.Authenticated || shared.AuthContext.Previous != inbound {
 		t.Errorf("AuthContext = %+v, want unauthenticated with the inbound context as Previous", shared.AuthContext)
 	}
 }
 
+// A token source should only fail with a *TokenError, but any other error still fails the request
+// rather than sending it upstream without a token.
+func TestAnErrorThatIsNotATokenErrorStillFails(t *testing.T) {
+	setWorkloadIdentityEnv(t, testClientID)
+	logs := captureLogs(t)
+	useFakeTokens(t, &fakeTokens{err: errors.New("boom")})
+
+	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
+	resp := requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+
+	if resp.StatusCode != http.StatusBadGateway || !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("response = %+v, want a declared 502", resp)
+	}
+	if want := "could not obtain an access token from Microsoft Entra ID"; resp.Fault.Description != want {
+		t.Fatalf("description = %q, want %q", resp.Fault.Description, want)
+	}
+	if out := logs.String(); !strings.Contains(out, "level=ERROR") || !strings.Contains(out, "boom") {
+		t.Fatalf("the failure was not logged at ERROR with its error:\n%s", out)
+	}
+}
+
 // A caller that leaves before the token arrives is not an Entra ID or IMDS failure, so it is logged
 // at Debug with its own reason and does not mark the request unauthenticated.
 func TestARequestThatEndsFirstIsNotAnIdentityFailure(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
+	setWorkloadIdentityEnv(t, testClientID)
 	logs := captureLogs(t)
-	useFakeAzure(t, func(ctx context.Context, _ tokenRequest) (int, any) {
-		<-ctx.Done()
-		return http.StatusOK, entraToken("too-late")
-	})
+	useFakeTokens(t, &fakeTokens{block: true})
 	inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey"}
 	shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
 	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
@@ -418,19 +616,19 @@ func TestARequestThatEndsFirstIsNotAnIdentityFailure(t *testing.T) {
 // Requests that get a cached rejection fail the same way but log at Debug, so a misconfigured
 // identity logs one ERROR per token request, not one per API request.
 func TestARejectionIsLoggedOnceWhileCached(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
+	setWorkloadIdentityEnv(t, testClientID)
 	logs := captureLogs(t)
-	f := useFakeAzure(t, answer(http.StatusUnauthorized, oauthError("invalid_client", "AADSTS700213", 700213)))
+	const reason = "Microsoft Entra ID rejected the token request (HTTP 401, invalid_client)"
+	f := &fakeTokens{err: &sdkauth.TokenError{Reason: reason, Rejected: true}}
+	useFakeTokens(t, f)
 	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
 
 	for i := range 3 {
 		resp := requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-		if resp.Fault == nil || resp.Fault.Description != "Microsoft Entra ID rejected the token request (HTTP 401, invalid_client)" {
+		if resp.Fault == nil || resp.Fault.Description != reason {
 			t.Fatalf("request %d: fault = %+v, want the rejection", i+1, resp.Fault)
 		}
-	}
-	if n := len(f.tokenRequests()); n != 1 {
-		t.Fatalf("token requests = %d, want 1", n)
+		f.err = &sdkauth.TokenError{Reason: reason, Rejected: true, Cached: true}
 	}
 	out := logs.String()
 	if n := strings.Count(out, "level=ERROR"); n != 1 {
@@ -441,74 +639,57 @@ func TestARejectionIsLoggedOnceWhileCached(t *testing.T) {
 	}
 }
 
-func TestPoliciesWithTheSameIdentityShareOneToken(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+// Policies with the same identity get one credential, so its tokens are shared, whatever the scope.
+func TestPoliciesWithTheSameIdentityShareOneCredential(t *testing.T) {
+	setWorkloadIdentityEnv(t, uniqueClientID())
 	params := map[string]interface{}{"authenticationType": "workload-identity"}
 
-	for range 3 { // e.g. three routes of one LLM provider
-		p := mustGetPolicy(t, params)
-		requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+	first := mustGetPolicy(t, params)
+	for range 2 { // e.g. three routes of one LLM provider
+		if p := mustGetPolicy(t, params); p.tokens != first.tokens {
+			t.Fatal("two routes with one identity got different credentials")
+		}
 	}
-	if n := len(f.tokenRequests()); n != 1 {
-		t.Fatalf("token requests = %d, want 1", n)
-	}
-
 	other := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "scope": "https://cognitiveservices.azure.com/.default"})
-	requireHeaderMods(t, other.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-	if n := len(f.tokenRequests()); n != 2 {
-		t.Fatalf("token requests = %d, want 2 (a different scope needs its own token)", n)
+	if other.tokens != first.tokens {
+		t.Fatal("a route with another scope got another credential for the same identity")
 	}
 }
 
 // A route that leaves clientId and tenantId to the webhook's AZURE_* variables and a route that
-// names the same identity use one identity, so they share its token.
-func TestAWorkloadIdentityNamedOrLeftToTheEnvironmentSharesOneToken(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	f := useFakeAzure(t, answer(http.StatusOK, entraToken("tok-1")))
+// names the same identity use one identity, so they share its credential.
+func TestAWorkloadIdentityNamedOrLeftToTheEnvironmentSharesOneCredential(t *testing.T) {
+	clientID := uniqueClientID()
+	setWorkloadIdentityEnv(t, clientID)
 
+	var first *Policy
 	for _, params := range []map[string]interface{}{
 		{"authenticationType": "workload-identity"},
-		{"authenticationType": "workload-identity", "clientId": testClientID},
+		{"authenticationType": "workload-identity", "clientId": clientID},
 		{"authenticationType": "workload-identity", "tenantId": testTenantID},
-		{"authenticationType": "workload-identity", "clientId": testClientID, "tenantId": testTenantID},
+		{"authenticationType": "workload-identity", "clientId": clientID, "tenantId": testTenantID},
 	} {
 		p := mustGetPolicy(t, params)
-		requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-	}
-	if n := len(f.tokenRequests()); n != 1 {
-		t.Fatalf("token requests = %d, want 1 (four routes, one identity)", n)
+		if first == nil {
+			first = p
+		} else if p.tokens != first.tokens {
+			t.Fatalf("params %v got another credential than the route that left them to the environment", params)
+		}
 	}
 }
 
 // AZURE_CLIENT_ID names the federated identity, which need not be assigned to the host, so a host's
 // identity without clientId stays the host's default even where AZURE_CLIENT_ID is set.
 func TestAHostsIdentityWithoutClientIDIgnoresAzureClientID(t *testing.T) {
-	for _, tt := range []struct {
-		authenticationType string
-		respond            func(resource string) map[string]any
-		containerApps      bool
-	}{
-		{"managed-identity", func(resource string) map[string]any { return imdsToken("tok-1", resource) }, false},
-		{"container-apps", func(resource string) map[string]any { return containerAppsToken("tok-1", resource, testClientID) }, true},
-	} {
-		t.Run(tt.authenticationType, func(t *testing.T) {
-			setWorkloadIdentityEnv(t, "federated-token")
-			scope := uniqueScope(t)
-			f := useFakeAzure(t, answer(http.StatusOK, tt.respond(strings.TrimSuffix(scope, "/.default"))))
-			if tt.containerApps {
-				setContainerAppsEnv(t)
-			}
+	for _, authenticationType := range []string{"managed-identity", "container-apps"} {
+		t.Run(authenticationType, func(t *testing.T) {
+			setWorkloadIdentityEnv(t, testClientID)
+			asked := useFakeTokens(t, &fakeTokens{token: "tok-1"})
 
-			p := mustGetPolicy(t, map[string]interface{}{"authenticationType": tt.authenticationType, "scope": scope})
-			requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+			p := mustGetPolicy(t, map[string]interface{}{"authenticationType": authenticationType})
 
-			reqs := f.tokenRequests()
-			if len(reqs) != 1 {
-				t.Fatalf("token requests = %d, want 1", len(reqs))
-			}
-			if q := reqs[0].url.Query(); q.Has("client_id") {
-				t.Fatalf("query = %v, want no client_id for the host's default identity", q)
+			if want := []sdkauth.Identity{{Type: authenticationType}}; !reflect.DeepEqual(*asked, want) {
+				t.Fatalf("identities = %+v, want %+v", *asked, want)
 			}
 			if p.credentialID() != hostDefaultCredentialID {
 				t.Fatalf("credential ID = %q, want %q", p.credentialID(), hostDefaultCredentialID)
@@ -517,51 +698,43 @@ func TestAHostsIdentityWithoutClientIDIgnoresAzureClientID(t *testing.T) {
 	}
 }
 
-func TestWorkloadAndManagedIdentitiesDoNotShareTokens(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	f := useFakeAzure(t, func(_ context.Context, r tokenRequest) (int, any) {
-		if r.form == nil {
-			return http.StatusOK, imdsToken("imds-tok", "https://ai.azure.com")
-		}
-		return http.StatusOK, entraToken("entra-tok")
-	})
+func TestWorkloadAndManagedIdentitiesDoNotShareACredential(t *testing.T) {
+	clearHostIdentityEnv(t)
+	clientID := uniqueClientID()
+	setWorkloadIdentityEnv(t, clientID)
 
-	for _, tt := range []struct{ authenticationType, want string }{
-		{"workload-identity", "Bearer entra-tok"},
-		{"managed-identity", "Bearer imds-tok"},
-	} {
-		p := mustGetPolicy(t, map[string]interface{}{"authenticationType": tt.authenticationType, "scope": uniqueScope(t)})
-		mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-		if got := mods.HeadersToSet["Authorization"]; got != tt.want {
-			t.Fatalf("%s: Authorization = %q, want %q", tt.authenticationType, got, tt.want)
-		}
+	workload := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
+	managed := mustGetPolicy(t, map[string]interface{}{"authenticationType": "managed-identity", "clientId": clientID})
+	if workload.tokens == managed.tokens {
+		t.Fatal("workload-identity and managed-identity share a credential")
 	}
-	if n := len(f.tokenRequests()); n != 2 {
-		t.Fatalf("token requests = %d, want 2 (each authentication type has its own token)", n)
+	if workload.tokens.Service() != "Microsoft Entra ID" || managed.tokens.Service() != "the managed identity endpoint" {
+		t.Fatalf("services = %q, %q", workload.tokens.Service(), managed.tokens.Service())
 	}
 }
 
 func TestGetPolicyBuildsManagedIdentityWithoutWorkloadIdentityEnvironment(t *testing.T) {
+	clearHostIdentityEnv(t)
 	for _, name := range []string{"AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_FEDERATED_TOKEN_FILE", "AZURE_AUTHORITY_HOST"} {
 		unsetEnv(t, name)
 	}
-	f := useFakeAzure(t, answer(http.StatusOK, imdsToken("tok-1", "https://ai.azure.com")))
 
-	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "managed-identity", "scope": uniqueScope(t)})
-	requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-	if reqs := f.tokenRequests(); len(reqs) != 1 || reqs[0].url.Host != "169.254.169.254" {
-		t.Fatalf("token requests = %+v, want one to IMDS", reqs)
+	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "managed-identity", "clientId": uniqueClientID()})
+	if p.tokens.Service() != "the managed identity endpoint" {
+		t.Fatalf("service = %q, want the managed identity endpoint", p.tokens.Service())
 	}
 }
 
-func TestManagedIdentityFailureNamesTheEndpoint(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, answer(http.StatusBadRequest, oauthError("invalid_request", "Identity not found")))
+func TestAFailureLogNamesTheTokenService(t *testing.T) {
+	setWorkloadIdentityEnv(t, testClientID)
+	useFakeTokens(t, &fakeTokens{err: &sdkauth.TokenError{Reason: "Microsoft Entra ID rejected the token request (HTTP 401, invalid_client)", Rejected: true}})
 	workload := requireFailure(t, mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"}).
 		OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
 
 	logs := captureLogs(t)
-	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "managed-identity", "clientId": testClientID, "scope": uniqueScope(t)})
+	const reason = "the managed identity endpoint rejected the token request (HTTP 400, invalid_request)"
+	useFakeTokens(t, &fakeTokens{service: "the managed identity endpoint", err: &sdkauth.TokenError{Reason: reason, Rejected: true}})
+	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "managed-identity", "clientId": testClientID})
 	resp := requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
 
 	if resp.StatusCode != workload.StatusCode || !reflect.DeepEqual(resp.Headers, workload.Headers) || !bytes.Equal(resp.Body, workload.Body) {
@@ -571,8 +744,8 @@ func TestManagedIdentityFailureNamesTheEndpoint(t *testing.T) {
 	if !resp.IsFault || resp.Fault == nil || resp.Fault.Code != policy.FaultCodeMediationFailed {
 		t.Fatalf("fault = %+v, want a declared %s", resp.Fault, policy.FaultCodeMediationFailed)
 	}
-	if want := "the managed identity endpoint rejected the token request (HTTP 400, invalid_request)"; resp.Fault.Description != want {
-		t.Fatalf("description = %q, want %q", resp.Fault.Description, want)
+	if resp.Fault.Description != reason {
+		t.Fatalf("description = %q, want %q", resp.Fault.Description, reason)
 	}
 	out := logs.String()
 	if !strings.Contains(out, "could not obtain an access token from the managed identity endpoint") || !strings.Contains(out, testClientID) {
@@ -593,11 +766,10 @@ func TestOnRequestHeadersRecordsManagedIdentityAuthContext(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useFakeAzure(t, answer(http.StatusOK, imdsToken("tok-1", "https://ai.azure.com")))
+			useFakeTokens(t, &fakeTokens{token: "tok-1"})
 			inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey", CredentialID: "app-1"}
 			shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
-			scope := uniqueScope(t)
-			tt.params["scope"] = scope
+			tt.params["scope"] = "https://cognitiveservices.azure.com/.default"
 
 			p := mustGetPolicy(t, tt.params)
 			requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(shared), nil))
@@ -606,7 +778,7 @@ func TestOnRequestHeadersRecordsManagedIdentityAuthContext(t *testing.T) {
 			if got == nil || !got.Authenticated || got.AuthType != "azure-managed-identity" || got.CredentialID != tt.wantCredentialID {
 				t.Fatalf("AuthContext = %+v", got)
 			}
-			wantProps := map[string]string{"authenticationType": "managed-identity", "scope": scope}
+			wantProps := map[string]string{"authenticationType": "managed-identity", "scope": "https://cognitiveservices.azure.com/.default"}
 			if !reflect.DeepEqual(got.Properties, wantProps) {
 				t.Fatalf("Properties = %v, want %v", got.Properties, wantProps)
 			}
@@ -638,17 +810,18 @@ func TestContainerAppsNeedsItsEndpoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useFakeAzure(t, answer(http.StatusOK, imdsToken("tok-1", "https://ai.azure.com")))
+			clearHostIdentityEnv(t)
 			for name, value := range tt.env {
 				t.Setenv(name, value)
 			}
+			clientID := uniqueClientID()
 
-			_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "container-apps"})
+			_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "container-apps", "clientId": clientID})
 			if err == nil || !strings.Contains(err.Error(), "Container Apps managed identity is not available") || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("err = %v, want Container Apps managed identity not available: %s", err, tt.want)
 			}
 			if tt.managedIdentityBuilds {
-				if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "managed-identity"}); err != nil {
+				if _, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{"authenticationType": "managed-identity", "clientId": clientID}); err != nil {
 					t.Fatalf("managed-identity: %v", err)
 				}
 			}
@@ -667,12 +840,10 @@ func TestOnRequestHeadersRecordsContainerAppsAuthContext(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useFakeAzure(t, answer(http.StatusOK, containerAppsToken("tok-1", "https://ai.azure.com", testClientID)))
-			setContainerAppsEnv(t)
+			useFakeTokens(t, &fakeTokens{token: "tok-1", service: "the Container Apps identity endpoint"})
 			inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey", CredentialID: "app-1"}
 			shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
-			scope := uniqueScope(t)
-			tt.params["scope"] = scope
+			tt.params["scope"] = "https://cognitiveservices.azure.com/.default"
 
 			p := mustGetPolicy(t, tt.params)
 			mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(shared), nil))
@@ -684,7 +855,7 @@ func TestOnRequestHeadersRecordsContainerAppsAuthContext(t *testing.T) {
 			if got == nil || !got.Authenticated || got.AuthType != "azure-container-apps" || got.CredentialID != tt.wantCredentialID {
 				t.Fatalf("AuthContext = %+v", got)
 			}
-			wantProps := map[string]string{"authenticationType": "container-apps", "scope": scope}
+			wantProps := map[string]string{"authenticationType": "container-apps", "scope": "https://cognitiveservices.azure.com/.default"}
 			if !reflect.DeepEqual(got.Properties, wantProps) {
 				t.Fatalf("Properties = %v, want %v", got.Properties, wantProps)
 			}
@@ -695,41 +866,9 @@ func TestOnRequestHeadersRecordsContainerAppsAuthContext(t *testing.T) {
 	}
 }
 
-// IDENTITY_HEADER keeps anything but the app itself from minting tokens at the identity endpoint,
-// so it must never reach a log line or a fault.
-func TestTheIdentityHeaderIsNeverLogged(t *testing.T) {
-	logs := captureLogs(t)
-	var descriptions []string
-	for _, tt := range []struct {
-		status int
-		body   any
-	}{
-		{http.StatusBadRequest, containerAppsError(http.StatusBadRequest, "Unable to load the proper Managed Identity.")},
-		{http.StatusForbidden, rawBody("")},
-		{http.StatusInternalServerError, containerAppsError(http.StatusInternalServerError, "An error occurred.")},
-		{0, nil},
-	} {
-		useFakeAzure(t, answer(tt.status, tt.body))
-		setContainerAppsEnv(t)
-		p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "container-apps", "scope": uniqueScope(t)})
-		resp := requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-		descriptions = append(descriptions, resp.Fault.Description)
-	}
-
-	out := logs.String()
-	if !strings.Contains(out, "could not obtain an access token from the Container Apps identity endpoint") {
-		t.Fatalf("the failures were not logged:\n%s", out)
-	}
-	for _, text := range append(descriptions, out) {
-		if strings.Contains(text, testIdentityHeader) {
-			t.Fatalf("the identity header appears in:\n%s", text)
-		}
-	}
-}
-
 func TestModeProcessesOnlyRequestHeaders(t *testing.T) {
-	setWorkloadIdentityEnv(t, "federated-token")
-	useFakeAzure(t, answer(http.StatusOK, entraToken("tok")))
+	setWorkloadIdentityEnv(t, testClientID)
+	useFakeTokens(t, &fakeTokens{token: "tok"})
 
 	got := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"}).Mode()
 	want := policy.ProcessingMode{
@@ -740,91 +879,5 @@ func TestModeProcessesOnlyRequestHeaders(t *testing.T) {
 	}
 	if got != want {
 		t.Fatalf("Mode() = %+v, want %+v", got, want)
-	}
-}
-
-// When the SDK can't decode a token response, its error quotes the response body, token and all.
-// The log keeps the error but not the token.
-func TestTokensInAnUndecodableResponseAreNotLogged(t *testing.T) {
-	logs := captureLogs(t)
-	setWorkloadIdentityEnv(t, "federated-token")
-	const jwt = "eyJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJodHRwczovL2FpLmF6dXJlLmNvbSJ9.c2lnbmF0dXJl"
-	useFakeAzure(t, answer(http.StatusOK, map[string]any{
-		"token_type":   "Bearer",
-		"access_token": "access-token-secret",
-		"id_token":     jwt,
-		"expires_in":   map[string]any{"not": "a number"},
-	}))
-
-	p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
-	requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-
-	out := logs.String()
-	if !strings.Contains(out, "could not obtain an access token from Microsoft Entra ID") || !strings.Contains(out, "[REDACTED]") {
-		t.Fatalf("the failure was not logged with a redacted response:\n%s", out)
-	}
-	for _, secret := range []string{"access-token-secret", jwt} {
-		if strings.Contains(out, secret) {
-			t.Errorf("logs contain %q:\n%s", secret, out)
-		}
-	}
-}
-
-// A token response cut off inside its token has no closing quote to end the token at. The log
-// keeps the error but nothing from the token field on.
-func TestATokenInATruncatedResponseIsNotLogged(t *testing.T) {
-	const truncated = `{"token_type":"Bearer","expires_in":3599,"access_token":"opaque-token-secret`
-	for _, tt := range []struct {
-		authenticationType string
-		setEnv             func(*testing.T)
-		failure            string
-	}{
-		{AuthenticationTypeWorkloadIdentity, func(t *testing.T) { setWorkloadIdentityEnv(t, "federated-token") }, "could not obtain an access token from Microsoft Entra ID"},
-		{AuthenticationTypeContainerApps, setContainerAppsEnv, "could not obtain an access token from the Container Apps identity endpoint"},
-	} {
-		t.Run(tt.authenticationType, func(t *testing.T) {
-			logs := captureLogs(t)
-			useFakeAzure(t, answer(http.StatusOK, rawBody(truncated)))
-			tt.setEnv(t)
-
-			p := mustGetPolicy(t, map[string]interface{}{"authenticationType": tt.authenticationType, "scope": uniqueScope(t)})
-			requireFailure(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-
-			out := logs.String()
-			if !strings.Contains(out, tt.failure) {
-				t.Fatalf("the failure was not logged:\n%s", out)
-			}
-			if strings.Contains(out, "opaque-token-secret") {
-				t.Errorf("logs contain the token:\n%s", out)
-			}
-		})
-	}
-}
-
-// The failure log carries the SDK's error, with Entra ID's error codes, but never the access token
-// or the federated token.
-func TestSecretsAreNotLogged(t *testing.T) {
-	logs := captureLogs(t)
-	setWorkloadIdentityEnv(t, "federated-token-secret")
-	useFakeAzure(t, func(_ context.Context, r tokenRequest) (int, any) {
-		if strings.HasPrefix(r.form.Get("scope"), "https://cognitiveservices.azure.com/") {
-			return http.StatusUnauthorized, oauthError("invalid_client", "AADSTS700213: No matching federated identity record found.", 700213)
-		}
-		return http.StatusOK, entraToken("access-token-secret")
-	})
-
-	ok := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity"})
-	requireHeaderMods(t, ok.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-	failing := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "scope": "https://cognitiveservices.azure.com/.default"})
-	requireFailure(t, failing.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
-
-	out := logs.String()
-	if !strings.Contains(out, "700213") {
-		t.Errorf("the failure was not logged with Entra ID's error:\n%s", out)
-	}
-	for _, secret := range []string{"access-token-secret", "federated-token-secret"} {
-		if strings.Contains(out, secret) {
-			t.Errorf("logs contain %q:\n%s", secret, out)
-		}
 	}
 }
