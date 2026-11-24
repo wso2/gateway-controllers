@@ -1,11 +1,29 @@
 name: set-headers
-version: v1.2.0
+version: v1.3.0
 description: |
-  Sets or appends configured headers on requests and/or responses. In "set" mode
-  (the default), an existing header with the same name is overwritten; if the same
-  header is configured multiple times, the latest configured value overwrites
-  earlier values. In "append" mode, configured values are appended while
-  preserving any existing header values.
+  Sets or appends headers on upstream requests and/or downstream responses.
+  In "set" mode (the default), an existing header with the same name is overwritten;
+  in "append" mode, configured values are appended while preserving any existing
+  header values.
+
+  Header values support embedded context-variable expressions:
+
+    ${req.header.<name>}   — replaced with the value of request header <name>
+    ${resp.header.<name>}  — replaced with the value of response header <name>
+                             (response phase only)
+    ${meta.<key>}          — replaced with SharedContext.Metadata[key]
+                             (available in both phases; written by upstream policies
+                             such as subscription-validation)
+
+  Expressions may appear anywhere inside the value string, e.g.:
+    "Bearer ${req.header.x-provider-token}"
+    "${meta.x-wso2-subscription-plan-name}"
+
+  If a referenced header or metadata key is absent, the target header is removed
+  from the upstream request or downstream response to prevent a client-supplied
+  value from reaching the backend.
+
+  Static values (no expressions) are never removed.
 
 parameters:
   type: object
@@ -57,8 +75,26 @@ parameters:
               value:
                 type: string
                 x-wso2-policy-advanced-param: false
-                description: Specifies the header value to set.
+                description: |
+                  The header value to set. May contain embedded expressions:
+                    ${req.header.<name>}  — injects a request header value
+                    ${meta.<key>}         — injects a SharedContext.Metadata value
+                  Literal text outside expressions is kept as-is. If a referenced
+                  header or metadata key is absent the target header is removed
+                  (spoof prevention). Note: ${resp.header.*} is not allowed in
+                  request-phase entries and fails validation at deploy time.
                 maxLength: 8192
+                not:
+                  pattern: '\$\{resp\.header\.'
+              removeSource:
+                type: boolean
+                x-wso2-policy-advanced-param: false
+                description: |
+                  When true, removes source headers referenced via
+                  ${req.header.<name>} expressions from the upstream request
+                  after reading their values. ${meta.<key>} sources are unaffected.
+                  Defaults to false.
+                default: false
             required:
             - name
             - value
@@ -90,8 +126,24 @@ parameters:
               value:
                 type: string
                 x-wso2-policy-advanced-param: false
-                description: Specifies the header value to set.
+                description: |
+                  The header value to set. May contain embedded expressions:
+                    ${req.header.<name>}   — injects a request header value
+                    ${resp.header.<name>}  — injects an upstream response header value
+                    ${meta.<key>}          — injects a SharedContext.Metadata value
+                  Literal text outside expressions is kept as-is. If a referenced
+                  header or metadata key is absent the target header is removed
+                  (spoof prevention).
                 maxLength: 8192
+              removeSource:
+                type: boolean
+                x-wso2-policy-advanced-param: false
+                description: |
+                  When true, removes source headers referenced via
+                  ${resp.header.<name>} expressions from the downstream response
+                  after reading their values. ${req.header.*} and ${meta.<key>}
+                  sources are unaffected. Defaults to false.
+                default: false
             required:
             - name
             - value

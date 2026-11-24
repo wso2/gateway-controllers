@@ -1,0 +1,13 @@
+{
+  "name": "set-headers",
+  "displayName": "Set Headers",
+  "version": "1.3",
+  "provider": "Choreo Labs",
+  "categories": [
+    "Transformation",
+    "MCP",
+    "WebSub",
+    "WebBroker"
+  ],
+  "description": "Sets or appends headers on upstream requests and/or downstream responses. Supports static values and embedded context-variable expressions (${req.header.*}, ${resp.header.*}, ${meta.*}) that are resolved at request time. When a referenced source is absent, the target header is actively removed to prevent spoofing."
+}
