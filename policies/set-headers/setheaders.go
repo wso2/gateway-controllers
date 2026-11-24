@@ -366,17 +366,21 @@ func sourceHeaderNames(tmpl, scope string) []string {
 	return names
 }
 
-// filterNotInSet removes entries from removes that also appear as keys in toSet.
-// Prevents a self-remove when source and target header share the same name.
-func filterNotInSet(removes []string, toSet map[string]string) []string {
-	if len(removes) == 0 || len(toSet) == 0 {
+// filterNotInSet removes from removes any header that the policy is also setting or
+// appending, so a header is never simultaneously removed and written by the same policy.
+func filterNotInSet(removes []string, toSet map[string]string, toAppend map[string][]string) []string {
+	if len(removes) == 0 {
 		return removes
 	}
 	out := removes[:0]
 	for _, r := range removes {
-		if _, inSet := toSet[r]; !inSet {
-			out = append(out, r)
+		if _, inSet := toSet[r]; inSet {
+			continue
 		}
+		if _, inAppend := toAppend[r]; inAppend {
+			continue
+		}
+		out = append(out, r)
 	}
 	return out
 }
@@ -414,7 +418,15 @@ func (p *SetHeadersPolicy) applyRequestEntries(
 			continue
 		}
 		val, ok := resolve(entry.Value, reqHeaders, nil, metadata)
+		if entry.RemoveSource {
+			// Collect source removals before the resolution check so that referenced
+			// source headers are stripped even when the target expression fails to resolve.
+			headersToRemove = append(headersToRemove, sourceHeaderNames(entry.Value, "req.header")...)
+		}
 		if !ok {
+			// Clear any earlier assignment for this header so the failing entry
+			// takes precedence (last-entry-wins in set mode).
+			delete(headersToSet, entry.Name)
 			// Remove target to prevent a client-supplied value from reaching the backend.
 			headersToRemove = append(headersToRemove, entry.Name)
 			continue
@@ -424,12 +436,9 @@ func (p *SetHeadersPolicy) applyRequestEntries(
 		} else {
 			headersToSet[entry.Name] = val
 		}
-		if entry.RemoveSource {
-			headersToRemove = append(headersToRemove, sourceHeaderNames(entry.Value, "req.header")...)
-		}
 	}
-	// Never remove a header that this same policy is also setting.
-	headersToRemove = filterNotInSet(headersToRemove, headersToSet)
+	// Never remove a header that this same policy is also setting or appending.
+	headersToRemove = filterNotInSet(headersToRemove, headersToSet, headersToAppend)
 	if len(headersToSet) == 0 {
 		headersToSet = nil
 	}
@@ -516,7 +525,16 @@ func (p *SetHeadersPolicy) OnResponseHeaders(ctx context.Context, respCtx *polic
 			continue
 		}
 		val, ok := resolve(entry.Value, respCtx.RequestHeaders, respCtx.ResponseHeaders, metadata)
+		if entry.RemoveSource {
+			// Collect source removals before the resolution check so that referenced
+			// source headers are stripped even when the target expression fails to resolve.
+			// Only ${resp.header.*} sources can be removed in the response phase.
+			headersToRemove = append(headersToRemove, sourceHeaderNames(entry.Value, "resp.header")...)
+		}
 		if !ok {
+			// Clear any earlier assignment for this header so the failing entry
+			// takes precedence (last-entry-wins in set mode).
+			delete(headersToSet, entry.Name)
 			headersToRemove = append(headersToRemove, entry.Name)
 			continue
 		}
@@ -525,12 +543,9 @@ func (p *SetHeadersPolicy) OnResponseHeaders(ctx context.Context, respCtx *polic
 		} else {
 			headersToSet[entry.Name] = val
 		}
-		if entry.RemoveSource {
-			// Only ${resp.header.*} sources can be removed in the response phase.
-			headersToRemove = append(headersToRemove, sourceHeaderNames(entry.Value, "resp.header")...)
-		}
 	}
-	headersToRemove = filterNotInSet(headersToRemove, headersToSet)
+	// Never remove a header that this same policy is also setting or appending.
+	headersToRemove = filterNotInSet(headersToRemove, headersToSet, headersToAppend)
 	if len(headersToSet) == 0 {
 		headersToSet = nil
 	}
