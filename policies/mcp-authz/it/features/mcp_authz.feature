@@ -689,19 +689,21 @@ Feature: MCP proxies governed by mcp-authz
     Then the response should be successful
 
     Examples: calls a rule names
-      | case                            | rules                                                                        | request                                                                                              |
+      | case                          | rules                                                                                                           | request                                                                                                  |
       # MAZ #23: a * tool rule governs add.
-      | * rule, add                     | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}     |
+      | * rule, add                   | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                         | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}         |
       # MAZ #23: the same * rule governs echo.
-      | * rule, echo                    | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hi"}}} |
+      | * rule, echo                  | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                         | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hi"}}}     |
       # MAZ #23: the same * rule governs headers.
-      | * rule, headers                 | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"headers","arguments":{"name":"Accept"}}} |
+      | * rule, headers               | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                         | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"headers","arguments":{"name":"Accept"}}} |
       # MAZ #27 (control): the rule Add governs a call to Add, so the rule is live.
-      | rule Add, call Add              | {"tools":[{"name":"Add","scopes":{"allOf":["maz-x"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"Add","arguments":{"a":2,"b":3}}}     |
+      | rule Add, call Add            | {"tools":[{"name":"Add","scopes":{"allOf":["maz-x"]}}]}                                                         | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"Add","arguments":{"a":2,"b":3}}}         |
       # MAZ #27 (control): the resource rule file:///docs/* governs a read of exactly file:///docs/*.
-      | rule file:///docs/*, same URI   | {"resources":[{"name":"file:///docs/*","scopes":{"allOf":["maz-x"]}}]}       | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/*"}}                 |
+      | rule file:///docs/*, same URI | {"resources":[{"name":"file:///docs/*","scopes":{"allOf":["maz-x"]}}]}                                          | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/*"}}                     |
       # MAZ #28 (control): the tool rule greeting governs a tool call named greeting.
-      | tool rule greeting, tool call   | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}                 | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting","arguments":{}}}           |
+      | tool rule greeting, tool call | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}                                                    | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"greeting","arguments":{}}}               |
+      # MAZ #38, #41 (control): tools * and methods * govern a tools/call, so these rules are live.
+      | tools * and methods *, add    | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}         |
 
   # A call no rule names passes to the MCP server. Each row has a control row above with the same
   # rules, which shows those rules are live: the 200 here comes from the name not matching, not from
@@ -743,13 +745,16 @@ Feature: MCP proxies governed by mcp-authz
     Then the response should be successful
 
     Examples: calls no rule names
-      | case                            | rules                                                                        | request                                                                                              |
+      | case                           | rules                                                                  | request                                                                                                 |
       # MAZ #27: the rule Add does not govern add; names must match exactly, case included.
-      | rule Add, call add              | {"tools":[{"name":"Add","scopes":{"allOf":["maz-x"]}}]}                      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}     |
+      | rule Add, call add             | {"tools":[{"name":"Add","scopes":{"allOf":["maz-x"]}}]}                | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        |
       # MAZ #27: a * inside a rule name is plain text, not a pattern, so file:///docs/readme.txt is not governed.
-      | rule file:///docs/*, other URI  | {"resources":[{"name":"file:///docs/*","scopes":{"allOf":["maz-x"]}}]}       | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}        |
+      | rule file:///docs/*, other URI | {"resources":[{"name":"file:///docs/*","scopes":{"allOf":["maz-x"]}}]} | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}}           |
       # MAZ #28: a tool rule does not govern a prompt with the same name.
-      | tool rule greeting, prompt      | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}                 | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} |
+      | tool rule greeting, prompt     | {"tools":[{"name":"greeting","scopes":{"allOf":["maz-x"]}}]}           | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting","arguments":{"name":"Maz"}}} |
+      # MAZ #44 (control): with a rule that names another tool, a readable call to add passes, so the
+      # 400s of the #44 rows come from the unreadable body, not from a rule.
+      | rule maz-other, call add       | {"tools":[{"name":"maz-other","scopes":{"allOf":["maz-all"]}}]}        | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        |
 
   # Rules beyond tools. A resource rule names a URI and a prompt rule a prompt; a method rule names
   # a whole JSON-RPC method, such as tools/call or tools/list, and governs every call of it. A list
@@ -884,6 +889,163 @@ Feature: MCP proxies governed by mcp-authz
       | method and tool rule, method scope | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}],"tools":[{"name":"add","scopes":{"allOf":["maz-add"]}}]}                                         | maz-call     | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | maz-add     |
       # MAZ #37: the token meets only the tool rule; the 403 names the method rule's scope.
       | method and tool rule, tool scope   | {"methods":[{"name":"tools/call","scopes":{"allOf":["maz-call"]}}],"tools":[{"name":"add","scopes":{"allOf":["maz-add"]}}]}                                         | maz-add      | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}        | maz-call    |
+
+  # Requests mcp-authz does not check. It reads only a POST to the MCP path, and a POST whose body
+  # names nothing to authorize passes on. mcp-authz runs alone, so a request it checked against a
+  # rule would get its 401; these answers come from the MCP server instead, which the upstream header
+  # shows (the server supports neither GET nor DELETE and answers 405). The rules tools * and
+  # methods * would catch any request mcp-authz looked at; the row with a nameless tools/call uses
+  # tools * alone, because the method rule * governs every tools/call. Their controls are in the
+  # outline "A call a rule names is governed". An initialize polled until 200 waits until the route
+  # is live; initialize is a bare method, which no rule governs.
+  Scenario Outline: A request mcp-authz does not check reaches the MCP server (<case>)
+    Given I generate a unique resource name from "mcp-authz-unchecked" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-unchecked" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-unchecked" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-unchecked" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-authz","version":"v1","params":<rules>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+    And I send a "<method>" request to "${CTX:mcpContext}/mcp" with body:
+      """
+      <body>
+      """
+    Then the response status code should be <status>
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: requests that are not checked
+      | case                       | rules                                                                                                           | method | body                                                                                             | status |
+      # MAZ #38: a GET (the server's event stream) is not checked.
+      | GET                        | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | GET    |                                                                                                  | 405    |
+      # MAZ #38: a GET is not checked even when it carries a tools/call body.
+      | GET with a tools/call body | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | GET    | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}} | 405    |
+      # MAZ #38: a DELETE (end of a session) is not checked.
+      | DELETE                     | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | DELETE |                                                                                                  | 405    |
+      # MAZ #41: an empty body names nothing; the server itself refuses it.
+      | empty body                 | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | POST   |                                                                                                  | 400    |
+      # MAZ #41: a JSON-RPC response has no method.
+      | JSON-RPC response          | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | POST   | {"jsonrpc":"2.0","id":1,"result":{}}                                                             | 202    |
+      # MAZ #41: a notification is not a capability call.
+      | notification               | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | POST   | {"jsonrpc":"2.0","method":"notifications/initialized"}                                           | 202    |
+      # MAZ #41: a tools/call with no tool name matches no tool rule, not even *; the server reports the unknown tool.
+      | tools/call with no name    | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                         | POST   | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"a":2,"b":3}}}              | 200    |
+
+  # A body mcp-authz cannot read as one JSON-RPC request gets its 400 before any rule is looked at,
+  # so the answer is the same whether a rule would have applied (tools *) or not (a rule that names
+  # another tool; its control in "A call no rule names passes to the MCP server" shows add passes).
+  Scenario Outline: An unreadable request body is refused before any rule is checked (<case>)
+    Given I generate a unique resource name from "mcp-authz-unreadable" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-unreadable" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-unreadable" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-unreadable" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-authz","version":"v1","params":<rules>}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" with body:
+      """
+      <body>
+      """
+    Then the response status code should be 400
+    And the JSON response field "message" should be "Invalid MCP request format"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: bodies that cannot be read
+      | case                            | rules                                                           | body                                                                                                                                                                                                |
+      # MAZ #42: broken JSON.
+      | broken JSON                     | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}         | {"jsonrpc":"2.0","id":1,"method":"tools/call",                                                                                                                                                      |
+      # MAZ #42: a batch of two requests.
+      | batch                           | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}         | [{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}] |
+      # MAZ #42: method sent as a number.
+      | numeric method                  | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}         | {"jsonrpc":"2.0","id":1,"method":5,"params":{"name":"add","arguments":{"a":2,"b":3}}}                                                                                                               |
+      # MAZ #44: broken JSON where no rule would apply.
+      | broken JSON, no rule applies    | {"tools":[{"name":"maz-other","scopes":{"allOf":["maz-all"]}}]} | {"jsonrpc":"2.0","id":1,"method":"tools/call",                                                                                                                                                      |
+      # MAZ #44: a batch where no rule would apply.
+      | batch, no rule applies          | {"tools":[{"name":"maz-other","scopes":{"allOf":["maz-all"]}}]} | [{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}] |
+      # MAZ #44: method sent as a number where no rule would apply.
+      | numeric method, no rule applies | {"tools":[{"name":"maz-other","scopes":{"allOf":["maz-all"]}}]} | {"jsonrpc":"2.0","id":1,"method":5,"params":{"name":"add","arguments":{"a":2,"b":3}}}                                                                                                               |
+
+  # MAZ #40: mcp-authz ignores the query string when it picks the requests to check, so a query
+  # string does not let a call around a rule. mcp-auth sits in front, and polling without a token
+  # until its 401 waits until the route and its policies are live.
+  Scenario: A tool call with a query string is still checked
+    Given I generate a unique resource name from "mcp-authz-query" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-query" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-query" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-query" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion} |
+      | name              | ${CTX:mcpName} |
+      | displayName       | ${CTX:mcpDisplayName} |
+      | version           | ${CTX:mcpVersion} |
+      | context           | ${CTX:mcpContext} |
+      | specVersion       | 2025-06-18 |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath} |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"]}},{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "maz-none" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp?foo=bar"
+    Then the response status code should be 403
+    And the JSON response field "message" should be "Forbidden: insufficient permissions to access this MCP resource"
+    And the response header "WWW-Authenticate" should match pattern "scope=\x22maz-all\x22,"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "maz-all" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp?foo=bar"
+    Then the response status code should be 200
+    And the JSON response field "result.content[0].text" should be "The sum of 40 and 60 is 100."
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
 
   # mcp-authz must decide governance by rule matching BEFORE consulting identity. A capability
   # no rule targets is not governed and passes through untouched, even with no authenticated
