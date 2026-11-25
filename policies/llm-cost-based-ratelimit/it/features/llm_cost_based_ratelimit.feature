@@ -95,6 +95,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue @llm-cost-multi-window
@@ -160,6 +164,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -229,6 +237,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   Scenario: Cost-based rate limit returns proper rate limit headers
     # The readiness path reports zero usage, so its response shows the budget untouched without spending
@@ -280,6 +292,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -376,9 +392,17 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerNameA}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContextA}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
     When I delete the LLM provider "${CTX:providerNameB}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContextB}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -452,6 +476,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue @llm-cost-window-reset
@@ -519,6 +547,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   Scenario Outline: Budget amounts of any magnitude scale to the same unit (<amount>)
     # Integer, fractional, the schema minimum and the schema maximum all scale by the default
@@ -559,6 +591,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
     Examples:
       | amount   | raw              | dollars      |
@@ -606,6 +642,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   Scenario: A composite Go duration is accepted as a budget window
     # The duration is handed to the rate-limit engine as written, and 1h30m is a valid Go duration.
@@ -643,6 +683,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   Scenario: A route that is not an LLM provider is not rate limited
     # A REST API route has no provider_name, so the policy skips every phase and the request goes
@@ -678,6 +722,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   Scenario: Concurrent requests on one provider all succeed and leave an unspent budget untouched
     # The readiness path reports zero usage, so a burst of them must neither be rejected nor consume any
@@ -726,6 +774,10 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -796,6 +848,10 @@ Feature: LLM cost-based rate limiting
     And I authenticate using basic auth as "admin"
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -877,3 +933,7 @@ Feature: LLM cost-based rate limiting
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """

@@ -76,6 +76,10 @@ Feature: LLM cost-based rate limit with budgets the gateway does not validate
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
     Examples:
       | case | slug | params |
@@ -121,3 +125,7 @@ Feature: LLM cost-based rate limit with budgets the gateway does not validate
 
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """

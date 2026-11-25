@@ -95,6 +95,10 @@ Feature: LLM cost-based rate limit and the application identity
     And I authenticate using basic auth as "admin"
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -171,6 +175,10 @@ Feature: LLM cost-based rate limit and the application identity
     And I authenticate using basic auth as "admin"
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -248,6 +256,10 @@ Feature: LLM cost-based rate limit and the application identity
     And I authenticate using basic auth as "admin"
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
 
   # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
@@ -336,3 +348,7 @@ Feature: LLM cost-based rate limit and the application identity
     And I authenticate using basic auth as "admin"
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:providerContext}/openai/v1/chat/completions" until status 404 with body:
+      """
+      {"model":"gpt-4.1-2025-04-14","messages":[{"role":"user","content":"Hello"}]}
+      """
