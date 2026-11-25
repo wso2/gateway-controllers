@@ -37,7 +37,7 @@ defaults:
 
 blocks:
   - name: model-access-control
-    parallel: 1
+    parallel: 3
     components:
       - name: platform-gateway
         db:
@@ -48,5 +48,11 @@ blocks:
         tags: "gateway-version>=1.2.0"
         features:
           - features/model_access_control.feature
+      - name: model-access-control-locations
+        tags: "gateway-version>=1.2.0"
+        features:
           - features/model_access_control_locations.feature
+      - name: model-access-control-hardening
+        tags: "gateway-version>=1.2.0"
+        features:
           - features/model_access_control_hardening.feature
