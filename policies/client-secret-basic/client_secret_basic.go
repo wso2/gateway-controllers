@@ -78,6 +78,34 @@ const (
 	sharedTransportMaxConns = 64
 )
 
+// endpointState holds the shared in-process state for one token endpoint.
+// All policy instances that point at the same endpoint share one of these,
+// so the failure counter, wrong-credential cache, success cache, and singleflight
+// group are global per IdP — not per operation or per API.
+type endpointState struct {
+	cache    sync.Map // cacheKey(clientId,secret) → validationEntry
+	failures failureTracker
+	sf       sfGroup
+}
+
+var (
+	endpointStatesMu sync.Mutex
+	endpointStates   = map[string]*endpointState{}
+)
+
+// getOrCreateEndpointState returns the shared state for the given token endpoint,
+// creating it on first call.
+func getOrCreateEndpointState(endpoint string) *endpointState {
+	endpointStatesMu.Lock()
+	defer endpointStatesMu.Unlock()
+	if s, ok := endpointStates[endpoint]; ok {
+		return s
+	}
+	s := &endpointState{}
+	endpointStates[endpoint] = s
+	return s
+}
+
 // sharedTransport is shared by all policy instances so connections to the token
 // endpoint are pooled across operations and APIs. The default transport keeps only
 // 2 idle connections per host, which causes port exhaustion under load.
@@ -427,9 +455,7 @@ func (g *sfGroup) do(key string, fn func() (sfResult, error)) (sfResult, error) 
 type ClientSecretBasicPolicy struct {
 	cfg        PolicyConfig
 	httpClient *http.Client
-	cache      sync.Map     // cacheKey(clientId,secret) → validationEntry (successes)
-	failures   failureTracker
-	sf         sfGroup
+	state      *endpointState // shared state for the token endpoint; nil in static mode
 }
 
 // GetPolicy is the v1alpha2 factory entry point.
@@ -447,6 +473,7 @@ func GetPolicy(
 			Timeout:   cfg.TokenTimeout,
 			Transport: sharedTransport,
 		}
+		p.state = getOrCreateEndpointState(cfg.TokenEndpoint)
 	}
 	return p, nil
 }
@@ -766,50 +793,50 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 	key := cacheKey(clientId, clientSecret)
 
 	// Check success cache.
-	if v, ok := p.cache.Load(key); ok {
+	if v, ok := p.state.cache.Load(key); ok {
 		entry := v.(validationEntry)
 		if time.Now().Before(entry.expiresAt) {
 			return entry.accessToken, nil
 		}
-		p.cache.Delete(key)
+		p.state.cache.Delete(key)
 	}
 
 	// Layer 1: exact wrong-credential pair cache — no IdP call for known-bad credentials.
-	if p.failures.isWrongCred(key) {
+	if p.state.failures.isWrongCred(key) {
 		return "", fmt.Errorf("credentials rejected (cached)")
 	}
 
 	// Layer 2: fast-path throttle check (non-authoritative; avoids singleflight overhead).
 	// The authoritative check+increment happens inside the singleflight fn().
-	if throttled, remaining := p.failures.isThrottled(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow); throttled {
+	if throttled, remaining := p.state.failures.isThrottled(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow); throttled {
 		return "", throttleError{clientId: clientId, retryAfter: remaining}
 	}
 
 	// Deduplicate concurrent first requests for the same credential pair. The throttle
 	// reservation happens inside fn() so exactly one slot is consumed per IdP call,
 	// regardless of how many goroutines are waiting on this credential pair.
-	result, err := p.sf.do(key, func() (sfResult, error) {
+	result, err := p.state.sf.do(key, func() (sfResult, error) {
 		// Re-check the success cache at callback start. A request that passed the
 		// outer cache check before a completed flight published its entry can enter
 		// here after the flight is removed but before the outer store runs. Finding
 		// the entry now avoids a redundant token request.
-		if v, ok := p.cache.Load(key); ok {
+		if v, ok := p.state.cache.Load(key); ok {
 			entry := v.(validationEntry)
 			if time.Now().Before(entry.expiresAt) {
 				return sfResult{accessToken: entry.accessToken, expiresAt: entry.expiresAt}, nil
 			}
-			p.cache.Delete(key)
+			p.state.cache.Delete(key)
 		}
 		// Re-check wrongCreds inside the singleflight fn. A request that arrives just
 		// as a prior IdP call for the same wrong credential finishes can miss both the
 		// singleflight group and the outer wrongCreds check; checking here closes that
 		// gap so it never starts a redundant IdP call.
-		if p.failures.isWrongCred(key) {
+		if p.state.failures.isWrongCred(key) {
 			return sfResult{}, fmt.Errorf("credentials rejected (cached)")
 		}
 		// Atomically check and reserve a failure slot. Each singleflight group is one
 		// distinct credential attempt, so the counter increments once per IdP call.
-		rsv, reserveErr := p.failures.checkAndReserve(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow)
+		rsv, reserveErr := p.state.failures.checkAndReserve(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow)
 		if reserveErr != nil {
 			return sfResult{}, reserveErr
 		}
@@ -819,15 +846,15 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 			var netErr networkError
 			if errors.As(err, &netErr) {
 				// Network/server error: return the slot so it doesn't count as a failure.
-				p.failures.releaseReservation(clientId, rsv)
+				p.state.failures.releaseReservation(clientId, rsv)
 			} else {
 				// Auth rejection: keep the slot, store the specific bad pair.
-				p.failures.storeWrongCred(key, p.cfg.FailureWindow)
+				p.state.failures.storeWrongCred(key, p.cfg.FailureWindow)
 			}
 			return sfResult{}, err
 		}
 		// Success: return the slot (it was a speculative increment).
-		p.failures.releaseReservation(clientId, rsv)
+		p.state.failures.releaseReservation(clientId, rsv)
 
 		// Compute absolute cache expiry inside the callback so all waiting goroutines
 		// reuse the same value rather than each computing it at their own resume time.
@@ -862,7 +889,7 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 		// Store the entry inside the callback — before singleflight removes the flight
 		// from its work map — so any concurrent request that misses the flight finds
 		// the populated cache entry instead of starting another token request.
-		p.cache.Store(key, validationEntry{expiresAt: expiresAt, accessToken: accessToken})
+		p.state.cache.Store(key, validationEntry{expiresAt: expiresAt, accessToken: accessToken})
 		return sfResult{accessToken: accessToken, expiresAt: expiresAt}, nil
 	})
 	if err != nil {

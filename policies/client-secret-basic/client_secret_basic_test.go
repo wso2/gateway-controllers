@@ -676,7 +676,7 @@ func TestOnRequestHeaders_Dynamic_MaxCacheTTL_CapsSuccessCacheTTL(t *testing.T) 
 	impl.OnRequestHeaders(context.Background(), newReqCtx(map[string]string{"Authorization": basicAuthHeader("c1", "s1")}), params)
 
 	key := cacheKey("c1", "s1")
-	v, ok := impl.cache.Load(key)
+	v, ok := impl.state.cache.Load(key)
 	if !ok {
 		t.Fatal("expected cache entry after successful validation")
 	}
@@ -704,7 +704,7 @@ func TestOnRequestHeaders_Dynamic_ExpiredCacheEntry_RetriggersTokenRequest(t *te
 	impl := p.(*ClientSecretBasicPolicy)
 
 	key := cacheKey("c1", "s1")
-	impl.cache.Store(key, validationEntry{expiresAt: time.Now().Add(-time.Second)}) // already expired
+	impl.state.cache.Store(key, validationEntry{expiresAt: time.Now().Add(-time.Second)}) // already expired
 
 	headers := map[string]string{"Authorization": basicAuthHeader("c1", "s1")}
 	impl.OnRequestHeaders(context.Background(), newReqCtx(headers), params)
@@ -869,7 +869,7 @@ func TestOnRequestHeaders_Dynamic_ShortToken_ClampedToOneSecond_NotFallback(t *t
 		newReqCtx(map[string]string{"Authorization": basicAuthHeader("c1", "s1")}), params)
 
 	key := cacheKey("c1", "s1")
-	v, ok := impl.cache.Load(key)
+	v, ok := impl.state.cache.Load(key)
 	if !ok {
 		t.Fatal("expected cache entry")
 	}
@@ -899,7 +899,7 @@ func TestOnRequestHeaders_Dynamic_MissingExpiresIn_Uses1hFallback(t *testing.T) 
 		newReqCtx(map[string]string{"Authorization": basicAuthHeader("c1", "s1")}), params)
 
 	key := cacheKey("c1", "s1")
-	v, ok := impl.cache.Load(key)
+	v, ok := impl.state.cache.Load(key)
 	if !ok {
 		t.Fatal("expected cache entry")
 	}
