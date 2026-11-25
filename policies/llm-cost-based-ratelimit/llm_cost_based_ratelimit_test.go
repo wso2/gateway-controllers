@@ -19,8 +19,11 @@
 package llmcostratelimit
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -681,5 +684,56 @@ func TestDelegateFaultDeclarationIsPassedThrough(t *testing.T) {
 	}
 	if resp.Fault == nil || resp.Fault.Code != "900802" {
 		t.Fatalf("the delegate's Fault must reach the gateway unchanged, got %+v", resp.Fault)
+	}
+}
+
+// TestDebugLogsOmitBackendSettings checks that the debug lines that describe the parameters
+// leave out the Redis settings the gateway merges into them, and keep the settings that help
+// diagnose a budget.
+func TestDebugLogsOmitBackendSettings(t *testing.T) {
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	params := map[string]interface{}{
+		"budgetLimits": []interface{}{
+			map[string]interface{}{"amount": float64(10), "duration": "1h"},
+		},
+		"consumerBased": true,
+		"algorithm":     "gcra",
+		"backend":       "memory",
+		"redis": map[string]interface{}{
+			"host":     "redis.internal",
+			"username": "user-4821",
+			"password": "pass-4821",
+		},
+		"systemParameters": map[string]interface{}{"costScaleFactor": 1000},
+	}
+
+	p, err := GetPolicy(policy.PolicyMetadata{RouteName: "test-route"}, params)
+	if err != nil {
+		t.Fatalf("Failed to create policy: %v", err)
+	}
+	p.(*LLMCostRateLimitPolicy).OnRequestHeaders(context.Background(), createTestRequestHeaderContext("openai"), params)
+
+	out := buf.String()
+	for _, line := range []string{
+		"OnRequestHeaders: processing LLM cost-based rate limit",
+		"transformToRatelimitParams: starting parameter transformation",
+	} {
+		if !strings.Contains(out, line) {
+			t.Fatalf("expected the debug line %q, got:\n%s", line, out)
+		}
+	}
+	for _, omitted := range []string{"user-4821", "pass-4821", "redis.internal"} {
+		if strings.Contains(out, omitted) {
+			t.Errorf("debug log contains %q:\n%s", omitted, out)
+		}
+	}
+	for _, kept := range []string{"budgetLimits", "consumerBased", "costScaleFactor:1000", "backend:memory"} {
+		if !strings.Contains(out, kept) {
+			t.Errorf("debug log is missing %q:\n%s", kept, out)
+		}
 	}
 }
