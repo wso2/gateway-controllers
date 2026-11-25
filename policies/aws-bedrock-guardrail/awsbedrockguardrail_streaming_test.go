@@ -1420,6 +1420,159 @@ func TestStreaming_RestoresMaskedPIIOnRelease(t *testing.T) {
 	}
 }
 
+// deliverStream feeds chunks straight to OnResponseBodyChunk and joins what the
+// client ends up with: the body a flush replaces, or the chunk itself where the
+// policy forwarded it unchanged.
+func deliverStream(t *testing.T, p *AWSBedrockGuardrailPolicy, respCtx *policy.ResponseStreamContext, chunks []string) string {
+	t.Helper()
+
+	var delivered strings.Builder
+	for i, c := range chunks {
+		action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+			Chunk: []byte(c), EndOfStream: i == len(chunks)-1,
+		}, map[string]interface{}{})
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok {
+			t.Fatalf("flush %d ended the stream (%T); nothing here is a violation", i, action)
+		}
+		if forward.Body != nil {
+			delivered.Write(forward.Body)
+			continue
+		}
+		delivered.WriteString(c)
+	}
+	return delivered.String()
+}
+
+// TestStreaming_RestoresAPlaceholderSplitAcrossEvents is the defect this guards.
+// A model emits "EMAIL_0000" as several token events -- "your email is EMAIL" in
+// one, "_0000" in the next -- and a restore that read one frame at a time found
+// the placeholder in neither, so the client received the placeholder instead of
+// the address it stood for. Restoring across the flush's frames is what fixes
+// it, and the assessment sees the restored text for the same reason.
+func TestStreaming_RestoresAPlaceholderSplitAcrossEvents(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	delivered := deliverStream(t, p, respCtx, []string{
+		sseEvent("your email is EMAIL") + sseEvent("_0000") + sseEvent(" as requested. "),
+		"data: [DONE]\n\n",
+	})
+
+	if !strings.Contains(delivered, "john@example.com") {
+		t.Errorf("a placeholder split across events must still be restored, got %q", delivered)
+	}
+	if strings.Contains(delivered, "EMAIL_0000") {
+		t.Errorf("the placeholder must not reach the client, got %q", delivered)
+	}
+	if !strings.Contains(delivered, "as requested.") || !strings.HasSuffix(delivered, "data: [DONE]\n\n") {
+		t.Errorf("the rest of the stream must survive the rewrite, got %q", delivered)
+	}
+	if assessed := strings.Join(client.texts, ""); !strings.Contains(assessed, "john@example.com") {
+		t.Errorf("the guardrail must assess the restored text, not the placeholder, got %q", assessed)
+	}
+}
+
+// TestStreaming_RestoresAPlaceholderSplitAcrossFlushes covers the same split one
+// level up: the halves arrive in different flushes, so neither flush holds the
+// whole placeholder. The withheld buffer holds both, and the restore at delivery
+// reads it as one text.
+func TestStreaming_RestoresAPlaceholderSplitAcrossFlushes(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{
+		"john@example.com": "EMAIL_0000",
+		"+1 555 0100":      "PHONE_0001",
+	}
+
+	delivered := deliverStream(t, p, respCtx, []string{
+		sseEvent("your email is EMAIL"),
+		sseEvent("_0000 and your number is PHONE"),
+		sseEvent("_0001. "),
+		"data: [DONE]\n\n",
+	})
+
+	for _, want := range []string{"john@example.com", "+1 555 0100"} {
+		if !strings.Contains(delivered, want) {
+			t.Errorf("want %q restored in the delivered stream, got %q", want, delivered)
+		}
+	}
+	for _, unwanted := range []string{"EMAIL_0000", "PHONE_0001"} {
+		if strings.Contains(delivered, unwanted) {
+			t.Errorf("placeholder %q must not reach the client, got %q", unwanted, delivered)
+		}
+	}
+}
+
+// TestStreaming_RestoresAPlaceholderTokenisedOneCharacterPerEvent is the
+// finest split a provider can produce, driven through the kernel's own contract
+// rather than flush by flush. Both placeholders are restored, and the assessment
+// sees the restored text: the window gathers the events into one flush, so the
+// restore that runs before the assessment has the whole placeholder in hand.
+func TestStreaming_RestoresAPlaceholderTokenisedOneCharacterPerEvent(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{
+		"john@example.com": "EMAIL_0000",
+		"+1 555 0100":      "PHONE_0001",
+	}
+
+	var chunks []string
+	for _, r := range "hello there, mail EMAIL_0000 or ring PHONE_0001 any time. " {
+		chunks = append(chunks, sseEvent(string(r)))
+	}
+	chunks = append(chunks, "data: [DONE]\n\n")
+
+	var delivered strings.Builder
+	for i, action := range feedStream(t, p, respCtx, chunks) {
+		forward, ok := action.(policy.ForwardResponseChunk)
+		if !ok {
+			t.Fatalf("flush %d ended the stream (%T); nothing here is a violation", i, action)
+		}
+		delivered.Write(forward.Body)
+	}
+
+	out := delivered.String()
+	assessed := strings.Join(client.texts, "")
+	for _, want := range []string{"john@example.com", "+1 555 0100"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q restored in the delivered stream, got %q", want, out)
+		}
+		if !strings.Contains(assessed, want) {
+			t.Errorf("want %q in the assessed text, got %q", want, assessed)
+		}
+	}
+	for _, unwanted := range []string{"EMAIL_0000", "PHONE_0001"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("placeholder %q must not reach the client, got %q", unwanted, out)
+		}
+	}
+}
+
+// TestStreaming_RedactionIgnoresThePlaceholderMap pins that redactPII is left
+// alone by the restore: it never minted a placeholder, so there is nothing to
+// put back and a stale mapping must not reintroduce a value the operator asked
+// to be removed.
+func TestStreaming_RedactionIgnoresThePlaceholderMap(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) { params.RedactPII = true })
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	delivered := deliverStream(t, p, respCtx, []string{
+		sseEvent("your email is EMAIL") + sseEvent("_0000. "),
+		"data: [DONE]\n\n",
+	})
+
+	if strings.Contains(delivered, "john@example.com") {
+		t.Errorf("redaction must not restore anything, got %q", delivered)
+	}
+}
+
 // ─── Flushes that stop mid-line ──────────────────────────────────────────────
 
 // TestSplitTrailingPartialLine_DividesAtTheLastTerminator pins the split used to
