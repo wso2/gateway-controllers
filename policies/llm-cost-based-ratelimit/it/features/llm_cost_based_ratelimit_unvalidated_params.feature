@@ -82,7 +82,7 @@ Feature: LLM cost-based rate limit with budgets the gateway does not validate
       | absent | absent | {} |
       | not an array | not-array | {"budgetLimits":{"amount":1,"duration":"1h"}} |
       | non-object entries | not-object | {"budgetLimits":["one-dollar",7]} |
-      | amount that is not a number | amount-text | {"budgetLimits":[{"amount":"1","duration":"1h"}]} |
+      | amount that is not a number | amount-text | {"budgetLimits":[{"amount":"abc","duration":"1h"}]} |
 
   Scenario: A usable budget on the same gateway is applied
     # The positive control for the scenarios above: the same provider shape with a valid budget does
