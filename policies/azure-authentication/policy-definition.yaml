@@ -28,8 +28,8 @@ parameters:
       x-wso2-policy-advanced-param: false
       default: "workload-identity"
       description: |
-        How the access token is obtained; "workload-identity" is the default and
-        the recommended type. "workload-identity" uses AKS Workload
+        How the access token is obtained; "workload-identity" is the recommended
+        type. "workload-identity" uses AKS Workload
         Identity: the gateway pod must run with a service account federated with
         a Microsoft Entra ID identity, so that the Workload Identity webhook
         injects AZURE_TENANT_ID, AZURE_CLIENT_ID and AZURE_FEDERATED_TOKEN_FILE
@@ -67,8 +67,8 @@ parameters:
         workload-identity, defaults to AZURE_CLIENT_ID and must have a federated
         credential that trusts the gateway pod's service account. With
         managed-identity, selects a user-assigned managed identity of the host;
-        leave it unset for the host's default identity: its system-assigned
-        identity, or its only user-assigned identity if it has none. With
+        leave it unset for the host's system-assigned identity, or, on a VM, VM
+        scale set or AKS node without one, its only user-assigned identity. With
         container-apps, selects a user-assigned managed identity of the container
         app; leave it unset for the app's system-assigned identity, which the app
         must then have.
