@@ -71,7 +71,22 @@ const (
 	maxDynamicClientIDLen = 256
 
 	maxTokenResponseBytes = 1 << 20 // 1 MiB
+
+	// sharedTransportMaxConns is the per-host connection cap on the shared transport.
+	// It limits both idle connections held in the pool and total concurrent connections
+	// to the token endpoint, preventing port exhaustion under load.
+	sharedTransportMaxConns = 64
 )
+
+// sharedTransport is shared by all policy instances so connections to the token
+// endpoint are pooled across operations and APIs. The default transport keeps only
+// 2 idle connections per host, which causes port exhaustion under load.
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        sharedTransportMaxConns * 2,
+	MaxIdleConnsPerHost: sharedTransportMaxConns,
+	MaxConnsPerHost:     sharedTransportMaxConns,
+	IdleConnTimeout:     90 * time.Second,
+}
 
 // validationMode selects how credentials are verified at request time.
 type validationMode int
@@ -428,7 +443,10 @@ func GetPolicy(
 	}
 	p := &ClientSecretBasicPolicy{cfg: cfg}
 	if cfg.Mode == modeDynamic {
-		p.httpClient = &http.Client{Timeout: cfg.TokenTimeout}
+		p.httpClient = &http.Client{
+			Timeout:   cfg.TokenTimeout,
+			Transport: sharedTransport,
+		}
 	}
 	return p, nil
 }
