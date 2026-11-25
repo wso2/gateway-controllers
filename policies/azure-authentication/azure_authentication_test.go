@@ -473,6 +473,24 @@ func TestOnRequestHeadersUsesConfiguredScope(t *testing.T) {
 	}
 }
 
+// An LLM provider's upstream.auth reaches the policy unchecked, where an empty or blank scope
+// means the default, as for the other optional params.
+func TestAnEmptyScopeMeansTheDefault(t *testing.T) {
+	for name, scope := range map[string]string{"empty": "", "blank": "   "} {
+		t.Run(name, func(t *testing.T) {
+			setWorkloadIdentityEnv(t, testClientID)
+			f := &fakeTokens{token: "tok-1"}
+			useFakeTokens(t, f)
+
+			p := mustGetPolicy(t, map[string]interface{}{"authenticationType": "workload-identity", "scope": scope})
+			requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(nil), nil))
+			if calls := f.tokenCalls(); len(calls) != 1 || calls[0].scope != "https://ai.azure.com/.default" {
+				t.Fatalf("token calls = %+v, want one for https://ai.azure.com/.default", calls)
+			}
+		})
+	}
+}
+
 func TestIdentityParamsOverrideTheEnvironment(t *testing.T) {
 	setWorkloadIdentityEnv(t, testClientID)
 	asked := useFakeTokens(t, &fakeTokens{token: "tok-1"})

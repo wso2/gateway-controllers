@@ -64,9 +64,9 @@ accept Entra ID tokens, typically as the upstream authentication of an LLM provi
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `authenticationType` | string | Yes | `workload-identity` | How the token is obtained: `workload-identity` (AKS Workload Identity, the recommended type), `managed-identity` (the host's managed identity) or `container-apps` (the managed identity of the Azure Container Apps app the gateway runs in). |
+| `authenticationType` | string | Yes | - | How the token is obtained: `workload-identity` (AKS Workload Identity, the recommended type), `managed-identity` (the host's managed identity) or `container-apps` (the managed identity of the Azure Container Apps app the gateway runs in). |
 | `scope` | string | No | `https://ai.azure.com/.default` | Scope of the access token: the target resource followed by `/.default`, the form Microsoft Entra ID requires (see [the `.default` scope](https://learn.microsoft.com/entra/identity-platform/scopes-oidc#client-credentials-grant-flow-and-default)). See [Choosing the scope](#choosing-the-scope) for the scope of each backend. |
-| `clientId` | string | No | `AZURE_CLIENT_ID` (`workload-identity`) | Application (client) ID of the managed identity, as a GUID. With `workload-identity`, overrides the environment variable. With `managed-identity`, selects a user-assigned identity of the host; leave it unset for the host's default identity (its system-assigned identity, or its only user-assigned identity if it has none). With `container-apps`, selects a user-assigned identity of the container app; leave it unset for the app's system-assigned identity, which the app must then have. |
+| `clientId` | string | No | `AZURE_CLIENT_ID` (`workload-identity`) | Application (client) ID of the managed identity, as a GUID. With `workload-identity`, overrides the environment variable. With `managed-identity`, selects a user-assigned identity of the host; leave it unset for the host's system-assigned identity (or, on a VM, VM scale set or AKS node without one, its only user-assigned identity). With `container-apps`, selects a user-assigned identity of the container app; leave it unset for the app's system-assigned identity, which the app must then have. |
 | `tenantId` | string | No | `AZURE_TENANT_ID` | Microsoft Entra tenant ID (GUID) or domain name. Overrides the environment variable. `workload-identity` only: setting it with `managed-identity` or `container-apps` makes the policy fail to initialize. |
 | `tokenRequestTimeout` | string | No | `10s` | Maximum time to obtain a token, including retries: whole seconds from `1s` to `30s`, or milliseconds from `1ms` to `30000ms`. |
 
@@ -370,6 +370,10 @@ spec:
     - method: POST
       path: /openai/deployments/{deployment}/chat/completions
 ```
+
+Clients send the `api-version` query parameter that Azure OpenAI requires, for example
+`/aoai/v1.0/openai/deployments/<deployment>/chat/completions?api-version=2024-10-21`. The gateway
+passes it to the upstream unchanged.
 
 ### Example 3: A Second Identity for One API
 

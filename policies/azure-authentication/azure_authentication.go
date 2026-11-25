@@ -274,8 +274,7 @@ func requiredString(raw map[string]interface{}, key string) (string, error) {
 	return s, nil
 }
 
-// optionalString returns a trimmed string param, or def when the key is absent or null. An
-// explicitly empty string is returned as "".
+// optionalString returns a trimmed string param, or def when the key is absent, null or blank.
 func optionalString(raw map[string]interface{}, key, def string) (string, error) {
 	v, ok := raw[key]
 	if !ok || v == nil {
@@ -285,7 +284,10 @@ func optionalString(raw map[string]interface{}, key, def string) (string, error)
 	if !ok {
 		return "", fmt.Errorf("'%s' must be a string", key)
 	}
-	return strings.TrimSpace(s), nil
+	if s = strings.TrimSpace(s); s == "" {
+		return def, nil
+	}
+	return s, nil
 }
 
 // Mode reports that only request headers are processed: the policy sets one header and never
