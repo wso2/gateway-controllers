@@ -43,8 +43,8 @@ const (
 	// applicationIDMetadataKey is the shared-context key subscription-validation
 	// reads when the request carries no Subscription-Key header. jwt-application-id
 	// writes the same key for JWT flows; api-key-auth writes it for API key flows.
-	applicationIDMetadataKey    = "x-wso2-application-id"
-	defaultTokenMetadataKey     = "upstream-access-token"
+	applicationIDMetadataKey = "x-wso2-application-id"
+	defaultTokenMetadataKey  = "upstream-access-token"
 
 	defaultTokenRequestTimeout = 10 * time.Second
 	defaultExpiryBuffer        = 30 * time.Second
@@ -121,7 +121,7 @@ type validationMode int
 
 const (
 	modeStatic  validationMode = iota // validate against stored credential pairs
-	modeDynamic                        // validate by attempting an OAuth2 token request
+	modeDynamic                       // validate by attempting an OAuth2 token request
 )
 
 // PolicyConfig holds the resolved, immutable configuration for one policy instance.

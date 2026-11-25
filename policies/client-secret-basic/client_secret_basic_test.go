@@ -358,13 +358,13 @@ func TestOnRequestHeaders_SubscriptionKeyHeader_Returns401(t *testing.T) {
 
 func TestOnRequestHeaders_SubscriptionKeyHeader_CustomName_Returns401(t *testing.T) {
 	params := map[string]interface{}{
-		"clientId":            "test-client",
-		"clientSecret":        "test-secret",
+		"clientId":              "test-client",
+		"clientSecret":          "test-secret",
 		"subscriptionKeyHeader": "X-Api-Subscription",
 	}
 	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
 	ctx := newReqCtx(map[string]string{
-		"Authorization":    basicAuthHeader("test-client", "test-secret"),
+		"Authorization":      basicAuthHeader("test-client", "test-secret"),
 		"X-Api-Subscription": "some-key",
 	})
 	assertUnauthorized(t, p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, params), "subscription key header is not permitted")
