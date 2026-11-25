@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1190,5 +1191,137 @@ func TestGetPolicy_Dynamic_InvalidDuration_ReturnsError(t *testing.T) {
 		if err == nil {
 			t.Errorf("param %s=%q: expected error for invalid duration, got nil", tc.param, tc.value)
 		}
+	}
+}
+
+// ─── failureTracker overflow path ─────────────────────────────────────────────
+
+// fillCounterMap fills the per-clientId counter map to capacity with clients that
+// each have one failure reserved so the map stays full after returning.
+// It returns a tracker whose map is at maxClientCounterEntries.
+func fillCounterMap(limit int, window time.Duration) *failureTracker {
+	ft := &failureTracker{}
+	for i := 0; i < maxClientCounterEntries; i++ {
+		id := fmt.Sprintf("fill-client-%d", i)
+		ft.checkAndReserve(id, limit, window) //nolint:errcheck
+	}
+	return ft
+}
+
+func TestFailureTracker_OverflowPath_ThrottlesAfterLimit(t *testing.T) {
+	// Fill the per-clientId map so new clients go through the overflow counter.
+	ft := fillCounterMap(2, time.Minute)
+
+	// First two new clients each consume one overflow slot — should succeed.
+	rsv1, err1 := ft.checkAndReserve("new-client-1", 2, time.Minute)
+	rsv2, err2 := ft.checkAndReserve("new-client-2", 2, time.Minute)
+	if err1 != nil {
+		t.Fatalf("first overflow slot: unexpected error: %v", err1)
+	}
+	if err2 != nil {
+		t.Fatalf("second overflow slot: unexpected error: %v", err2)
+	}
+
+	// Third new client exceeds the limit — must get throttleError.
+	_, err3 := ft.checkAndReserve("new-client-3", 2, time.Minute)
+	if err3 == nil {
+		t.Fatal("expected throttleError when overflow counter is at limit, got nil")
+	}
+	var te throttleError
+	if !errors.As(err3, &te) {
+		t.Fatalf("expected throttleError, got %T: %v", err3, err3)
+	}
+
+	_ = rsv1
+	_ = rsv2
+}
+
+func TestFailureTracker_OverflowPath_ReleaseDecrementsOverflow(t *testing.T) {
+	ft := fillCounterMap(1, time.Minute)
+
+	// First new client hits the overflow counter — succeeds.
+	rsv1, err := ft.checkAndReserve("new-client-1", 1, time.Minute)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !rsv1.isOverflow {
+		t.Fatal("expected overflow reservation")
+	}
+
+	// Second new client must be throttled (limit reached).
+	_, err2 := ft.checkAndReserve("new-client-2", 1, time.Minute)
+	if err2 == nil {
+		t.Fatal("expected throttleError before release, got nil")
+	}
+
+	// Release the first overflow slot.
+	ft.releaseReservation("new-client-1", rsv1)
+
+	// Now a new client should succeed again.
+	_, err3 := ft.checkAndReserve("new-client-3", 1, time.Minute)
+	if err3 != nil {
+		t.Fatalf("expected success after overflow slot released, got: %v", err3)
+	}
+}
+
+func TestFailureTracker_OverflowPath_ValidClientGets429OnFullMap(t *testing.T) {
+	// Simulate the full-map scenario end-to-end via OnRequestHeaders using a fake IdP.
+	// A new valid client should get 429 when the counter map is full and the overflow
+	// counter has also been exhausted.
+	srv := fakeTokenServer(http.StatusOK, 3600)
+	defer srv.Close()
+
+	params := map[string]interface{}{
+		"tokenEndpoint":    srv.URL,
+		"failureRateLimit": float64(1),
+		"failureWindow":    "60s",
+	}
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+	impl := p.(*ClientSecretBasicPolicy)
+
+	// Fill the counter map with entries that each have one slot reserved (one failure).
+	for i := 0; i < maxClientCounterEntries; i++ {
+		id := fmt.Sprintf("fill-%d", i)
+		impl.state.failures.checkAndReserve(id, 1, time.Minute) //nolint:errcheck
+	}
+
+	// Exhaust the overflow counter by reserving its one slot.
+	impl.state.failures.checkAndReserve("overflow-filler", 1, time.Minute) //nolint:errcheck
+
+	// A new valid client should now get 429 because the overflow slot is consumed.
+	ctx := newReqCtx(map[string]string{
+		"Authorization": basicAuthHeader("brand-new-valid-client", "secret"),
+	})
+	result := impl.OnRequestHeaders(context.Background(), ctx, params)
+	resp, ok := result.(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected ImmediateResponse, got %T", result)
+	}
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Errorf("expected 429, got %d", resp.StatusCode)
+	}
+}
+
+func TestFailureTracker_OverflowWindow_ResetsIndependently(t *testing.T) {
+	ft := fillCounterMap(1, time.Minute)
+
+	// Consume the overflow slot.
+	rsv, err := ft.checkAndReserve("new-client-1", 1, time.Minute)
+	if err != nil {
+		t.Fatalf("first overflow: unexpected error: %v", err)
+	}
+	if !rsv.isOverflow {
+		t.Fatal("expected overflow reservation")
+	}
+
+	// Manually expire the overflow window to simulate time passing.
+	ft.mu.Lock()
+	ft.overflowCounter.windowEnd = time.Now().Add(-time.Second)
+	ft.mu.Unlock()
+
+	// A new client should now succeed because the overflow window has reset.
+	_, err2 := ft.checkAndReserve("new-client-2", 1, time.Minute)
+	if err2 != nil {
+		t.Fatalf("expected success after overflow window reset, got: %v", err2)
 	}
 }
