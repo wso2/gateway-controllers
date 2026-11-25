@@ -30,7 +30,7 @@ const (
 
 	// AuthenticationTypeManagedIdentity gets the access token for an identity assigned to the host:
 	// from the Azure Instance Metadata Service (IMDS) on a VM, VM scale set or AKS node, or from the
-	// host's own managed identity endpoint on App Service, Container Apps or Azure Arc.
+	// host's own managed identity endpoint on App Service or Container Apps.
 	AuthenticationTypeManagedIdentity = sdkauth.ManagedIdentity
 
 	// AuthenticationTypeContainerApps gets the access token for a managed identity of the Azure

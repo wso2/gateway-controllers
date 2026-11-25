@@ -13,7 +13,7 @@ description: |
   authenticationType "managed-identity", the gateway gets the access token for a
   managed identity assigned to the host it runs on: from the Azure Instance
   Metadata Service of a VM, VM scale set or AKS node, or from the managed
-  identity endpoint of App Service or Azure Arc. With authenticationType
+  identity endpoint of App Service. With authenticationType
   "container-apps", the gateway runs in Azure Container Apps and gets the access
   token for a managed identity of its container app from the Container Apps
   identity endpoint. Tokens are obtained and cached by the Azure Identity SDK
@@ -36,7 +36,7 @@ parameters:
         (and, for sovereign clouds, AZURE_AUTHORITY_HOST). "managed-identity" gets
         the token for an identity assigned to the host the gateway runs on: from
         the Azure Instance Metadata Service (IMDS) of a VM, VM scale set or AKS
-        node, or from the managed identity endpoint of App Service or Azure Arc.
+        node, or from the managed identity endpoint of App Service.
         "container-apps" gets the token for a managed identity of the Azure
         Container Apps app the gateway runs in, from the identity endpoint
         Container Apps sets in IDENTITY_ENDPOINT and IDENTITY_HEADER; the policy
