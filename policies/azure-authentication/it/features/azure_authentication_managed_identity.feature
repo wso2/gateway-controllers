@@ -114,10 +114,9 @@ Feature: Azure Authentication policy with a managed identity
       | container-apps     |
 
   # Without clientId the request names no identity, so the endpoint uses the system-assigned
-  # identity. This outline is the block's only user of it, so the block's system-assigned log is its
-  # own: the managed-identity row's request is the log's first, the container-apps row's its
-  # second. The SDK would serve the second row the first row's cached token for the same resource,
-  # so the rows ask for different resources.
+  # identity, whose tokens the testbench issues with the appid "system-assigned". Each row checks
+  # only its own upstream request, so it runs on its own. The SDK would serve the second row the
+  # first row's cached token for the same resource, so the rows ask for different resources.
   Scenario Outline: Without clientId the system-assigned identity is used (<authenticationType>)
     Given I generate a unique value from "az-mi-system" and store it as "apiName"
     And I generate a unique API version from "az-mi-system" and store it as "apiVersion"
@@ -138,20 +137,15 @@ Feature: Azure Authentication policy with a managed identity
     Then the response header "X-Testbench-Entra-Appid" should be "system-assigned"
     And the response header "X-Testbench-Entra-Tid" should be "managed-identity"
     And the response header "X-Testbench-Entra-Aud" should be "<resource>"
-    When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/system-assigned"
-    Then the response status code should be 200
-    And the JSON response field "count" should be <count>
-    And the JSON response field "requests[<entry>].clientId" should be ""
-    And the JSON response field "requests[<entry>].resource" should be "<resource>"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 404
 
     Examples:
-      | authenticationType | resource                             | upstream  | entry | count |
-      | managed-identity   | https://ai.azure.com                 | foundry   | 0     | 1     |
-      | container-apps     | https://cognitiveservices.azure.com  | cognitive | 1     | 2     |
+      | authenticationType | resource                             | upstream  |
+      | managed-identity   | https://ai.azure.com                 | foundry   |
+      | container-apps     | https://cognitiveservices.azure.com  | cognitive |
 
   # The endpoint answering 429 or 500 is retried within the same client request, which then
   # succeeds: one client request, two token requests. The tokens are for an api:// resource no
