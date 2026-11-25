@@ -183,8 +183,9 @@ account. This is Azure and Kubernetes configuration, not something the policy cr
 
    The webhook sets the variables when a pod starts. After changing the annotation on an existing
    service account, restart the gateway runtime pods, for example with
-   `kubectl rollout restart deployment/<name> -n <namespace>`, and check that they have the new
-   `AZURE_CLIENT_ID`.
+   `kubectl rollout restart deployment/<name> -n <namespace>`. Then check that each pod has
+   `AZURE_CLIENT_ID` set to the new client ID, `AZURE_TENANT_ID` set, and
+   `AZURE_FEDERATED_TOKEN_FILE` pointing at the projected token file.
 
 The gateway also needs outbound HTTPS access to `login.microsoftonline.com` (or your cloud's
 authority host).
