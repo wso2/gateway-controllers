@@ -1553,6 +1553,38 @@ func TestStreaming_RestoresAPlaceholderTokenisedOneCharacterPerEvent(t *testing.
 	}
 }
 
+// TestStreaming_RestoresEveryChoiceNotOnlyTheReadOne guards the frames the
+// across-frames pass does not own. rewriteAcrossFrames reads exactly the frames
+// the assessment reads, so a second choice is outside its joined text -- but a
+// placeholder there is still the client's own value and must be put back.
+//
+// Choice 0 splits its placeholder across two frames (the across-frames pass),
+// choice 1 carries another whole (the per-frame pass). Both come back.
+func TestStreaming_RestoresEveryChoiceNotOnlyTheReadOne(t *testing.T) {
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{
+		"john@example.com": "EMAIL_0000",
+		"+1 555 0100":      "PHONE_0001",
+	}
+
+	flush := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"mail EMAIL\"}}]}\n\n" +
+		"data: {\"choices\":[{\"index\":1,\"delta\":{\"content\":\"ring PHONE_0001 now\"}}]}\n\n" +
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"_0000 now\"}}]}\n\n"
+
+	out := p.restorePlaceholderFrames(flush, respCtx, p.responseParams)
+	for _, want := range []string{"john@example.com", "+1 555 0100"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("want %q restored, got %q", want, out)
+		}
+	}
+	for _, unwanted := range []string{"EMAIL_0000", "PHONE_0001"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("placeholder %q must not survive, got %q", unwanted, out)
+		}
+	}
+}
+
 // TestStreaming_RedactionIgnoresThePlaceholderMap pins that redactPII is left
 // alone by the restore: it never minted a placeholder, so there is nothing to
 // put back and a stale mapping must not reintroduce a value the operator asked
