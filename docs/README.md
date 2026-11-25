@@ -30,7 +30,7 @@ All available policies, sorted alphabetically.
 <!-- POLICY_TABLE_START -->
 | Policy | Categories | Description |
 |--------|------------|-------------|
-| [Amazon Bedrock Guardrails](./aws-bedrock-guardrail/v1.5/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against Amazon Bedrock Guardrails. |
+| [Amazon Bedrock Guardrails](./aws-bedrock-guardrail/v1.6/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against Amazon Bedrock Guardrails. |
 | [Analytics Header Filter](./analytics-header-filter/v1.0/docs/analytics-header-filter.md) | Logging, Analytics & Monitoring | The Analytics Header Filter policy allows you to control which request and response headers are included in analytics data using allow or deny modes. |
 | [API Key Auth](./api-key-auth/v1.3/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
 | [AWS Authentication](./aws-authentication/v0.11/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |

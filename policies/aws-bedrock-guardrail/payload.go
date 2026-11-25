@@ -137,6 +137,50 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 	return nil, fmt.Errorf("payload is neither JSON nor a Server-Sent Events stream: %w", jsonErr)
 }
 
+// extractFirstHit tries the paths in order and returns the first that finds text.
+// If none finds text, it returns the first path that matched, or an error.
+func extractFirstHit(payload []byte, jsonPaths []string, eventStream bool) (*extractedPayload, error) {
+	extract := func(jsonPath string) (*extractedPayload, error) {
+		if eventStream {
+			return extractPayloadAs(payload, jsonPath, true)
+		}
+		return extractPayload(payload, jsonPath)
+	}
+	if len(jsonPaths) == 1 {
+		return extract(jsonPaths[0])
+	}
+
+	var firstResolved *extractedPayload
+	misses := make([]string, 0, len(jsonPaths))
+	for _, jsonPath := range jsonPaths {
+		extracted, err := extract(jsonPath)
+		if err != nil {
+			misses = append(misses, err.Error())
+			continue
+		}
+		if hasAssessableText(extracted) {
+			return extracted, nil
+		}
+		if firstResolved == nil {
+			firstResolved = extracted
+		}
+	}
+	if firstResolved != nil {
+		return firstResolved, nil
+	}
+	return nil, fmt.Errorf("none of the JSONPaths matched the payload: %s", strings.Join(misses, "; "))
+}
+
+// hasAssessableText reports whether any segment has non-blank text.
+func hasAssessableText(extracted *extractedPayload) bool {
+	for _, segment := range extracted.segments {
+		if strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(segment.value, "")) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // structuredContentSegments returns the text of an MCP tool result's
 // structuredContent that the primary selection does not already hold, when
 // jsonPath reads the result: it is the same result in another form, and would

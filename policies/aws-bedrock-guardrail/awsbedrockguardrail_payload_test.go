@@ -19,6 +19,8 @@ package awsbedrockguardrail
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -355,5 +357,345 @@ func TestResponse_MultiLineJSONRPCEventIsAssessed(t *testing.T) {
 	expectGuardrailBlock(t, 200, sendResponse(p, map[string]interface{}{}, body))
 	if client.calls != 1 {
 		t.Fatalf("expected the tool result to be assessed once, got %d calls", client.calls)
+	}
+}
+
+// --- fallbackJsonPaths ---------------------------------------------------------
+
+// fallbackPathsAttachment builds the policy through GetPolicy with a fake Bedrock client.
+func fallbackPathsAttachment(t *testing.T, flow string, flowParams map[string]interface{}, client bedrockGuardrailClient) *AWSBedrockGuardrailPolicy {
+	t.Helper()
+	params := baseParams()
+	params[flow] = flowParams
+	p := mustGetPolicy(t, params)
+	p.loadAWSConfigFunc = func(context.Context, string) (aws.Config, error) { return aws.Config{}, nil }
+	p.newBedrockClientFunc = func(aws.Config) bedrockGuardrailClient { return client }
+	return p
+}
+
+// paths returns fallbackJsonPaths as the gateway delivers it.
+func paths(p ...string) []interface{} {
+	out := make([]interface{}, len(p))
+	for i, s := range p {
+		out[i] = s
+	}
+	return out
+}
+
+const (
+	chatCompletionsBody  = `{"model":"m","messages":[{"role":"system","content":"Be brief."},{"role":"user","content":"hello chat"}]}`
+	responsesStringBody  = `{"model":"m","input":"hello responses"}`
+	responsesItemsBody   = `{"model":"m","input":[{"role":"user","content":[{"type":"input_text","text":"hello items"}]}]}`
+	notOpenAIRequestBody = `{"model":"m","prompt":"legacy completions"}`
+	bothFormatsBody      = `{"messages":[{"role":"user","content":"from messages"}],"input":"from input"}`
+)
+
+var openAIRequestPaths = paths(
+	"$.messages[-1].content",
+	"$.input[-1].content[*].text",
+	"$.input",
+)
+
+func TestFallbackJSONPaths_InvalidConfigurationIsRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		fallbacks interface{}
+		want      string
+	}{
+		{"not an array", "$.messages[-1].content", "'fallbackJsonPaths' must be an array of strings"},
+		{"non-string entry", []interface{}{"$.input", 42}, "'fallbackJsonPaths' must be an array of strings"},
+		{"empty entry", paths("$.input", "  "), "'fallbackJsonPaths' entries must not be empty"},
+		{"malformed entry", paths("$.input", "$.messages[-1"), "invalid 'fallbackJsonPaths' entry"},
+	}
+	for _, flow := range []string{"request", "response"} {
+		for _, tt := range tests {
+			t.Run(flow+"/"+tt.name, func(t *testing.T) {
+				params := baseParams()
+				params[flow] = map[string]interface{}{"enabled": true, "fallbackJsonPaths": tt.fallbacks}
+				expectGetPolicyError(t, params, tt.want)
+			})
+		}
+	}
+}
+
+func TestRequest_FallbackJSONPathsAloneAreTriedInOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"chat completions hits the first path", chatCompletionsBody, []string{"hello chat"}},
+		{"responses items hit the second path", responsesItemsBody, []string{"hello items"}},
+		{"responses string falls through to the last path", responsesStringBody, []string{"hello responses"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &countingBedrockClient{output: makeNoInterventionOutput()}
+			p := fallbackPathsAttachment(t, "request", map[string]interface{}{"fallbackJsonPaths": openAIRequestPaths}, client)
+
+			action := sendRequest(p, map[string]interface{}{}, tt.body)
+			if mod, ok := action.(policy.UpstreamRequestModifications); !ok || mod.Body != nil {
+				t.Fatalf("expected the clean request to pass unchanged, got %#v", action)
+			}
+			if !reflect.DeepEqual(client.texts, tt.want) {
+				t.Fatalf("assessed %q, want %q", client.texts, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequest_JSONPathIsTriedBeforeFallbackJSONPaths(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":          "$.messages[-1].content",
+		"fallbackJsonPaths": paths("$.input"),
+	}, client)
+
+	sendRequest(p, map[string]interface{}{}, bothFormatsBody)
+	if !reflect.DeepEqual(client.texts, []string{"from messages"}) {
+		t.Fatalf("assessed %q, want the jsonPath match", client.texts)
+	}
+}
+
+func TestRequest_FallbackJSONPathsAreTriedWhenJSONPathMisses(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"first fallback", responsesItemsBody, []string{"hello items"}},
+		{"second fallback", responsesStringBody, []string{"hello responses"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &countingBedrockClient{output: makeNoInterventionOutput()}
+			p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+				"jsonPath":          "$.messages[-1].content",
+				"fallbackJsonPaths": paths("$.input[-1].content[*].text", "$.input"),
+			}, client)
+
+			sendRequest(p, map[string]interface{}{}, tt.body)
+			if !reflect.DeepEqual(client.texts, tt.want) {
+				t.Fatalf("assessed %q, want %q", client.texts, tt.want)
+			}
+		})
+	}
+}
+
+// Without jsonPath, only the fallback paths are tried; the default jsonPath is not added.
+func TestRequest_FallbackJSONPathsWithoutJSONPathSkipTheDefault(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"fallbackJsonPaths": paths("$.input"),
+	}, client)
+
+	sendRequest(p, map[string]interface{}{}, bothFormatsBody)
+	if !reflect.DeepEqual(client.texts, []string{"from input"}) {
+		t.Fatalf("assessed %q, want only the fallback match", client.texts)
+	}
+}
+
+// The editor sends [] for an untouched array; jsonPath alone applies.
+func TestRequest_EmptyFallbackJSONPathsKeepJSONPath(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":          "$.input",
+		"fallbackJsonPaths": []interface{}{},
+	}, client)
+
+	sendRequest(p, map[string]interface{}{}, responsesStringBody)
+	if !reflect.DeepEqual(client.texts, []string{"hello responses"}) {
+		t.Fatalf("assessed %q, want the jsonPath match", client.texts)
+	}
+}
+
+func TestRequest_FallbackJSONPathsSkipAPathThatFindsNoText(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":          "$.messages[-1].content",
+		"fallbackJsonPaths": paths("$.input"),
+	}, client)
+
+	sendRequest(p, map[string]interface{}{}, `{"messages":[{"role":"user","content":"   "}],"input":"hello"}`)
+	if !reflect.DeepEqual(client.texts, []string{"hello"}) {
+		t.Fatalf("assessed %q, want the text the fallback reaches", client.texts)
+	}
+}
+
+func TestRequest_FallbackJSONPathsLetAPayloadWithNothingToAssessPass(t *testing.T) {
+	client := &countingBedrockClient{output: makeContentViolationOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":          "$.params.arguments",
+		"fallbackJsonPaths": paths("$.params.input"),
+	}, client)
+
+	body := `{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{}}}`
+	if mod, ok := sendRequest(p, map[string]interface{}{}, body).(policy.UpstreamRequestModifications); !ok || mod.Body != nil {
+		t.Fatalf("expected the handshake to pass unchanged")
+	}
+	if client.calls != 0 {
+		t.Fatalf("expected no guardrail call, got %d", client.calls)
+	}
+}
+
+func TestRequest_NoHitIsRejectedAsASingleMissIs(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":          "$.messages[-1].content",
+		"fallbackJsonPaths": paths("$.input[-1].content[*].text", "$.input"),
+	}, client)
+
+	resp, ok := sendRequest(p, map[string]interface{}{}, notOpenAIRequestBody).(policy.ImmediateResponse)
+	if !ok {
+		t.Fatalf("expected the request to be refused")
+	}
+	if resp.StatusCode != 422 {
+		t.Fatalf("status %d, want 422", resp.StatusCode)
+	}
+	var body struct {
+		Type    string `json:"type"`
+		Message struct {
+			ActionReason string `json:"actionReason"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	if body.Type != "AWS_BEDROCK_GUARDRAIL" || body.Message.ActionReason != "Error extracting value from JSONPath" {
+		t.Fatalf("unexpected body %s", resp.Body)
+	}
+	if !resp.IsFault || resp.Fault == nil {
+		t.Fatalf("expected a declared fault, got IsFault=%v Fault=%v", resp.IsFault, resp.Fault)
+	}
+	if resp.Fault.Code != policy.FaultCodeInvalidRequestBody || resp.Fault.Type != policy.FaultTypeValidation {
+		t.Fatalf("fault %s/%s, want %s/%s", resp.Fault.Code, resp.Fault.Type, policy.FaultCodeInvalidRequestBody, policy.FaultTypeValidation)
+	}
+	for _, path := range []string{"$.messages[-1].content", "$.input[-1].content[*].text", "$.input"} {
+		if !strings.Contains(resp.Fault.Description, path) {
+			t.Fatalf("fault description %q does not name the path %q that was tried", resp.Fault.Description, path)
+		}
+	}
+	if client.calls != 0 {
+		t.Fatalf("expected no guardrail call, got %d", client.calls)
+	}
+}
+
+func TestRequest_NoHitPassesWithPassthroughOnError(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":           "$.messages[-1].content",
+		"fallbackJsonPaths":  paths("$.input"),
+		"passthroughOnError": true,
+	}, client)
+
+	if mod, ok := sendRequest(p, map[string]interface{}{}, notOpenAIRequestBody).(policy.UpstreamRequestModifications); !ok || mod.Body != nil {
+		t.Fatalf("expected the request to pass unchanged")
+	}
+	if client.calls != 0 {
+		t.Fatalf("expected no guardrail call, got %d", client.calls)
+	}
+}
+
+func TestRequest_FallbackJSONPathsMaskAtThePathThatHit(t *testing.T) {
+	client := &mockBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
+		"jsonPath":          "$.messages[-1].content",
+		"fallbackJsonPaths": paths("$.input"),
+		"redactPII":         true,
+	}, client)
+
+	mod, ok := sendRequest(p, map[string]interface{}{}, `{"model":"m","input":"Mail john@example.com today"}`).(policy.UpstreamRequestModifications)
+	if !ok || mod.Body == nil {
+		t.Fatalf("expected the request to pass with a redacted body")
+	}
+	var got map[string]interface{}
+	if err := json.Unmarshal(mod.Body, &got); err != nil {
+		t.Fatalf("body is not JSON: %v", err)
+	}
+	want := map[string]interface{}{"model": "m", "input": "Mail ***** today"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("body %s, want %v", mod.Body, want)
+	}
+}
+
+func TestResponse_FallbackJSONPathsAreTriedWhenJSONPathMisses(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "$.choices[0].message.content",
+		"fallbackJsonPaths": paths("$.output[*].content[*].text"),
+	}, client)
+
+	body := `{"id":"resp_1","output":[{"type":"reasoning","summary":[]},{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The answer is 42."}]}]}`
+	if mod, ok := sendResponse(p, map[string]interface{}{}, body).(policy.DownstreamResponseModifications); !ok || mod.StatusCode != nil {
+		t.Fatalf("expected the clean response to pass")
+	}
+	if !reflect.DeepEqual(client.texts, []string{"The answer is 42."}) {
+		t.Fatalf("assessed %q, want the Responses API output text", client.texts)
+	}
+}
+
+// With fallback paths set, an empty jsonPath does not mean "assess the whole body".
+func TestStreaming_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "",
+		"fallbackJsonPaths": paths("$.choices[0].message.content"),
+	}, client)
+
+	feedStream(t, p, streamCtxWithType("text/event-stream"), []string{sseEvent("Hello"), sseEvent(" world"), "data: [DONE]\n\n"})
+	if got := strings.Join(client.texts, ""); got != "Hello world" {
+		t.Fatalf("assessed %q, want only the streamed text", got)
+	}
+}
+
+func TestStreaming_JSONPathWithFallbackJSONPathsReadsEvents(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "$.choices[0].message.content",
+		"fallbackJsonPaths": paths("$.output[*].content[*].text"),
+	}, client)
+
+	feedStream(t, p, streamCtxWithType("text/event-stream"), []string{sseEvent("Hello"), sseEvent(" world"), "data: [DONE]\n\n"})
+	if got := strings.Join(client.texts, ""); got != "Hello world" {
+		t.Fatalf("assessed %q, want only the streamed text", got)
+	}
+}
+
+func TestBufferedEventStream_JSONPathWithFallbackJSONPathsReadsEvents(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "$.choices[0].message.content",
+		"fallbackJsonPaths": paths("$.output[*].content[*].text"),
+	}, client)
+
+	body := sseEvent("Hello") + sseEvent(" world") + "data: [DONE]\n\n"
+	action := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", body), map[string]interface{}{})
+	if mod, ok := action.(policy.DownstreamResponseModifications); !ok || mod.StatusCode != nil {
+		t.Fatalf("expected the clean stream to pass, got %#v", action)
+	}
+	if got := strings.Join(client.texts, ""); got != "Hello world" {
+		t.Fatalf("assessed %q, want only the streamed text", got)
+	}
+}
+
+func TestBufferedEventStream_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "",
+		"fallbackJsonPaths": paths("$.choices[0].message.content"),
+	}, client)
+
+	body := sseEvent("Hello") + sseEvent(" world") + "data: [DONE]\n\n"
+	action := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", body), map[string]interface{}{})
+	if mod, ok := action.(policy.DownstreamResponseModifications); !ok || mod.StatusCode != nil {
+		t.Fatalf("expected the clean stream to pass, got %#v", action)
+	}
+	if got := strings.Join(client.texts, ""); got != "Hello world" {
+		t.Fatalf("assessed %q, want only the streamed text", got)
 	}
 }
