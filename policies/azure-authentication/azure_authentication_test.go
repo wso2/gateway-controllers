@@ -317,8 +317,10 @@ func TestParamsMatchThePolicyDefinition(t *testing.T) {
 			defined = append(defined, m[1])
 		} else if m := pattern.FindStringSubmatch(line); m != nil && len(defined) > 0 {
 			patterns[defined[len(defined)-1]] = yamlScalar(t, m[1])
-		} else if len(line) > 4 && strings.HasPrefix(line, "    ") && !strings.ContainsRune(" -#", rune(line[4])) {
-			// A parameter this loop can't read would otherwise be left out of the comparison.
+		} else if item := strings.TrimSpace(line); len(line) > 4 && strings.HasPrefix(line, "    ") && line[4] != ' ' &&
+			line[4] != '#' && item != "-" && !strings.HasPrefix(item, "- ") {
+			// A parameter this loop can't read would otherwise be left out of the comparison; only
+			// list entries ("- name") and comments are skipped.
 			t.Fatalf("policy-definition.yaml: can't read parameter line %q", line)
 		}
 	}
