@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -292,23 +293,30 @@ func TestGetPolicyAcceptsTheGatewaysAttachedToParam(t *testing.T) {
 	}
 }
 
-// paramNames must list exactly the parameters of policy-definition.yaml, in order, or a parameter
-// added there would be rejected as unknown when it arrives through upstream.auth.
-func TestParamNamesMatchThePolicyDefinition(t *testing.T) {
+// The policy checks its own params, as those in upstream.auth reach it unvalidated, so paramNames
+// and its patterns must match policy-definition.yaml, or the two paths would accept different values.
+func TestParamsMatchThePolicyDefinition(t *testing.T) {
 	data, err := os.ReadFile("policy-definition.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var defined []string
+	patterns := map[string]string{}
 	inParameters := false
-	property := regexp.MustCompile(`^    ([A-Za-z]+):\s*$`)
+	property := regexp.MustCompile(`^    ([A-Za-z0-9_]+):\s*$`)
+	pattern := regexp.MustCompile(`^      pattern:\s*(.+?)\s*$`)
 	for _, line := range strings.Split(string(data), "\n") {
 		if len(line) > 0 && line[0] != ' ' && line[0] != '#' {
 			inParameters = strings.HasPrefix(line, "parameters:")
 			continue
 		}
-		if m := property.FindStringSubmatch(line); inParameters && m != nil {
+		if !inParameters {
+			continue
+		}
+		if m := property.FindStringSubmatch(line); m != nil {
 			defined = append(defined, m[1])
+		} else if m := pattern.FindStringSubmatch(line); m != nil && len(defined) > 0 {
+			patterns[defined[len(defined)-1]] = yamlScalar(t, m[1])
 		}
 	}
 	if len(defined) == 0 {
@@ -317,6 +325,31 @@ func TestParamNamesMatchThePolicyDefinition(t *testing.T) {
 	if !reflect.DeepEqual(paramNames, defined) {
 		t.Fatalf("paramNames = %v, policy-definition.yaml defines %v", paramNames, defined)
 	}
+	for name, re := range map[string]*regexp.Regexp{
+		"clientId":            guidPattern,
+		"tenantId":            tenantPattern,
+		"tokenRequestTimeout": tokenRequestTimeoutPattern,
+	} {
+		if patterns[name] != re.String() {
+			t.Errorf("%s: policy-definition.yaml's pattern is %q, the policy's is %q", name, patterns[name], re.String())
+		}
+	}
+}
+
+// yamlScalar returns a quoted YAML scalar's value.
+func yamlScalar(t *testing.T, s string) string {
+	t.Helper()
+	switch {
+	case len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'':
+		return strings.ReplaceAll(s[1:len(s)-1], "''", "'")
+	case len(s) >= 2 && s[0] == '"':
+		v, err := strconv.Unquote(s)
+		if err != nil {
+			t.Fatalf("pattern %s: %v", s, err)
+		}
+		return v
+	}
+	return s
 }
 
 // TestTokenRequestTimeoutFormats pins the formats the policy definition's pattern admits, so a
@@ -776,20 +809,24 @@ func TestOnRequestHeadersRecordsManagedIdentityAuthContext(t *testing.T) {
 		name             string
 		params           map[string]interface{}
 		wantCredentialID string
+		clientID         string
 	}{
-		{"user-assigned", map[string]interface{}{"authenticationType": "managed-identity", "clientId": testClientID}, testClientID},
+		{"user-assigned", map[string]interface{}{"authenticationType": "managed-identity", "clientId": testClientID}, testClientID, testClientID},
 		// Without clientId, IMDS picks the host's system-assigned identity, or its only
 		// user-assigned identity, so the policy cannot tell which one it got.
-		{"host's default identity", map[string]interface{}{"authenticationType": "managed-identity"}, "host-default"},
+		{"host's default identity", map[string]interface{}{"authenticationType": "managed-identity"}, "host-default", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useFakeTokens(t, &fakeTokens{token: "tok-1"})
+			asked := useFakeTokens(t, &fakeTokens{token: "tok-1"})
 			inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey", CredentialID: "app-1"}
 			shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
 			tt.params["scope"] = "https://cognitiveservices.azure.com/.default"
 
 			p := mustGetPolicy(t, tt.params)
+			if want := []sdkauth.Identity{{Type: "managed-identity", ClientID: tt.clientID}}; !reflect.DeepEqual(*asked, want) {
+				t.Fatalf("identities = %+v, want %+v", *asked, want)
+			}
 			requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(shared), nil))
 
 			got := shared.AuthContext
@@ -852,18 +889,22 @@ func TestOnRequestHeadersRecordsContainerAppsAuthContext(t *testing.T) {
 		name             string
 		params           map[string]interface{}
 		wantCredentialID string
+		clientID         string
 	}{
-		{"user-assigned", map[string]interface{}{"authenticationType": "container-apps", "clientId": testClientID}, testClientID},
-		{"system-assigned", map[string]interface{}{"authenticationType": "container-apps"}, "host-default"},
+		{"user-assigned", map[string]interface{}{"authenticationType": "container-apps", "clientId": testClientID}, testClientID, testClientID},
+		{"system-assigned", map[string]interface{}{"authenticationType": "container-apps"}, "host-default", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			useFakeTokens(t, &fakeTokens{token: "tok-1", service: "the Container Apps identity endpoint"})
+			asked := useFakeTokens(t, &fakeTokens{token: "tok-1", service: "the Container Apps identity endpoint"})
 			inbound := &policy.AuthContext{Authenticated: true, AuthType: "apikey", CredentialID: "app-1"}
 			shared := &policy.SharedContext{RequestID: "req-1", AuthContext: inbound}
 			tt.params["scope"] = "https://cognitiveservices.azure.com/.default"
 
 			p := mustGetPolicy(t, tt.params)
+			if want := []sdkauth.Identity{{Type: "container-apps", ClientID: tt.clientID}}; !reflect.DeepEqual(*asked, want) {
+				t.Fatalf("identities = %+v, want %+v", *asked, want)
+			}
 			mods := requireHeaderMods(t, p.OnRequestHeaders(context.Background(), newRequestHeaderContext(shared), nil))
 			if got := mods.HeadersToSet["Authorization"]; got != "Bearer tok-1" {
 				t.Fatalf("Authorization = %q, want Bearer tok-1", got)

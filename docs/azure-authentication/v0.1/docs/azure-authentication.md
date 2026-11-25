@@ -21,9 +21,8 @@ With `authenticationType: managed-identity`, the gateway gets the token for a
 [managed identity](https://learn.microsoft.com/entra/identity/managed-identities-azure-resources/overview)
 assigned to the host it runs on: from the
 [Azure Instance Metadata Service](https://learn.microsoft.com/azure/virtual-machines/instance-metadata-service)
-(IMDS) of a VM, VM scale set or AKS node, or from the host's own managed identity endpoint on
-App Service or Azure Arc. Use it when the gateway runs on Azure compute without
-Workload Identity, for example on Azure VMs.
+(IMDS) of a VM, VM scale set or AKS node, or from the managed identity endpoint of App Service.
+Use it when the gateway runs on Azure compute without Workload Identity, for example on Azure VMs.
 
 With `authenticationType: container-apps`, the gateway runs in
 [Azure Container Apps](https://learn.microsoft.com/azure/container-apps/managed-identity) and gets
@@ -46,7 +45,7 @@ accept Entra ID tokens, typically as the upstream authentication of an LLM provi
 
 - Secretless upstream authentication with AKS Workload Identity (user-assigned managed identity),
   with the managed identity of an Azure Container Apps app, or with the host's managed identity:
-  IMDS on VMs, VM scale sets and AKS nodes, or the endpoint of App Service or Azure Arc
+  IMDS on VMs, VM scale sets and AKS nodes, or the endpoint of App Service
 - On Container Apps, an app without a managed identity is reported when the policy is created,
   not on every request
 - Works with any Entra ID–protected resource through a configurable `scope`
@@ -76,14 +75,14 @@ There are no system (`config.toml`) parameters.
 
 With `workload-identity`, the identity is read from the environment the AKS Workload Identity
 webhook injects into the gateway runtime pod. `managed-identity` and `container-apps` read none of
-these variables; on App Service, Container Apps and Azure Arc, the SDK finds the managed identity
-endpoint through the variables those platforms set.
+these variables; on App Service and Container Apps, the SDK finds the managed identity endpoint
+through the variables those platforms set.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `AZURE_TENANT_ID` | Unless `tenantId` is set | Tenant of the managed identity. |
 | `AZURE_CLIENT_ID` | Unless `clientId` is set | Client ID of the managed identity. |
-| `AZURE_FEDERATED_TOKEN_FILE` | Yes | Path of the projected service account token. Read again at least every 10 minutes, so rotation is picked up. |
+| `AZURE_FEDERATED_TOKEN_FILE` | Yes | Path of the projected service account token. Read when a token is requested, and its content reused for up to 10 minutes, so a rotated token is used from the first request after that. |
 | `AZURE_AUTHORITY_HOST` | No | Entra ID host, `https://login.microsoftonline.com/` by default. Set by the webhook for sovereign clouds. Must use `https`. |
 
 A variable the policy uses in place of a parameter must have the parameter's form. If
@@ -182,6 +181,11 @@ account. This is Azure and Kubernetes configuration, not something the policy cr
    The chart's service account is named after the release unless `serviceAccount.name` is set;
    the federated credential's subject must match it.
 
+   The webhook sets the variables when a pod starts. After changing the annotation on an existing
+   service account, restart the gateway runtime pods, for example with
+   `kubectl rollout restart deployment/<name> -n <namespace>`, and check that they have the new
+   `AZURE_CLIENT_ID`.
+
 The gateway also needs outbound HTTPS access to `login.microsoftonline.com` (or your cloud's
 authority host).
 
@@ -206,8 +210,8 @@ through to the client unchanged.
 
 With `managed-identity`, the gateway must run on Azure compute that has the managed identity
 assigned. This is Azure configuration, not something the policy creates. The steps below are for
-a VM, VM scale set or AKS node, which serve tokens through IMDS. On App Service or Azure Arc,
-assign the identity to the app or server instead. On Container Apps, use `container-apps`; see
+a VM, VM scale set or AKS node, which serve tokens through IMDS. On App Service, assign the
+identity to the app instead. On Container Apps, use `container-apps`; see
 [Container Apps Prerequisites](#container-apps-prerequisites).
 
 1. Assign a user-assigned identity to the host, or leave out `--identities` to enable its
@@ -500,11 +504,12 @@ is passed to fault policies and analytics only, never to the client.
   lived and rotated by Kubernetes.
 - **HTTPS only**: the authority host must use `https`. With `managed-identity` and
   `container-apps`, plain HTTP goes only to the link-local IMDS address, or to the platform's
-  local endpoint on App Service, Container Apps or Azure Arc.
+  local endpoint on App Service or Container Apps.
 - **The identity header**: `IDENTITY_HEADER` is a secret Container Apps sets so that only the app
-  can get tokens from its identity endpoint. The policy never logs it. An API whose upstream
-  points at the endpoint can't get a token through the gateway, because a client doesn't know the
-  header, whereas IMDS needs only the fixed `Metadata: true` header.
+  can get tokens from its identity endpoint. The policy never logs it. The endpoint answers only
+  requests that carry the header, whereas IMDS needs only the fixed `Metadata: true` header, so an
+  API whose upstream points at the endpoint gets a token only if its configuration sets the header.
+  Never put the header's value in an API or LLM provider.
 - **Proxies**: token requests honour `HTTP_PROXY` and `HTTPS_PROXY`. With `managed-identity` on a
   VM, VM scale set or AKS node, add `169.254.169.254` to `NO_PROXY` so a proxy never sees IMDS
   tokens.
