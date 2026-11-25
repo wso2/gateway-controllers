@@ -37,6 +37,31 @@ Provide either `credentials` (multi-client) or `clientId` + `clientSecret` (sing
 | `failureWindow` | string | No | `30s` | Tumbling window over which the per-clientId failure counter resets. Accepts a Go duration string, e.g. `"30s"`. |
 | `tokenMetadataKey` | string | No | `upstream-access-token` | Metadata key under which the IdP access token is stored after a successful dynamic validation. Downstream policies can read it with `${meta.<key>}` (e.g. in `header-transform`: `value: Bearer ${meta.upstream-access-token}`). Has no effect in static mode. |
 
+### System parameters (dynamic mode — operator-configured)
+
+System parameters are set by the platform operator in the policy attachment, not by the API author. They are not visible in the API definition.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `failureBackend` | string | `memory` | Backend for per-clientId failure counters. `memory` = in-process (independent per replica). `redis` = shared via Redis (cross-replica). |
+| `redis.host` | string | `localhost` | Redis hostname or IP. |
+| `redis.port` | integer | `6379` | Redis port. |
+| `redis.password` | string | — | Redis password (empty for unauthenticated). |
+| `redis.username` | string | — | Redis username (ACL, Redis 6+). |
+| `redis.db` | integer | `0` | Redis database index. |
+| `redis.failureMode` | string | `open` | `open` = fall back to in-memory on Redis unavailability. `closed` = fail policy load if initial ping fails. |
+| `redis.keyPrefix` | string | `csb:failure:` | Key prefix. Override when multiple gateway clusters share one Redis. |
+| `redis.connectionTimeout` | string | `5s` | Dial timeout. Go duration string. |
+| `redis.readTimeout` | string | `3s` | Read timeout. Go duration string. |
+| `redis.writeTimeout` | string | `3s` | Write timeout. Go duration string. |
+| `redis.poolSize` | integer | `0` (auto) | Connection pool size. `0` uses go-redis default (10 × GOMAXPROCS). |
+| `redis.tls.enabled` | boolean | `false` | Enable TLS for the Redis connection. |
+| `redis.tls.caFile` | string | — | PEM file with CA certificate(s) to trust. |
+| `redis.tls.serverName` | string | — | TLS SNI / certificate verification name. |
+| `redis.tls.certFile` | string | — | Client certificate PEM (mutual TLS). |
+| `redis.tls.keyFile` | string | — | Private key PEM matching `redis.tls.certFile`. |
+| `redis.tls.insecureSkipVerify` | boolean | `false` | Disable TLS verification. Development only. |
+
 ---
 
 ## Examples
@@ -167,7 +192,46 @@ policies:
 
 ---
 
-### Example 5: Dynamic — forward the access token to the backend
+### Example 5: Dynamic — shared failure counting via Redis
+
+By default, each gateway replica counts failed credential attempts independently. In a multi-replica deployment this means `N` replicas allow up to `N × failureRateLimit` wrong-secret attempts before any one client is throttled. Setting `failureBackend=redis` via a system parameter makes all replicas share a single atomic counter per clientId.
+
+System parameters are configured by the platform operator in the gateway policy engine configuration file (TOML), not in the API definition:
+
+```toml
+[policy_configurations.client_secret_basic_v1]
+failure_backend = "redis"
+
+[policy_configurations.client_secret_basic_v1.redis]
+host = "redis.internal"
+port = 6379
+failure_mode = "open"
+key_prefix = "gw:csb:failure:"
+```
+
+With this configuration the per-clientId failure counter is stored as a Redis key with an atomic Lua increment. If Redis becomes unreachable the policy falls back to in-process counting automatically (`failure_mode = "open"`), so traffic is never blocked by Redis unavailability. Use `failure_mode = "closed"` only when you need a strict guarantee that throttling is always cross-replica.
+
+For a Redis connection over TLS:
+
+```toml
+[policy_configurations.client_secret_basic_v1]
+failure_backend = "redis"
+
+[policy_configurations.client_secret_basic_v1.redis]
+host = "redis.internal"
+port = 6379
+failure_mode = "open"
+
+[policy_configurations.client_secret_basic_v1.redis.tls]
+enabled = true
+ca_file = "/etc/gateway/certs/redis-ca.pem"
+server_name = "redis.internal"
+insecure_skip_verify = false
+```
+
+---
+
+### Example 6: Dynamic — forward the access token to the backend
 
 After a successful dynamic validation, the IdP-issued access token is stored in `SharedContext.Metadata` under the key `upstream-access-token` by default (configurable via `tokenMetadataKey`). A downstream `header-transform` policy can read it with `${meta.upstream-access-token}` and add it as an `Authorization` header on the upstream request.
 
@@ -192,7 +256,7 @@ The original `Authorization: Basic` header is stripped by `client-secret-basic` 
 
 ---
 
-### Example 6: Full API definition with per-plan routing
+### Example 7: Full API definition with per-plan routing
 
 Combines `client-secret-basic`, `subscription-validation`, and `dynamic-endpoint` to authenticate callers and route each request to the backend tier that matches the caller's subscription plan.
 
@@ -339,7 +403,7 @@ The `error` field in the response body varies by condition:
 - **Dynamic mode — credential changes need cache expiry.** If an external credential is revoked at the IdP, cached validations for that credential remain valid until the entry expires. The effective maximum hold time is `min(expires_in - expiryBuffer, maxCacheTTL)`. Use a short `maxCacheTTL` when low revocation latency is required.
 - **Static mode — no runtime rotation.** Changing the credential set requires updating the API definition and redeploying.
 - **Authorization: Basic only.** Bearer tokens, API keys in query parameters, and other credential formats are not supported by this policy.
-- **Dynamic mode — no Redis.** The validation cache is in-process only. Each gateway replica maintains its own cache independently.
+- **Dynamic mode — validation cache is in-process only.** Each gateway replica maintains its own success cache independently. Failure counts can be shared across replicas via Redis (see `failureBackend` system parameter) but the success/token cache remains per-replica.
 - **Dynamic mode — 256-character client ID limit.** Client IDs longer than 256 characters are rejected with `401 Unauthorized` and the message `Unauthorized: invalid credentials`. This is the same response as a wrong secret — the limit is not disclosed to callers.
 - **Dynamic mode — throttle DoS.** Anyone who knows a `clientId` can exhaust its per-window failure budget by sending `failureRateLimit` distinct wrong secrets, temporarily blocking further unauthenticated attempts for that client. Clients with a still-valid entry in the success cache are unaffected.
 - **Dynamic mode — full counter map blocks new clients.** The per-clientId failure counter map is capped at 100,000 entries. While the map is kept at capacity (requires roughly 3,300 failed token-endpoint calls per second with the default 30-second window), every new client that has no cached validation gets `429 Too Many Requests` on that gateway instance. Clients that are already in the success cache or the counter map are not affected. This is an intentional trade-off: the overflow counter still engages rather than letting unknown clients bypass the limit entirely.

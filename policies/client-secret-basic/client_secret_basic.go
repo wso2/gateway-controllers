@@ -34,8 +34,26 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 )
+
+// failureIncrScript atomically increments a Redis counter, sets its expiry on
+// creation, and enforces a per-window limit. Returns [count, ttl_seconds] on
+// success (count ≥ 1), or [-1, ttl_seconds] when the counter is already at
+// the limit (the increment is immediately reversed so the key is not inflated).
+var failureIncrScript = redis.NewScript(`
+local count = redis.call('INCR', KEYS[1])
+if count == 1 then
+    redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+local ttl = redis.call('TTL', KEYS[1])
+if count > tonumber(ARGV[1]) then
+    redis.call('DECR', KEYS[1])
+    return {-1, ttl}
+end
+return {count, ttl}
+`)
 
 const (
 	authType = "ClientCredentials"
@@ -93,15 +111,18 @@ var (
 	endpointStates   = map[string]*endpointState{}
 )
 
-// getOrCreateEndpointState returns the shared state for the given token endpoint,
-// creating it on first call.
-func getOrCreateEndpointState(endpoint string) *endpointState {
+// getOrCreateEndpointState returns the shared state for the given token endpoint.
+// On first call, the state is initialized with redisCfg (may be nil for in-memory).
+// Subsequent calls return the existing state; redisCfg is ignored after first creation
+// so the first registered instance's backend configuration takes effect.
+func getOrCreateEndpointState(endpoint string, redisCfg *failureRedisConfig) *endpointState {
 	endpointStatesMu.Lock()
 	defer endpointStatesMu.Unlock()
 	if s, ok := endpointStates[endpoint]; ok {
 		return s
 	}
 	s := &endpointState{}
+	s.failures.redis = redisCfg
 	endpointStates[endpoint] = s
 	return s
 }
@@ -154,6 +175,19 @@ type PolicyConfig struct {
 	// is configured to accept as a subscription key. Requests carrying this cookie are
 	// rejected with 401 for the same reason as SubscriptionKeyHeader.
 	SubscriptionKeyCookie string
+
+	// failureRedis holds the wired-up Redis client and settings for distributed
+	// failure counting. Nil means in-memory counting only.
+	failureRedis *failureRedisConfig
+}
+
+// failureRedisConfig carries the Redis connection and key-space settings for the
+// distributed failure counter. It is populated once at GetPolicy time and shared
+// across all policy instances pointing at the same token endpoint.
+type failureRedisConfig struct {
+	rdb       *redis.Client
+	keyPrefix string
+	failOpen  bool // when true, Redis errors allow requests through
 }
 
 // validationEntry is a cache record produced by a successful dynamic validation.
@@ -210,6 +244,12 @@ type failureTracker struct {
 	clientCounters  map[string]clientThrottleEntry
 	overflowCounter overflowThrottleEntry // counts new IDs when the map is full
 	lastSweep       time.Time             // throttles the full-map expired-entry sweep
+
+	// redis is non-nil when the failure backend is Redis. When set, client counters
+	// are stored in Redis so all gateway replicas share one limit per token endpoint.
+	// Wrong-cred pairs remain in-memory (they are a performance optimisation, not a
+	// security boundary — the IdP rejects them regardless).
+	redis *failureRedisConfig
 }
 
 // overflowThrottleEntry is a single shared counter used when clientCounters is at capacity.
@@ -221,9 +261,82 @@ type overflowThrottleEntry struct {
 
 // reservation identifies which counter was incremented by checkAndReserve so that
 // releaseReservation can decrement the correct counter and verify the window is still active.
+// For the in-memory path, isOverflow/windowEnd identify the slot. For the Redis path,
+// redisKey names the key to DECR; both overflow and windowEnd are zero in that case.
 type reservation struct {
 	isOverflow bool
 	windowEnd  time.Time
+	redisKey   string // non-empty: slot came from Redis
+}
+
+// failureCounterKey returns the Redis key for the per-clientId failure counter.
+func (f *failureTracker) failureCounterKey(clientId string) string {
+	return f.redis.keyPrefix + "fc:" + clientCounterKey(clientId)
+}
+
+// isThrottledRedis is a non-authoritative fast path that reads the Redis counter.
+// It never increments — that happens inside checkAndReserveRedis.
+func (f *failureTracker) isThrottledRedis(clientId string, limit int) (bool, time.Duration) {
+	key := f.failureCounterKey(clientId)
+	ctx := context.Background()
+	val, err := f.redis.rdb.Get(ctx, key).Int64()
+	if err != nil {
+		return false, 0
+	}
+	if val < int64(limit) {
+		return false, 0
+	}
+	ttl, err := f.redis.rdb.TTL(ctx, key).Result()
+	if err != nil || ttl <= 0 {
+		return true, time.Second
+	}
+	if ttl < time.Second {
+		ttl = time.Second
+	}
+	return true, ttl
+}
+
+// checkAndReserveRedis increments the Redis counter atomically and enforces the
+// per-clientId limit. The Lua script ensures the increment and limit check are
+// a single atomic operation. Returns a reservation that holds the Redis key so
+// releaseReservationRedis can DECR it on success or network error.
+func (f *failureTracker) checkAndReserveRedis(clientId string, limit int, window time.Duration) (reservation, error) {
+	key := f.failureCounterKey(clientId)
+	windowSecs := int64(window.Seconds())
+	if windowSecs < 1 {
+		windowSecs = 1
+	}
+	ctx := context.Background()
+	res, err := failureIncrScript.Run(ctx, f.redis.rdb, []string{key}, int64(limit), windowSecs).Int64Slice()
+	if err != nil {
+		if f.redis.failOpen {
+			slog.Debug("client-secret-basic: Redis failure counter unavailable, allowing request (failureMode=open)", "error", err)
+			return reservation{}, nil // zero reservation: nothing to release
+		}
+		return reservation{}, networkError{fmt.Errorf("Redis failure counter: %w", err)}
+	}
+	count := res[0]
+	ttlSecs := res[1]
+	if count < 0 {
+		retryAfter := time.Duration(ttlSecs) * time.Second
+		if retryAfter < time.Second {
+			retryAfter = time.Second
+		}
+		return reservation{}, throttleError{clientId: clientId, retryAfter: retryAfter}
+	}
+	return reservation{redisKey: key}, nil
+}
+
+// releaseReservationRedis decrements the Redis counter. Called on IdP success or
+// network error so those outcomes do not consume a failure quota slot.
+func (f *failureTracker) releaseReservationRedis(rsv reservation) {
+	if rsv.redisKey == "" {
+		return // zero reservation from a fail-open Redis miss: nothing to release
+	}
+	ctx := context.Background()
+	if err := f.redis.rdb.Decr(ctx, rsv.redisKey).Err(); err != nil {
+		slog.Debug("client-secret-basic: Redis DECR failed during reservation release", "error", err)
+	}
 }
 
 // isWrongCred returns true if key is a confirmed bad credential pair still within its TTL.
@@ -249,6 +362,9 @@ func (f *failureTracker) isWrongCred(key string) bool {
 // or (false, 0) otherwise. It does not increment the counter — that happens inside
 // checkAndReserve, which is the authoritative check.
 func (f *failureTracker) isThrottled(clientId string, limit int, _ time.Duration) (bool, time.Duration) {
+	if f.redis != nil {
+		return f.isThrottledRedis(clientId, limit)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.clientCounters == nil {
@@ -285,6 +401,9 @@ func (f *failureTracker) isThrottled(clientId string, limit int, _ time.Duration
 // The caller MUST call releaseReservation if the IdP accepts the credentials or
 // returns a network error so successful requests don't consume failure quota.
 func (f *failureTracker) checkAndReserve(clientId string, limit int, window time.Duration) (reservation, error) {
+	if f.redis != nil {
+		return f.checkAndReserveRedis(clientId, limit, window)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.clientCounters == nil {
@@ -355,6 +474,10 @@ func (f *failureTracker) checkAndReserve(clientId string, limit int, window time
 // reservation's window to avoid corrupting a later window when a slow request outlasts
 // its failureWindow.
 func (f *failureTracker) releaseReservation(clientId string, rsv reservation) {
+	if f.redis != nil {
+		f.releaseReservationRedis(rsv)
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if rsv.isOverflow {
@@ -480,7 +603,101 @@ func GetPolicy(
 			Timeout:   cfg.TokenTimeout,
 			Transport: sharedTransport,
 		}
-		p.state = getOrCreateEndpointState(cfg.TokenEndpoint)
+
+		var redisCfg *failureRedisConfig
+		if failureBackend := stringParam(params, "failureBackend"); failureBackend == "redis" {
+			redisHost := stringParam(params, "redis.host")
+			if redisHost == "" {
+				redisHost = "localhost"
+			}
+			redisPort := 6379
+			if v, ok := params["redis.port"]; ok {
+				if n, ok := v.(float64); ok && n > 0 {
+					redisPort = int(n)
+				}
+			}
+			redisPassword := stringParam(params, "redis.password")
+			redisUsername := stringParam(params, "redis.username")
+			redisDB := 0
+			if v, ok := params["redis.db"]; ok {
+				if n, ok := v.(float64); ok && n >= 0 {
+					redisDB = int(n)
+				}
+			}
+			failureMode := stringParam(params, "redis.failureMode")
+			if failureMode == "" {
+				failureMode = "open"
+			}
+			keyPrefix := stringParam(params, "redis.keyPrefix")
+			if keyPrefix == "" {
+				keyPrefix = "csb:failure:"
+			}
+			connTimeout := parseDurationParam(params, "redis.connectionTimeout", 5*time.Second)
+			readTimeout := parseDurationParam(params, "redis.readTimeout", 3*time.Second)
+			writeTimeout := parseDurationParam(params, "redis.writeTimeout", 3*time.Second)
+			poolSize := 0
+			if v, ok := params["redis.poolSize"]; ok {
+				if n, ok := v.(float64); ok && n >= 0 {
+					poolSize = int(n)
+				}
+			}
+			tlsEnabled, _ := params["redis.tls.enabled"].(bool)
+			tlsCAFile := stringParam(params, "redis.tls.caFile")
+			tlsServerName := stringParam(params, "redis.tls.serverName")
+			tlsInsecureSkip, _ := params["redis.tls.insecureSkipVerify"].(bool)
+			tlsCertFile := stringParam(params, "redis.tls.certFile")
+			tlsKeyFile := stringParam(params, "redis.tls.keyFile")
+
+			tlsCfg, err := csbBuildTLSConfig(tlsEnabled, tlsCAFile, tlsServerName, tlsCertFile, tlsKeyFile, tlsInsecureSkip)
+			if err != nil {
+				return nil, err
+			}
+			if tlsEnabled && tlsInsecureSkip {
+				slog.Warn("client-secret-basic: Redis TLS certificate verification is disabled (redis.tls.insecureSkipVerify); do not use in production",
+					"addr", fmt.Sprintf("%s:%d", redisHost, redisPort))
+			}
+
+			connKey := csbRedisConnKey{
+				addr:            fmt.Sprintf("%s:%d", redisHost, redisPort),
+				username:        redisUsername,
+				passwordHash:    csbHashPassword(redisPassword),
+				db:              redisDB,
+				dialTimeout:     connTimeout,
+				readTimeout:     readTimeout,
+				writeTimeout:    writeTimeout,
+				poolSize:        poolSize,
+				tlsEnabled:      tlsEnabled,
+				tlsInsecureSkip: tlsInsecureSkip,
+				tlsCAFile:       tlsCAFile,
+				tlsServerName:   tlsServerName,
+				tlsCertFile:     tlsCertFile,
+				tlsKeyFile:      tlsKeyFile,
+			}
+			rdb, created, pingErr := getOrCreateCsbRedisClient(&redis.Options{
+				Addr:         connKey.addr,
+				Username:     redisUsername,
+				Password:     redisPassword,
+				DB:           redisDB,
+				DialTimeout:  connTimeout,
+				ReadTimeout:  readTimeout,
+				WriteTimeout: writeTimeout,
+				PoolSize:     poolSize,
+				TLSConfig:    tlsCfg,
+			}, connKey, connTimeout)
+			if created && pingErr != nil {
+				if failureMode != "open" {
+					return nil, fmt.Errorf("client-secret-basic: Redis ping failed and failureMode=closed: %w", pingErr)
+				}
+				slog.Warn("client-secret-basic: Redis ping failed but failureMode=open; proceeding with in-memory fallback until Redis recovers", "error", pingErr)
+			}
+			redisCfg = &failureRedisConfig{
+				rdb:       rdb,
+				keyPrefix: keyPrefix,
+				failOpen:  failureMode == "open",
+			}
+		}
+
+		p.state = getOrCreateEndpointState(cfg.TokenEndpoint, redisCfg)
 	}
 	return p, nil
 }
@@ -634,6 +851,18 @@ func stringParam(params map[string]interface{}, key string) string {
 		}
 	}
 	return ""
+}
+
+func parseDurationParam(params map[string]interface{}, key string, defaultVal time.Duration) time.Duration {
+	s := stringParam(params, key)
+	if s == "" {
+		return defaultVal
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d <= 0 {
+		return defaultVal
+	}
+	return d
 }
 
 // Mode returns the processing mode — only request headers are needed.
