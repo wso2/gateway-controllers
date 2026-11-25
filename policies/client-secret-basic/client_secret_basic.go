@@ -100,6 +100,17 @@ type PolicyConfig struct {
 	TokenMetadataKey string
 
 	Mode validationMode
+
+	// SubscriptionKeyHeader is the header name that subscription-validation reads
+	// as the subscription key. Any request carrying this header is rejected with 401
+	// before subscription-validation runs, so the subscription cannot be detached
+	// from the authenticated client identity.
+	SubscriptionKeyHeader string
+
+	// SubscriptionKeyCookie, when non-empty, names a cookie that subscription-validation
+	// is configured to accept as a subscription key. Requests carrying this cookie are
+	// rejected with 401 for the same reason as SubscriptionKeyHeader.
+	SubscriptionKeyCookie string
 }
 
 // validationEntry is a cache record produced by a successful dynamic validation.
@@ -486,6 +497,12 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 		cfg.TokenMetadataKey = s
 	}
 
+	cfg.SubscriptionKeyHeader = "Subscription-Key"
+	if s := stringParam(params, "subscriptionKeyHeader"); s != "" {
+		cfg.SubscriptionKeyHeader = s
+	}
+	cfg.SubscriptionKeyCookie = stringParam(params, "subscriptionKeyCookie")
+
 	// Reject ambiguous mixed-mode configuration before any mode detection.
 	_, hasCredentials := params["credentials"]
 	_, hasClientId := params["clientId"]
@@ -633,6 +650,27 @@ func (p *ClientSecretBasicPolicy) OnRequestHeaders(
 	headers := reqCtx.Headers
 	if headers == nil {
 		return unauthorizedResponse("no request headers available")
+	}
+
+	// Reject subscription key injection before subscription-validation can read it.
+	// subscription-validation checks the subscription key header first; a client with
+	// no subscription can send another subscription's key and get that plan's
+	// entitlements. Rejecting here ties the subscription to the authenticated identity.
+	if len(headers.Get(p.cfg.SubscriptionKeyHeader)) > 0 {
+		slog.Debug("client-secret-basic: request carries subscription key header, rejecting",
+			"header", p.cfg.SubscriptionKeyHeader)
+		return unauthorizedResponse("subscription key header is not permitted")
+	}
+	if p.cfg.SubscriptionKeyCookie != "" {
+		cookieLines := headers.Get("Cookie")
+		if len(cookieLines) > 0 {
+			fakeReq := &http.Request{Header: http.Header{"Cookie": cookieLines}}
+			if c, _ := fakeReq.Cookie(p.cfg.SubscriptionKeyCookie); c != nil {
+				slog.Debug("client-secret-basic: request carries subscription cookie, rejecting",
+					"cookie", p.cfg.SubscriptionKeyCookie)
+				return unauthorizedResponse("subscription cookie is not permitted")
+			}
+		}
 	}
 
 	clientId, clientSecret, err := extractBasicCredentials(headers)
@@ -919,7 +957,7 @@ func (p *ClientSecretBasicPolicy) successResponse(
 	}
 
 	return policy.UpstreamRequestHeaderModifications{
-		HeadersToRemove: []string{"Authorization", "Subscription-Key"},
+		HeadersToRemove: []string{"Authorization", p.cfg.SubscriptionKeyHeader},
 		AnalyticsMetadata: map[string]any{
 			"clientId":               clientId,
 			applicationIDMetadataKey: clientId,

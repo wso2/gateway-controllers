@@ -346,6 +346,84 @@ func TestOnRequestHeaders_Static_AuthorizationAndSubscriptionKeyStripped(t *test
 	}
 }
 
+func TestOnRequestHeaders_SubscriptionKeyHeader_Returns401(t *testing.T) {
+	p, _ := GetPolicy(policy.PolicyMetadata{}, staticParams())
+	ctx := newReqCtx(map[string]string{
+		"Authorization":    basicAuthHeader("test-client", "test-secret"),
+		"Subscription-Key": "some-subscription-key",
+	})
+	assertUnauthorized(t, p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, staticParams()), "subscription key header is not permitted")
+}
+
+func TestOnRequestHeaders_SubscriptionKeyHeader_CustomName_Returns401(t *testing.T) {
+	params := map[string]interface{}{
+		"clientId":            "test-client",
+		"clientSecret":        "test-secret",
+		"subscriptionKeyHeader": "X-Api-Subscription",
+	}
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+	ctx := newReqCtx(map[string]string{
+		"Authorization":    basicAuthHeader("test-client", "test-secret"),
+		"X-Api-Subscription": "some-key",
+	})
+	assertUnauthorized(t, p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, params), "subscription key header is not permitted")
+}
+
+func TestOnRequestHeaders_SubscriptionKeyHeader_DefaultDoesNotBlockOtherHeaders(t *testing.T) {
+	p, _ := GetPolicy(policy.PolicyMetadata{}, staticParams())
+	ctx := newReqCtx(map[string]string{
+		"Authorization": basicAuthHeader("test-client", "test-secret"),
+		"X-Custom":      "value",
+	})
+	result := p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, staticParams())
+	if _, ok := result.(policy.ImmediateResponse); ok {
+		t.Error("unexpected rejection for request with no subscription key header")
+	}
+}
+
+func TestOnRequestHeaders_SubscriptionCookie_Returns401(t *testing.T) {
+	params := map[string]interface{}{
+		"clientId":              "test-client",
+		"clientSecret":          "test-secret",
+		"subscriptionKeyCookie": "subscription_token",
+	}
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+	ctx := newReqCtx(map[string]string{
+		"Authorization": basicAuthHeader("test-client", "test-secret"),
+		"Cookie":        "subscription_token=abc123; session=xyz",
+	})
+	assertUnauthorized(t, p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, params), "subscription cookie is not permitted")
+}
+
+func TestOnRequestHeaders_SubscriptionCookie_OtherCookiesNotBlocked(t *testing.T) {
+	params := map[string]interface{}{
+		"clientId":              "test-client",
+		"clientSecret":          "test-secret",
+		"subscriptionKeyCookie": "subscription_token",
+	}
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+	ctx := newReqCtx(map[string]string{
+		"Authorization": basicAuthHeader("test-client", "test-secret"),
+		"Cookie":        "session=xyz; pref=dark",
+	})
+	result := p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, params)
+	if _, ok := result.(policy.ImmediateResponse); ok {
+		t.Error("unexpected rejection when only unrelated cookies are present")
+	}
+}
+
+func TestOnRequestHeaders_SubscriptionCookieNotConfigured_CookieAllowed(t *testing.T) {
+	p, _ := GetPolicy(policy.PolicyMetadata{}, staticParams())
+	ctx := newReqCtx(map[string]string{
+		"Authorization": basicAuthHeader("test-client", "test-secret"),
+		"Cookie":        "subscription_token=abc123",
+	})
+	result := p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, staticParams())
+	if _, ok := result.(policy.ImmediateResponse); ok {
+		t.Error("unexpected rejection when subscriptionKeyCookie is not configured")
+	}
+}
+
 func TestOnRequestHeaders_401_HasWWWAuthenticate(t *testing.T) {
 	p, _ := GetPolicy(policy.PolicyMetadata{}, staticParams())
 	ctx := newReqCtx(map[string]string{}) // no Authorization header

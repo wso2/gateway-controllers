@@ -19,6 +19,14 @@ description: |
   Metadata["x-wso2-application-id"] set to clientId.
   All 401 responses carry WWW-Authenticate: Basic.
 
+  Subscription key protection: any request carrying the subscription key header
+  (default: Subscription-Key) is rejected with 401 before subscription-validation
+  runs. This prevents a client from using another subscription's key to obtain a
+  different plan. Configure subscriptionKeyHeader to match the value set in
+  subscription-validation if a non-default header name is used. If
+  subscription-validation is also configured with a subscriptionKeyCookie, set
+  the same cookie name in subscriptionKeyCookie to close the cookie vector too.
+
 parameters:
   type: object
   additionalProperties: false
@@ -174,6 +182,32 @@ parameters:
         effect in static mode. Override only when the default key conflicts with
         another policy.
       default: upstream-access-token
+      minLength: 1
+      maxLength: 256
+
+    # ── Subscription key protection ───────────────────────────────────────────
+    subscriptionKeyHeader:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Header name that subscription-validation reads as the subscription key.
+        Any request carrying this header is rejected with 401 before
+        subscription-validation runs, preventing subscription plan spoofing.
+        Must match the subscriptionKeyHeader value configured in
+        subscription-validation. Defaults to "Subscription-Key".
+      default: Subscription-Key
+      minLength: 1
+      maxLength: 256
+
+    subscriptionKeyCookie:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Cookie name that subscription-validation is configured to accept as a
+        subscription key. When set, any request carrying a cookie with this name
+        is rejected with 401 before subscription-validation runs. Leave empty
+        (the default) when subscription-validation is not configured with a
+        subscriptionKeyCookie.
       minLength: 1
       maxLength: 256
 
