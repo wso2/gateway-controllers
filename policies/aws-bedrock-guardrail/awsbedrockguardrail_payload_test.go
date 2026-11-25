@@ -699,3 +699,94 @@ func TestBufferedEventStream_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) 
 		t.Fatalf("assessed %q, want only the streamed text", got)
 	}
 }
+
+// An MCP Streamable HTTP response whose events have different shapes: a log
+// notification, then the tool result.
+const (
+	mcpLogEvent    = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"Looking up john@example.com\"}}\n\n"
+	mcpResultEvent = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"Order shipped\"}]}}\n\n"
+)
+
+func mixedMCPStreamParams(fallback string) map[string]interface{} {
+	return map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "$.result.content[*].text",
+		"fallbackJsonPaths": paths(fallback),
+	}
+}
+
+func TestResponse_EventStreamEventsUseTheirOwnPath(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", mixedMCPStreamParams("$.params.data"), client)
+
+	action := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", mcpLogEvent+mcpResultEvent), map[string]interface{}{})
+	if mod, ok := action.(policy.DownstreamResponseModifications); !ok || mod.StatusCode != nil {
+		t.Fatalf("expected the stream to pass, got %#v", action)
+	}
+	if want := []string{"Looking up john@example.com", "Order shipped"}; !reflect.DeepEqual(client.texts, want) {
+		t.Fatalf("assessed %q, want %q", client.texts, want)
+	}
+}
+
+func TestStreaming_EventStreamEventsUseTheirOwnPath(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", mixedMCPStreamParams("$.params.data"), client)
+
+	for _, action := range feedStream(t, p, streamCtxWithType("text/event-stream"), []string{mcpLogEvent + mcpResultEvent}) {
+		if action.TerminateStream() {
+			t.Fatalf("expected the stream to continue, got %#v", action)
+		}
+	}
+	if want := []string{"Looking up john@example.com", "Order shipped"}; !reflect.DeepEqual(client.texts, want) {
+		t.Fatalf("assessed %q, want %q", client.texts, want)
+	}
+}
+
+func TestResponse_EventStreamMasksEachEventAtItsOwnPath(t *testing.T) {
+	client := &mockBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
+	params := mixedMCPStreamParams("$.params.data")
+	params["redactPII"] = true
+	p := fallbackPathsAttachment(t, "response", params, client)
+
+	action := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", mcpLogEvent+mcpResultEvent), map[string]interface{}{})
+	mod, ok := action.(policy.DownstreamResponseModifications)
+	if !ok || mod.StatusCode != nil || mod.Body == nil {
+		t.Fatalf("expected the stream to pass with a masked body, got %#v", action)
+	}
+	body := string(mod.Body)
+	if !strings.Contains(body, `"data":"Looking up *****"`) || strings.Contains(body, "john@example.com") {
+		t.Fatalf("expected the log event masked at params.data, got %s", body)
+	}
+	if !strings.Contains(body, mcpResultEvent) {
+		t.Fatalf("expected the result event unchanged, got %s", body)
+	}
+}
+
+func TestResponse_EventStreamEventNoPathMatchesIsMissed(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", mixedMCPStreamParams("$.params.other"), client)
+
+	action := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", mcpLogEvent+mcpResultEvent), map[string]interface{}{})
+	expectGuardrailBlock(t, 200, action)
+	if client.calls != 0 {
+		t.Fatalf("expected no guardrail call, got %d", client.calls)
+	}
+}
+
+func TestResponse_EventStreamEventSkipsAPathWithBlankText(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
+		"enabled":           true,
+		"jsonPath":          "$.params.data",
+		"fallbackJsonPaths": paths("$.params.logger"),
+	}, client)
+
+	event := "event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"   \",\"logger\":\"order lookup\"}}\n\n"
+	action := p.OnResponseBody(context.Background(), bufferedResponse(map[string]interface{}{}, "text/event-stream", event), map[string]interface{}{})
+	if mod, ok := action.(policy.DownstreamResponseModifications); !ok || mod.StatusCode != nil {
+		t.Fatalf("expected the stream to pass, got %#v", action)
+	}
+	if want := []string{"order lookup"}; !reflect.DeepEqual(client.texts, want) {
+		t.Fatalf("assessed %q, want %q", client.texts, want)
+	}
+}
