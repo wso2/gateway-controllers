@@ -209,6 +209,7 @@ type failureTracker struct {
 	wrongCreds      map[string]wrongCredEntry
 	clientCounters  map[string]clientThrottleEntry
 	overflowCounter overflowThrottleEntry // counts new IDs when the map is full
+	lastSweep       time.Time             // throttles the full-map expired-entry sweep
 }
 
 // overflowThrottleEntry is a single shared counter used when clientCounters is at capacity.
@@ -307,12 +308,18 @@ func (f *failureTracker) checkAndReserve(clientId string, limit int, window time
 		return reservation{windowEnd: e.windowEnd}, nil
 	}
 
-	// No entry or window expired: start a fresh window. Sweep map if at capacity.
+	// No entry or window expired: start a fresh window. Sweep map if at capacity,
+	// but at most once per second — sweeping on every request under full-map pressure
+	// (up to ~1,850 req/s per instance) would hold the lock for the full iteration
+	// each time. One sweep per second is enough to reclaim expired entries promptly.
 	if len(f.clientCounters) >= maxClientCounterEntries {
-		for k, v := range f.clientCounters {
-			if now.After(v.windowEnd) {
-				delete(f.clientCounters, k)
+		if now.Sub(f.lastSweep) >= time.Second {
+			for k, v := range f.clientCounters {
+				if now.After(v.windowEnd) {
+					delete(f.clientCounters, k)
+				}
 			}
+			f.lastSweep = now
 		}
 	}
 	if len(f.clientCounters) >= maxClientCounterEntries {
