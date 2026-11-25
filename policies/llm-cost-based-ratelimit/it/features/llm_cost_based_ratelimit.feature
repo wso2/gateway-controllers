@@ -26,6 +26,7 @@ Feature: LLM cost-based rate limiting
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: Enforce cost-based rate limit on LLM API
     # gpt-4.1-2025-04-14: 19 prompt x $2/1M + 10 completion x $8/1M = $0.000118 per request
@@ -95,6 +96,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue @llm-cost-multi-window
   Scenario: Cost-based rate limit with multiple budget time windows
     # Budget: $0.000236/1m (minute) AND $0.001180/1h (hourly - 10x per-request cost)
@@ -159,6 +161,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: Cost accumulates correctly across real LLM responses
     # The Anthropic reply reports input_tokens and output_tokens, which the template maps.
@@ -278,6 +281,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: Per-provider cost rate limiting is isolated
     # Two separate providers each budgeted for exactly 2 requests. Exhausting provider A's
@@ -376,6 +380,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerNameB}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: Zero cost requests do not consume budget
     # An unrecognized model returns cost=0 (not_calculated) and must not consume budget, leaving
@@ -448,6 +453,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue @llm-cost-window-reset
   Scenario: Rate limit window resets after time window expires
     Given I generate a unique resource name from "cblr-reset-template" and store it as "templateName"
@@ -721,6 +727,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: A caller cannot dodge the budget by naming another provider
     # The provider name is recorded by the gateway for the route, never read from the request. Every
@@ -790,6 +797,7 @@ Feature: LLM cost-based rate limiting
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: Changing the budget replaces the limiter and discards the spend recorded against the old one
     # Spend lives inside the limiter instance. A new budget builds a new limiter, so a provider that was

@@ -71,6 +71,7 @@ Feature: LLM cost-based rate limit system configuration
     When I delete the LLM provider "${CTX:providerName}"
     Then the response should be successful
 
+  # Known issue: https://github.com/wso2/api-platform/issues/2936 (an exactly spent budget still admits one more request under GCRA)
   @known-issue
   Scenario: The configured cost scale factor also scales the charged cost
     # gpt-4.1-2025-04-14 costs $0.000118 for this request and the $0.000236 budget holds exactly two. The
