@@ -27,7 +27,12 @@ import (
 	"github.com/wso2/gateway-controllers/policies/json-schema-guardrail/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// The scenarios chain basic-auth, basic-ratelimit and prompt-decorator with the policy, to show the
+// order in which they act.
+var config = suite.Config{
+	Register:   steps.Register,
+	Companions: []string{"basic-auth", "basic-ratelimit", "prompt-decorator"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
