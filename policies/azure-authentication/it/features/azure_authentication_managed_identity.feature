@@ -194,7 +194,8 @@ Feature: Azure Authentication policy with a managed identity
   # A 404 is not retried. container-apps takes it as a refusal and answers again from the rejection
   # cache for about 2 seconds, so the second request gets the same 502 without a new token request.
   # managed-identity, which on a VM may be talking to IMDS while it starts, doesn't, so the second
-  # request asks again and gets a token. Either way the endpoint's next answer is a token.
+  # request asks again and gets a token. Either way the endpoint's next answer is a token. The second
+  # request follows the first at once, so the refusal is still cached, and the log is checked after it.
   Scenario Outline: A 404 from the identity endpoint is a refusal only for container-apps (<authenticationType>)
     Given I generate a UUID and store it as "clientId"
     And I generate a unique value from "az-mi-404" and store it as "apiName"
@@ -214,11 +215,11 @@ Feature: Azure Authentication policy with a managed identity
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get"
     Then the response status code should be 502
     And the response should match the expected error response "azure-authentication-upstream-auth-failed"
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get"
+    Then the response status code should be <second>
     And the "gateway-runtime" service logs should have exactly 1 line containing:
       | ${CTX:clientId} |
       | <reason>        |
-    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get"
-    Then the response status code should be <second>
     When I send a "GET" request to the "entra" service at "/${CTX:testbenchPartition}/test/managed-identity/${CTX:clientId}"
     Then the response status code should be 200
     And the JSON response field "count" should be <requests>
