@@ -342,6 +342,7 @@ The `error` field in the response body varies by condition:
 - **Dynamic mode — no Redis.** The validation cache is in-process only. Each gateway replica maintains its own cache independently.
 - **Dynamic mode — 256-character client ID limit.** Client IDs longer than 256 characters are rejected with `401 Unauthorized` and the message `Unauthorized: invalid credentials`. This is the same response as a wrong secret — the limit is not disclosed to callers.
 - **Dynamic mode — throttle DoS.** Anyone who knows a `clientId` can exhaust its per-window failure budget by sending `failureRateLimit` distinct wrong secrets, temporarily blocking further unauthenticated attempts for that client. Clients with a still-valid entry in the success cache are unaffected.
+- **Dynamic mode — full counter map blocks new clients.** The per-clientId failure counter map is capped at 100,000 entries. While the map is kept at capacity (requires roughly 3,300 failed token-endpoint calls per second with the default 30-second window), every new client that has no cached validation gets `429 Too Many Requests` on that gateway instance. Clients that are already in the success cache or the counter map are not affected. This is an intentional trade-off: the overflow counter still engages rather than letting unknown clients bypass the limit entirely.
 
 ---
 
