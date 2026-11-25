@@ -1765,7 +1765,7 @@ func (p *AWSBedrockGuardrailPolicy) redactedFlush(
 		return flush, false, false
 	}
 
-	rewritten, changed = rewriteAcrossFrames(flush, rp.StreamingJsonPath, rewrites)
+	rewritten, changed = rewriteAcrossFrames(flush, rp.StreamingJsonPath, rewrites, true)
 
 	joined := extractSSEDeltaContent(rewritten, rp.StreamingJsonPath)
 	for _, r := range rewrites {
@@ -3089,7 +3089,7 @@ func (p *AWSBedrockGuardrailPolicy) restorePlaceholderFrames(
 	}
 	restored := chunkStr
 	if rewritten, changed := rewriteAcrossFrames(restored, rp.StreamingJsonPath,
-		placeholderRestores(maskedPII)); changed {
+		placeholderRestores(maskedPII), false); changed {
 		restored = rewritten
 	}
 	if rewritten, changed := p.restoreOtherChoiceFrames(restored, rp.StreamingJsonPath, maskedPII); changed {
@@ -4554,7 +4554,13 @@ type sseTextFrame struct {
 // after it. Frames are kept -- one emptied of text still carries its event -- so
 // the stream keeps its shape and only the text changes. A frame whose text does
 // not change is passed through byte-for-byte.
-func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiReplacement) (string, bool) {
+//
+// stripLogprobs drops the log probabilities of a frame this rewrites. Masking
+// sets it: the tokens beside a masked value hold the value itself, so they go
+// with it. A restore does not, because the tokens there spell out the
+// placeholder, not the value, and dropping them would take log probabilities a
+// client asked for away for nothing -- the buffered restore keeps them too.
+func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiReplacement, stripLogprobs bool) (string, bool) {
 	if len(replacements) == 0 {
 		return chunkStr, false
 	}
@@ -4623,7 +4629,9 @@ func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiR
 		if replacement == f.value {
 			continue
 		}
-		dropLogprobs(f.frame)
+		if stripLogprobs {
+			dropLogprobs(f.frame)
+		}
 		if err := utils.SetValueAtJSONPath(f.frame, streamingJsonPath, replacement); err != nil {
 			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
 				"jsonPath", streamingJsonPath, "error", err)

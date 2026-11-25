@@ -1585,6 +1585,58 @@ func TestStreaming_RestoresEveryChoiceNotOnlyTheReadOne(t *testing.T) {
 	}
 }
 
+// TestStreaming_RestoreKeepsLogprobsMaskingDropsThem pins the split introduced
+// with the cross-frame restore. Masking drops the log probabilities of a frame
+// it rewrites, because their tokens hold the value being masked. A restore must
+// keep them: the tokens there spell out the placeholder, not the value, so
+// dropping them takes data the client asked for away for nothing. The buffered
+// restore keeps them too.
+func TestStreaming_RestoreKeepsLogprobsMaskingDropsThem(t *testing.T) {
+	frame := "data: {\"choices\":[{\"delta\":{\"content\":\"mail EMAIL_0000\"},\"logprobs\":{\"content\":[{\"token\":\"EMAIL\"}]}}]}\n\n"
+
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	restored := p.restorePlaceholderFrames(frame, respCtx, p.responseParams)
+	if !strings.Contains(restored, "logprobs") {
+		t.Errorf("a restore must keep the log probabilities, got %q", restored)
+	}
+	if !strings.Contains(restored, "john@example.com") {
+		t.Errorf("the value must be restored, got %q", restored)
+	}
+
+	masked, changed := rewriteAcrossFrames(frame, ResponseDefaultStreamingJSONPath,
+		[]piiReplacement{{match: "EMAIL_0000", replacement: "{EMAIL}"}}, true)
+	if !changed || strings.Contains(masked, "logprobs") {
+		t.Errorf("masking must drop the log probabilities, got %q", masked)
+	}
+}
+
+// TestStreaming_RestoresASplitPlaceholderOnANativeGeminiStream pins that the
+// cross-frame restore follows streamingJsonPath rather than assuming the OpenAI
+// shape. Gemini's candidates array is a choice array like OpenAI's choices, and
+// a placeholder split across its events restores the same way.
+func TestStreaming_RestoresASplitPlaceholderOnANativeGeminiStream(t *testing.T) {
+	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()},
+		func(params *AWSBedrockGuardrailPolicyParams) {
+			params.StreamingJsonPath = "$.candidates[0].content.parts[0].text"
+		})
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	flush := "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"mail EMAIL\"}]}}]}\n\n" +
+		"data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"_0000 now\"}]}}]}\n\n"
+
+	out := p.restorePlaceholderFrames(flush, respCtx, p.responseParams)
+	if !strings.Contains(out, "john@example.com") {
+		t.Errorf("want the value restored on a Gemini stream, got %q", out)
+	}
+	if strings.Contains(out, "EMAIL_0000") {
+		t.Errorf("the placeholder must not survive, got %q", out)
+	}
+}
+
 // TestStreaming_RedactionIgnoresThePlaceholderMap pins that redactPII is left
 // alone by the restore: it never minted a placeholder, so there is nothing to
 // put back and a stale mapping must not reintroduce a value the operator asked
