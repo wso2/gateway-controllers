@@ -1,0 +1,75 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# The integration suite of the remove-headers policy. Feature paths are relative to this directory.
+# Give a runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release
+# newer than the oldest one tested.
+
+suite: remove-headers
+
+defaults:
+  parallel: 1
+  components:
+    platform-gateway:
+      db: sqlite
+      dbCompatibility:
+        sqlserver: "gateway-version>=1.2.0"
+  timeouts:
+    boot: 5m
+    propagation: 60s
+
+blocks:
+  # Runners stay one at a time: the restart runner restarts the block's gateway, which would
+  # interrupt the others, and the lifecycle runner reads the block's shared service logs.
+  - name: remove-headers
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: remove-headers-request
+        features:
+          - features/remove_headers_request.feature
+      - name: remove-headers-response
+        features:
+          - features/remove_headers_response.feature
+      - name: remove-headers-matching
+        features:
+          - features/remove_headers_matching.feature
+      - name: remove-headers-scope
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/remove_headers_scope.feature
+      # Gateway 1.1.0 gives policies the request headers as earlier policies left them, not the
+      # client's snapshot (wso2/api-platform#2548, fixed in 1.2.0), so the scenarios tagged
+      # @known-issue-gw-1.1.0 are skipped there.
+      - name: remove-headers-scope-gw-1.1.0
+        tags: "gateway-version<1.2.0;~@known-issue-gw-1.1.0"
+        features:
+          - features/remove_headers_scope.feature
+      - name: remove-headers-lifecycle
+        features:
+          - features/remove_headers_lifecycle.feature
+      - name: remove-headers-validation
+        features:
+          - features/remove_headers_validation.feature
+      - name: remove-headers-restart
+        features:
+          - features/remove_headers_restart.feature
