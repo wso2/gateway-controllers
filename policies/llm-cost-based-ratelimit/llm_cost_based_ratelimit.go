@@ -115,7 +115,7 @@ func (p *LLMCostRateLimitPolicy) OnRequestHeaders(ctx context.Context, reqCtx *p
 ) policy.RequestHeaderAction {
 	slog.Debug("OnRequestHeaders: processing LLM cost-based rate limit",
 		"route", p.metadata.RouteName,
-		"params", params)
+		"params", loggableParams(params))
 
 	providerName, ok := reqCtx.SharedContext.Metadata[MetadataKeyProviderName].(string)
 	if !ok || providerName == "" {
@@ -537,7 +537,7 @@ func randomString(length int) string {
 // The cost multipliers are also scaled so that the final deduction is in the scaled unit.
 func transformToRatelimitParams(params map[string]interface{}) map[string]interface{} {
 	slog.Debug("transformToRatelimitParams: starting parameter transformation",
-		"params", params)
+		"params", loggableParams(params))
 
 	// Get the budget limits from user parameters
 	budgetLimits := params["budgetLimits"]
@@ -654,6 +654,19 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 		"quotas", quotas)
 
 	return rlParams
+}
+
+// loggableParams returns the parameters worth writing to a log. The gateway merges the whole
+// rate-limit backend configuration into the parameters, so they are not logged as a whole. Only
+// the settings listed here are kept.
+func loggableParams(params map[string]interface{}) map[string]interface{} {
+	return map[string]interface{}{
+		"budgetLimits":    params["budgetLimits"],
+		"consumerBased":   params["consumerBased"],
+		"costScaleFactor": extractCostScaleFactor(params),
+		"algorithm":       params["algorithm"],
+		"backend":         params["backend"],
+	}
 }
 
 // extractCostScaleFactor extracts the cost scale factor from system parameters.
