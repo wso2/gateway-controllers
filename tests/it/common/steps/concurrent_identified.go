@@ -121,9 +121,9 @@ func (s *concurrentIdentifiedSteps) sendConcurrentIdentified(
 		number := i + 1
 		headers := withRequestHeaders(scenarioHeaders)
 		identity := fmt.Sprintf("request-%d", number)
-		headers[identityHeader] = identity
+		setRequestHeader(headers, identityHeader, identity)
 		if number%2 == 1 {
-			headers[extraHeader] = fmt.Sprintf("secret-%d", number)
+			setRequestHeader(headers, extraHeader, fmt.Sprintf("secret-%d", number))
 		}
 		// Stop starting requests once the scenario is cancelled, also while waiting for a free slot.
 		if err := ctx.Err(); err != nil {
@@ -283,4 +283,16 @@ func withRequestHeaders(headers map[string]string) map[string]string {
 		out[name] = value
 	}
 	return out
+}
+
+// setRequestHeader sets name to value, first removing every header whose name differs only in
+// case. The HTTP client canonicalizes names, so a scenario's "x-request-id" and the step's
+// "X-Request-Id" would otherwise become one header holding whichever value map order wrote last.
+func setRequestHeader(headers map[string]string, name, value string) {
+	for existing := range headers {
+		if strings.EqualFold(existing, name) {
+			delete(headers, existing)
+		}
+	}
+	headers[name] = value
 }

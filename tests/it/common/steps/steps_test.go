@@ -713,6 +713,36 @@ func TestStoreResponseHeaderRequiresTheHeader(t *testing.T) {
 	require.ErrorContains(t, base.storeResponseHeader(ctx, "ETag", ""), "empty key")
 }
 
+// A generated identity replaces a scenario header of the same name in any case, so the request
+// always carries the generated value; other scenario headers are kept.
+func TestSetRequestHeaderReplacesNamesDifferingOnlyInCase(t *testing.T) {
+	headers := withRequestHeaders(map[string]string{
+		"x-request-id": "from-scenario",
+		"X-REQUEST-ID": "also-from-scenario",
+		"Accept":       "application/json",
+	})
+	setRequestHeader(headers, "X-Request-Id", "request-1")
+	require.Equal(t, map[string]string{"X-Request-Id": "request-1", "Accept": "application/json"}, headers)
+}
+
+// A header passes only when it is sent once with the wanted value; a second value, before or after
+// it, fails, as does an absent header.
+func TestResponseHeaderOnlyValue(t *testing.T) {
+	base := &Base{}
+	withValues := func(values ...string) context.Context {
+		return publishedContext(t, &httpx.Response{StatusCode: 200, Headers: http.Header{"X-Set": values}})
+	}
+
+	require.NoError(t, base.responseHeaderOnlyValue(withValues("gateway-value"), "x-set", "gateway-value"))
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues("gateway-value", "backend"), "X-Set", "gateway-value"),
+		"only the value")
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues("backend", "gateway-value"), "X-Set", "gateway-value"),
+		"only the value")
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues("backend"), "X-Set", "gateway-value"),
+		"only the value")
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues(), "X-Set", "gateway-value"), "only the value")
+}
+
 func TestResponseHeaderNotEquals(t *testing.T) {
 	base := &Base{}
 	ctx := publishedContext(t, &httpx.Response{StatusCode: 200, Headers: map[string][]string{"Etag": {`"new"`}}})

@@ -56,7 +56,7 @@ Feature: Set headers policy on the response flow
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get?statusCode=201" until status 201
     Then the response status code should be 201
-    And the response header "<header>" should be "gateway-value"
+    And the response header "<header>" should have only the value "gateway-value"
     And the response header "<kept>" should be "<keptValue>"
     And the response header "X-Removed-Response" should be "removed"
     And the response header "Content-Type" should be "application/json"
@@ -96,7 +96,7 @@ Feature: Set headers policy on the response flow
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/get" until status 200
     Then the response header "X-Gateway-Response" should be "gateway-value"
     And the response header "X-Gateway-Region" should be "eu-west"
-    And the response header "X-Denied-Response" should be "overridden"
+    And the response header "X-Denied-Response" should have only the value "overridden"
     And the response header "X-Allowed-Response" should be "allowed"
     And the response header "X-Removed-Response" should be "removed"
 

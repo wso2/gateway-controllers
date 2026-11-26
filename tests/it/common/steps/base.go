@@ -205,6 +205,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the response should contain Prometheus metrics$`, b.responseContainsPrometheusMetrics)
 	sc.Step(`^the response should contain metric "([^"]*)"$`, b.responseContainsMetric)
 	sc.Step(`^the response header "([^"]*)" should be "([^"]*)"$`, b.responseHeaderEquals)
+	sc.Step(`^the response header "([^"]*)" should have only the value "([^"]*)"$`, b.responseHeaderOnlyValue)
 	sc.Step(`^the response header "([^"]*)" should contain "([^"]*)"$`, b.responseHeaderContains)
 	sc.Step(`^the response header "([^"]*)" should not contain "([^"]*)"$`, b.responseHeaderNotContains)
 	sc.Step(`^the response header "([^"]*)" should not be "([^"]*)"$`, b.responseHeaderNotEquals)
@@ -1450,6 +1451,26 @@ func (b *Base) responseHeaderEquals(ctx context.Context, name, want string) erro
 	got := resp.Headers.Get(name)
 	if got != resolved {
 		return fmt.Errorf("expected header %q to be %q, got %q (%s)",
+			name, resolved, got, resp.Describe())
+	}
+	return nil
+}
+
+// responseHeaderOnlyValue asserts that a header is sent exactly once, with the wanted value.
+// responseHeaderEquals reads only the first value, so it cannot tell a replaced header from one
+// that still carries a second, older value after the wanted one.
+func (b *Base) responseHeaderOnlyValue(ctx context.Context, name, want string) error {
+	resp, err := httpx.Published(ctx)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	got := resp.Headers.Values(name)
+	if len(got) != 1 || got[0] != resolved {
+		return fmt.Errorf("expected header %q to have only the value %q, got %q (%s)",
 			name, resolved, got, resp.Describe())
 	}
 	return nil

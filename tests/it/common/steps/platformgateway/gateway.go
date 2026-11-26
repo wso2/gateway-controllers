@@ -2197,7 +2197,29 @@ func (g *Gateway) serviceLogsNotContain(ctx context.Context, service, text strin
 	if err != nil {
 		return err
 	}
-	if strings.Contains(stack.Logs(ctx), text) {
+	return checkLogsNotContain(stack.Logs(ctx), service, text)
+}
+
+// unreadLogNotes are the notes the framework's stack Logs writes in place of a log it could not
+// read. A log holding one was not read in full, so it cannot show that a text is absent.
+var unreadLogNotes = []string{
+	"(no stack to read logs from)",
+	"(could not locate service: ",
+	"(could not read logs: ",
+	"(log read failed: ",
+}
+
+// checkLogsNotContain fails when logs contain text, or when logs hold a note that a log could not
+// be read: such a log would pass for any text.
+func checkLogsNotContain(logs, service, text string) error {
+	for _, line := range strings.Split(logs, "\n") {
+		for _, note := range unreadLogNotes {
+			if strings.HasPrefix(line, note) {
+				return fmt.Errorf("cannot check that service %q logs do not contain %q: %s", service, text, line)
+			}
+		}
+	}
+	if strings.Contains(logs, text) {
 		return fmt.Errorf("service %q logs unexpectedly contain %q", service, text)
 	}
 	return nil
