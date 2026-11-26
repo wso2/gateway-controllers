@@ -25,6 +25,7 @@ Feature: Json xml mediator policy
   Background:
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
+    And I resolve the "capture" service URL at "" and store it as "captureUpstream"
 
   # The response must match the expected error response recorded from the policy before a
   # change (resources/expected-error-responses), so a change a client could observe fails.
@@ -38,7 +39,7 @@ Feature: Json xml mediator policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.upstream.main.url | ${CTX:captureUpstream}/${CTX:apiName} |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/convert","policies":[{"name":"json-xml-mediator","version":"v1","params":{"downsteamPayloadFormat":"json","upstreamPayloadFormat":"xml"}}]}] |
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
@@ -50,3 +51,11 @@ Feature: Json xml mediator policy
       """
     Then the response status code should be 500
     And the response should match the expected error response "json-xml-mediator-request-content-type"
+
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/convert" until status 204
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
