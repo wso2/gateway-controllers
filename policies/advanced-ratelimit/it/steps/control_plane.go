@@ -309,23 +309,36 @@ func (s *Steps) createRestAPIWithQuotas(ctx context.Context, id, projectHandle, 
 		restAPIPayload(resolvedID, resolvedProject, resolvedContext, quotas), &created); err != nil {
 		return err
 	}
-	if err := checkAssignedHandle(created.Handle, created.ID, created.UUID, resolvedID); err != nil {
+	// The API exists from here on, so it is registered for cleanup before the handle is checked,
+	// and under the name the control plane gave it: that is the resource a delete has to reach.
+	assigned := assignedHandle(created.Handle, created.ID, created.UUID)
+	cleanupID := resolvedID
+	if assigned != "" {
+		cleanupID = assigned
+	}
+	if err := s.registerResource(ctx, restAPIKind, cleanupID, "/rest-apis"); err != nil {
 		return err
 	}
-	return s.registerResource(ctx, restAPIKind, resolvedID, "/rest-apis")
+	return checkAssignedHandle(assigned, resolvedID)
+}
+
+// assignedHandle is the identifier the control plane gave the API: its handle, else its id, else
+// its uuid. It is empty when the response named none.
+func assignedHandle(handle, id, uuid string) string {
+	if handle != "" {
+		return handle
+	}
+	if id != "" {
+		return id
+	}
+	return uuid
 }
 
 // checkAssignedHandle fails when the control plane named the API differently from the requested
 // handle, because a later deploy would then address the wrong resource.
-func checkAssignedHandle(handle, id, uuid, want string) error {
-	if handle == "" {
-		handle = id
-	}
-	if handle == "" {
-		handle = uuid
-	}
-	if handle != "" && handle != want {
-		return fmt.Errorf("control plane assigned REST API handle %q, expected %q: a later deploy would address the wrong resource", handle, want)
+func checkAssignedHandle(assigned, want string) error {
+	if assigned != "" && assigned != want {
+		return fmt.Errorf("control plane assigned REST API handle %q, expected %q: a later deploy would address the wrong resource", assigned, want)
 	}
 	return nil
 }

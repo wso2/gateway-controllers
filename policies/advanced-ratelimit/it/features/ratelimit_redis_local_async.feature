@@ -133,6 +133,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     Given I generate a unique value from "arl-async-restart" and store it as "apiName"
     And I generate a unique API version from "arl-async-restart" and store it as "apiVersion"
     And I generate a unique API context from "/arl-async-restart" and store it as "apiContext"
+    And I generate a unique value from "arl-async-restart-user" and store it as "restartUser"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}         |
       | name                   | ${CTX:apiName}                   |
@@ -140,21 +141,33 @@ Feature: Advanced rate limit on the redis-local-async backend
       | spec.version           | ${CTX:apiVersion}                |
       | spec.context           | ${CTX:apiContext}/$version       |
       | spec.upstream.main.url | http://testbench:3000            |
-      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"GET","path":"/resource","policies":[{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"async-restart","limits":[{"limit":2,"duration":"1h"}]}]}}]}] |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"GET","path":"/resource","policies":[{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"async-restart","limits":[{"limit":2,"duration":"1h"}],"keyExtraction":[{"type":"header","key":"X-User-ID"}]}]}}]}] |
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
-    When I send 2 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource"
+    When I set header "X-User-ID" to "${CTX:restartUser}"
+    And I send 2 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource"
     Then the response status code should be 200
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource"
     Then the response status code should be 429
+    # The requests are counted locally and flushed to Redis in the background, so wait until
+    # Redis holds the count before the gateway goes away.
+    And the Redis counter for "${CTX:restartUser}" should reach 2
 
     When I restart the "gateway-runtime" service
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
-    # The restarted process counts locally from zero, so its first requests may still be admitted.
-    # Once it has read the count back from Redis, where the first process flushed it, it rejects.
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource" until status 429
-    Then the response body should contain "Rate limit exceeded"
+    # A restarted process counts from zero until its first flush reads the count back, so its
+    # first request is admitted. Once Redis shows that request on top of the earlier two, the
+    # gateway has read the total back and refuses the next one. A gateway that ignored Redis
+    # would still hold only its own single request, below the limit of 2, and admit it.
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource"
+    Then the response status code should be 200
+    And the Redis counter for "${CTX:restartUser}" should reach 3
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource"
+    Then the response status code should be 429
+    And the response body should contain "Rate limit exceeded"
+    And I clear all headers
+    And I authenticate using basic auth as "admin"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
@@ -165,6 +178,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     Given I generate a unique value from "arl-async-outage" and store it as "apiName"
     And I generate a unique API version from "arl-async-outage" and store it as "apiVersion"
     And I generate a unique API context from "/arl-async-outage" and store it as "apiContext"
+    And I generate a unique value from "arl-async-recovered-user" and store it as "recoveredUser"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}         |
       | name                   | ${CTX:apiName}                   |
@@ -186,10 +200,13 @@ Feature: Advanced rate limit on the redis-local-async backend
     And the "gateway-runtime" service logs should not contain the Redis password
 
     When I start the Redis component
-    And I set header "X-User-ID" to "recovered-user"
+    And I set header "X-User-ID" to "${CTX:recoveredUser}"
     And I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource"
     Then the response status code should be 200
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource" until status 429
+    # A fresh key is also enforced from the gateway's own count, so only Redis can show that the
+    # gateway reconnected and is sharing the usage again.
+    Then the Redis counter for "${CTX:recoveredUser}" should reach 3
     And I clear all headers
     And I authenticate using basic auth as "admin"
 

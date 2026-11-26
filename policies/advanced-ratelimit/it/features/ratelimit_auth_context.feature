@@ -155,6 +155,7 @@ Feature: Advanced rate limit combined with jwt-auth
     And I generate a unique API context from "/arl-jwt-metadata" and store it as "apiContext"
     And I generate a unique value from "arl-meta-app-one" and store it as "clientOne"
     And I generate a unique value from "arl-meta-app-two" and store it as "clientTwo"
+    And I store the value "metadata" as "keyType"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}         |
       | name                   | ${CTX:apiName}                   |
@@ -162,7 +163,7 @@ Feature: Advanced rate limit combined with jwt-auth
       | spec.version           | ${CTX:apiVersion}                |
       | spec.context           | ${CTX:apiContext}/$version       |
       | spec.upstream.main.url | http://testbench:3000            |
-      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"GET","path":"/protected","policies":[{"name":"jwt-auth","version":"v1","params":{"issuers":["mock-jwks-appid"]}},{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"per-application","limits":[{"limit":1,"duration":"1h"}],"keyExtraction":[{"type":"metadata","key":"x-wso2-application-id"}]}]}}]}] |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"GET","path":"/protected","policies":[{"name":"jwt-auth","version":"v1","params":{"issuers":["mock-jwks-appid"]}},{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"per-application","limits":[{"limit":1,"duration":"1h"}],"keyExtraction":[{"type":"${CTX:keyType}","key":"x-wso2-application-id"}]}]}}]}] |
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
     And I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and claims "sub=alice,client_id=${CTX:clientOne}" and store it as "oneToken"

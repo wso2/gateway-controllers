@@ -27,12 +27,46 @@ import (
 	"github.com/cucumber/godog"
 
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
+	"github.com/wso2/api-platform/tests/framework/core/util/retry"
 
 	stepscommon "github.com/wso2/gateway-controllers/tests/it/common/steps/common"
 )
 
 func (s *Steps) registerReplicas(sc *godog.ScenarioContext) {
 	sc.Step(`^I send (\d+) "([^"]*)" requests to the (first|second) gateway "([^"]*)"$`, s.sendRepeatedAt)
+	sc.Step(`^I send a "([^"]*)" request to the (first|second) gateway "([^"]*)" until header "([^"]*)" is "([^"]*)"$`,
+		s.sendUntilHeaderAt)
+}
+
+// sendUntilHeaderAt polls a gateway replica until a response header carries the wanted value. A
+// rate limit header only appears once the replica has loaded the policy, so this waits for that
+// without depending on the quota's state: the response it stops on is the first one the policy
+// counted, which the next assertion can then check.
+func (s *Steps) sendUntilHeaderAt(ctx context.Context, method, ordinal, path, name, want string) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	wantValue, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	target, err := s.base.GatewayURLAt(ordinal, resolved)
+	if err != nil {
+		return err
+	}
+	method = strings.ToUpper(method)
+	return stepscommon.AwaitResponse(ctx, func(ctx context.Context) (*httpx.Response, error) {
+		resp, sendErr := s.funnel.Send(ctx, httpx.Request{
+			Method: method, URL: target, Headers: maps.Clone(s.base.ScenarioHeaders(ctx)), Host: s.base.RequestHost(ctx),
+		})
+		if sendErr != nil {
+			return nil, retry.Transient(sendErr)
+		}
+		return resp, nil
+	}, func(resp *httpx.Response) bool {
+		return resp != nil && resp.Headers.Get(name) == wantValue
+	}, fmt.Sprintf("waiting for %s %s to answer with header %s: %q", method, target, name, wantValue))
 }
 
 // sendRepeatedAt sends n requests one after another to the chosen gateway replica, without

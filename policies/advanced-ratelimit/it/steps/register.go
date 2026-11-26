@@ -50,6 +50,9 @@ type Steps struct {
 
 	controlPlane controlPlane
 
+	// redisID is the Redis container once it has been found. A container that is stopped and
+	// started again is published on a new host port, so the port cannot find it a second time.
+	redisID string
 	// stoppedRedis is the container a scenario stopped and has not started again.
 	stoppedRedis string
 	// docker runs the docker CLI; tests replace it.
@@ -73,4 +76,5 @@ func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, topo *framework
 	s.registerRedis(sc)
 	s.registerReplicas(sc)
 	s.registerControlPlane(sc)
+	sc.Step(`^I store the value "([^"]*)" as "([^"]*)"$`, storeValue)
 }

@@ -76,9 +76,11 @@ Feature: Advanced rate limit quota shared by two gateway replicas through Redis
 
     When I deploy the "RestApi" "${CTX:apiHandle}" to the second gateway via the control plane
     Then I send a "GET" request to the second gateway "${CTX:apiCtx}/health" until status 200
-    # The replica has to see the count Redis already holds; polling tolerates the moment between a
-    # route answering and its policy chain being loaded, when a request is not yet counted.
-    When I send a "GET" request to the second gateway "${CTX:apiCtx}/limited" until status 429
+    # Until the replica has loaded the policy a request is passed on without being counted and
+    # carries no rate limit header. The first request the policy does count has to be refused,
+    # because Redis already holds the whole quota; a replica with a quota of its own would admit it.
+    When I send a "GET" request to the second gateway "${CTX:apiCtx}/limited" until header "X-RateLimit-Limit" is "2"
+    Then the response status code should be 429
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
   @skip-gw-1.1.0

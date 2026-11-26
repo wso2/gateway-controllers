@@ -46,9 +46,16 @@ Feature: Advanced rate limit with the GCRA algorithm on the Redis backend
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
-    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/burst" until status 429
-    Then the response header "Retry-After" should exist
+    # An empty bucket admits exactly the burst, then refuses the next request.
+    When I send 2 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/burst"
+    Then the response status code should be 200
+    And the response header "X-RateLimit-Remaining" should be "0"
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/burst"
+    Then the response status code should be 429
+    And the response header "Retry-After" should exist
     And the response header "X-RateLimit-Quota" should be "redis-burst"
+
+    # One emission interval later a request is admitted again.
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/burst" until status 200
 
     When I delete the API "${CTX:apiName}"

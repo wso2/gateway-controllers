@@ -30,6 +30,7 @@ import (
 
 	"github.com/cucumber/godog"
 
+	"github.com/wso2/api-platform/tests/framework/core/catalog/infrastructure"
 	"github.com/wso2/api-platform/tests/framework/core/util/httpx"
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
 )
@@ -178,6 +179,20 @@ func TestRedisStartAndStopGuards(t *testing.T) {
 	}
 }
 
+func TestRedisContainerIDIsRememberedAcrossARestart(t *testing.T) {
+	s := newSteps(fakeBase{}, nil)
+	s.docker = func(context.Context, ...string) (string, error) {
+		t.Fatal("a known container must not be looked up again by its port")
+		return "", nil
+	}
+	s.redisID = "abc123"
+	for i := 0; i < 2; i++ {
+		if id, err := s.redisContainerID(scenarioContext()); err != nil || id != "abc123" {
+			t.Fatalf("redisContainerID = %q, %v; want abc123", id, err)
+		}
+	}
+}
+
 func TestRunDockerReportsFailures(t *testing.T) {
 	if _, err := runDocker(context.Background(), "this-subcommand-does-not-exist"); err == nil {
 		t.Skip("docker accepted an unknown subcommand")
@@ -245,6 +260,43 @@ func TestSendRepeatedAtTargetsReplicaAndPublishesLast(t *testing.T) {
 	}
 	if firstHits.Load() != 1 {
 		t.Fatalf("first replica served %d requests, want 1", firstHits.Load())
+	}
+}
+
+func TestSendUntilHeaderAtWaitsForTheHeaderAndPublishesThatResponse(t *testing.T) {
+	var hits atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The policy is not loaded for the first two requests, so no rate limit header yet.
+		if hits.Add(1) > 2 {
+			w.Header().Set("X-RateLimit-Limit", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	s := newSteps(fakeBase{replicas: map[string]string{"second": server.URL}}, nil)
+	ctx := scenarioContext()
+	if err := s.sendUntilHeaderAt(ctx, "get", "second", "/limited", "X-RateLimit-Limit", "2"); err != nil {
+		t.Fatalf("polling for the header: %v", err)
+	}
+	if hits.Load() != 3 {
+		t.Fatalf("the poll sent %d requests, want 3", hits.Load())
+	}
+	published, err := httpx.Published(ctx)
+	if err != nil {
+		t.Fatalf("the response that carried the header should be published: %v", err)
+	}
+	if published.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("published status %d, want 429", published.StatusCode)
+	}
+}
+
+func TestSendUntilHeaderAtRejectsAnUnknownReplica(t *testing.T) {
+	s := newSteps(fakeBase{replicas: map[string]string{"first": "http://127.0.0.1:1"}}, nil)
+	if err := s.sendUntilHeaderAt(scenarioContext(), "GET", "third", "/x", "X-A", "1"); err == nil {
+		t.Fatal("an unknown replica should be rejected")
 	}
 }
 
@@ -354,14 +406,27 @@ func TestCreateRestAPIWithQuotasValidatesBeforeCallingTheControlPlane(t *testing
 	}
 }
 
+func TestAssignedHandle(t *testing.T) {
+	for name, tc := range map[string]struct{ handle, id, uuid, want string }{
+		"handle first": {"h", "i", "u", "h"},
+		"id next":      {"", "i", "u", "i"},
+		"uuid last":    {"", "", "u", "u"},
+		"none":         {"", "", "", ""},
+	} {
+		if got := assignedHandle(tc.handle, tc.id, tc.uuid); got != tc.want {
+			t.Errorf("%s: got %q, want %q", name, got, tc.want)
+		}
+	}
+}
+
 func TestCheckAssignedHandle(t *testing.T) {
-	if err := checkAssignedHandle("", "", "", "api"); err != nil {
+	if err := checkAssignedHandle("", "api"); err != nil {
 		t.Fatalf("a response without a handle should pass: %v", err)
 	}
-	if err := checkAssignedHandle("api", "", "", "api"); err != nil {
+	if err := checkAssignedHandle("api", "api"); err != nil {
 		t.Fatalf("a matching handle should pass: %v", err)
 	}
-	if err := checkAssignedHandle("", "", "uuid-1", "api"); err == nil {
+	if err := checkAssignedHandle("uuid-1", "api"); err == nil {
 		t.Fatal("a different identifier should fail")
 	}
 }
@@ -390,5 +455,91 @@ func TestIsLastProjectValidation(t *testing.T) {
 	}
 	if isLastProjectValidation(nil) {
 		t.Fatal("a nil response is not the refusal")
+	}
+}
+
+func TestStoreValue(t *testing.T) {
+	ctx := scenarioContext()
+	if err := storeValue(ctx, "metadata", "keyType"); err != nil {
+		t.Fatalf("storing a value: %v", err)
+	}
+	if got, err := tcontext.ResolveString(ctx, "keyType"); err != nil || got != "metadata" {
+		t.Fatalf("stored %q, %v; want metadata", got, err)
+	}
+	if err := storeValue(ctx, "x", "  "); err == nil {
+		t.Fatal("an empty key should be rejected")
+	}
+	if err := storeValue(context.Background(), "x", "k"); err == nil {
+		t.Fatal("a context without a runner should be rejected")
+	}
+}
+
+func TestParseCounter(t *testing.T) {
+	for in, want := range map[string]int64{"3\n": 3, "  12 ": 12, "": 0, "\n": 0} {
+		if got, err := parseCounter(in); err != nil || got != want {
+			t.Errorf("parseCounter(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	if _, err := parseCounter("(error) WRONGTYPE"); err == nil {
+		t.Fatal("a non-number should be rejected")
+	}
+}
+
+func TestHighestCounterReadsEveryMatchingKeyWithoutPuttingThePasswordOnTheCommandLine(t *testing.T) {
+	var calls [][]string
+	s := newSteps(fakeBase{}, nil)
+	s.docker = func(_ context.Context, args ...string) (string, error) {
+		calls = append(calls, args)
+		switch {
+		case strings.Contains(strings.Join(args, " "), "--scan"):
+			return "ratelimit:v1:user-1:1\nratelimit:v1:user-1:2\n", nil
+		case args[len(args)-1] == "ratelimit:v1:user-1:1":
+			return "2\n", nil
+		default:
+			return "5\n", nil
+		}
+	}
+	got, err := s.highestCounter(context.Background(), "cid", "user-1")
+	if err != nil || got != 5 {
+		t.Fatalf("highestCounter = %d, %v; want 5", got, err)
+	}
+	if len(calls) != 3 {
+		t.Fatalf("expected one scan and two reads, got %v", calls)
+	}
+	scan := calls[0]
+	if scan[len(scan)-1] != "ratelimit:v1:*user-1*" {
+		t.Fatalf("scan pattern %q", scan[len(scan)-1])
+	}
+	for _, call := range calls {
+		if call[1] != "-e" || call[2] != "REDISCLI_AUTH="+infrastructure.RedisPassword {
+			t.Fatalf("the password must travel as REDISCLI_AUTH in the exec environment: %v", call)
+		}
+		for _, arg := range call[3:] {
+			if arg == infrastructure.RedisPassword {
+				t.Fatalf("the password must not be a command-line argument: %v", call)
+			}
+		}
+	}
+}
+
+func TestHighestCounterIsZeroWithoutKeysAndReportsDockerFailures(t *testing.T) {
+	s := newSteps(fakeBase{}, nil)
+	s.docker = func(context.Context, ...string) (string, error) { return "", nil }
+	if got, err := s.highestCounter(context.Background(), "cid", "none"); err != nil || got != 0 {
+		t.Fatalf("no keys should read as zero, got %d, %v", got, err)
+	}
+	s.docker = func(context.Context, ...string) (string, error) { return "", fmt.Errorf("docker is down") }
+	if _, err := s.highestCounter(context.Background(), "cid", "x"); err == nil {
+		t.Fatal("a docker failure should be reported")
+	}
+}
+
+func TestRedisCounterReachesRejectsGlobCharacters(t *testing.T) {
+	s := newSteps(fakeBase{}, nil)
+	s.docker = func(context.Context, ...string) (string, error) { return "", nil }
+	for _, fragment := range []string{"", "a*b", "a b", "x[1]"} {
+		if err := s.redisCounterReaches(scenarioContext(), fragment, 1); err == nil {
+			t.Errorf("fragment %q should be rejected", fragment)
+		}
 	}
 }

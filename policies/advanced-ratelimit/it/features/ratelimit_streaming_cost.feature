@@ -46,14 +46,20 @@ Feature: Advanced rate limit cost extraction from streamed responses
     Then the resource creation response should indicate successful deployment
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 200 with body:
       """
-      {"x_testbench_reply":{"events":[{"choices":[{"delta":{"content":"Hello"}}]},{"usage":{"total_tokens":10}},{"usage":{"total_tokens":100}},"data: [DONE]"]}}
+      {"x_testbench_reply":{"events":[{"choices":[{"delta":{"content":"Hello"}}]},{"usage":{"total_tokens":70}},{"usage":{"total_tokens":60}},"data: [DONE]"]}}
       """
     Then the response header "Content-Type" should contain "text/event-stream"
     And the response body should contain "Hello"
     And the response body should contain "data: [DONE]"
     And the response header "X-RateLimit-Limit" should be "100"
 
-    # The last usage event (100) is the charge, which exhausts the quota.
+    # The last usage value (60) is the charge. Charging the first value (70) would leave 30 and
+    # adding the values up (130) would exhaust the quota, so what remains tells the rules apart.
+    # This stream reports the remaining quota and spends it, with a charge of exactly 40.
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until header "X-RateLimit-Remaining" is "40" with body:
+      """
+      {"x_testbench_reply":{"events":[{"usage":{"total_tokens":40}},"data: [DONE]"]}}
+      """
     When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 429 with body:
       """
       {"x_testbench_reply":{"events":[{"choices":[{"delta":{"content":"Again"}}]},{"usage":{"total_tokens":1}},"data: [DONE]"]}}
