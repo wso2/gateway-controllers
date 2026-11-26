@@ -1190,3 +1190,291 @@ Feature: MCP proxies governed by mcp-authz
     And I authenticate using basic auth as "admin"
     And I delete the MCP proxy "${CTX:mcpName}"
     Then the response should be successful
+
+  # On gateway latest, mcp-authz decides a 2026-07-28 request from its Mcp-Method and Mcp-Name
+  # headers and does not read the body. The upstream is the scripted MCP server: it ignores the
+  # headers, answers every tool and records the tool each call ran, so a row can show whether the
+  # body's tool (always add) really ran. The MCP client mirrors add into Mcp-Name itself; a row's
+  # own Mcp-Name header replaces that value.
+  Scenario Outline: mcp-authz decides a 2026-07-28 tool call by its Mcp-Name header (<case>)
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "mcp-authz-mirrored" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-mirrored" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-mirrored" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-mirrored" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-authz-mirrored" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion}                                                                                                                                                      |
+      | name              | ${CTX:mcpName}                                                                                                                                                                 |
+      | displayName       | ${CTX:mcpDisplayName}                                                                                                                                                          |
+      | version           | ${CTX:mcpVersion}                                                                                                                                                              |
+      | context           | ${CTX:mcpContext}                                                                                                                                                              |
+      | specVersion       | 2026-07-28                                                                                                                                                                     |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath}                                                                                                            |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"]}},{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"add","scopes":{"allOf":["maz-all"]}}]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "<token scopes>" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I set header "Mcp-Name" to "<mcp name>"
+    And I use the MCP Client to send a "tools/call" request for "add" to "${CTX:mcpContext}/mcp" declaring MCP version "2026-07-28"
+    Then the response status code should be <status>
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the response should be successful
+    And the JSON response array "requests" should <add ran> an item with "tool" equal to "add"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: the tool named in Mcp-Name decides
+      | case                                       | mcp name        | token scopes | status | add ran     |
+      # MAZ #45: add in the base64 form is still the protected tool; without the scope it is refused.
+      | base64 add without the scope               | =?base64?YWRk?= | maz-none     | 403    | not contain |
+      # MAZ #45: add in the base64 form with the scope runs.
+      | base64 add with the scope                  | =?base64?YWRk?= | maz-all      | 200    | contain     |
+      # MAZ #48: the header names echo, which no rule protects, so the body's add runs without the scope.
+      | header names echo while the body calls add | echo            | maz-none     | 200    | contain     |
+      # MAZ #48 (control): the same call with the header naming add is refused.
+      | header names add                           | add             | maz-none     | 403    | not contain |
+
+  # A 2026-07-28 request must mirror its method into Mcp-Method, and a tools/call, resources/read
+  # or prompts/get must also mirror its name into Mcp-Name. Without them mcp-authz cannot tell
+  # what is called, so it answers 400 before any rule or identity is looked at. mcp-authz runs
+  # alone here: with mcp-auth in front, mcp-auth refuses the same requests first. mcp-authz does
+  # not read the body of a 2026-07-28 request, so the bodies are kept short. No step removes a
+  # header, so a row that leaves a mirrored header out sets the harmless X-Maz-Unused instead.
+  Scenario Outline: A 2026-07-28 request without a usable Mcp-Method or Mcp-Name is refused (<case>)
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "mcp-authz-mirror-missing" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-mirror-missing" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-mirror-missing" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-mirror-missing" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion}                                                                                                                                                                                                |
+      | name              | ${CTX:mcpName}                                                                                                                                                                                                           |
+      | displayName       | ${CTX:mcpDisplayName}                                                                                                                                                                                                    |
+      | version           | ${CTX:mcpVersion}                                                                                                                                                                                                        |
+      | context           | ${CTX:mcpContext}                                                                                                                                                                                                        |
+      | specVersion       | 2026-07-28                                                                                                                                                                                                               |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath}                                                                                                                                                                       |
+      | spec.policies     | [{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"resources":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"prompts":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+
+    When I set header "MCP-Protocol-Version" to "2026-07-28"
+    And I set header "<header 1>" to "<value 1>"
+    And I set header "<header 2>" to "<value 2>"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <body>
+      """
+    Then the response status code should be <status>
+    And the response body should contain "<message>"
+    And the response header "WWW-Authenticate" should match pattern "error=\x22<error>\x22"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: mirrored headers
+      | case                                 | header 1   | value 1        | header 2     | value 2        | body                                                                                          | status | error           | message                                                       |
+      # MAZ #46, #47 (control): with both headers the rules apply, so the caller with no identity gets 401.
+      | both headers                         | Mcp-Method | tools/call     | Mcp-Name     | add            | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}                        | 401    | invalid_token   | Unauthorized: authentication required for this MCP capability |
+      # MAZ #46: no Mcp-Method.
+      | no Mcp-Method                        | Mcp-Name   | add            | X-Maz-Unused | 1              | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}                        | 400    | invalid_request | Mcp-Method header is required                                 |
+      # MAZ #47: a tools/call with no Mcp-Name.
+      | tools/call with no Mcp-Name          | Mcp-Method | tools/call     | X-Maz-Unused | 1              | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}                        | 400    | invalid_request | Mcp-Name header is required for tools/call                    |
+      # MAZ #47: an Mcp-Name in the base64 form whose content is not base64.
+      | tools/call with an undecodable name  | Mcp-Method | tools/call     | Mcp-Name     | =?base64?***?= | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}                        | 400    | invalid_request | Mcp-Name header is required for tools/call                    |
+      # MAZ #47: an Mcp-Name in the base64 form with nothing inside.
+      | tools/call with an empty base64 name | Mcp-Method | tools/call     | Mcp-Name     | =?base64?=     | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add"}}                        | 400    | invalid_request | Mcp-Name header is required for tools/call                    |
+      # MAZ #47: a resources/read with no Mcp-Name.
+      | resources/read with no Mcp-Name      | Mcp-Method | resources/read | X-Maz-Unused | 1              | {"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"file:///docs/readme.txt"}} | 400    | invalid_request | Mcp-Name header is required for resources/read                |
+      # MAZ #47: a prompts/get with no Mcp-Name.
+      | prompts/get with no Mcp-Name         | Mcp-Method | prompts/get    | X-Maz-Unused | 1              | {"jsonrpc":"2.0","id":1,"method":"prompts/get","params":{"name":"greeting"}}                  | 400    | invalid_request | Mcp-Name header is required for prompts/get                   |
+
+  # Gateways 1.1.0 and 1.2.0 have no MCP resolver, so mcp-authz reads the tool from the body and
+  # ignores the mirrored headers, even on a request that declares 2026-07-28. These gateways do not
+  # accept a 2026-07-28 proxy, so the proxy is 2025-06-18; the request still carries the headers.
+  # The upstream is the scripted MCP server, which records the tool each call ran.
+  Scenario Outline: Without the MCP resolver, mcp-authz reads the tool from the body (<case>)
+    Given the gateway version satisfies "<=1.2.0"
+    And I generate a unique resource name from "mcp-authz-body-decides" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-body-decides" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-body-decides" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-body-decides" and store it as "mcpContext"
+    And I generate a unique resource name from "mcp-authz-body-decides" and store it as "partition"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion}                                                                                |
+      | name              | ${CTX:mcpName}                                                                                           |
+      | displayName       | ${CTX:mcpDisplayName}                                                                                    |
+      | version           | ${CTX:mcpVersion}                                                                                        |
+      | context           | ${CTX:mcpContext}                                                                                        |
+      | specVersion       | 2025-06-18                                                                                               |
+      | spec.upstream.url | http://testbench:3021/${CTX:partition}${CTX:gatewayMCPUpstreamPath}                                      |
+      | spec.policies     | [{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"add","scopes":{"allOf":["maz-all"]}}]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 200 with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+
+    When I set header "MCP-Protocol-Version" to "2026-07-28"
+    And I set header "Mcp-Method" to "tools/call"
+    And I set header "Mcp-Name" to "<mcp name>"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"<body tool>","arguments":{"text":"ran"}}}
+      """
+    Then the response status code should be <status>
+
+    When I clear all headers
+    And I send a "GET" request to the "mcp-scripted" service at "/${CTX:partition}/test/requests"
+    Then the response should be successful
+    And the JSON response array "requests" should <ran> an item with "tool" equal to "<body tool>"
+
+    When I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: the body decides
+      | case                                       | mcp name | body tool | status | ran         |
+      # MAZ #49: the header names echo, but the body's add is protected, so the caller with no identity gets 401.
+      | header names echo while the body calls add | echo     | add       | 401    | not contain |
+      # MAZ #49: the header names the protected add, but the body's echo is not protected, so it runs.
+      | header names add while the body calls echo | add      | echo      | 200    | contain     |
+
+  # mcp-auth does not check the token for a tool in its exceptions list, so a call to that tool
+  # reaches mcp-authz with no identity. If an mcp-authz rule protects the tool, mcp-authz answers
+  # its own 401, whose message differs from mcp-auth's "Authentication failed".
+  # MAZ #50: mcp-auth skips add and mcp-authz protects it; a call with no token gets mcp-authz's 401.
+  # MAZ #9: the second half, a protected tool that mcp-auth skipped.
+  Scenario: A tool mcp-auth skips still gets mcp-authz's 401
+    Given I generate a unique resource name from "mcp-authz-auth-skipped" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-auth-skipped" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-auth-skipped" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-auth-skipped" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion        | ${CTX:gatewaySpecVersion}                                                                                                                                                                                     |
+      | name              | ${CTX:mcpName}                                                                                                                                                                                                |
+      | displayName       | ${CTX:mcpDisplayName}                                                                                                                                                                                         |
+      | version           | ${CTX:mcpVersion}                                                                                                                                                                                             |
+      | context           | ${CTX:mcpContext}                                                                                                                                                                                             |
+      | specVersion       | 2025-06-18                                                                                                                                                                                                    |
+      | spec.upstream.url | http://testbench:3009${CTX:gatewayMCPUpstreamPath}                                                                                                                                                            |
+      | spec.policies     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"],"tools":{"exceptions":["add"]}}},{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"add","scopes":{"allOf":["maz-all"]}}]}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+
+    When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 401
+    And the response body should contain "Unauthorized: authentication required for this MCP capability"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    # Control: mcp-auth still checks echo, and its own 401 has another message.
+    When I use the MCP Client to send "echo" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 401
+    And the response body should contain "Authentication failed"
+    And the response body should not contain "authentication required for this MCP capability"
+
+    # mcp-auth does not read the token for add either, so even a token with the scope gets
+    # mcp-authz's 401: a tool mcp-auth skips cannot pass an mcp-authz rule.
+    When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "maz-all" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
+    Then the response status code should be 401
+    And the response body should contain "Unauthorized: authentication required for this MCP capability"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+  # On gateway latest, an mcp-authz rejection carries a fault (a type and a code), which the gateway
+  # records in analytics and hands to the API's fault policies. The fault policy here is
+  # error-response-formatter with the canonical preset, which rewrites the client's body into the
+  # fault's code and type, so the body shows the fault policy ran. Analytics records a rejected
+  # request under the API's context, without /mcp. Every row sends a token with maz-none: mcp-auth
+  # skips echo, so the echo row reaches mcp-authz with no identity, and the unreadable-body row runs
+  # mcp-authz alone, because mcp-auth would refuse that body first.
+  Scenario Outline: An mcp-authz rejection reaches analytics and the API's fault policies (<case>)
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique resource name from "mcp-authz-fault" and store it as "mcpName"
+    And I generate a unique value from "mcp-authz-fault" and store it as "mcpDisplayName"
+    And I generate a unique API version from "mcp-authz-fault" and store it as "mcpVersion"
+    And I generate a unique API context from "/mcp-authz-fault" and store it as "mcpContext"
+    When I create MCP proxy from "resources/templates/mcp.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}                                                            |
+      | name               | ${CTX:mcpName}                                                                       |
+      | displayName        | ${CTX:mcpDisplayName}                                                                |
+      | version            | ${CTX:mcpVersion}                                                                    |
+      | context            | ${CTX:mcpContext}                                                                    |
+      | specVersion        | 2025-06-18                                                                           |
+      | spec.upstream.url  | http://testbench:3009${CTX:gatewayMCPUpstreamPath}                                   |
+      | spec.policies      | <policies>                                                                           |
+      | spec.faultPolicies | [{"name":"error-response-formatter","version":"v1","params":{"preset":"canonical"}}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I set header "Accept" to "application/json, text/event-stream"
+    And I send a "POST" request to "${CTX:mcpContext}/mcp" until status <ready> with body:
+      """
+      {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
+      """
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
+    # The warm-up's own event is recorded under the same path, so it is cleared first.
+    And I wait for the analytics collector to settle
+    And I reset the analytics collector
+
+    When I clear all headers
+    And I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and scope "maz-none" and store it as "token"
+    And I set header "Authorization" to "Bearer ${CTX:token}"
+    And I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
+      """
+      <request>
+      """
+    Then the response status code should be <status>
+    And the JSON response field "code" should be "<code>"
+    And the JSON response field "type" should be "<type>"
+    And the latest analytics event for path "${CTX:mcpContext}" should have response status <status>
+    And the latest analytics event for path "${CTX:mcpContext}" should have metadata field "error.type" with value "<type>"
+    And the latest analytics event for path "${CTX:mcpContext}" should have metadata field "error.wso2ErrorCode" with value "<code>"
+    And the latest analytics event for path "${CTX:mcpContext}" should have metadata field "error.policy" with value "mcp-authz"
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the MCP proxy "${CTX:mcpName}"
+    Then the response should be successful
+
+    Examples: one rejection of each kind
+      | case            | policies                                                                                                                                                                                                     | ready | request                                                                                              | status | type           | code   |
+      # MAZ #50: no identity reaches mcp-authz, an authentication failure.
+      | no identity     | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"],"tools":{"exceptions":["echo"]}}},{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}] | 401   | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{"message":"hi"}}} | 401    | authentication | 900902 |
+      # MAZ #50: the token lacks the scope, an authorization failure.
+      | scope missing   | [{"name":"mcp-auth","version":"v1","params":{"issuers":["mock-jwks"],"tools":{"exceptions":["echo"]}}},{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}] | 401   | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":40,"b":60}}}   | 403    | authorization  | 900910 |
+      # MAZ #50: a body mcp-authz cannot read, a validation failure.
+      | unreadable body | [{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}]                                                                                                       | 200   | {"jsonrpc":"2.0","id":1,"method":                                                                    | 400    | validation     | 960001 |
