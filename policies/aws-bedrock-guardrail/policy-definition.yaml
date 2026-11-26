@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.5.1
+version: v1.6.0
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
@@ -183,8 +183,18 @@ parameters:
           description: |
             JSONPath to the content to validate; supports [n], [-1], [*] and .*. Every string
             under a selected object or array is validated. MCP tool calls: "$.params.arguments".
-            Empty validates the whole payload.
+            Empty validates the whole payload. Tried before fallbackJsonPaths.
           default: "$.messages[-1].content"
+        fallbackJsonPaths:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPaths to try, in order, when jsonPath finds no text to validate. The first
+            path that finds text is validated. A request no path matches is handled as a
+            jsonPath miss. Same syntax as jsonPath.
+          items:
+            type: string
+            minLength: 1
         redactPII:
           type: boolean
           x-wso2-policy-advanced-param: true
@@ -223,8 +233,19 @@ parameters:
             JSONPath to the content to validate; supports [n], [-1], [*] and .*. Every string
             under a selected object or array is validated. MCP tool results:
             "$.result.content[*].text". Empty validates the whole payload. Streamed LLM
-            responses use streamingJsonPath instead.
+            responses use streamingJsonPath instead. Tried before fallbackJsonPaths.
           default: "$.choices[0].message.content"
+        fallbackJsonPaths:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPaths to try, in order, when jsonPath finds no text to validate. The first
+            path that finds text is validated. A response no path matches is handled as a
+            jsonPath miss. Same syntax as jsonPath. Streamed LLM responses use
+            streamingJsonPath instead.
+          items:
+            type: string
+            minLength: 1
         redactPII:
           type: boolean
           x-wso2-policy-advanced-param: true

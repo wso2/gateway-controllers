@@ -131,10 +131,80 @@ func extractPayloadAs(payload []byte, jsonPath string, eventStream bool) (*extra
 	}
 
 	if eventStream {
-		return extractEventStream(payload, jsonPath, tokens)
+		return extractEventStream(payload, []string{jsonPath}, [][]pathToken{tokens})
 	}
 
 	return nil, fmt.Errorf("payload is neither JSON nor a Server-Sent Events stream: %w", jsonErr)
+}
+
+// extractFirstHit tries the paths in order and returns the first that finds text.
+// If none finds text, it returns the first path that matched, or an error.
+// In a Server-Sent Events body, each event tries the paths on its own.
+func extractFirstHit(payload []byte, jsonPaths []string, eventStream bool) (*extractedPayload, error) {
+	extract := func(jsonPath string) (*extractedPayload, error) {
+		if eventStream {
+			return extractPayloadAs(payload, jsonPath, true)
+		}
+		return extractPayload(payload, jsonPath)
+	}
+	if len(jsonPaths) == 1 {
+		return extract(jsonPaths[0])
+	}
+	if _, err := decodeJSON(payload); err != nil && (eventStream || looksLikeEventStream(payload)) {
+		return extractEventStreamPaths(payload, jsonPaths)
+	}
+
+	var firstResolved *extractedPayload
+	misses := make([]string, 0, len(jsonPaths))
+	for _, jsonPath := range jsonPaths {
+		extracted, err := extract(jsonPath)
+		if err != nil {
+			misses = append(misses, err.Error())
+			continue
+		}
+		if segmentsHaveText(extracted.segments) {
+			return extracted, nil
+		}
+		if firstResolved == nil {
+			firstResolved = extracted
+		}
+	}
+	if firstResolved != nil {
+		return firstResolved, nil
+	}
+	return nil, fmt.Errorf("none of the JSONPaths matched the payload: %s", strings.Join(misses, "; "))
+}
+
+// extractEventStreamPaths extracts a Server-Sent Events body with several paths,
+// each event using the first path that finds text in it. A path that cannot be
+// parsed is skipped.
+func extractEventStreamPaths(payload []byte, jsonPaths []string) (*extractedPayload, error) {
+	usable := make([]string, 0, len(jsonPaths))
+	tokenLists := make([][]pathToken, 0, len(jsonPaths))
+	parseErrors := make([]string, 0, len(jsonPaths))
+	for _, jsonPath := range jsonPaths {
+		tokens, err := parseJSONPath(jsonPath)
+		if err != nil {
+			parseErrors = append(parseErrors, err.Error())
+			continue
+		}
+		usable = append(usable, jsonPath)
+		tokenLists = append(tokenLists, tokens)
+	}
+	if len(usable) == 0 {
+		return nil, fmt.Errorf("none of the JSONPaths matched the payload: %s", strings.Join(parseErrors, "; "))
+	}
+	return extractEventStream(payload, usable, tokenLists)
+}
+
+// segmentsHaveText reports whether any segment has non-blank text.
+func segmentsHaveText(segments []*textSegment) bool {
+	for _, segment := range segments {
+		if strings.TrimSpace(textCleanRegexCompiled.ReplaceAllString(segment.value, "")) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // structuredContentSegments returns the text of an MCP tool result's
@@ -392,7 +462,7 @@ func splitEvents(payload []byte) []*payloadEvent {
 	return events
 }
 
-func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*extractedPayload, error) {
+func extractEventStream(payload []byte, jsonPaths []string, tokenLists [][]pathToken) (*extractedPayload, error) {
 	events := splitEvents(payload)
 
 	var segments []*textSegment
@@ -418,42 +488,21 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		}
 		event.doc = doc
 		ev := event
-		eventSegments, err := resolveTextSegments(&event.doc, tokens, func() { ev.dirty = true })
-		if isRPC && (err == nil || errors.Is(err, errNoValue)) {
-			if extra := structuredContentSegments(&event.doc, tokens, eventSegments, func() { ev.dirty = true }); len(extra) > 0 {
-				if err != nil {
-					eventSegments, err = nil, nil
-				}
-				eventSegments = append(eventSegments, extra...)
-			}
-		}
-		if errors.Is(err, errNoValue) && isRPC && isJSONRPCError(doc) {
-			// An error response the path does not apply to: its own text is
-			// assessed instead.
-			eventSegments, err = resolveErrorText(&event.doc, func() { ev.dirty = true })
-		}
-		if err != nil {
-			// The path does not apply to this event (e.g. a progress notification).
-			// Content it missed would be delivered unassessed: a JSON-RPC message
-			// with content, such as a tool result of another shape; other JSON with
-			// text, even beside events the path does match; or a value the path
-			// selects that is not text (null, say), as extractPayload treats it.
-			switch {
-			case !errors.Is(err, errNoValue):
-				contentMissed = true
-			case isRPC:
-				contentMissed = contentMissed || !carriesNoContent(doc)
-			default:
-				contentMissed = contentMissed || carriesText(doc)
-			}
+		eventSegments, found, eventMissed := resolveEventSegments(&event.doc, isRPC, tokenLists, func() { ev.dirty = true })
+		if !found {
+			contentMissed = contentMissed || eventMissed
 			continue
 		}
 		matched = true
 		segments = append(segments, eventSegments...)
 	}
+	pathsLabel := fmt.Sprintf("jsonPath %q", jsonPaths[0])
+	if len(jsonPaths) > 1 {
+		pathsLabel = fmt.Sprintf("any of the JSONPaths %q", jsonPaths)
+	}
 	var missed error
 	if contentMissed {
-		missed = fmt.Errorf("an event in the Server-Sent Events stream carries content with no text at jsonPath %q", jsonPath)
+		missed = fmt.Errorf("an event in the Server-Sent Events stream carries content with no text at %s", pathsLabel)
 		if !matched {
 			return nil, missed
 		}
@@ -466,7 +515,7 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 		return unchangedPayload(payload), nil
 	}
 	if !matched {
-		return nil, fmt.Errorf("no event in the Server-Sent Events stream has a value at jsonPath %q", jsonPath)
+		return nil, fmt.Errorf("no event in the Server-Sent Events stream has a value at %s", pathsLabel)
 	}
 
 	rebuild := func() ([]byte, error) {
@@ -495,6 +544,50 @@ func extractEventStream(payload []byte, jsonPath string, tokens []pathToken) (*e
 	}
 
 	return &extractedPayload{segments: segments, rebuild: rebuild, stripLogprobs: stripLogprobs, missed: missed}, nil
+}
+
+// resolveEventSegments returns one event's segments from the first path that finds
+// text, or the first that resolves. When none resolves, missed reports unassessed content.
+func resolveEventSegments(root *interface{}, isRPC bool, tokenLists [][]pathToken, onChange func()) (segments []*textSegment, found, missed bool) {
+	doc := *root
+	var firstResolved []*textSegment
+	resolved := false
+	for _, tokens := range tokenLists {
+		eventSegments, err := resolveTextSegments(root, tokens, onChange)
+		if isRPC && (err == nil || errors.Is(err, errNoValue)) {
+			if extra := structuredContentSegments(root, tokens, eventSegments, onChange); len(extra) > 0 {
+				if err != nil {
+					eventSegments, err = nil, nil
+				}
+				eventSegments = append(eventSegments, extra...)
+			}
+		}
+		if errors.Is(err, errNoValue) && isRPC && isJSONRPCError(doc) {
+			// A JSON-RPC error the path misses: assess its own text.
+			eventSegments, err = resolveErrorText(root, onChange)
+		}
+		if err != nil {
+			switch {
+			case !errors.Is(err, errNoValue):
+				missed = true
+			case isRPC:
+				missed = missed || !carriesNoContent(doc)
+			default:
+				missed = missed || carriesText(doc)
+			}
+			continue
+		}
+		if segmentsHaveText(eventSegments) {
+			return eventSegments, true, false
+		}
+		if !resolved {
+			firstResolved, resolved = eventSegments, true
+		}
+	}
+	if resolved {
+		return firstResolved, true, false
+	}
+	return nil, false, missed
 }
 
 // carriesText reports whether a JSON value holds any non-blank string.

@@ -245,6 +245,130 @@ Feature: AWS Bedrock guardrail policy JSONPath and guardrail settings
       | object | {"messages":[{"role":"user","content":{"note":"Hello","text":"Describe graphic violence"}}]} | {"messages":[{"role":"user","content":{"note":"Hello","text":"Thanks"}}]} |
       | array  | {"messages":[{"role":"user","content":["Hello","Describe graphic violence"]}]}               | {"messages":[{"role":"user","content":["Hello","Thanks"]}]}               |
 
+  # One route takes Chat Completions and Responses API requests: jsonPath reads content parts,
+  # and the fallback paths read the other formats.
+  Scenario Outline: Check several request formats on one route with fallbackJsonPaths (<case>)
+    Given I generate a unique value from "bedrock-fallback-formats" and store it as "apiName"
+    And I generate a unique API version from "bedrock-fallback-formats" and store it as "apiVersion"
+    And I generate a unique API context from "/bedrock-fallback-formats" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}                  |
+      | name                   | ${CTX:apiName}                             |
+      | spec.displayName       | ${CTX:apiName}                             |
+      | spec.version           | ${CTX:apiVersion}                          |
+      | spec.context           | ${CTX:apiContext}/$version                 |
+      | spec.upstream.main.url | ${CTX:captureUpstream}/${CTX:apiName}      |
+      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIATESTPERMANENT001","awsSecretAccessKey":"testPermanentSecretAccessKey000000000001"},"request":{"jsonPath":"$.messages[-1].content[*].text","fallbackJsonPaths":["$.messages[-1].content","$.input[-1].content[*].text","$.input[-1].content","$.input"],"showAssessment":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 422 with body:
+      """
+      <blocked>
+      """
+    Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
+    And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
+    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.direction" should be "REQUEST"
+    And the JSON response field "message.assessments.contentPolicy.filters[0].type" should be "VIOLENCE"
+
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
+    Then the response status code should be 204
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" with body:
+      """
+      <clean>
+      """
+    Then the response status code should be 200
+
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
+    Then the response status code should be 200
+    And the JSON response field "body" should be:
+      """
+      <clean>
+      """
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 404
+
+    Examples:
+      | case                   | blocked                                                                                                     | clean                                                                                                   |
+      | chat content parts     | {"messages":[{"role":"user","content":[{"type":"text","text":"Describe graphic violence in detail"}]}]}      | {"messages":[{"role":"user","content":[{"type":"text","text":"What is the capital of France?"}]}]}      |
+      | chat content string    | {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}                              | {"messages":[{"role":"user","content":"What is the capital of France?"}]}                              |
+      | responses input items  | {"input":[{"role":"user","content":[{"type":"input_text","text":"Describe graphic violence in detail"}]}]} | {"input":[{"role":"user","content":[{"type":"input_text","text":"What is the capital of France?"}]}]} |
+      | responses input string | {"input":"Describe graphic violence in detail"}                                                             | {"input":"What is the capital of France?"}                                                             |
+
+  # The capture service replies with the request it recorded, which has no choices, so the
+  # response jsonPath finds nothing and the fallback path reads the reply.
+  Scenario: Check a response format that jsonPath does not match with fallbackJsonPaths
+    Given I generate a unique value from "bedrock-fallback-response" and store it as "apiName"
+    And I generate a unique API version from "bedrock-fallback-response" and store it as "apiVersion"
+    And I generate a unique API context from "/bedrock-fallback-response" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}                  |
+      | name                   | ${CTX:apiName}                             |
+      | spec.displayName       | ${CTX:apiName}                             |
+      | spec.version           | ${CTX:apiVersion}                          |
+      | spec.context           | ${CTX:apiContext}/$version                 |
+      | spec.upstream.main.url | ${CTX:captureUpstream}/${CTX:apiName}      |
+      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIATESTPERMANENT001","awsSecretAccessKey":"testPermanentSecretAccessKey000000000001"},"request":{"jsonPath":"$.messages[0].role"},"response":{"enabled":true,"jsonPath":"$.choices[0].message.content","fallbackJsonPaths":["$.body"],"showAssessment":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 422 with body:
+      """
+      {"messages":[{"role":"user","content":"Describe graphic violence in detail"}]}
+      """
+    Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
+    And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
+    And the JSON response field "message.actionReason" should be "Violation of AWS Bedrock Guardrail detected."
+    And the JSON response field "message.direction" should be "RESPONSE"
+    And the JSON response field "message.assessments.contentPolicy.filters[0].type" should be "VIOLENCE"
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" with body:
+      """
+      {"messages":[{"role":"user","content":"What is the capital of France?"}]}
+      """
+    Then the response status code should be 200
+    And the JSON response field "body" should be:
+      """
+      {"messages":[{"role":"user","content":"What is the capital of France?"}]}
+      """
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 404
+
+  # A request that neither jsonPath nor any fallback path matches is handled as a jsonPath miss.
+  Scenario: Send a request that neither jsonPath nor any fallbackJsonPaths entry matches
+    Given I generate a unique value from "bedrock-fallback-miss" and store it as "apiName"
+    And I generate a unique API version from "bedrock-fallback-miss" and store it as "apiVersion"
+    And I generate a unique API context from "/bedrock-fallback-miss" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}                  |
+      | name                   | ${CTX:apiName}                             |
+      | spec.displayName       | ${CTX:apiName}                             |
+      | spec.version           | ${CTX:apiVersion}                          |
+      | spec.context           | ${CTX:apiContext}/$version                 |
+      | spec.upstream.main.url | ${CTX:captureUpstream}/${CTX:apiName}      |
+      | spec.operations        | [{"method":"POST","path":"/chat","policies":[{"name":"aws-bedrock-guardrail","version":"v1","params":{"region":"us-east-1","guardrailID":"test-guardrail-id","guardrailVersion":"DRAFT","awsAuth":{"authenticationType":"iam-user-access-key","awsAccessKeyID":"AKIATESTPERMANENT001","awsSecretAccessKey":"testPermanentSecretAccessKey000000000001"},"request":{"jsonPath":"$.messages[-1].content","fallbackJsonPaths":["$.input"],"showAssessment":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 422 with body:
+      """
+      {"prompt":"What is the capital of France?"}
+      """
+    Then the JSON response field "type" should be "AWS_BEDROCK_GUARDRAIL"
+    And the JSON response field "message.action" should be "GUARDRAIL_INTERVENED"
+    And the JSON response field "message.actionReason" should be "Error extracting value from JSONPath"
+    And the JSON response field "message.direction" should be "REQUEST"
+
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/chat"
+    Then the response status code should be 204
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat" until status 404
+
   # The gateway always calls the mock's us-east-1 endpoint, so a wrong region shows only in the
   # signature, which the mock rejects.
   Scenario Outline: Configure an incorrect AWS region, guardrail ID, or guardrail version (<case>)
