@@ -274,6 +274,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendConcurrentWithBody)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" cycling through:$`,
 		b.sendConcurrentCycling)
+	newConcurrentIdentifiedSteps(b, b.funnel.Client()).register(sc)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+)$`, b.sendUntilStatus)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) or (\d+)$`, b.sendUntilStatusOneOf)
@@ -1813,21 +1814,30 @@ func (b *Base) echoedHeaderValues(ctx context.Context, name, want string) ([]str
 		return nil, "", fmt.Errorf("expected echoed header %q to exist in response", name)
 	}
 
-	// A JSON echo may render a header as a string or an array of values.
+	values, ok := echoedStrings(value)
+	if !ok {
+		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+	}
+	if len(values) == 0 {
+		return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
+	}
+	return values, resolved, nil
+}
+
+// echoedStrings returns the values of an echoed header. A JSON echo renders a header as a string
+// or an array of values; ok is false for any other shape.
+func echoedStrings(value any) ([]string, bool) {
 	switch v := value.(type) {
 	case string:
-		return []string{v}, resolved, nil
+		return []string{v}, true
 	case []any:
-		if len(v) == 0 {
-			return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
-		}
 		values := make([]string, len(v))
 		for i, item := range v {
 			values[i] = fmt.Sprintf("%v", item)
 		}
-		return values, resolved, nil
+		return values, true
 	default:
-		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+		return nil, false
 	}
 }
 

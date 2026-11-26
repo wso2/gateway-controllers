@@ -30,8 +30,8 @@ import (
 // RH19 chains remove-headers with basic-auth, so a direct go test run builds basic-auth into its
 // gateway too. set-headers, which RH17 and RH18 chain with it, is always built.
 var config = suite.Config{
-	RegisterWithBase: steps.Register,
-	Companions:       []string{"basic-auth"},
+	Register:   steps.Register,
+	Companions: []string{"basic-auth"},
 }
 
 func TestMain(m *testing.M) {
