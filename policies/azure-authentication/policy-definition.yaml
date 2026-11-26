@@ -77,7 +77,8 @@ parameters:
       x-wso2-policy-advanced-param: true
       pattern: "^[A-Za-z0-9][A-Za-z0-9-]*(\\.[A-Za-z0-9-]+)*$"
       description: |
-        Microsoft Entra tenant ID (GUID) or domain name. Defaults to the
+        Microsoft Entra tenant ID (GUID) or domain name of the identity, to use
+        an identity in a tenant other than the cluster's. Defaults to the
         AZURE_TENANT_ID environment variable. Only for workload-identity; must
         not be set with managed-identity or container-apps.
     tokenRequestTimeout:
