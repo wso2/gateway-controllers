@@ -189,7 +189,7 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 When the selected value is an object or an array, every string inside it is sent to the guardrail. A path that matches nothing, or that selects only `true`, `false`, or `null`, is an extraction error, handled according to `passthroughOnError`. Numbers are validated only when selected directly. Every string includes non-text values such as inline base64 image data (`data:` URLs) and type names, so a path such as `$.messages[-1].content` sends every part of a multimodal message to the guardrail, image data included.
 
-If `jsonPath` is set to an empty string (`""`), the entire payload is treated as a string and validated. This includes a Server-Sent Events response: it is withheld whole and validated as text, rather than read event by event with `streamingJsonPath`, so it is not streamed. If `jsonPath` is omitted, the default path for that phase is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses).
+If `jsonPath` is not set, the default path is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses). If it is set to an empty string (`""`), the whole payload is validated as text, and a streamed response is held until it ends, so it is not streamed. When `fallbackJsonPaths` is set, a missing or empty `jsonPath` is skipped, and only the fallback paths are tried.
 
 #### Several formats on one route (`fallbackJsonPaths`)
 
