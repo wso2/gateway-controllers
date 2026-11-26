@@ -45,8 +45,7 @@ Feature: Advanced rate limit throttling in the policy engine metrics
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
-    Given I note the policy engine counter "policy_executions_total" for series labelled {policy_name="advanced-ratelimit",status="short_circuited"}
-    And I note the policy engine counter "short_circuits_total" for series labelled {policy_name="advanced-ratelimit"}
+    Given I note the policy engine counter "short_circuits_total" for series labelled {policy_name="advanced-ratelimit"}
     When I set header "X-Metrics-Key" to "metrics-secret-marker-5d1c"
     And I send 2 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource"
     Then the response status code should be 200
@@ -56,10 +55,35 @@ Feature: Advanced rate limit throttling in the policy engine metrics
     And I authenticate using basic auth as "admin"
 
     Then the policy engine counter "short_circuits_total" for series labelled {policy_name="advanced-ratelimit"} should have grown by at least 1
-    And the policy engine counter "policy_executions_total" for series labelled {policy_name="advanced-ratelimit",status="short_circuited"} should have grown by at least 1
     When I send a "GET" request to the "policy-engine-metrics" service at "/metrics"
     Then the response status code should be 200
     And the response body should not contain "metrics-secret-marker-5d1c"
+
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+
+  # Older gateways count a policy's immediate response only as a short circuit; the execution
+  # status "short_circuited" is newer than gateway 1.2.0.
+  Scenario: A throttled request is recorded as a short-circuited execution of the policy
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "arl-metrics-status" and store it as "apiName"
+    And I generate a unique API version from "arl-metrics-status" and store it as "apiVersion"
+    And I generate a unique API context from "/arl-metrics-status" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}         |
+      | name                   | ${CTX:apiName}                   |
+      | spec.displayName       | ${CTX:apiName}                   |
+      | spec.version           | ${CTX:apiVersion}                |
+      | spec.context           | ${CTX:apiContext}/$version       |
+      | spec.upstream.main.url | http://testbench:3000            |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"GET","path":"/resource","policies":[{"name":"advanced-ratelimit","version":"v1","params":{"quotas":[{"name":"metered-status","limits":[{"limit":1,"duration":"1h"}]}]}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
+
+    Given I note the policy engine counter "policy_executions_total" for series labelled {policy_name="advanced-ratelimit",status="short_circuited"}
+    When I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource"
+    Then the response status code should be 429
+    And the policy engine counter "policy_executions_total" for series labelled {policy_name="advanced-ratelimit",status="short_circuited"} should have grown by at least 1
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
