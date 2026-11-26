@@ -46,6 +46,7 @@ accept Entra ID tokens, typically as the upstream authentication of an LLM provi
 - Secretless upstream authentication with AKS Workload Identity (user-assigned managed identity),
   with the managed identity of an Azure Container Apps app, or with the host's managed identity:
   IMDS on VMs, VM scale sets and AKS nodes, or the endpoint of App Service
+- An identity in another Microsoft Entra tenant for one API, with `workload-identity`
 - On Container Apps, an app without a managed identity is reported when the policy is created,
   not on every request
 - Works with any Entra ID–protected resource through a configurable `scope`
@@ -66,7 +67,7 @@ accept Entra ID tokens, typically as the upstream authentication of an LLM provi
 | `authenticationType` | string | Yes | - | How the token is obtained: `workload-identity` (AKS Workload Identity, the recommended type), `managed-identity` (the host's managed identity) or `container-apps` (the managed identity of the Azure Container Apps app the gateway runs in). |
 | `scope` | string | No | `https://ai.azure.com/.default` | Scope of the access token: the target resource followed by `/.default`, the form Microsoft Entra ID requires (see [the `.default` scope](https://learn.microsoft.com/entra/identity-platform/scopes-oidc#client-credentials-grant-flow-and-default)). See [Choosing the scope](#choosing-the-scope) for the scope of each backend. |
 | `clientId` | string | No | `AZURE_CLIENT_ID` (`workload-identity`) | Application (client) ID of the managed identity, as a GUID. With `workload-identity`, overrides the environment variable. With `managed-identity`, selects a user-assigned identity of the host; leave it unset for the host's system-assigned identity (or, on a VM, VM scale set or AKS node without one, its only user-assigned identity). With `container-apps`, selects a user-assigned identity of the container app; leave it unset for the app's system-assigned identity, which the app must then have. |
-| `tenantId` | string | No | `AZURE_TENANT_ID` | Microsoft Entra tenant ID (GUID) or domain name. Overrides the environment variable. `workload-identity` only: setting it with `managed-identity` or `container-apps` makes the policy fail to initialize. |
+| `tenantId` | string | No | `AZURE_TENANT_ID` | Microsoft Entra tenant ID (GUID) or domain name of the identity, to use an identity in a tenant other than the cluster's; see [Using an identity in another tenant](#using-an-identity-in-another-tenant). Overrides the environment variable. `workload-identity` only: a host's or container app's managed identity is always in that host's tenant, so setting it with `managed-identity` or `container-apps` makes the policy fail to initialize. |
 | `tokenRequestTimeout` | string | No | `10s` | Maximum time to obtain a token, including retries: whole seconds from `1s` to `30s`, or milliseconds from `1ms` to `30000ms`. |
 
 There are no system (`config.toml`) parameters.
@@ -80,7 +81,7 @@ through the variables those platforms set.
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `AZURE_TENANT_ID` | Unless `tenantId` is set | Tenant of the managed identity. |
+| `AZURE_TENANT_ID` | Unless `tenantId` is set | Tenant of the managed identity. The webhook sets the cluster's tenant unless the service account has the [`azure.workload.identity/tenant-id`](https://azure.github.io/azure-workload-identity/docs/topics/service-account-labels-and-annotations.html) annotation. |
 | `AZURE_CLIENT_ID` | Unless `clientId` is set | Client ID of the managed identity. |
 | `AZURE_FEDERATED_TOKEN_FILE` | Yes | Path of the projected service account token. Read when the SDK fetches a new access token from Entra ID, not on every request, and its content reused for up to 10 minutes, so a rotated token is used from the first fetch after that. |
 | `AZURE_AUTHORITY_HOST` | No | Entra ID host, `https://login.microsoftonline.com/` by default. Set by the webhook for sovereign clouds. Must use `https`. |
@@ -189,6 +190,60 @@ account. This is Azure and Kubernetes configuration, not something the policy cr
 
 The gateway also needs outbound HTTPS access to `login.microsoftonline.com` (or your cloud's
 authority host).
+
+### Using an identity in another tenant
+
+An API can use a managed identity in a different Microsoft Entra tenant from the cluster's, for
+example to reach an Azure AI Foundry resource that another tenant owns. The cluster's OIDC issuer
+is public, so an identity in any tenant can trust the gateway's service account. That tenant then
+issues the token, and the resource sees an ordinary token from its own tenant. This is Microsoft's
+[cross-tenant workload identity](https://learn.microsoft.com/azure/aks/workload-identity-cross-tenant)
+setup, and only `workload-identity` supports it.
+
+In the other tenant, with the cluster's issuer URL from step 1:
+
+1. Create a user-assigned managed identity:
+
+   ```bash
+   az identity create -g <resource-group> -n gateway-identity --subscription <other-tenant-subscription>
+   ```
+
+2. Federate it with the gateway's service account, using the cluster's issuer:
+
+   ```bash
+   az identity federated-credential create --name gateway-runtime \
+     --identity-name gateway-identity -g <resource-group> --subscription <other-tenant-subscription> \
+     --issuer "$AKS_OIDC_ISSUER" \
+     --subject system:serviceaccount:<namespace>:<service-account> \
+     --audience api://AzureADTokenExchange
+   ```
+
+3. Grant the identity a data-plane role on the resource. As in step 4, but in the other tenant's
+   subscription:
+
+   ```bash
+   az role assignment create --role "<role>" --scope <resource-id> \
+     --subscription <other-tenant-subscription> \
+     --assignee-object-id "$(az identity show -g <resource-group> -n gateway-identity \
+       --subscription <other-tenant-subscription> --query principalId -o tsv)" \
+     --assignee-principal-type ServicePrincipal
+   ```
+
+4. On the API, set `clientId` to the identity's client ID and `tenantId` to the other tenant's ID
+   or domain name, as in [Example 4](#example-4-azure-ai-foundry-in-another-tenant). Nothing
+   changes on the cluster or the service account, and the gateway's other APIs keep using its own
+   identity.
+
+The webhook sets `AZURE_TENANT_ID` to the cluster's tenant. An API that names an identity in another
+tenant without `tenantId` asks the cluster's tenant for its token. That tenant rejects the request
+(`AADSTS700016`: the application isn't in the directory), and the API answers `502`. To move every
+API to an identity in the other tenant, annotate the service account with its client ID and
+[`azure.workload.identity/tenant-id`](https://azure.github.io/azure-workload-identity/docs/topics/service-account-labels-and-annotations.html)
+instead.
+
+A resource accepts tokens only from its own tenant. A token from the other tenant sent to a
+resource in the cluster's tenant, or the reverse, is answered with `400` ("Token tenant … does not
+match resource tenant"), which the gateway passes through unchanged.
 
 ### Choosing the scope
 
@@ -341,6 +396,7 @@ spec:
   displayName: Azure AI Foundry Provider
   version: v1.0
   template: azureai-foundry
+  context: /foundry
   upstream:
     url: https://<resource>.services.ai.azure.com
     auth:
@@ -349,7 +405,13 @@ spec:
       policyVersion: v0
       policyParams:
         authenticationType: workload-identity
+  accessControl:
+    mode: allow_all
 ```
+
+`accessControl` is required. Clients call the provider under its context, for example
+`POST /foundry/models/chat/completions?api-version=2024-05-01-preview`. Give each provider its own
+`context`.
 
 ### Example 2: Azure OpenAI as a REST API
 
@@ -382,8 +444,10 @@ passes it to the upstream unchanged.
 
 ### Example 3: A Second Identity for One API
 
-A gateway can use more than one managed identity, as long as each identity has a federated
-credential that trusts the gateway's service account.
+A gateway can use more than one managed identity. Give each one a federated credential that trusts
+the gateway's service account and a data-plane role on the resource (steps 2 to 4 of the
+[Workload Identity Prerequisites](#workload-identity-prerequisites)), then name it in `clientId`.
+In [Example 2](#example-2-azure-openai-as-a-rest-api)'s REST API:
 
 ```yaml
   policies:
@@ -394,10 +458,43 @@ credential that trusts the gateway's service account.
         clientId: 99999999-8888-7777-6666-555555555555
 ```
 
-### Example 4: Inbound API Key, Outbound Entra ID Token
+### Example 4: Azure AI Foundry in Another Tenant
+
+The Foundry resource is in another tenant, together with a managed identity federated with the
+gateway's service account; see [Using an identity in another tenant](#using-an-identity-in-another-tenant).
+`clientId` is that identity's client ID and `tenantId` is the other tenant's ID.
+
+```yaml
+apiVersion: gateway.api-platform.wso2.com/v1
+kind: LlmProvider
+metadata:
+  name: foundry-other-tenant
+spec:
+  displayName: Azure AI Foundry in Another Tenant
+  version: v1.0
+  template: azureai-foundry
+  context: /foundry-other-tenant
+  upstream:
+    url: https://<resource>.services.ai.azure.com
+    auth:
+      type: other
+      policyName: azure-authentication
+      policyVersion: v0
+      policyParams:
+        authenticationType: workload-identity
+        clientId: 99999999-8888-7777-6666-555555555555
+        tenantId: 11111111-2222-3333-4444-555555555555
+  accessControl:
+    mode: allow_all
+```
+
+Clients call `POST /foundry-other-tenant/models/chat/completions?api-version=2024-05-01-preview`.
+
+### Example 5: Inbound API Key, Outbound Entra ID Token
 
 Clients authenticate to the gateway with its own API key; `api-key-auth` removes that key before
-the request is forwarded, and `azure-authentication` adds the Entra ID token.
+the request is forwarded, and `azure-authentication` adds the Entra ID token. In
+[Example 2](#example-2-azure-openai-as-a-rest-api)'s REST API:
 
 ```yaml
   policies:
@@ -412,10 +509,15 @@ the request is forwarded, and `azure-authentication` adds the Entra ID token.
         authenticationType: workload-identity
 ```
 
-### Example 5: Managed Identity on an Azure VM
+Issue a key with the gateway's management API: `POST /api/management/v1/rest-apis/<name>/api-keys`
+with a body such as `{"name": "client-key"}`. Clients send the response's `apiKey.apiKey` value in
+the `X-API-Key` header. A new key can take a few seconds to take effect.
+
+### Example 6: Managed Identity on an Azure VM
 
 The gateway runs on an Azure VM with a user-assigned identity that has access to the Azure OpenAI
-resource.
+resource; see [Managed Identity Prerequisites](#managed-identity-prerequisites). In
+[Example 2](#example-2-azure-openai-as-a-rest-api)'s REST API:
 
 ```yaml
   policies:
@@ -427,10 +529,12 @@ resource.
         scope: https://cognitiveservices.azure.com/.default
 ```
 
-### Example 6: Azure AI Foundry from Azure Container Apps
+### Example 7: Azure AI Foundry from Azure Container Apps
 
 The gateway runs in a container app with a user-assigned identity that has access to the Azure AI
-Foundry resource. Leave out `clientId` to use the app's system-assigned identity.
+Foundry resource; see [Container Apps Prerequisites](#container-apps-prerequisites). Leave out
+`clientId` to use the app's system-assigned identity. In
+[Example 1](#example-1-azure-ai-foundry-llm-provider)'s provider, set `upstream` to:
 
 ```yaml
   upstream:
@@ -491,8 +595,10 @@ is passed to fault policies and analytics only, never to the client.
   the specific resource rather than the subscription.
 - **Federate narrowly**: the federated credential's subject should name the gateway runtime's own
   namespace and service account, so no other workload can use the identity.
-- **Identity overrides**: `clientId` lets an API choose any identity federated with the gateway's
-  service account. Federate only identities that every API on the gateway may use.
+- **Identity overrides**: `clientId` and `tenantId` let an API choose any identity federated with
+  the gateway's service account, in any tenant. An identity in another tenant becomes usable as
+  soon as that tenant federates it with the cluster's issuer; the cluster's owner isn't asked.
+  Federate only identities that every API on the gateway may use.
 - **Who configures the policy controls the token**: whoever creates an API or LLM provider with
   this policy chooses the identity (`clientId`), the scope (any resource's `/.default`, such as
   `https://management.azure.com/.default`) and the upstream URL the token is sent to. They can
@@ -534,6 +640,11 @@ is passed to fault policies and analytics only, never to the client.
   `tokenRequestTimeout` instead of the policy failing when it is created.
 - `managed-identity` and `container-apps` select a user-assigned identity by client ID only, not
   by resource ID or object ID.
+- An identity in another tenant works only with `workload-identity`. Managed identities of hosts
+  and container apps can't be used across tenants, and Microsoft's other cross-tenant option, a
+  multitenant app registration that
+  [trusts a managed identity](https://learn.microsoft.com/entra/workload-id/workload-identity-federation-config-app-trust-managed-identity),
+  isn't supported.
 - The AKS identity bindings proxy and Entra ID regional endpoints are not used.
 - A token rejected by the backend is not discarded early; it is replaced on the normal refresh
   schedule.
