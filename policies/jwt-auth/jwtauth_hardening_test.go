@@ -2156,6 +2156,37 @@ func TestJWTAuthPolicy_OnAuthorizationFailureStatusCode_Override(t *testing.T) {
 	assertAuthFailure(t, ctx, action, 401)
 }
 
+// The definition accepts parameters this version does not know (additionalProperties: true),
+// so params written for a newer jwt-auth v1 deploy here. The policy ignores them: the rules it
+// does know are still enforced, and a token that satisfies them is still accepted.
+func TestJWTAuthPolicy_UnknownParamsAreIgnored(t *testing.T) {
+	resetJWTAuthSingletonCache(t)
+
+	privateKey, publicKey := generateTestKeys(t)
+	jwksServer := createJWKSServer(t, publicKey, "test-kid")
+	defer jwksServer.Close()
+
+	params := newRemoteParams(jwksServer.URL + "/jwks.json")
+	params["issuers"] = []interface{}{"km-primary"}
+	params["scopes"] = map[string]interface{}{"anyOf": []interface{}{"write"}}
+	params["parameterFromANewerVersion"] = map[string]interface{}{"enabled": true}
+	params["anotherNewerParameter"] = 42
+
+	writer := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-123", "iss": "https://issuer.example.com", "scope": "write",
+	})
+	reader := createTestToken(t, privateKey, map[string]interface{}{
+		"sub": "user-456", "iss": "https://issuer.example.com", "scope": "read",
+	})
+
+	ctx, action := executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", writer))
+	assertAuthSuccess(t, ctx, action)
+	ctx, action = executeOnRequestHeaders(t, params, authHeader("Authorization", "Bearer", reader))
+	assertAuthFailure(t, ctx, action, 403)
+	ctx, action = executeOnRequestHeaders(t, params, map[string][]string{})
+	assertAuthFailure(t, ctx, action, 401)
+}
+
 // The override reaches the claims rejection and a verdict served from the token cache.
 func TestJWTAuthPolicy_OnAuthorizationFailureStatusCode_ClaimsAndCachedVerdict(t *testing.T) {
 	resetJWTAuthSingletonCache(t)

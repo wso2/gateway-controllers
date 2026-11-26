@@ -77,15 +77,50 @@ func (s *Steps) forgetStoppedProcess(ctx context.Context, service, process strin
 }
 
 // processSignalScript scans /proc because the gateway images package neither pkill nor pgrep.
+//
+// It signals every process of that name, not the first one it finds, and then waits until the
+// signal has taken effect: a STOPped process is in state T, a CONTinued one is not, and a KILLed one
+// is gone. A signal is delivered asynchronously, so a request sent straight after "kill" returns
+// can still reach a process that has not stopped yet, and a scenario that expects the hang would
+// read an answer from a live process instead.
 func processSignalScript(signal, process string) string {
-	return fmt.Sprintf(`for p in /proc/[0-9]*; do
+	return fmt.Sprintf(`state() {
+  local stat
+  stat=$(cat "/proc/$1/stat" 2>/dev/null) || { echo gone; return; }
+  stat=${stat##*) }
+  echo "${stat:0:1}"
+}
+pids=""
+for p in /proc/[0-9]*; do
   pid=$(basename "$p")
-  if [ -r "$p/cmdline" ] && tr '\0' '\n' < "$p/cmdline" 2>/dev/null | head -n1 | grep -q '/%s$'; then
-    kill -%s "$pid" && exit 0
+  if [ -r "$p/cmdline" ] && tr '\0' '\n' < "$p/cmdline" 2>/dev/null | head -n1 | grep -q '/%[1]s$'; then
+    pids="$pids $pid"
   fi
 done
-echo "no process named %s found" >&2
-exit 1`, process, signal, process)
+if [ -z "$pids" ]; then
+  echo "no process named %[1]s found" >&2
+  exit 1
+fi
+for pid in $pids; do
+  kill -%[2]s "$pid" || exit 1
+done
+for pid in $pids; do
+  settled=""
+  for _ in $(seq 1 100); do
+    s=$(state "$pid")
+    case "%[2]s" in
+      STOP) [ "$s" = T ] && settled=1 ;;
+      CONT) [ "$s" != T ] && settled=1 ;;
+      KILL) { [ "$s" = gone ] || [ "$s" = Z ]; } && settled=1 ;;
+    esac
+    [ -n "$settled" ] && break
+    sleep 0.05
+  done
+  if [ -z "$settled" ]; then
+    echo "process $pid of %[1]s did not react to %[2]s" >&2
+    exit 1
+  fi
+done`, process, signal)
 }
 
 func (s *Steps) sendProcessSignal(ctx context.Context, signal, process, service string) error {
@@ -93,12 +128,17 @@ func (s *Steps) sendProcessSignal(ctx context.Context, signal, process, service 
 	if err != nil {
 		return err
 	}
+	if signal == "STOP" {
+		// Recorded before the script runs: it can stop some matches and then fail, and the
+		// after-scenario hook must still resume them.
+		if err := s.rememberStoppedProcess(ctx, service, process); err != nil {
+			return err
+		}
+	}
 	if _, err := stack.Exec(ctx, resolved, []string{"bash", "-c", processSignalScript(signal, process)}); err != nil {
 		return fmt.Errorf("sending %s to process %q in service %q: %w", signal, process, service, err)
 	}
 	switch signal {
-	case "STOP":
-		return s.rememberStoppedProcess(ctx, service, process)
 	case "CONT":
 		return s.forgetStoppedProcess(ctx, service, process)
 	default:

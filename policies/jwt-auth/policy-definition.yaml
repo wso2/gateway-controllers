@@ -1,12 +1,16 @@
 name: jwt-auth
-version: v1.6.0
+version: v1.7.0
 description: |
   Validates JWT access tokens included in API requests. The gateway verifies the
   token's signature, expiry, issuer, audience, scopes, and required claims.
 
 parameters:
   type: object
-  additionalProperties: false
+  # Parameters this version does not know are accepted and ignored, so params written for a
+  # newer jwt-auth v1 (an API references the policy by major version only, and the console
+  # builds its form from the latest version) still deploy on a gateway running this one.
+  # A misspelt parameter name is ignored too, rather than rejected.
+  additionalProperties: true
   properties:
     issuers:
       type: array
@@ -120,6 +124,7 @@ parameters:
 
     onAuthorizationFailureStatusCode:
       type: integer
+      x-wso2-policy-advanced-param: true
       description: |
         HTTP status code returned when the token is valid but does not satisfy `scopes`/`requiredScopes`
         or `claims`/`requiredClaims`. Defaults to 403 Forbidden with `WWW-Authenticate: Bearer error="insufficient_scope"`

@@ -16,9 +16,9 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the llm-cost-based-ratelimit policy. Feature paths are relative to this directory. Give a
-# runner a tags entry, "gateway-version>=X.Y.Z", only when the policy needs a gateway release
-# newer than the oldest one tested.
+# The integration suite of the llm-cost-based-ratelimit policy. Feature and overlay paths are
+# relative to this directory. Give a runner a tags entry, "gateway-version>=X.Y.Z", only when the
+# policy needs a gateway release newer than the oldest one tested.
 
 suite: llm-cost-based-ratelimit
 
@@ -42,7 +42,49 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
+      # Scenarios tagged @known-issue fail on the gateway today (for example, a budget spent exactly
+      # is not rejected at the next request), so the runners skip them.
       - name: llm-cost-based-ratelimit
         tags: "~@known-issue"
         features:
           - features/llm_cost_based_ratelimit.feature
+      # Gateways 1.1.0 and 1.2.0 do not validate an LLM provider's policy parameters, so they
+      # accept the budgets this feature expects to be rejected. Later gateways reject them.
+      - name: llm-cost-based-ratelimit-validation
+        tags: "gateway-version>1.2.0"
+        features:
+          - features/llm_cost_based_ratelimit_validation.feature
+      # The same budgets on the gateways that accept them: the policy builds no limiter and the
+      # route runs unlimited.
+      - name: llm-cost-based-ratelimit-unvalidated-params
+        tags: "gateway-version<=1.2.0"
+        features:
+          - features/llm_cost_based_ratelimit_unvalidated_params.feature
+
+  # A gateway with a cost scale factor other than the default. The factor changes the raw value of
+  # every budget, so no other runner can share this gateway. It runs on SQLite only: the database
+  # plays no part in how the policy scales budgets.
+  - name: llm-cost-based-ratelimit-system-config
+    components:
+      - name: platform-gateway
+        overlay: overlays/system-config.toml
+      - name: testbench
+    runners:
+      - name: llm-cost-based-ratelimit-system-config
+        tags: "~@known-issue"
+        features:
+          - features/llm_cost_based_ratelimit_system_config.feature
+
+  # A gateway with a jwt-auth key manager that takes the application from the client_id claim, so
+  # the budget can be keyed on the application. It runs on SQLite only, as the database plays no
+  # part in how the policy keys its budget.
+  - name: llm-cost-based-ratelimit-application-identity
+    components:
+      - name: platform-gateway
+        overlay: overlays/application-identity.toml
+      - name: testbench
+    runners:
+      - name: llm-cost-based-ratelimit-application-identity
+        tags: "~@known-issue"
+        features:
+          - features/llm_cost_based_ratelimit_application_identity.feature

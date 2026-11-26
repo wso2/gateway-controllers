@@ -2893,43 +2893,90 @@ func (g *Gateway) analyticsResponseStatus(ctx context.Context, path string, want
 }
 
 func (g *Gateway) analyticsMetadataField(ctx context.Context, path, field, want string) error {
-	event, err := g.analyticsEventForPath(ctx, path)
-	if err != nil {
-		return err
-	}
 	resolved, err := stepscommon.Expand(ctx, want)
 	if err != nil {
 		return err
 	}
-	// MCP analytics nests its fields under mcpAnalytics, so the field is a dotted path rather
-	// than a key. traverseJSON resolves both: a name with no dot is a plain lookup.
-	value, ok := traverseJSON(event.Metadata, field)
-	if !ok {
-		return fmt.Errorf("latest analytics event metadata has no field %q", field)
+	return g.awaitAnalyticsEvent(ctx, path, func(event *analyticsEvent) error {
+		// MCP analytics nests its fields under mcpAnalytics, so the field is a dotted path rather
+		// than a key. traverseJSON resolves both: a name with no dot is a plain lookup.
+		value, ok := traverseJSON(event.Metadata, field)
+		if !ok {
+			return fmt.Errorf("latest analytics event metadata has no field %q", field)
+		}
+		if got := fmt.Sprintf("%v", value); got != resolved {
+			return fmt.Errorf("latest analytics event metadata field %q is %q, want %q", field, got, resolved)
+		}
+		return nil
+	})
+}
+
+// awaitAnalyticsEvent waits until an analytics event for the path satisfies check, and returns the
+// check's error for the newest event of that path when none does.
+//
+// Analytics reach the collector asynchronously and an earlier request on the same path can deliver
+// its event late, even after the event of the request a scenario has just made, so neither the first
+// nor the last event of a path is always the one the scenario is about. The newest event that
+// satisfies the check is, and an event that never carries the wanted content still fails the step
+// with the check's own message.
+func (g *Gateway) awaitAnalyticsEvent(ctx context.Context, path string, check func(*analyticsEvent) error) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
 	}
-	if got := fmt.Sprintf("%v", value); got != resolved {
-		return fmt.Errorf("latest analytics event metadata field %q is %q, want %q", field, got, resolved)
+	return untilEventSatisfies(ctx, resolved,
+		func(ctx context.Context) ([]analyticsEvent, error) {
+			events, err := g.fetchAnalyticsEvents(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return analyticsEventsForPath(events, resolved), nil
+		}, check)
+}
+
+// untilEventSatisfies polls forPath, which returns the events of one path oldest first, until one of
+// them satisfies check. It looks at every event of the path, newest first, not only the latest.
+func untilEventSatisfies(
+	ctx context.Context, path string,
+	forPath func(context.Context) ([]analyticsEvent, error), check func(*analyticsEvent) error,
+) error {
+	newestSatisfying := func(events []analyticsEvent) *analyticsEvent {
+		for i := len(events) - 1; i >= 0; i-- {
+			if check(&events[i]) == nil {
+				return &events[i]
+			}
+		}
+		return nil
 	}
-	return nil
+	last, err := retry.Until(ctx, retry.Options{Interval: time.Second}, forPath,
+		func(events []analyticsEvent) bool { return newestSatisfying(events) != nil })
+	if err != nil {
+		return err
+	}
+	if len(last) == 0 {
+		return fmt.Errorf("no analytics event found for request path %q", path)
+	}
+	if newestSatisfying(last) != nil {
+		return nil
+	}
+	return check(&last[len(last)-1])
 }
 
 // analyticsNumericMetadataField compares a numeric metadata field with a number: equal within a
 // relative tolerance, since a cost computed in floating point rarely prints as the decimal a
 // scenario states, or at least that number.
 func (g *Gateway) analyticsNumericMetadataField(ctx context.Context, path, field, op, want string) error {
-	event, err := g.analyticsEventForPath(ctx, path)
-	if err != nil {
-		return err
-	}
 	resolved, err := stepscommon.Expand(ctx, want)
 	if err != nil {
 		return err
 	}
-	value, ok := traverseJSON(event.Metadata, field)
-	if !ok {
-		return fmt.Errorf("latest analytics event metadata has no field %q", field)
-	}
-	return numericMatches(field, value, op, resolved)
+	return g.awaitAnalyticsEvent(ctx, path, func(event *analyticsEvent) error {
+		value, ok := traverseJSON(event.Metadata, field)
+		if !ok {
+			return fmt.Errorf("latest analytics event metadata has no field %q", field)
+		}
+		return numericMatches(field, value, op, resolved)
+	})
 }
 
 func analyticsHeaderValue(headers map[string][]string, wanted string) (string, bool) {
