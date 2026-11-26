@@ -34,8 +34,10 @@ defaults:
     propagation: 60s
 
 blocks:
+  # The runners create their own APIs and fault-injection scripts under unique names and run at the
+  # same time.
   - name: interceptor-service
-    parallel: 1
+    parallel: 4
     components:
       - name: platform-gateway
         db:
@@ -47,6 +49,15 @@ blocks:
       - name: interceptor-service
         features:
           - features/interceptor_service.feature
+      - name: interceptor-service-requests
+        features:
+          - features/interceptor_service_requests.feature
+      - name: interceptor-service-resilience
+        features:
+          - features/interceptor_service_resilience.feature
+      - name: interceptor-service-security
+        features:
+          - features/interceptor_service_security.feature
 
   - name: interceptor-service-restart
     parallel: 1
