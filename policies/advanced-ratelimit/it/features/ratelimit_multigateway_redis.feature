@@ -33,7 +33,7 @@ Feature: Advanced rate limit quota shared by two gateway replicas through Redis
     And I create a project "${CTX:projectHandle}" on the control plane
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: Requests through either replica draw on the same quota
     Given I generate a unique resource name from "arl-mg-shared" and store it as "apiHandle"
     And I generate a unique API context from "/arl-mg-shared" and store it as "apiCtx"
@@ -59,7 +59,7 @@ Feature: Advanced rate limit quota shared by two gateway replicas through Redis
     Then the response status code should be 429
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: A replica that receives the API later is bound by the quota already consumed
     Given I generate a unique resource name from "arl-mg-late" and store it as "apiHandle"
     And I generate a unique API context from "/arl-mg-late" and store it as "apiCtx"
@@ -81,7 +81,7 @@ Feature: Advanced rate limit quota shared by two gateway replicas through Redis
     When I send a "GET" request to the second gateway "${CTX:apiCtx}/limited" until status 429
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: Restarting one replica keeps its quota, which lives in Redis
     Given I generate a unique resource name from "arl-mg-restart" and store it as "apiHandle"
     And I generate a unique API context from "/arl-mg-restart" and store it as "apiCtx"

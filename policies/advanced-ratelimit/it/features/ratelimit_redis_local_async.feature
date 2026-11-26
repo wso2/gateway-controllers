@@ -31,7 +31,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     And I authenticate using basic auth as "admin"
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: A quota counted locally is enforced exactly on one replica
     Given I generate a unique value from "arl-async-basic" and store it as "apiName"
     And I generate a unique API version from "arl-async-basic" and store it as "apiVersion"
@@ -67,7 +67,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     Then the response should be successful
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: Parallel requests around the boundary are admitted exactly up to the quota
     Given I generate a unique value from "arl-async-concurrent" and store it as "apiName"
     And I generate a unique API version from "arl-async-concurrent" and store it as "apiVersion"
@@ -89,7 +89,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     Then the response should be successful
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: Costs are charged through the synchronous Redis path
     Given I generate a unique value from "arl-async-cost" and store it as "apiName"
     And I generate a unique API version from "arl-async-cost" and store it as "apiVersion"
@@ -128,7 +128,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     Then the response should be successful
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: Locally counted requests are flushed to Redis and a restarted gateway converges on that count
     Given I generate a unique value from "arl-async-restart" and store it as "apiName"
     And I generate a unique API version from "arl-async-restart" and store it as "apiVersion"
@@ -160,7 +160,7 @@ Feature: Advanced rate limit on the redis-local-async backend
     Then the response should be successful
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: While Redis is down the quota is still enforced locally and again shared once Redis returns
     Given I generate a unique value from "arl-async-outage" and store it as "apiName"
     And I generate a unique API version from "arl-async-outage" and store it as "apiVersion"

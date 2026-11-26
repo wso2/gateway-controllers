@@ -131,7 +131,10 @@ blocks:
         features:
           - features/ratelimit_metrics.feature
 
-  # The Redis blocks stop and start the shared Redis component, so each owns one.
+  # The Redis blocks stop and start the shared Redis component, so each owns one. Every scenario of
+  # these blocks carries @skip-gw-1.1.0: gateway 1.1.0 does not interpolate {{ env }} in config.toml,
+  # so Redis rejects the policy's password (WRONGPASS). A runner whose scenarios are all excluded
+  # would run nothing, which is an error, so the runners are gated to gateway 1.2.0 instead.
   - name: ratelimit-redis
     parallel: 1
     components:

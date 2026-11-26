@@ -30,7 +30,7 @@ Feature: Advanced rate limit with the GCRA algorithm on the Redis backend
     And I authenticate using basic auth as "admin"
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: The burst allowance is enforced by the Redis script and then replenished at the rate
     Given I generate a unique value from "arl-rgcra-burst" and store it as "apiName"
     And I generate a unique API version from "arl-rgcra-burst" and store it as "apiVersion"
@@ -55,7 +55,7 @@ Feature: Advanced rate limit with the GCRA algorithm on the Redis backend
     Then the response should be successful
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: Weighted and response-reported costs are charged by the Redis script
     Given I generate a unique value from "arl-rgcra-cost" and store it as "apiName"
     And I generate a unique API version from "arl-rgcra-cost" and store it as "apiVersion"
@@ -110,7 +110,7 @@ Feature: Advanced rate limit with the GCRA algorithm on the Redis backend
     Then the response should be successful
 
   # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
-  @known-issue-gw-1.1.0
+  @skip-gw-1.1.0
   Scenario: The strictest of several GCRA limits is enforced over Redis
     Given I generate a unique value from "arl-rgcra-multi" and store it as "apiName"
     And I generate a unique API version from "arl-rgcra-multi" and store it as "apiVersion"
