@@ -997,7 +997,9 @@ Feature: Host rewrite routing
     Then the resource creation response should indicate successful deployment
     # The backend on port 8445 is listening (the suite waits for it) and shares the container
     # that answered on 8446, so this 503 comes from the certificate check, not a refused connection.
-    And I send a "GET" request to "${CTX:apiContextW}/v1.0/tls-wronghost-34" until status 503
+    # A route that has just been deployed can answer 503 with an empty body before its cluster has
+    # converged, so the wait is for the 503 that carries the upstream error, not for any 503.
+    And I send a "GET" request to "${CTX:apiContextW}/v1.0/tls-wronghost-34" until status 503 and the response body contains "upstream connect error"
     Then the response body should contain "upstream connect error"
 
     When I delete the API "${CTX:apiNameW}"

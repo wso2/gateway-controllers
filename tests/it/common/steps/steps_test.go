@@ -505,6 +505,43 @@ func TestSendConcurrentRejectsInvalidCount(t *testing.T) {
 // sendConcurrent is a funnel exception: it clears the previously published response and
 // publishes none of its own, whether its requests succeed or fail, so a later response
 // assertion can neither pass against a stale response nor read an arbitrary concurrent one.
+func TestSendUntilStatusAndBodyContainsWaitsForTheBodyNotJustTheStatus(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		// The first answers are the router's 503 with no body; only later does it carry the cause.
+		if calls.Add(1) > 2 {
+			_, _ = w.Write([]byte("upstream connect error or disconnect/reset before headers"))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+
+	ctx := publishedContext(t, &httpx.Response{StatusCode: http.StatusTeapot})
+	require.NoError(t, base.sendUntilStatusAndBodyContains(ctx, "get", "/api/v1/resource", http.StatusServiceUnavailable,
+		"upstream connect error"))
+	require.GreaterOrEqual(t, int(calls.Load()), 3, "a 503 with an empty body must not satisfy the wait")
+	resp, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	require.Contains(t, string(resp.Body), "upstream connect error")
+}
+
 func TestSendConcurrentLeavesNoPublishedResponse(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]string{}
