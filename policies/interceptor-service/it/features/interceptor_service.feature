@@ -26,6 +26,9 @@ Feature: Interceptor service policies
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  # The fixed interceptor at testbench:3003 picks its reply by the request path. On a path with a
+  # mutate segment it adds X-Interceptor-Request: true, rewrites the path to /anything/intercepted
+  # and replaces the body with {"message":"mutated-by-interceptor"}.
   Scenario: Request interceptor mutates the path, headers, and body
     Given I generate a unique value from "interceptor-request-api" and store it as "apiName"
     And I generate a unique value from "interceptor-request-display" and store it as "apiDisplayName"
@@ -56,7 +59,10 @@ Feature: Interceptor service policies
     And the JSON response field "body" should contain "mutated-by-interceptor"
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/mutate" until status 404
 
+  # On a path with a block segment, the fixed interceptor answers with a direct 403 response that
+  # carries X-Interceptor-Decision: blocked and {"error":"blocked by interceptor"}.
   Scenario: Request interceptor returns a direct response
     Given I generate a unique value from "interceptor-direct-api" and store it as "apiName"
     And I generate a unique value from "interceptor-direct-display" and store it as "apiDisplayName"
@@ -78,7 +84,11 @@ Feature: Interceptor service policies
     And the response body should contain "blocked by interceptor"
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/block" until status 404
 
+  # On a path with a response-rewrite segment, the fixed interceptor sets trace=request-phase in the
+  # request phase. In the response phase it answers 202 with X-Interceptor-Response: true,
+  # X-Interceptor-Trace set to that trace, and {"message":"response-overridden"}.
   Scenario: Response interceptor rewrites the status, headers, and body
     Given I generate a unique value from "interceptor-response-api" and store it as "apiName"
     And I generate a unique value from "interceptor-response-display" and store it as "apiDisplayName"
@@ -101,9 +111,12 @@ Feature: Interceptor service policies
     And the response body should contain "response-overridden"
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/response-rewrite" until status 404
 
   # The response must match the expected error response recorded from the policy before a
   # change (resources/expected-error-responses), so a change a client could observe fails.
+  # The endpoint is the echo service's /status/<code> route. The policy calls /status/handle-request,
+  # which names no status code, so the call fails with 400.
   Scenario: interceptor-service refuses a request when the request-phase interceptor call fails
     Given I generate a unique value from "compat-is-req" and store it as "apiName"
     And I generate a unique API version from "compat-is-req" and store it as "apiVersion"
@@ -125,3 +138,6 @@ Feature: Interceptor service policies
       """
     Then the response status code should be 500
     And the response should match the expected error response "interceptor-service-request-call-failed"
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
