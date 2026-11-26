@@ -82,7 +82,7 @@ through the variables those platforms set.
 |----------|----------|-------------|
 | `AZURE_TENANT_ID` | Unless `tenantId` is set | Tenant of the managed identity. |
 | `AZURE_CLIENT_ID` | Unless `clientId` is set | Client ID of the managed identity. |
-| `AZURE_FEDERATED_TOKEN_FILE` | Yes | Path of the projected service account token. Read when a token is requested, and its content reused for up to 10 minutes, so a rotated token is used from the first request after that. |
+| `AZURE_FEDERATED_TOKEN_FILE` | Yes | Path of the projected service account token. Read when the SDK fetches a new access token from Entra ID, not on every request, and its content reused for up to 10 minutes, so a rotated token is used from the first fetch after that. |
 | `AZURE_AUTHORITY_HOST` | No | Entra ID host, `https://login.microsoftonline.com/` by default. Set by the webhook for sovereign clouds. Must use `https`. |
 
 A variable the policy uses in place of a parameter must have the parameter's form. If
@@ -508,9 +508,8 @@ is passed to fault policies and analytics only, never to the client.
   local endpoint on App Service or Container Apps.
 - **The identity header**: `IDENTITY_HEADER` is a secret Container Apps sets so that only the app
   can get tokens from its identity endpoint. The policy never logs it. The endpoint answers only
-  requests that carry the header, whereas IMDS needs only the fixed `Metadata: true` header, so an
-  API whose upstream points at the endpoint gets a token only if its configuration sets the header.
-  Never put the header's value in an API or LLM provider.
+  requests that carry the header, whereas IMDS needs only the fixed `Metadata: true` header. Never
+  put the header's value in an API or LLM provider.
 - **Proxies**: token requests honour `HTTP_PROXY` and `HTTPS_PROXY`. With `managed-identity` on a
   VM, VM scale set or AKS node, add `169.254.169.254` to `NO_PROXY` so a proxy never sees IMDS
   tokens.
