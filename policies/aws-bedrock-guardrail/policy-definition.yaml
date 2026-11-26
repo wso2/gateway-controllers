@@ -187,7 +187,7 @@ parameters:
           default: "$.messages[-1].content"
         fallbackJsonPaths:
           type: array
-          x-wso2-policy-advanced-param: false
+          x-wso2-policy-advanced-param: true
           description: |
             JSONPaths to try, in order, when jsonPath finds no text to validate. The first
             path that finds text is validated. With no jsonPath set, only these paths are
@@ -238,7 +238,7 @@ parameters:
           default: "$.choices[0].message.content"
         fallbackJsonPaths:
           type: array
-          x-wso2-policy-advanced-param: false
+          x-wso2-policy-advanced-param: true
           description: |
             JSONPaths to try, in order, when jsonPath finds no text to validate. The first
             path that finds text is validated. With no jsonPath set, only these paths are
