@@ -301,6 +301,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		})
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the response body contains "([^"]*)" with body:$`,
 		b.sendUntilBodyContains)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) and the response body contains "([^"]*)"$`,
+		b.sendUntilStatusAndBodyContains)
 }
 
 func (b *Base) responseSuccessful(ctx context.Context) error {
@@ -1245,6 +1247,46 @@ func (b *Base) sendUntilBodyContains(ctx context.Context, method, path, want str
 		},
 		fmt.Sprintf("waiting for %s %s to answer with a body containing %q",
 			strings.ToUpper(method), url, wantValue))
+}
+
+// sendUntilStatusAndBodyContains polls a data-plane path until it answers with the wanted status
+// AND a body containing the wanted substring.
+//
+// A status alone cannot tell a failure the scenario is about from one that comes before it. A
+// route that has just been deployed can answer 503 from the router with an empty body while its
+// cluster is still converging, and the same 503 later carries the upstream error text the
+// scenario asserts on. Waiting for both lets the assertion that follows read a settled response.
+func (b *Base) sendUntilStatusAndBodyContains(ctx context.Context, method, path string, wantStatus int, want string) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	url, err := b.gatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	wantValue, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	headers := b.scenarioHeaders(ctx)
+
+	return stepscommon.AwaitResponse(ctx,
+		func(ctx context.Context) (*httpx.Response, error) {
+			response, sendErr := b.funnel.Send(ctx, httpx.Request{
+				Method: strings.ToUpper(method), URL: url, Headers: headers,
+				Host: b.requestHost(ctx),
+			})
+			if sendErr != nil {
+				return nil, retry.Transient(sendErr)
+			}
+			return response, nil
+		},
+		func(r *httpx.Response) bool {
+			return r != nil && r.StatusCode == wantStatus && strings.Contains(string(r.Body), wantValue)
+		},
+		fmt.Sprintf("waiting for %s %s to return %d with a body containing %q",
+			strings.ToUpper(method), url, wantStatus, wantValue))
 }
 
 func (b *Base) statusCodeIs(ctx context.Context, want int) error {

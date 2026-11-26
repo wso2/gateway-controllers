@@ -162,9 +162,9 @@ The upstream service then validates the `x-jwt-assertion` header using the publi
 
 ## Related Policies
 
-- [`jwt-auth`](../../jwt-auth/v1.0/docs/jwt-authentication.md) — validates incoming JWTs from clients
-- [`basic-auth`](../../basic-auth/) — authenticates clients with username/password; pairs well with Backend JWT to forward user identity
-- [`api-key-auth`](../../api-key-auth/) — authenticates clients with API keys; pairs well with Backend JWT to forward client identity
+- [`jwt-auth`](../../../jwt-auth/v1.0/docs/jwt-authentication.md) — validates incoming JWTs from clients
+- [`basic-auth`](../../../basic-auth/v1.1/docs/basic-auth.md) — authenticates clients with username/password; pairs well with Backend JWT to forward user identity
+- [`api-key-auth`](../../../api-key-auth/v1.2/docs/apikey-authentication.md) — authenticates clients with API keys; pairs well with Backend JWT to forward client identity
 
 ## Fault reporting
 

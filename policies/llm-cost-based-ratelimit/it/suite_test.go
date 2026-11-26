@@ -27,7 +27,7 @@ import (
 	"github.com/wso2/gateway-controllers/policies/llm-cost-based-ratelimit/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register, Companions: []string{"llm-cost"}}
+var config = suite.Config{Register: steps.Register, Companions: []string{"llm-cost", "jwt-auth"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

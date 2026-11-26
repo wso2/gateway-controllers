@@ -212,19 +212,28 @@ func TestResponse_MCPEventStreamMasksInPlace(t *testing.T) {
 	}
 }
 
-// An LLM token stream with no assistant text (a tool-call-only answer) still
-// passes on the buffered path: the JSON-RPC route above must not catch it.
+// An LLM token stream with no assistant text still passes on the buffered path:
+// the JSON-RPC route above must not catch it. A tool-call answer is not one of
+// those: its arguments are model output streamingJsonPath does not read.
 func TestResponse_LLMStreamWithoutTextStillPasses(t *testing.T) {
 	client := &countingBedrockClient{output: makeContentViolationOutput()}
 	p := streamingPolicy(client, nil)
 
-	body := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+	body := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":null}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3}}\n\ndata: [DONE]\n\n"
 	mod, ok := sendResponse(p, map[string]interface{}{}, body).(policy.DownstreamResponseModifications)
 	if !ok || mod.StatusCode != nil {
 		t.Fatalf("expected a text-free token stream to pass, got %#v", mod)
 	}
 	if client.calls != 0 {
 		t.Fatalf("expected no guardrail call for a stream with no text, got %d", client.calls)
+	}
+
+	toolCalls := "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n"
+	mod, ok = sendResponse(p, map[string]interface{}{}, toolCalls).(policy.DownstreamResponseModifications)
+	if !ok || mod.StatusCode == nil || mod.Fault == nil || mod.Fault.Code != policy.FaultCodeMediationFailed {
+		t.Fatalf("expected a tool-call stream refused with a mediation fault, got %#v", mod)
 	}
 }
 

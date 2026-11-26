@@ -34,8 +34,9 @@ defaults:
     propagation: 60s
 
 blocks:
+  # The runners create their own uniquely named APIs and run at the same time.
   - name: json-schema-guardrail
-    parallel: 1
+    parallel: 4
     components:
       - name: platform-gateway
         db:
@@ -45,3 +46,26 @@ blocks:
       - name: json-schema-guardrail
         features:
           - features/json_schema_guardrail.feature
+      - name: json-schema-guardrail-schema-keywords
+        features:
+          - features/json_schema_guardrail_schema_keywords.feature
+      - name: json-schema-guardrail-response
+        features:
+          - features/json_schema_guardrail_response.feature
+      - name: json-schema-guardrail-api-lifecycle
+        features:
+          - features/json_schema_guardrail_api_lifecycle.feature
+
+  # The restart runner restarts gateway services, which would interrupt any runner beside it, so it
+  # gets a block of its own.
+  - name: json-schema-guardrail-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: json-schema-guardrail-restart
+        features:
+          - features/json_schema_guardrail_restart.feature

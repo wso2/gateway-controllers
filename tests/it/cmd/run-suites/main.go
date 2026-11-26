@@ -24,6 +24,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -228,8 +229,9 @@ type runner struct {
 // parent, and nothing would be removed until the whole run ended.
 func (r *runner) run(job runsuites.Job) error {
 	it := r.items[job.Name]
-	out := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+job.Name+"] ")
-	defer out.Flush()
+	lines := runsuites.NewLineWriter(os.Stdout, &r.printing, "["+job.Name+"] ")
+	defer lines.Flush()
+	out := &bootWatcher{Writer: lines}
 
 	started := time.Now()
 	if err := r.warm(it.policy); err != nil {
@@ -244,6 +246,83 @@ func (r *runner) run(job runsuites.Job) error {
 	if r.host != "" {
 		args = append(args, "-host="+r.host)
 	}
+	fmt.Fprintf(out, "=== started on gateway %s ===\n", r.version)
+	err := r.goTest(it, args, out)
+	for attempt := 1; err != nil && attempt <= bootRetries && out.sawBootFailure(); attempt++ {
+		// The container runtime refused to start a container, so no scenario ran: starting the
+		// block again cannot hide a scenario failure.
+		fmt.Fprintf(out, "=== the container runtime failed to start the block; starting it again (%d of %d) ===\n",
+			attempt, bootRetries)
+		err = r.goTest(it, args, out)
+	}
+	result := "passed"
+	if err != nil {
+		result = "failed: " + err.Error()
+	}
+	fmt.Fprintf(out, "=== %s in %.0fs ===\n", result, time.Since(started).Seconds())
+	r.recorder.Block(job.Slot, it.policy, it.block, started, err == nil)
+	return err
+}
+
+// bootRetries is how many times a block that the container runtime failed to start is started again.
+const bootRetries = 1
+
+// bootFailedMarker is what the framework prints when a block's components did not come up. Only
+// that failure is judged for a retry: the same runtime error in the middle of a scenario, say when
+// it restarts a service, is a scenario failure and stays one.
+var bootFailedMarker = []byte("failed to boot after")
+
+// runtimeFailureSignatures are the container runtime's own errors when it cannot start a container
+// or publish its ports.
+// A block that fails to boot because of the gateway or the policy under test does not carry them and
+// is not started again.
+var runtimeFailureSignatures = [][]byte{
+	[]byte("failed to create shim task"),
+	[]byte("failed to start io pipe copy"),
+	// Two blocks that start at the same moment can be given the same free host port.
+	[]byte("port is already allocated"),
+}
+
+// bootWatcher passes a block's output through and records whether the block failed to boot on a
+// container runtime error, without keeping the output.
+type bootWatcher struct {
+	io.Writer
+	tail    []byte
+	booted  bool
+	runtime bool
+}
+
+func (w *bootWatcher) Write(p []byte) (int, error) {
+	window := append(w.tail, p...)
+	if bytes.Contains(window, bootFailedMarker) {
+		w.booted = true
+	}
+	for _, signature := range runtimeFailureSignatures {
+		if bytes.Contains(window, signature) {
+			w.runtime = true
+		}
+	}
+	keep := len(bootFailedMarker) - 1
+	for _, signature := range runtimeFailureSignatures {
+		keep = max(keep, len(signature)-1)
+	}
+	if len(window) > keep {
+		window = window[len(window)-keep:]
+	}
+	w.tail = append([]byte(nil), window...)
+	return w.Writer.Write(p)
+}
+
+// sawBootFailure reports whether the output so far shows the block failing to boot on a container
+// runtime error, and forgets it so that the next attempt is judged on its own output.
+func (w *bootWatcher) sawBootFailure() bool {
+	seen := w.booted && w.runtime
+	w.booted, w.runtime, w.tail = false, false, nil
+	return seen
+}
+
+// goTest runs the go test of one block, with its output going to out.
+func (r *runner) goTest(it item, args []string, out io.Writer) error {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = r.policyDir(it.policy)
 	if r.coverageOut != "" {
@@ -253,16 +332,7 @@ func (r *runner) run(job runsuites.Job) error {
 	}
 	cmd.Stdout = out
 	cmd.Stderr = out
-
-	fmt.Fprintf(out, "=== started on gateway %s ===\n", r.version)
-	err := cmd.Run()
-	result := "passed"
-	if err != nil {
-		result = "failed: " + err.Error()
-	}
-	fmt.Fprintf(out, "=== %s in %.0fs ===\n", result, time.Since(started).Seconds())
-	r.recorder.Block(job.Slot, it.policy, it.block, started, err == nil)
-	return err
+	return cmd.Run()
 }
 
 // warm compiles the policy's suite once, on first use, and throws the binary away, so that the go
