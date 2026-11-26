@@ -59,3 +59,50 @@ Feature: Json xml mediator policy
     And I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+  # The order is the policy doc's example. Each item of an array becomes one element named after
+  # the array's key, and the keys of an object come out in any order, so the XML is compared
+  # without regard to the order of differently named elements.
+  Scenario: Configure downstream json and upstream xml, then send a valid JSON request
+    Given I generate a unique value from "jxm-json-to-xml" and store it as "apiName"
+    And I generate a unique API version from "jxm-json-to-xml" and store it as "apiVersion"
+    And I generate a unique API context from "/jxm-json-to-xml" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | ${CTX:captureUpstream}/${CTX:apiName} |
+      | spec.operations        | [{"method":"GET","path":"/ready"},{"method":"POST","path":"/orders","policies":[{"name":"json-xml-mediator","version":"v1","params":{"downsteamPayloadFormat":"json","upstreamPayloadFormat":"xml"}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
+
+    When I send a "PUT" request to the "capture" service at "/test/responses?path=/${CTX:apiName}/orders" with body:
+      """
+      {"contentType":"application/xml","body":"<ack>received</ack>"}
+      """
+    Then the response status code should be 200
+
+    When I set header "Content-Type" to "application/json"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
+      """
+      {"orderId":"12345","customer":"John Doe","items":[{"name":"Widget","quantity":2},{"name":"Gadget","quantity":1}]}
+      """
+    Then the response status code should be 200
+    And the response body should be:
+      """
+      {"ack":"received"}
+      """
+
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/${CTX:apiName}/orders" until status 200
+    Then the JSON response field "body" should be XML equivalent to:
+      """
+      <root><orderId>12345</orderId><customer>John Doe</customer><items><name>Widget</name><quantity>2</quantity></items><items><name>Gadget</name><quantity>1</quantity></items></root>
+      """
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
