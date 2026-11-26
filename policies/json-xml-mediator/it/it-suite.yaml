@@ -34,8 +34,10 @@ defaults:
     propagation: 60s
 
 blocks:
+  # Each scenario creates its own API, and capture records under paths that begin with the API's
+  # name, so every runner runs at the same time.
   - name: json-xml-mediator
-    parallel: 1
+    parallel: 5
     components:
       - name: platform-gateway
         db:
@@ -43,5 +45,33 @@ blocks:
       - name: testbench
     runners:
       - name: json-xml-mediator
+        tags: "~@known-issue"
         features:
           - features/json_xml_mediator.feature
+      - name: json-xml-mediator-response
+        tags: "~@known-issue"
+        features:
+          - features/json_xml_mediator_response.feature
+      - name: json-xml-mediator-validation
+        features:
+          - features/json_xml_mediator_validation.feature
+      - name: json-xml-mediator-api-lifecycle
+        features:
+          - features/json_xml_mediator_api_lifecycle.feature
+      - name: json-xml-mediator-security
+        features:
+          - features/json_xml_mediator_security.feature
+
+  # Restarting the gateway runtime or controller would interrupt the other runners, so the restart
+  # scenarios run in a block of their own, one runner at a time.
+  - name: json-xml-mediator-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: json-xml-mediator-restart
+        features:
+          - features/json_xml_mediator_restart.feature

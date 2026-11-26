@@ -27,7 +27,12 @@ import (
 	"github.com/wso2/gateway-controllers/policies/json-xml-mediator/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// The scenarios chain basic-auth, basic-ratelimit, request-rewrite and pii-masking-regex with the
+// policy.
+var config = suite.Config{
+	Register:   steps.Register,
+	Companions: []string{"basic-auth", "basic-ratelimit", "request-rewrite", "pii-masking-regex"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
