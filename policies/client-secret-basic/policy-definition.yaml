@@ -207,7 +207,6 @@ parameters:
         is rejected with 401 before subscription-validation runs. Leave empty
         (the default) when subscription-validation is not configured with a
         subscriptionKeyCookie.
-      minLength: 1
       maxLength: 256
 
 systemParameters:
