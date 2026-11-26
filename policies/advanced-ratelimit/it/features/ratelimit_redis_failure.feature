@@ -29,6 +29,8 @@ Feature: Advanced rate limit on the Redis backend with fail-closed behaviour
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: Requests are rejected while Redis is down and accepted again after it returns
     Given I generate a unique value from "arl-redis-closed" and store it as "apiName"
     And I generate a unique API version from "arl-redis-closed" and store it as "apiVersion"

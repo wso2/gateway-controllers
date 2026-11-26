@@ -29,6 +29,8 @@ Feature: Advanced rate limit on the Redis backend with fail-open behaviour
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: A quota kept in Redis is enforced with correct headers
     Given I generate a unique value from "arl-redis-basic" and store it as "apiName"
     And I generate a unique API version from "arl-redis-basic" and store it as "apiVersion"
@@ -69,6 +71,8 @@ Feature: Advanced rate limit on the Redis backend with fail-open behaviour
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: The strictest of several Redis-backed limits in one quota wins
     Given I generate a unique value from "arl-redis-multi" and store it as "apiName"
     And I generate a unique API version from "arl-redis-multi" and store it as "apiVersion"
@@ -92,6 +96,8 @@ Feature: Advanced rate limit on the Redis backend with fail-open behaviour
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: Weighted requests and response-reported costs are charged in Redis
     Given I generate a unique value from "arl-redis-cost" and store it as "apiName"
     And I generate a unique API version from "arl-redis-cost" and store it as "apiVersion"
@@ -146,6 +152,8 @@ Feature: Advanced rate limit on the Redis backend with fail-open behaviour
   # does on the in-memory backend (ratelimit_window.feature). The Redis fixed-window limiter adds
   # the cost to the shared counter before it compares it with the limit and never takes it back.
   @known-issue
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: A weighted request refused on Redis consumes none of the remaining quota
     Given I generate a unique value from "arl-redis-atomic" and store it as "apiName"
     And I generate a unique API version from "arl-redis-atomic" and store it as "apiVersion"
@@ -187,6 +195,8 @@ Feature: Advanced rate limit on the Redis backend with fail-open behaviour
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: Quota state kept in Redis survives a gateway runtime restart
     Given I generate a unique value from "arl-redis-restart" and store it as "apiName"
     And I generate a unique API version from "arl-redis-restart" and store it as "apiVersion"
@@ -216,6 +226,8 @@ Feature: Advanced rate limit on the Redis backend with fail-open behaviour
     When I delete the API "${CTX:apiName}"
     Then the response should be successful
 
+  # Fixed in gateway 1.2.0 by wso2/api-platform PR #2596 (https://github.com/wso2/api-platform/pull/2596): config.toml gains {{ env }} interpolation, so the Redis password reaches the policy.
+  @known-issue-gw-1.1.0
   Scenario: During a Redis outage requests pass and the failure is logged, and enforcement resumes after recovery
     Given I generate a unique value from "arl-redis-open" and store it as "apiName"
     And I generate a unique API version from "arl-redis-open" and store it as "apiVersion"

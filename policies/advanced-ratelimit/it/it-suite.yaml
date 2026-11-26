@@ -131,9 +131,7 @@ blocks:
         features:
           - features/ratelimit_metrics.feature
 
-  # The Redis blocks stop and start the shared Redis component, so each owns one. They need gateway
-  # 1.2.0: on 1.1.0 the policy is refused by Redis (WRONGPASS), so the password the overlay passes
-  # does not reach it.
+  # The Redis blocks stop and start the shared Redis component, so each owns one.
   - name: ratelimit-redis
     parallel: 1
     components:
