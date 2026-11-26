@@ -262,3 +262,75 @@ func TestGetOrCreateEndpointState_BackendMismatchWarns(t *testing.T) {
 		t.Errorf("expected existing backend=memory, got %q", s2.backend)
 	}
 }
+
+// TestRedisRelease_SkipsWhenWindowExpired verifies that releaseReservationRedis
+// skips the conditional DECR when the reservation's windowEnd is already in the
+// past — preventing counter corruption in a newer failure window.
+func TestRedisRelease_SkipsWhenWindowExpired(t *testing.T) {
+	mr := miniredis.RunT(t)
+	ft := newTestRedisTracker(t, mr)
+	ctx := context.Background()
+
+	rsv, err := ft.checkAndReserve(ctx, "client-window-test", 3, 30*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rsv.redisKey == "" {
+		t.Fatal("expected non-empty redisKey from Redis path")
+	}
+
+	// Backdate windowEnd to simulate the window having already expired
+	rsv.windowEnd = time.Now().Add(-2 * time.Second)
+
+	// Release — the guard should skip the DECR
+	ft.releaseReservation(ctx, "client-window-test", rsv)
+
+	// Counter must still be 1 (DECR was not issued)
+	checkRdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { checkRdb.Close() })
+	val, getErr := checkRdb.Get(ctx, rsv.redisKey).Result()
+	if getErr != nil {
+		t.Fatalf("failed to read Redis counter: %v", getErr)
+	}
+	if val != "1" {
+		t.Errorf("expected counter=1 (DECR skipped by windowEnd guard), got %q", val)
+	}
+}
+
+// TestGetPolicy_Redis_FailClosed_CachedClient_PingFail_ReturnsError verifies that
+// when GetPolicy is called a second time with failureMode=closed and the Redis
+// client is already cached (created=false), an explicit ping is still issued and
+// the call fails when Redis is unreachable.
+func TestGetPolicy_Redis_FailClosed_CachedClient_PingFail_ReturnsError(t *testing.T) {
+	mr := miniredis.RunT(t)
+	host, port := mr.Host(), 0
+	fmt.Sscanf(mr.Port(), "%d", &port)
+
+	params := map[string]interface{}{
+		"tokenEndpoint":  "https://idp-cached-ping-test.example.com/token",
+		"failureBackend": "redis",
+		"redis": map[string]interface{}{
+			"host":              host,
+			"port":              float64(port),
+			"failureMode":       "closed",
+			"requestTimeout":    "200ms",
+			"connectionTimeout": "500ms",
+		},
+	}
+
+	// First call: Redis is up — created=true, initial ping passes, policy loads.
+	_, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err != nil {
+		t.Fatalf("first GetPolicy should succeed: %v", err)
+	}
+
+	// Take Redis down.
+	mr.Close()
+
+	// Second call: same connKey → created=false; explicit ping for closed mode
+	// fires and must fail because Redis is now unreachable.
+	_, err = GetPolicy(policy.PolicyMetadata{}, params)
+	if err == nil {
+		t.Error("expected error on second GetPolicy when Redis is down with failureMode=closed")
+	}
+}
