@@ -190,9 +190,8 @@ parameters:
           x-wso2-policy-advanced-param: true
           description: |
             JSONPaths to try, in order, when jsonPath finds no text to validate. The first
-            path that finds text is validated. With no jsonPath set, only these paths are
-            tried. A request no path matches is handled as a jsonPath miss. Same syntax as
-            jsonPath.
+            path that finds text is validated. A request no path matches is handled as a
+            jsonPath miss. Same syntax as jsonPath.
           items:
             type: string
             minLength: 1
@@ -241,9 +240,9 @@ parameters:
           x-wso2-policy-advanced-param: true
           description: |
             JSONPaths to try, in order, when jsonPath finds no text to validate. The first
-            path that finds text is validated. With no jsonPath set, only these paths are
-            tried. A response no path matches is handled as a jsonPath miss. Same syntax as
-            jsonPath. Streamed LLM responses use streamingJsonPath instead.
+            path that finds text is validated. A response no path matches is handled as a
+            jsonPath miss. Same syntax as jsonPath. Streamed LLM responses use
+            streamingJsonPath instead.
           items:
             type: string
             minLength: 1

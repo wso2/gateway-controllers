@@ -466,14 +466,12 @@ type AWSBedrockGuardrailPolicyParams struct {
 	StreamingTextUnitChars int
 }
 
-// extractionPaths returns the JSONPaths to try, in order: jsonPath first when it
-// is set, followed by the fallback paths.
+// extractionPaths returns the JSONPaths to try, in order: jsonPath, then the
+// fallback paths. An empty jsonPath validates the whole payload, so no path
+// follows it.
 func (params AWSBedrockGuardrailPolicyParams) extractionPaths() []string {
-	if len(params.FallbackJsonPaths) == 0 {
+	if params.JsonPath == "" || len(params.FallbackJsonPaths) == 0 {
 		return []string{params.JsonPath}
-	}
-	if params.JsonPath == "" {
-		return params.FallbackJsonPaths
 	}
 	return append([]string{params.JsonPath}, params.FallbackJsonPaths...)
 }
@@ -680,27 +678,21 @@ func parseRequestResponseParams(params map[string]interface{}, isResponse bool) 
 	}
 
 	// Extract optional jsonPath parameter
-	jsonPathSet := false
 	if jsonPathRaw, ok := params["jsonPath"]; ok {
 		if jsonPath, ok := jsonPathRaw.(string); ok {
 			result.JsonPath = jsonPath
-			jsonPathSet = true
 		} else {
 			return result, fmt.Errorf("'jsonPath' must be a string")
 		}
 	}
 
-	// Extract optional fallbackJsonPaths parameter. They are tried after jsonPath,
-	// or on their own when jsonPath is not set. An empty list leaves jsonPath alone.
+	// Extract optional fallbackJsonPaths parameter. They are tried in order after jsonPath.
 	if fallbackRaw, ok := params["fallbackJsonPaths"]; ok {
 		fallbackPaths, err := parseFallbackJSONPaths(fallbackRaw)
 		if err != nil {
 			return result, err
 		}
 		result.FallbackJsonPaths = fallbackPaths
-		if len(fallbackPaths) > 0 && !jsonPathSet {
-			result.JsonPath = ""
-		}
 	}
 
 	// Extract optional redactPII parameter
@@ -2393,11 +2385,11 @@ func (p *AWSBedrockGuardrailPolicy) OnResponseBodyChunk(
 // dispatchResponseChunk hands a flush to the reader for the stream's format.
 func (p *AWSBedrockGuardrailPolicy) dispatchResponseChunk(chunkStr string, sseStream bool, chunk *policy.StreamBody, respCtx *policy.ResponseStreamContext) policy.StreamingResponseAction {
 
-	// An empty jsonPath with no fallback paths assesses the whole payload as text,
-	// an event stream included, so the body is withheld and assessed whole as any
-	// other non-event-stream body is; reading it as events would apply
+	// An empty jsonPath assesses the whole payload as text, an event stream
+	// included, so the body is withheld and assessed whole as any other
+	// non-event-stream body is; reading it as events would apply
 	// streamingJsonPath to a configuration that asked for the whole body.
-	if sseStream && (p.responseParams.JsonPath != "" || len(p.responseParams.FallbackJsonPaths) > 0) {
+	if sseStream && p.responseParams.JsonPath != "" {
 		if p.isJSONRPCStream(chunkStr, respCtx) {
 			return p.handleJSONRPCStreamFlush(chunkStr, chunk, respCtx)
 		}
@@ -4716,14 +4708,14 @@ func (p *AWSBedrockGuardrailPolicy) validatePayloadAs(payload []byte, params AWS
 	// batch may hold no JSON-RPC message of its own; it is read with jsonPath all
 	// the same, as the whole stream is.
 	//
-	// An empty jsonPath with no fallback paths means "assess the whole payload",
-	// for an event stream as for anything else, so such a body is assessed whole
-	// as text (see extractPayload) and is never read as events.
+	// An empty jsonPath means "assess the whole payload", for an event stream as
+	// for anything else, so such a body is assessed whole as text (see
+	// extractPayload) and is never read as events.
 	forceJSONRPC := mediaType == jsonRPCEventStream
 	if forceJSONRPC {
 		mediaType = "text/event-stream"
 	}
-	eventStream := isResponse && (params.JsonPath != "" || len(params.FallbackJsonPaths) > 0) && isEventStreamResponse(mediaType, payload)
+	eventStream := isResponse && params.JsonPath != "" && isEventStreamResponse(mediaType, payload)
 	if eventStream {
 		if !forceJSONRPC && !sseCarriesJSONRPC(payload) {
 			return p.validateStreamedBody(payload, params, metadata, restored)

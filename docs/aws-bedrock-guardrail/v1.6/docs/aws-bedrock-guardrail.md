@@ -156,7 +156,7 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `true` | Enables validation for the request flow. |
 | `jsonPath` | string | No | `"$.messages[-1].content"` | JSONPath expression selecting the request content to validate. When it selects an object or array, every string inside it is validated. If empty, validates the entire payload as a string. Tried before `fallbackJsonPaths`. See [JSONPath Support](#jsonpath-support). |
-| `fallbackJsonPaths` | array of strings | No | – | JSONPaths tried in order when `jsonPath` finds no text, for a route that receives more than one request format. The first path that finds text is validated. With no `jsonPath` set, only these paths are tried. See [Several formats on one route](#several-formats-on-one-route-fallbackjsonpaths). |
+| `fallbackJsonPaths` | array of strings | No | – | JSONPaths tried in order when `jsonPath` finds no text, for a route that receives more than one request format. The first path that finds text is validated. See [Several formats on one route](#several-formats-on-one-route-fallbackjsonpaths). |
 | `redactPII` | boolean | No | `false` | If `true`, redacts PII by replacing with `*****` (permanent). If `false`, masks PII with placeholders that can be restored in responses. |
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows the request to proceed when the Amazon Bedrock Guardrails API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from Amazon Bedrock Guardrails in error responses. |
@@ -167,7 +167,7 @@ For `irsa`, the web identity token file path is never a policy parameter — it 
 |-----------|------|----------|---------|-------------|
 | `enabled` | boolean | No | `false` | Enables validation for the response flow. |
 | `jsonPath` | string | No | `"$.choices[0].message.content"` | JSONPath expression selecting the response content to validate. When it selects an object or array, every string inside it is validated. For a Server-Sent Events response, it is applied to the JSON in each event. If empty, validates the entire payload as a string. Tried before `fallbackJsonPaths`. See [JSONPath Support](#jsonpath-support). |
-| `fallbackJsonPaths` | array of strings | No | – | JSONPaths tried in order when `jsonPath` finds no text, for a route whose upstream returns more than one response format. The first path that finds text is validated. With no `jsonPath` set, only these paths are tried. Streamed LLM responses are read with `streamingJsonPath`. See [Several formats on one route](#several-formats-on-one-route-fallbackjsonpaths). |
+| `fallbackJsonPaths` | array of strings | No | – | JSONPaths tried in order when `jsonPath` finds no text, for a route whose upstream returns more than one response format. The first path that finds text is validated. Streamed LLM responses are read with `streamingJsonPath`. See [Several formats on one route](#several-formats-on-one-route-fallbackjsonpaths). |
 | `redactPII` | boolean | No | `false` | If `true`, PII the guardrail anonymizes in the response is replaced with `*****`, and the request's placeholders are not restored. If `false`, it is replaced with its type, such as `{EMAIL}`, and the request's placeholders are restored. Always `true` when the request's `redactPII` is `true`. Setting it to `true` while the request's `redactPII` is `false` delivers the request's placeholders (such as `EMAIL_0000`) unrestored. |
 | `passthroughOnError` | boolean | No | `false` | If `true`, allows the response to proceed when the Amazon Bedrock Guardrails API call fails. If `false`, blocks on API errors. |
 | `showAssessment` | boolean | No | `false` | If `true`, includes detailed assessment information from Amazon Bedrock Guardrails in error responses. |
@@ -189,7 +189,7 @@ The guardrail supports JSONPath expressions to extract and validate specific fie
 
 When the selected value is an object or an array, every string inside it is sent to the guardrail. A path that matches nothing, or that selects only `true`, `false`, or `null`, is an extraction error, handled according to `passthroughOnError`. Numbers are validated only when selected directly. Every string includes non-text values such as inline base64 image data (`data:` URLs) and type names, so a path such as `$.messages[-1].content` sends every part of a multimodal message to the guardrail, image data included.
 
-If `jsonPath` is not set, the default path is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses). If it is set to an empty string (`""`), the whole payload is validated as text, and a streamed response is held until it ends, so it is not streamed. When `fallbackJsonPaths` is set, a missing or empty `jsonPath` is skipped, and only the fallback paths are tried.
+If `jsonPath` is not set, the default path is used (`$.messages[-1].content` for requests, `$.choices[0].message.content` for responses). If it is set to an empty string (`""`), the whole payload is validated as text, and a streamed response is held until it ends, so it is not streamed.
 
 #### Several formats on one route (`fallbackJsonPaths`)
 
@@ -206,7 +206,7 @@ request:
 ```
 
 - `jsonPath` is tried first. When it finds no text, the fallback paths are tried in order, and the first one that finds text is validated. Masking writes back at that path only.
-- With no `jsonPath` set, only the fallback paths are tried, in order; the default `jsonPath` is not added. An empty `jsonPath` together with fallback paths also uses only the fallback paths.
+- With no `jsonPath` set, its default path is tried first. An empty `jsonPath` validates the whole payload, so the fallback paths are not used.
 - A path that matches nothing, selects only `true`, `false` or `null`, or finds only blank text is skipped.
 - When no path finds text but one finds a value with nothing to check, such as a blank string or an MCP `initialize`, the payload passes as it would with that path alone. A path that selects only `true`, `false` or `null` finds no value. When no path finds a value, it is an extraction error, handled according to `passthroughOnError` exactly as a `jsonPath` miss is, with the same status and body.
 - In a Server-Sent Events body, such as an MCP Streamable HTTP response, each event tries the paths on its own, in the same order, so events of different shapes can use different paths. An event is reported as missed only when no path finds a value in it.

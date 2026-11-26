@@ -418,13 +418,14 @@ func TestFallbackJSONPaths_InvalidConfigurationIsRejected(t *testing.T) {
 	}
 }
 
-func TestRequest_FallbackJSONPathsAloneAreTriedInOrder(t *testing.T) {
+// Without jsonPath, its default is tried first, then the fallback paths in order.
+func TestRequest_FallbackJSONPathsAreTriedInOrderAfterTheDefault(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
 		want []string
 	}{
-		{"chat completions hits the first path", chatCompletionsBody, []string{"hello chat"}},
+		{"chat completions hits the default jsonPath", chatCompletionsBody, []string{"hello chat"}},
 		{"responses items hit the second path", responsesItemsBody, []string{"hello items"}},
 		{"responses string falls through to the last path", responsesStringBody, []string{"hello responses"}},
 	}
@@ -482,16 +483,16 @@ func TestRequest_FallbackJSONPathsAreTriedWhenJSONPathMisses(t *testing.T) {
 	}
 }
 
-// Without jsonPath, only the fallback paths are tried; the default jsonPath is not added.
-func TestRequest_FallbackJSONPathsWithoutJSONPathSkipTheDefault(t *testing.T) {
+// Without jsonPath, its default is tried before the fallback paths.
+func TestRequest_FallbackJSONPathsWithoutJSONPathTryTheDefaultFirst(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := fallbackPathsAttachment(t, "request", map[string]interface{}{
 		"fallbackJsonPaths": paths("$.input"),
 	}, client)
 
 	sendRequest(p, map[string]interface{}{}, bothFormatsBody)
-	if !reflect.DeepEqual(client.texts, []string{"from input"}) {
-		t.Fatalf("assessed %q, want only the fallback match", client.texts)
+	if !reflect.DeepEqual(client.texts, []string{"from messages"}) {
+		t.Fatalf("assessed %q, want the default jsonPath match", client.texts)
 	}
 }
 
@@ -635,8 +636,8 @@ func TestResponse_FallbackJSONPathsAreTriedWhenJSONPathMisses(t *testing.T) {
 	}
 }
 
-// With fallback paths set, an empty jsonPath does not mean "assess the whole body".
-func TestStreaming_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) {
+// An empty jsonPath assesses the whole body, so the fallback paths after it are not used.
+func TestStreaming_EmptyJSONPathWithFallbackJSONPathsAssessesTheWholeBody(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
 		"enabled":           true,
@@ -644,9 +645,10 @@ func TestStreaming_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) {
 		"fallbackJsonPaths": paths("$.choices[0].message.content"),
 	}, client)
 
+	body := sseEvent("Hello") + sseEvent(" world") + "data: [DONE]\n\n"
 	feedStream(t, p, streamCtxWithType("text/event-stream"), []string{sseEvent("Hello"), sseEvent(" world"), "data: [DONE]\n\n"})
-	if got := strings.Join(client.texts, ""); got != "Hello world" {
-		t.Fatalf("assessed %q, want only the streamed text", got)
+	if len(client.texts) != 1 || client.texts[0] != strings.TrimSpace(body) {
+		t.Fatalf("assessed %q, want the whole body once", client.texts)
 	}
 }
 
@@ -682,7 +684,7 @@ func TestBufferedEventStream_JSONPathWithFallbackJSONPathsReadsEvents(t *testing
 	}
 }
 
-func TestBufferedEventStream_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) {
+func TestBufferedEventStream_EmptyJSONPathWithFallbackJSONPathsAssessesTheWholeBody(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := fallbackPathsAttachment(t, "response", map[string]interface{}{
 		"enabled":           true,
@@ -695,8 +697,8 @@ func TestBufferedEventStream_FallbackJSONPathsWithAnEmptyJSONPath(t *testing.T) 
 	if mod, ok := action.(policy.DownstreamResponseModifications); !ok || mod.StatusCode != nil {
 		t.Fatalf("expected the clean stream to pass, got %#v", action)
 	}
-	if got := strings.Join(client.texts, ""); got != "Hello world" {
-		t.Fatalf("assessed %q, want only the streamed text", got)
+	if len(client.texts) != 1 || !strings.Contains(client.texts[0], "data: ") {
+		t.Fatalf("assessed %q, want the whole body once", client.texts)
 	}
 }
 
