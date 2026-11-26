@@ -190,24 +190,24 @@ Feature: OpenAI to Azure OpenAI transformer
       | version       | v1.0                                                                                                                                                                                                                        |
       | context       | ${CTX:proxyContext}                                                                                                                                                                                                         |
       | provider.id   | ${CTX:providerName}                                                                                                                                                                                                         |
-      | spec.policies | [{"name":"openai-to-azure-openai-transformer","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"apiVersion":"2024-10-21","model":"fallback-deployment","pathSuffix":"chat/completions"}}]}] |
+      | spec.policies | [{"name":"openai-to-azure-openai-transformer","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"apiVersion":"2024-10-21","model":"fallback-deployment","pathSuffix":"completions"}}]}] |
     Then the response status code should be 201
     And I send a "POST" request to "${CTX:proxyContext}/chat/completions" until status 200 with body:
       """
       not a json document
       """
-    When I send a "GET" request to the "capture" service at "/test/captured?path=/openai/deployments/fallback-deployment/chat/completions"
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/openai/deployments/fallback-deployment/completions"
     Then the response status code should be 200
-    And the JSON response field "path" should be "/openai/deployments/fallback-deployment/chat/completions"
+    And the JSON response field "path" should be "/openai/deployments/fallback-deployment/completions"
     And the JSON response field "query" should be "api-version=2024-10-21"
-    And the JSON response field "body" should contain "not a json document"
+    And the JSON response field "body" should match pattern "^not a json document[[:space:]]*$"
     # A model given as null counts as none, so the fallback deployment serves it too.
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
       """
       {"model":null,"messages":[{"role":"user","content":"Hello"}]}
       """
     Then the response status code should be 200
-    When I send a "GET" request to the "capture" service at "/test/captured?path=/openai/deployments/fallback-deployment/chat/completions"
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/openai/deployments/fallback-deployment/completions"
     Then the response status code should be 200
     And the JSON response field "body" should contain "Hello"
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
@@ -301,7 +301,7 @@ Feature: OpenAI to Azure OpenAI transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should contain "left untranslated"
+    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:otherName}"

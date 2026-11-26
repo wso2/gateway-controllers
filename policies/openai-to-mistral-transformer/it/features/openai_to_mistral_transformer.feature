@@ -463,11 +463,64 @@ Feature: OpenAI to Mistral transformer
     Then the response should be successful
 
     Examples:
-      | case               | status | contentType              | body                                                                                                                                                                                                          | request                                                                                       | expected | expect1           | expect2                       | expect3       | absent |
-      | nested-error       | 400    | application/json         | {\\"error\\":{\\"message\\":\\"Nested failure\\",\\"type\\":\\"invalid_model\\",\\"code\\":\\"model_missing\\"}}                                                                                              | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}]}               | 400      | Nested failure    | invalid_model                 | model_missing | detail |
-      | flat-error         | 422    | application/json         | {\\"object\\":\\"error\\",\\"message\\":\\"Flat failure\\",\\"type\\":\\"invalid_request_message_order\\",\\"code\\":\\"3230\\"}                                                                              | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}]}               | 422      | Flat failure      | invalid_request_message_order | 3230          | detail |
-      | streamed-error     | 429    | application/json         | {\\"object\\":\\"error\\",\\"message\\":\\"Too many requests\\",\\"type\\":\\"rate_limited\\",\\"code\\":\\"1300\\"}                                                                                          | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}],"stream":true} | 429      | Too many requests | rate_limited                  | 1300          | detail |
-      | comment-led-stream | 200    | application/octet-stream | : ping\\u000a\\u000adata: {\\"id\\":\\"cmpl-comment\\",\\"object\\":\\"chat.completion.chunk\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"content\\":\\"hi\\"}}]}\\u000a\\u000adata: [DONE]\\u000a\\u000a | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}],"stream":true} | 200      | cmpl-comment      | data: [DONE]                  | hi            | error  |
+      | case               | status | contentType              | body                                                                                                                                                                                                          | request                                                                                       | expected | expect1      | expect2      | expect3 | absent |
+      | comment-led-stream | 200    | application/octet-stream | : ping\\u000a\\u000adata: {\\"id\\":\\"cmpl-comment\\",\\"object\\":\\"chat.completion.chunk\\",\\"choices\\":[{\\"index\\":0,\\"delta\\":{\\"content\\":\\"hi\\"}}]}\\u000a\\u000adata: [DONE]\\u000a\\u000a | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}],"stream":true} | 200      | cmpl-comment | data: [DONE] | hi      | error  |
+  Scenario Outline: A scripted O2M error is rewritten as an OpenAI error object (<case>)
+    Given I generate a unique value from "o2m-fake-<case>" and store it as "fakeName"
+    And I generate a unique API context from "/o2m-fake-<case>" and store it as "fakeContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}                                                                                                                                                                                                     |
+      | name                   | ${CTX:fakeName}                                                                                                                                                                                                               |
+      | spec.displayName       | ${CTX:fakeName}                                                                                                                                                                                                               |
+      | spec.version           | v1.0                                                                                                                                                                                                                          |
+      | spec.context           | ${CTX:fakeContext}/$version                                                                                                                                                                                                   |
+      | spec.upstream.main.url | http://testbench:3002                                                                                                                                                                                                         |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/*","policies":[{"name":"respond","version":"v1","params":{"statusCode":<status>,"headers":[{"name":"Content-Type","value":"<contentType>"}],"body":"<body>"}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:fakeContext}/v1.0/health" until status 200
+    And I generate a unique resource name from "o2m-scripted-provider" and store it as "providerName"
+    And I generate a unique API context from "/o2m-scripted-provider" and store it as "providerContext"
+    And I generate a unique resource name from "o2m-scripted-proxy" and store it as "proxyName"
+    And I generate a unique API context from "/o2m-scripted-proxy" and store it as "proxyContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}                          |
+      | name               | ${CTX:providerName}                                |
+      | displayName        | O2M-Scripted-Provider                              |
+      | version            | v1.0                                               |
+      | template           | openai                                             |
+      | spec.context       | ${CTX:providerContext}                             |
+      | spec.upstream.url  | http://gateway-runtime:8080${CTX:fakeContext}/v1.0 |
+      | accessControl.mode | allow_all                                          |
+    Then the response status code should be 201
+    When I create LLM proxy from "resources/templates/llm-proxy.yaml" with values:
+      | apiVersion    | ${CTX:gatewaySpecVersion}                                                                                                                                     |
+      | name          | ${CTX:proxyName}                                                                                                                                              |
+      | displayName   | O2M-Scripted-Proxy                                                                                                                                            |
+      | version       | v1.0                                                                                                                                                          |
+      | context       | ${CTX:proxyContext}                                                                                                                                           |
+      | provider.id   | ${CTX:providerName}                                                                                                                                           |
+      | spec.policies | [{"name":"openai-to-mistral-transformer","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"model":"mistral-large-latest"}}]}] |
+    Then the response status code should be 201
+    And I send a "POST" request to "${CTX:proxyContext}/chat/completions" until status <expected> with body:
+      """
+      <request>
+      """
+    Then the JSON response field "error.type" should be "<errType>"
+    And the JSON response field "error.message" should be "<errMessage>"
+    And the JSON response field "error.code" should be "<errCode>"
+    And the JSON response field "<gone>" should not exist
+    When I delete the LLM proxy "${CTX:proxyName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:providerName}"
+    Then the response should be successful
+    When I delete the API "${CTX:fakeName}"
+    Then the response should be successful
+
+    Examples:
+      | case           | status | contentType      | body                                                                                                                             | request                                                                                       | expected | errType                       | errMessage        | errCode       | gone    |
+      | nested-error   | 400    | application/json | {\\"error\\":{\\"message\\":\\"Nested failure\\",\\"type\\":\\"invalid_model\\",\\"code\\":\\"model_missing\\"}}                 | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}]}               | 400      | invalid_model                 | Nested failure    | model_missing | detail  |
+      | flat-error     | 422    | application/json | {\\"object\\":\\"error\\",\\"message\\":\\"Flat failure\\",\\"type\\":\\"invalid_request_message_order\\",\\"code\\":\\"3230\\"} | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}]}               | 422      | invalid_request_message_order | Flat failure      | 3230          | message |
+      | streamed-error | 429    | application/json | {\\"object\\":\\"error\\",\\"message\\":\\"Too many requests\\",\\"type\\":\\"rate_limited\\",\\"code\\":\\"1300\\"}             | {"model":"mistral-small-latest","messages":[{"role":"user","content":"Hello"}],"stream":true} | 429      | rate_limited                  | Too many requests | 1300          | message |
 
   Scenario: The translator runs only for the provider a header router selected for it
     Given I generate a unique resource name from "o2m-route-primary" and store it as "primaryName"
@@ -534,7 +587,7 @@ Feature: OpenAI to Mistral transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should contain "left untranslated"
+    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
       """
       {"model":"route-model","stream":true,"messages":[{"role":"user","content":"streamed untranslated"}]}
