@@ -27,7 +27,11 @@ import (
 	"github.com/wso2/gateway-controllers/policies/advanced-ratelimit/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+var config = suite.Config{
+	// jwt-auth supplies the authenticated identity the auth-context scenarios key and match on.
+	Companions:       []string{"jwt-auth"},
+	RegisterWithBase: steps.Register,
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

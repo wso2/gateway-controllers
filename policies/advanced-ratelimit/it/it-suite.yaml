@@ -57,3 +57,188 @@ blocks:
       - name: ratelimit-multi-quota
         features:
           - features/ratelimit_multi_quota.feature
+      - name: ratelimit-window
+        features:
+          - features/ratelimit_window.feature
+      - name: ratelimit-match
+        features:
+          - features/ratelimit_match.feature
+      - name: ratelimit-concurrency
+        features:
+          - features/ratelimit_concurrency_and_key_hygiene.feature
+      - name: ratelimit-observability
+        features:
+          - features/ratelimit_observability.feature
+      - name: ratelimit-streaming-cost
+        features:
+          - features/ratelimit_streaming_cost.feature
+      - name: ratelimit-configuration
+        tags: "~@known-issue"
+        features:
+          - features/ratelimit_configuration.feature
+
+  # The algorithm, the backend, the headers and the Redis connection are system parameters read
+  # from the gateway's config, so each combination below needs a gateway of its own. They run on
+  # SQLite only: the rate limit state does not depend on the database.
+  - name: ratelimit-gcra
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/gcra.toml
+      - name: testbench
+    runners:
+      - name: ratelimit-gcra
+        features:
+          - features/ratelimit_gcra.feature
+
+  - name: ratelimit-memory-tuning
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/memory-tuning.toml
+      - name: testbench
+    runners:
+      - name: ratelimit-memory-tuning
+        tags: "~@known-issue"
+        features:
+          - features/ratelimit_memory_tuning.feature
+
+  # jwt-auth needs a key manager that trusts the testbench's JWKS service.
+  - name: ratelimit-jwt
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/jwt.toml
+      - name: testbench
+    runners:
+      - name: ratelimit-auth-context
+        features:
+          - features/ratelimit_auth_context.feature
+
+  # The policy engine's metrics are off by default; this block switches them on and reads counters.
+  - name: ratelimit-metrics
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/metrics.toml
+      - name: testbench
+    runners:
+      - name: ratelimit-metrics
+        features:
+          - features/ratelimit_metrics.feature
+
+  # The Redis blocks stop and start the shared Redis component, so each owns one.
+  - name: ratelimit-redis
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/redis.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      - name: ratelimit-redis
+        tags: "~@known-issue"
+        features:
+          - features/ratelimit_redis.feature
+
+  - name: ratelimit-redis-gcra
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/redis-gcra.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      - name: ratelimit-redis-gcra
+        tags: "~@known-issue"
+        features:
+          - features/ratelimit_redis_gcra.feature
+
+  - name: ratelimit-redis-closed
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/redis-closed.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      - name: ratelimit-redis-closed
+        features:
+          - features/ratelimit_redis_failure.feature
+
+  - name: ratelimit-redis-local-async
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/redis-local-async.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      - name: ratelimit-redis-local-async
+        tags: "~@known-issue"
+        features:
+          - features/ratelimit_redis_local_async.feature
+
+  # The API and its policy reach each replica through the control plane (platform-api), so these
+  # blocks boot two gateways. The memory block keeps the default backend; the Redis block shares
+  # one Redis between the replicas.
+  - name: ratelimit-multigateway-memory
+    parallel: 1
+    components:
+      - name: platform-api
+        version: latest
+        db: sqlite
+      - name: platform-gateway
+        dependsOn: [platform-api]
+        replicas: 2
+        db: sqlite
+      - name: testbench
+    runners:
+      - name: ratelimit-multigateway-memory
+        tags: "gateway-version>=1.1.0"
+        features:
+          - features/ratelimit_multigateway_memory.feature
+
+  - name: ratelimit-multigateway-redis
+    parallel: 1
+    components:
+      - name: platform-api
+        version: latest
+        db: sqlite
+      - name: platform-gateway
+        dependsOn: [platform-api, redis]
+        replicas: 2
+        db: sqlite
+        overlay: overlays/redis.toml
+      - name: testbench
+      - name: redis
+    runners:
+      - name: ratelimit-multigateway-redis
+        tags: "gateway-version>=1.1.0"
+        features:
+          - features/ratelimit_multigateway_redis.feature
+
+  # A broken Redis TLS setting fails policy creation whatever the failure mode, so no Redis runs.
+  - name: ratelimit-redis-tls
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db: sqlite
+        overlay: overlays/redis-tls-misconfigured.toml
+      - name: testbench
+    runners:
+      - name: ratelimit-redis-tls
+        features:
+          - features/ratelimit_redis_tls.feature
