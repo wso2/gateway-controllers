@@ -41,7 +41,33 @@ blocks:
         db:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
+      # The TLS backend the HTTPS interceptor scenario calls.
+      - name: tls-backend
     runners:
       - name: interceptor-service
         features:
           - features/interceptor_service.feature
+
+  - name: interceptor-service-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: interceptor-service-restart
+        features:
+          - features/interceptor_service_restart.feature
+
+  - name: interceptor-service-logs
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: interceptor-service-logs
+        features:
+          - features/interceptor_service_logs.feature
