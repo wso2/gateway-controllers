@@ -36,7 +36,8 @@ Feature: Request rewrite against hostile input
   # RR29: The client sends a plain request, and the query rules carry the delimiters. A value with &
   # and =, a value with CR LF and a header line, a substitution that appends &role=admin, and a
   # value that is already percent-encoded each stay inside their own parameter, as literal text: no
-  # admin or role parameter and no X-Injected header reach the backend.
+  # admin or role parameter and no X-Injected header reach the backend. A step string cannot hold
+  # CR LF, so the note value is matched in the raw JSON, where the echo writes it as \r\n.
   Scenario: Keep delimiters in rewrite rule values inside the value
     Given I generate a unique value from "rr-rule-values" and store it as "apiName"
     And I generate a unique API version from "rr-rule-values" and store it as "apiVersion"
@@ -59,7 +60,7 @@ Feature: Request rewrite against hostile input
     And the JSON response field "args.tag" should be "a&admin=true"
     And the JSON response field "args.q" should be "x&role=admin"
     And the JSON response field "args.enc" should be "a%26admin%3Dtrue"
-    And the JSON response field "args.note" should contain "X-Injected: yes"
+    And the response body should match pattern "\x22note\x22:\x22a\\r\\nX-Injected: yes\x22"
     And the JSON response field "args.admin" should not exist
     And the JSON response field "args.role" should not exist
     And the response should not contain echoed header "X-Injected"

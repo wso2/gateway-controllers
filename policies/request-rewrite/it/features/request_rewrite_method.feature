@@ -71,25 +71,34 @@ Feature: Request rewrite of the method
       | GET  | PATCH     |
       | GET  | OPTIONS   |
 
-  # RR14: A GET rewritten to HEAD reaches the backend as HEAD. The backend is the testbench status
-  # endpoint, which answers 200 with an empty body, and the client must receive that 200 with an
-  # empty body and without waiting for content.
+  # RR14: A GET rewritten to HEAD must reach the backend as HEAD. The echo cannot report the
+  # method of a HEAD request, so both requests carry a 3 KiB query value: the echo's reply is then
+  # over 2 KiB and is streamed without a Content-Length. A GET to the operation without the policy
+  # receives that reply as JSON, and the rewritten GET must receive an empty 200, which only a HEAD
+  # to the backend returns. A shorter reply would carry a Content-Length the client waits for.
   Scenario: Rewrite the request method to HEAD
     Given I generate a unique value from "rr-method-head" and store it as "apiName"
     And I generate a unique API version from "rr-method-head" and store it as "apiVersion"
     And I generate a unique API context from "/rr-method-head" and store it as "apiContext"
+    And I generate a value of 3 KiB of "QUFB" and store it as "padding"
     When I create API from "resources/templates/rest-api.yaml" with values:
-      | apiVersion             | ${CTX:gatewaySpecVersion}    |
-      | name                   | ${CTX:apiName}               |
-      | spec.displayName       | ${CTX:apiName}               |
-      | spec.version           | ${CTX:apiVersion}            |
-      | spec.context           | ${CTX:apiContext}/$version   |
-      | spec.upstream.main.url | http://testbench:3002/status |
-      | spec.operations        | [{"method":"GET","path":"/200","policies":[{"name":"request-rewrite","version":"v1","params":{"methodRewrite":"HEAD"}}]}] |
+      | apiVersion             | ${CTX:gatewaySpecVersion}      |
+      | name                   | ${CTX:apiName}                 |
+      | spec.displayName       | ${CTX:apiName}                 |
+      | spec.version           | ${CTX:apiVersion}              |
+      | spec.context           | ${CTX:apiContext}/$version     |
+      | spec.upstream.main.url | http://testbench:3002/anything |
+      | spec.operations        | [{"method":"GET","path":"/plain"},{"method":"GET","path":"/orders","policies":[{"name":"request-rewrite","version":"v1","params":{"methodRewrite":"HEAD"}}]}] |
     Then the resource creation response should indicate successful deployment
 
     When I clear all headers
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/200?page=2" until status 200
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/plain?page=2&pad=${CTX:padding}" until status 200
+    Then the response status code should be 200
+    And the JSON response field "path" should be "/anything/plain"
+    And the JSON response field "args.page" should be "2"
+    And the JSON response field "method" should be "GET"
+
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/orders?page=2&pad=${CTX:padding}"
     Then the response status code should be 200
     And the response body should be empty
 
@@ -97,7 +106,7 @@ Feature: Request rewrite of the method
     And I authenticate using basic auth as "admin"
     And I delete the API "${CTX:apiName}"
     Then the response should be successful
-    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/200" until status 404
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/plain" until status 404
 
   # RR15: One policy rewrites the path prefix, adds and removes query parameters and changes the
   # method. A POST with a body must reach the backend as a PUT on the new path, with the new query

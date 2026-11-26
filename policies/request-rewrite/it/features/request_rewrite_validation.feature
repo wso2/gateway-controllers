@@ -149,6 +149,9 @@ Feature: Request rewrite configuration errors
     Then the response status code should be 500
     And the response should match the expected error response "<errorResponse>"
 
+    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health"
+    Then the response status code should be 200
+
     When I clear all headers
     And I authenticate using basic auth as "admin"
     And I delete the API "${CTX:apiName}"
