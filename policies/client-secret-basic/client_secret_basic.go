@@ -55,6 +55,17 @@ end
 return {count, ttl}
 `)
 
+// failureDecrScript conditionally decrements the counter only if the key
+// exists and its value is positive. This prevents creating a -1 key when the
+// window has already expired and the key was removed by Redis.
+var failureDecrScript = redis.NewScript(`
+local v = redis.call('GET', KEYS[1])
+if not v then return 0 end
+local n = tonumber(v)
+if n <= 0 then return 0 end
+return redis.call('DECR', KEYS[1])
+`)
+
 const (
 	authType = "ClientCredentials"
 
@@ -104,6 +115,7 @@ type endpointState struct {
 	cache    sync.Map // cacheKey(clientId,secret) → validationEntry
 	failures failureTracker
 	sf       sfGroup
+	backend  string // "memory" or "redis" — the failure-counter backend registered first
 }
 
 var (
@@ -113,15 +125,19 @@ var (
 
 // getOrCreateEndpointState returns the shared state for the given token endpoint.
 // On first call, the state is initialized with redisCfg (may be nil for in-memory).
-// Subsequent calls return the existing state; redisCfg is ignored after first creation
-// so the first registered instance's backend configuration takes effect.
-func getOrCreateEndpointState(endpoint string, redisCfg *failureRedisConfig) *endpointState {
+// Subsequent calls return the existing state; if the requested backend differs from
+// the registered one, a warning is logged and the existing state is returned unchanged.
+func getOrCreateEndpointState(endpoint, backend string, redisCfg *failureRedisConfig) *endpointState {
 	endpointStatesMu.Lock()
 	defer endpointStatesMu.Unlock()
 	if s, ok := endpointStates[endpoint]; ok {
+		if s.backend != backend {
+			slog.Warn("client-secret-basic: endpoint already registered with a different failure backend; using existing",
+				"endpoint", endpoint, "existing", s.backend, "requested", backend)
+		}
 		return s
 	}
-	s := &endpointState{}
+	s := &endpointState{backend: backend}
 	s.failures.redis = redisCfg
 	endpointStates[endpoint] = s
 	return s
@@ -175,25 +191,25 @@ type PolicyConfig struct {
 	// is configured to accept as a subscription key. Requests carrying this cookie are
 	// rejected with 401 for the same reason as SubscriptionKeyHeader.
 	SubscriptionKeyCookie string
-
-	// failureRedis holds the wired-up Redis client and settings for distributed
-	// failure counting. Nil means in-memory counting only.
-	failureRedis *failureRedisConfig
 }
 
 // failureRedisConfig carries the Redis connection and key-space settings for the
 // distributed failure counter. It is populated once at GetPolicy time and shared
 // across all policy instances pointing at the same token endpoint.
 type failureRedisConfig struct {
-	rdb       *redis.Client
-	keyPrefix string
-	failOpen  bool // when true, Redis errors allow requests through
+	rdb            *redis.Client
+	keyPrefix      string
+	failOpen       bool
+	requestTimeout time.Duration // per-call bound applied via context.WithTimeout; default 200ms
 }
 
 // validationEntry is a cache record produced by a successful dynamic validation.
+// tokenExpiry and validatedAt are stored raw so each reading API can apply its own
+// maxCacheTTL and expiryBuffer instead of baking in the writer's configuration.
 type validationEntry struct {
-	expiresAt   time.Time
-	accessToken string // the access token returned by the IdP; empty when TokenMetadataKey is unset
+	tokenExpiry time.Time // time.Now() + expires_in as returned by the IdP
+	validatedAt time.Time // time.Now() when this entry was written
+	accessToken string    // the access token returned by the IdP; empty when TokenMetadataKey is unset
 }
 
 // wrongCredEntry caches a confirmed bad credential pair so repeats never reach the IdP.
@@ -262,7 +278,7 @@ type overflowThrottleEntry struct {
 // reservation identifies which counter was incremented by checkAndReserve so that
 // releaseReservation can decrement the correct counter and verify the window is still active.
 // For the in-memory path, isOverflow/windowEnd identify the slot. For the Redis path,
-// redisKey names the key to DECR; both overflow and windowEnd are zero in that case.
+// redisKey names the key to DECR; isOverflow and windowEnd are zero in that case.
 type reservation struct {
 	isOverflow bool
 	windowEnd  time.Time
@@ -275,48 +291,47 @@ func (f *failureTracker) failureCounterKey(clientId string) string {
 }
 
 // isThrottledRedis is a non-authoritative fast path that reads the Redis counter.
-// It never increments — that happens inside checkAndReserveRedis.
-func (f *failureTracker) isThrottledRedis(clientId string, limit int) (bool, time.Duration) {
+// Returns (throttled, retryAfter, nil) on success; (false, 0, err) on Redis infra failure.
+func (f *failureTracker) isThrottledRedis(ctx context.Context, clientId string, limit int) (bool, time.Duration, error) {
+	rCtx, cancel := context.WithTimeout(ctx, f.redis.requestTimeout)
+	defer cancel()
 	key := f.failureCounterKey(clientId)
-	ctx := context.Background()
-	val, err := f.redis.rdb.Get(ctx, key).Int64()
+	val, err := f.redis.rdb.Get(rCtx, key).Int64()
 	if err != nil {
-		return false, 0
+		if errors.Is(err, redis.Nil) {
+			return false, 0, nil
+		}
+		return false, 0, err
 	}
 	if val < int64(limit) {
-		return false, 0
+		return false, 0, nil
 	}
-	ttl, err := f.redis.rdb.TTL(ctx, key).Result()
+	ttl, err := f.redis.rdb.TTL(rCtx, key).Result()
 	if err != nil || ttl <= 0 {
-		return true, time.Second
+		return true, time.Second, nil
 	}
 	if ttl < time.Second {
 		ttl = time.Second
 	}
-	return true, ttl
+	return true, ttl, nil
 }
 
 // checkAndReserveRedis increments the Redis counter atomically and enforces the
-// per-clientId limit. The Lua script ensures the increment and limit check are
-// a single atomic operation. Returns a reservation that holds the Redis key so
-// releaseReservationRedis can DECR it on success or network error.
-func (f *failureTracker) checkAndReserveRedis(clientId string, limit int, window time.Duration) (reservation, error) {
+// per-clientId limit. Returns a reservation on success, throttleError when throttled,
+// or a plain error on Redis infrastructure failure.
+func (f *failureTracker) checkAndReserveRedis(ctx context.Context, clientId string, limit int, window time.Duration) (reservation, error) {
+	rCtx, cancel := context.WithTimeout(ctx, f.redis.requestTimeout)
+	defer cancel()
 	key := f.failureCounterKey(clientId)
 	windowSecs := int64(window.Seconds())
 	if windowSecs < 1 {
 		windowSecs = 1
 	}
-	ctx := context.Background()
-	res, err := failureIncrScript.Run(ctx, f.redis.rdb, []string{key}, int64(limit), windowSecs).Int64Slice()
+	res, err := failureIncrScript.Run(rCtx, f.redis.rdb, []string{key}, int64(limit), windowSecs).Int64Slice()
 	if err != nil {
-		if f.redis.failOpen {
-			slog.Debug("client-secret-basic: Redis failure counter unavailable, allowing request (failureMode=open)", "error", err)
-			return reservation{}, nil // zero reservation: nothing to release
-		}
-		return reservation{}, networkError{fmt.Errorf("Redis failure counter: %w", err)}
+		return reservation{}, err // infrastructure error — caller decides fallback
 	}
-	count := res[0]
-	ttlSecs := res[1]
+	count, ttlSecs := res[0], res[1]
 	if count < 0 {
 		retryAfter := time.Duration(ttlSecs) * time.Second
 		if retryAfter < time.Second {
@@ -327,15 +342,17 @@ func (f *failureTracker) checkAndReserveRedis(clientId string, limit int, window
 	return reservation{redisKey: key}, nil
 }
 
-// releaseReservationRedis decrements the Redis counter. Called on IdP success or
-// network error so those outcomes do not consume a failure quota slot.
-func (f *failureTracker) releaseReservationRedis(rsv reservation) {
+// releaseReservationRedis decrements the Redis counter using a conditional Lua script
+// that only DECRs when the key exists and its value is positive. This prevents creating
+// a -1 key when the window has already expired and Redis removed the key.
+func (f *failureTracker) releaseReservationRedis(ctx context.Context, rsv reservation) {
 	if rsv.redisKey == "" {
-		return // zero reservation from a fail-open Redis miss: nothing to release
+		return
 	}
-	ctx := context.Background()
-	if err := f.redis.rdb.Decr(ctx, rsv.redisKey).Err(); err != nil {
-		slog.Debug("client-secret-basic: Redis DECR failed during reservation release", "error", err)
+	rCtx, cancel := context.WithTimeout(ctx, f.redis.requestTimeout)
+	defer cancel()
+	if err := failureDecrScript.Run(rCtx, f.redis.rdb, []string{rsv.redisKey}).Err(); err != nil {
+		slog.Debug("client-secret-basic: Redis conditional DECR failed during reservation release", "error", err)
 	}
 }
 
@@ -361,9 +378,14 @@ func (f *failureTracker) isWrongCred(key string) bool {
 // singleflight. It returns (true, remaining) if the clientId is currently throttled,
 // or (false, 0) otherwise. It does not increment the counter — that happens inside
 // checkAndReserve, which is the authoritative check.
-func (f *failureTracker) isThrottled(clientId string, limit int, _ time.Duration) (bool, time.Duration) {
+func (f *failureTracker) isThrottled(ctx context.Context, clientId string, limit int, _ time.Duration) (bool, time.Duration) {
 	if f.redis != nil {
-		return f.isThrottledRedis(clientId, limit)
+		throttled, retryAfter, err := f.isThrottledRedis(ctx, clientId, limit)
+		if err == nil {
+			return throttled, retryAfter
+		}
+		slog.Debug("client-secret-basic: Redis pre-check unavailable, falling back to in-memory", "error", err)
+		// fall through to in-memory fast path regardless of failOpen
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -400,9 +422,21 @@ func (f *failureTracker) isThrottled(clientId string, limit int, _ time.Duration
 // Returns (zero, throttleError) if the limit is reached.
 // The caller MUST call releaseReservation if the IdP accepts the credentials or
 // returns a network error so successful requests don't consume failure quota.
-func (f *failureTracker) checkAndReserve(clientId string, limit int, window time.Duration) (reservation, error) {
+func (f *failureTracker) checkAndReserve(ctx context.Context, clientId string, limit int, window time.Duration) (reservation, error) {
 	if f.redis != nil {
-		return f.checkAndReserveRedis(clientId, limit, window)
+		rsv, err := f.checkAndReserveRedis(ctx, clientId, limit, window)
+		if err == nil {
+			return rsv, nil
+		}
+		if _, isThrottle := err.(throttleError); isThrottle {
+			return reservation{}, err
+		}
+		// Redis infrastructure error
+		if !f.redis.failOpen {
+			return reservation{}, networkError{fmt.Errorf("Redis failure counter unavailable (failureMode=closed): %w", err)}
+		}
+		slog.Debug("client-secret-basic: Redis counter unavailable, falling back to in-memory", "error", err)
+		// fall through to in-memory counter
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -473,9 +507,9 @@ func (f *failureTracker) checkAndReserve(clientId string, limit int, window time
 // consume a failure slot. Only releases if the stored window still matches the
 // reservation's window to avoid corrupting a later window when a slow request outlasts
 // its failureWindow.
-func (f *failureTracker) releaseReservation(clientId string, rsv reservation) {
-	if f.redis != nil {
-		f.releaseReservationRedis(rsv)
+func (f *failureTracker) releaseReservation(ctx context.Context, clientId string, rsv reservation) {
+	if rsv.redisKey != "" {
+		f.releaseReservationRedis(ctx, rsv)
 		return
 	}
 	f.mu.Lock()
@@ -604,56 +638,34 @@ func GetPolicy(
 			Transport: sharedTransport,
 		}
 
+		backend := getStringParam(params, "failureBackend", "memory")
 		var redisCfg *failureRedisConfig
-		if failureBackend := stringParam(params, "failureBackend"); failureBackend == "redis" {
-			redisHost := stringParam(params, "redis.host")
-			if redisHost == "" {
-				redisHost = "localhost"
-			}
-			redisPort := 6379
-			if v, ok := params["redis.port"]; ok {
-				if n, ok := v.(float64); ok && n > 0 {
-					redisPort = int(n)
-				}
-			}
-			redisPassword := stringParam(params, "redis.password")
-			redisUsername := stringParam(params, "redis.username")
-			redisDB := 0
-			if v, ok := params["redis.db"]; ok {
-				if n, ok := v.(float64); ok && n >= 0 {
-					redisDB = int(n)
-				}
-			}
-			failureMode := stringParam(params, "redis.failureMode")
-			if failureMode == "" {
-				failureMode = "open"
-			}
-			keyPrefix := stringParam(params, "redis.keyPrefix")
-			if keyPrefix == "" {
-				keyPrefix = "csb:failure:"
-			}
-			connTimeout := parseDurationParam(params, "redis.connectionTimeout", 5*time.Second)
-			readTimeout := parseDurationParam(params, "redis.readTimeout", 3*time.Second)
-			writeTimeout := parseDurationParam(params, "redis.writeTimeout", 3*time.Second)
-			poolSize := 0
-			if v, ok := params["redis.poolSize"]; ok {
-				if n, ok := v.(float64); ok && n >= 0 {
-					poolSize = int(n)
-				}
-			}
-			tlsEnabled, _ := params["redis.tls.enabled"].(bool)
-			tlsCAFile := stringParam(params, "redis.tls.caFile")
-			tlsServerName := stringParam(params, "redis.tls.serverName")
-			tlsInsecureSkip, _ := params["redis.tls.insecureSkipVerify"].(bool)
-			tlsCertFile := stringParam(params, "redis.tls.certFile")
-			tlsKeyFile := stringParam(params, "redis.tls.keyFile")
+		if backend == "redis" {
+			redisHost := getStringParam(params, "redis.host", "localhost")
+			redisPort := getIntParam(params, "redis.port", 6379)
+			redisPassword := getStringParam(params, "redis.password", "")
+			redisUsername := getStringParam(params, "redis.username", "")
+			redisDB := getIntParam(params, "redis.db", 0)
+			failureMode := getStringParam(params, "redis.failureMode", "open")
+			keyPrefix := getStringParam(params, "redis.keyPrefix", "csb:failure:")
+			connTimeout := getDurationParam(params, "redis.connectionTimeout", 5*time.Second)
+			readTimeout := getDurationParam(params, "redis.readTimeout", 3*time.Second)
+			writeTimeout := getDurationParam(params, "redis.writeTimeout", 3*time.Second)
+			poolSize := getIntParam(params, "redis.poolSize", 0)
+			requestTimeout := getDurationParam(params, "redis.requestTimeout", 200*time.Millisecond)
+			tlsEnabled := getBoolParam(params, "redis.tls.enabled", false)
+			tlsCAFile := getStringParam(params, "redis.tls.caFile", "")
+			tlsServerName := getStringParam(params, "redis.tls.serverName", "")
+			tlsInsecureSkip := getBoolParam(params, "redis.tls.insecureSkipVerify", false)
+			tlsCertFile := getStringParam(params, "redis.tls.certFile", "")
+			tlsKeyFile := getStringParam(params, "redis.tls.keyFile", "")
 
 			tlsCfg, err := csbBuildTLSConfig(tlsEnabled, tlsCAFile, tlsServerName, tlsCertFile, tlsKeyFile, tlsInsecureSkip)
 			if err != nil {
 				return nil, err
 			}
 			if tlsEnabled && tlsInsecureSkip {
-				slog.Warn("client-secret-basic: Redis TLS certificate verification is disabled (redis.tls.insecureSkipVerify); do not use in production",
+				slog.Warn("client-secret-basic: Redis TLS certificate verification is disabled; do not use in production",
 					"addr", fmt.Sprintf("%s:%d", redisHost, redisPort))
 			}
 
@@ -691,13 +703,14 @@ func GetPolicy(
 				slog.Warn("client-secret-basic: Redis ping failed but failureMode=open; proceeding with in-memory fallback until Redis recovers", "error", pingErr)
 			}
 			redisCfg = &failureRedisConfig{
-				rdb:       rdb,
-				keyPrefix: keyPrefix,
-				failOpen:  failureMode == "open",
+				rdb:            rdb,
+				keyPrefix:      keyPrefix,
+				failOpen:       failureMode == "open",
+				requestTimeout: requestTimeout,
 			}
 		}
 
-		p.state = getOrCreateEndpointState(cfg.TokenEndpoint, redisCfg)
+		p.state = getOrCreateEndpointState(cfg.TokenEndpoint, backend, redisCfg)
 	}
 	return p, nil
 }
@@ -743,6 +756,12 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 		}
 		cfg.FailureWindow = d
 	}
+	const maxFailureWindow = 5 * time.Minute
+	if cfg.FailureWindow > maxFailureWindow {
+		slog.Warn("client-secret-basic: failureWindow capped to prevent shared-tracker abuse",
+			"requested", cfg.FailureWindow, "cap", maxFailureWindow)
+		cfg.FailureWindow = maxFailureWindow
+	}
 	if v, ok := params["failureRateLimit"]; ok {
 		switch n := v.(type) {
 		case float64:
@@ -758,7 +777,8 @@ func buildConfig(params map[string]interface{}) (PolicyConfig, error) {
 		}
 	}
 
-	cfg.TokenMetadataKey = defaultTokenMetadataKey
+	// tokenMetadataKey is opt-in: empty by default so the upstream access token is not
+	// stored in request metadata unless the API explicitly requests it.
 	if s := stringParam(params, "tokenMetadataKey"); s != "" {
 		if s == applicationIDMetadataKey {
 			return cfg, fmt.Errorf("client-secret-basic: 'tokenMetadataKey' cannot be %q — it is reserved for the authenticated application identity", applicationIDMetadataKey)
@@ -853,8 +873,72 @@ func stringParam(params map[string]interface{}, key string) string {
 	return ""
 }
 
-func parseDurationParam(params map[string]interface{}, key string, defaultVal time.Duration) time.Duration {
-	s := stringParam(params, key)
+// getStringParam traverses nested maps using dot-notation keys (e.g. "redis.host").
+func getStringParam(params map[string]interface{}, key string, defaultVal string) string {
+	keys := strings.Split(key, ".")
+	current := params
+	for i, k := range keys {
+		if i == len(keys)-1 {
+			if val, ok := current[k].(string); ok {
+				return strings.TrimSpace(val)
+			}
+			return defaultVal
+		}
+		if next, ok := current[k].(map[string]interface{}); ok {
+			current = next
+		} else {
+			return defaultVal
+		}
+	}
+	return defaultVal
+}
+
+// getIntParam traverses nested maps using dot-notation keys.
+func getIntParam(params map[string]interface{}, key string, defaultVal int) int {
+	keys := strings.Split(key, ".")
+	current := params
+	for i, k := range keys {
+		if i == len(keys)-1 {
+			switch v := current[k].(type) {
+			case float64:
+				return int(v)
+			case int:
+				return v
+			}
+			return defaultVal
+		}
+		if next, ok := current[k].(map[string]interface{}); ok {
+			current = next
+		} else {
+			return defaultVal
+		}
+	}
+	return defaultVal
+}
+
+// getBoolParam traverses nested maps using dot-notation keys.
+func getBoolParam(params map[string]interface{}, key string, defaultVal bool) bool {
+	keys := strings.Split(key, ".")
+	current := params
+	for i, k := range keys {
+		if i == len(keys)-1 {
+			if val, ok := current[k].(bool); ok {
+				return val
+			}
+			return defaultVal
+		}
+		if next, ok := current[k].(map[string]interface{}); ok {
+			current = next
+		} else {
+			return defaultVal
+		}
+	}
+	return defaultVal
+}
+
+// getDurationParam traverses nested maps using dot-notation keys and parses a Go duration string.
+func getDurationParam(params map[string]interface{}, key string, defaultVal time.Duration) time.Duration {
+	s := getStringParam(params, key, "")
 	if s == "" {
 		return defaultVal
 	}
@@ -943,13 +1027,20 @@ func (p *ClientSecretBasicPolicy) OnRequestHeaders(
 		return unauthorizedResponse("subscription key header is not permitted")
 	}
 	if p.cfg.SubscriptionKeyCookie != "" {
-		cookieLines := headers.Get("Cookie")
-		if len(cookieLines) > 0 {
-			fakeReq := &http.Request{Header: http.Header{"Cookie": cookieLines}}
-			if c, _ := fakeReq.Cookie(p.cfg.SubscriptionKeyCookie); c != nil {
-				slog.Debug("client-secret-basic: request carries subscription cookie, rejecting",
-					"cookie", p.cfg.SubscriptionKeyCookie)
-				return unauthorizedResponse("subscription cookie is not permitted")
+		// Read from DownstreamHeaders (the same source subscription-validation reads)
+		// and compare cookie names case-insensitively, matching subscription-validation's
+		// strings.EqualFold behaviour so a client cannot bypass the check by varying case.
+		downstreamHeaders := reqCtx.DownstreamHeaders()
+		if downstreamHeaders != nil {
+			for _, line := range downstreamHeaders.Get("Cookie") {
+				for _, part := range strings.Split(line, ";") {
+					name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
+					if strings.EqualFold(name, p.cfg.SubscriptionKeyCookie) {
+						slog.Debug("client-secret-basic: request carries subscription cookie, rejecting",
+							"cookie", p.cfg.SubscriptionKeyCookie)
+						return unauthorizedResponse("subscription cookie is not permitted")
+					}
+				}
 			}
 		}
 	}
@@ -1014,6 +1105,18 @@ func (p *ClientSecretBasicPolicy) validateStatic(clientId, clientSecret string) 
 //     window resets. The reservation is released on success or network error so valid
 //     requests don't consume failure quota.
 //
+// cacheEffectiveDeadline computes the effective cache deadline for a validationEntry
+// using this policy instance's maxCacheTTL and expiryBuffer. Because these settings
+// are stored raw in the entry, two policies sharing the same token-endpoint state
+// each apply their own configured values independently on lookup.
+func (p *ClientSecretBasicPolicy) cacheEffectiveDeadline(e validationEntry) time.Time {
+	effective := e.tokenExpiry.Add(-p.cfg.ExpiryBuffer)
+	if cap := e.validatedAt.Add(p.cfg.MaxCacheTTL); cap.Before(effective) {
+		effective = cap
+	}
+	return effective
+}
+
 // Concurrent requests for the same credential pair are deduplicated via singleflight so
 // only one IdP call is made per unique (clientId, secret) burst. The counter increments
 // exactly once per singleflight group — not once per waiting goroutine.
@@ -1029,12 +1132,18 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 	key := cacheKey(clientId, clientSecret)
 
 	// Check success cache.
+	// Delete only when the IdP token itself has expired (tokenExpiry); a per-API TTL
+	// lapse from expiryBuffer/maxCacheTTL means this API will re-validate, but the
+	// entry may still be valid for another API sharing the same token-endpoint state.
 	if v, ok := p.state.cache.Load(key); ok {
 		entry := v.(validationEntry)
-		if time.Now().Before(entry.expiresAt) {
+		if time.Now().Before(p.cacheEffectiveDeadline(entry)) {
 			return entry.accessToken, nil
 		}
-		p.state.cache.Delete(key)
+		if time.Now().After(entry.tokenExpiry) {
+			p.state.cache.Delete(key) // IdP token expired; evict for all APIs
+		}
+		// else: entry still live for other APIs; fall through for a fresh call for this one
 	}
 
 	// Layer 1: exact wrong-credential pair cache — no IdP call for known-bad credentials.
@@ -1044,7 +1153,7 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 
 	// Layer 2: fast-path throttle check (non-authoritative; avoids singleflight overhead).
 	// The authoritative check+increment happens inside the singleflight fn().
-	if throttled, remaining := p.state.failures.isThrottled(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow); throttled {
+	if throttled, remaining := p.state.failures.isThrottled(ctx, clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow); throttled {
 		return "", throttleError{clientId: clientId, retryAfter: remaining}
 	}
 
@@ -1058,10 +1167,12 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 		// the entry now avoids a redundant token request.
 		if v, ok := p.state.cache.Load(key); ok {
 			entry := v.(validationEntry)
-			if time.Now().Before(entry.expiresAt) {
-				return sfResult{accessToken: entry.accessToken, expiresAt: entry.expiresAt}, nil
+			if dl := p.cacheEffectiveDeadline(entry); time.Now().Before(dl) {
+				return sfResult{accessToken: entry.accessToken, expiresAt: dl}, nil
 			}
-			p.state.cache.Delete(key)
+			if time.Now().After(entry.tokenExpiry) {
+				p.state.cache.Delete(key) // IdP token expired; evict for all APIs
+			}
 		}
 		// Re-check wrongCreds inside the singleflight fn. A request that arrives just
 		// as a prior IdP call for the same wrong credential finishes can miss both the
@@ -1072,7 +1183,7 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 		}
 		// Atomically check and reserve a failure slot. Each singleflight group is one
 		// distinct credential attempt, so the counter increments once per IdP call.
-		rsv, reserveErr := p.state.failures.checkAndReserve(clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow)
+		rsv, reserveErr := p.state.failures.checkAndReserve(ctx, clientId, p.cfg.FailureRateLimit, p.cfg.FailureWindow)
 		if reserveErr != nil {
 			return sfResult{}, reserveErr
 		}
@@ -1082,7 +1193,7 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 			var netErr networkError
 			if errors.As(err, &netErr) {
 				// Network/server error: return the slot so it doesn't count as a failure.
-				p.state.failures.releaseReservation(clientId, rsv)
+				p.state.failures.releaseReservation(ctx, clientId, rsv)
 			} else {
 				// Auth rejection: keep the slot, store the specific bad pair.
 				p.state.failures.storeWrongCred(key, p.cfg.FailureWindow)
@@ -1090,43 +1201,35 @@ func (p *ClientSecretBasicPolicy) validateDynamic(ctx context.Context, clientId,
 			return sfResult{}, err
 		}
 		// Success: return the slot (it was a speculative increment).
-		p.state.failures.releaseReservation(clientId, rsv)
+		p.state.failures.releaseReservation(ctx, clientId, rsv)
 
 		// Compute absolute cache expiry inside the callback so all waiting goroutines
 		// reuse the same value rather than each computing it at their own resume time.
 		//
 		// Three cases:
-		//   expiresIn absent (nil)   → 1-hour fallback minus buffer
-		//   expiresIn ≤ 0            → token is already expired; store with past expiry
-		//                              so the entry is treated as a cache miss immediately
-		//   expiresIn > 0            → use it minus buffer (minimum 1 second)
+		// Compute the raw IdP token expiry (no policy adjustments applied yet).
+		// Three cases:
+		//   expiresIn absent (nil) → use a 1-hour fallback as the IdP-side expiry
+		//   expiresIn ≤ 0          → token already expired; treat as immediate cache miss
+		//   expiresIn > 0          → use the reported lifetime
+		// expiryBuffer and maxCacheTTL are NOT applied here — they are applied per-read
+		// by cacheEffectiveDeadline so each API uses its own configured values.
 		now := time.Now()
-		var expiresAt time.Time
+		var tokenExpiry time.Time
 		if expiresIn == nil {
-			ttl := defaultTokenTTLFallback - p.cfg.ExpiryBuffer
-			if ttl <= 0 {
-				ttl = defaultFailureWindow
-			}
-			expiresAt = now.Add(ttl)
+			tokenExpiry = now.Add(defaultTokenTTLFallback)
 		} else if *expiresIn <= 0 {
-			expiresAt = now // immediate expiry — do not cache
+			tokenExpiry = now // already expired; cacheEffectiveDeadline returns a past time
 		} else {
-			ttl := time.Duration(*expiresIn*float64(time.Second)) - p.cfg.ExpiryBuffer
-			if ttl <= 0 {
-				ttl = time.Second
-			}
-			expiresAt = now.Add(ttl)
+			tokenExpiry = now.Add(time.Duration(*expiresIn * float64(time.Second)))
 		}
-		if p.cfg.MaxCacheTTL > 0 {
-			if maxExpiry := now.Add(p.cfg.MaxCacheTTL); expiresAt.After(maxExpiry) {
-				expiresAt = maxExpiry
-			}
-		}
-		// Store the entry inside the callback — before singleflight removes the flight
-		// from its work map — so any concurrent request that misses the flight finds
-		// the populated cache entry instead of starting another token request.
-		p.state.cache.Store(key, validationEntry{expiresAt: expiresAt, accessToken: accessToken})
-		return sfResult{accessToken: accessToken, expiresAt: expiresAt}, nil
+		// Store raw values — before singleflight removes the flight from its work map —
+		// so concurrent requests that miss the flight find the cache entry instead of
+		// starting a redundant token request.
+		cacheEntry := validationEntry{tokenExpiry: tokenExpiry, validatedAt: now, accessToken: accessToken}
+		p.state.cache.Store(key, cacheEntry)
+		effectiveDeadline := p.cacheEffectiveDeadline(cacheEntry)
+		return sfResult{accessToken: accessToken, expiresAt: effectiveDeadline}, nil
 	})
 	if err != nil {
 		return "", err

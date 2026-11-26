@@ -34,20 +34,20 @@ import (
 // csbRedisConnKey identifies a unique Redis connection configuration. Two policy
 // instances with identical settings share one *redis.Client (one pool).
 type csbRedisConnKey struct {
-	addr               string
-	username           string
-	passwordHash       string
-	db                 int
-	dialTimeout        time.Duration
-	readTimeout        time.Duration
-	writeTimeout       time.Duration
-	poolSize           int
-	tlsEnabled         bool
-	tlsInsecureSkip    bool
-	tlsCAFile          string
-	tlsServerName      string
-	tlsCertFile        string
-	tlsKeyFile         string
+	addr            string
+	username        string
+	passwordHash    string
+	db              int
+	dialTimeout     time.Duration
+	readTimeout     time.Duration
+	writeTimeout    time.Duration
+	poolSize        int
+	tlsEnabled      bool
+	tlsInsecureSkip bool
+	tlsCAFile       string
+	tlsServerName   string
+	tlsCertFile     string
+	tlsKeyFile      string
 }
 
 var csbRedisClients = struct {

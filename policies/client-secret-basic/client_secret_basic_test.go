@@ -425,6 +425,38 @@ func TestOnRequestHeaders_SubscriptionCookieNotConfigured_CookieAllowed(t *testi
 	}
 }
 
+func TestOnRequestHeaders_SubscriptionCookie_CaseInsensitive_Returns401(t *testing.T) {
+	params := map[string]interface{}{
+		"clientId":              "test-client",
+		"clientSecret":          "test-secret",
+		"subscriptionKeyCookie": "sub-key",
+	}
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+	for _, cookieName := range []string{"SUB-KEY", "Sub-Key", "SUB-key", "sub-KEY"} {
+		ctx := newReqCtx(map[string]string{
+			"Authorization": basicAuthHeader("test-client", "test-secret"),
+			"Cookie":        cookieName + "=some-token",
+		})
+		assertUnauthorized(t, p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, params),
+			"subscription cookie is not permitted")
+	}
+}
+
+func TestOnRequestHeaders_SubscriptionCookie_ExactCaseAlsoRejected(t *testing.T) {
+	params := map[string]interface{}{
+		"clientId":              "test-client",
+		"clientSecret":          "test-secret",
+		"subscriptionKeyCookie": "Subscription-Token",
+	}
+	p, _ := GetPolicy(policy.PolicyMetadata{}, params)
+	ctx := newReqCtx(map[string]string{
+		"Authorization": basicAuthHeader("test-client", "test-secret"),
+		"Cookie":        "other=x; subscription-token=abc; session=y",
+	})
+	assertUnauthorized(t, p.(*ClientSecretBasicPolicy).OnRequestHeaders(context.Background(), ctx, params),
+		"subscription cookie is not permitted")
+}
+
 func TestOnRequestHeaders_401_HasWWWAuthenticate(t *testing.T) {
 	p, _ := GetPolicy(policy.PolicyMetadata{}, staticParams())
 	ctx := newReqCtx(map[string]string{}) // no Authorization header
@@ -682,9 +714,9 @@ func TestOnRequestHeaders_Dynamic_MaxCacheTTL_CapsSuccessCacheTTL(t *testing.T) 
 		t.Fatal("expected cache entry after successful validation")
 	}
 	entry := v.(validationEntry)
-	remaining := time.Until(entry.expiresAt)
+	remaining := time.Until(impl.cacheEffectiveDeadline(entry))
 	if remaining > 70*time.Second {
-		t.Errorf("maxCacheTTL not enforced: cache entry expires in %v, want ≤1m", remaining)
+		t.Errorf("maxCacheTTL not enforced: effective deadline in %v, want ≤1m", remaining)
 	}
 }
 
@@ -705,7 +737,8 @@ func TestOnRequestHeaders_Dynamic_ExpiredCacheEntry_RetriggersTokenRequest(t *te
 	impl := p.(*ClientSecretBasicPolicy)
 
 	key := cacheKey("c1", "s1")
-	impl.state.cache.Store(key, validationEntry{expiresAt: time.Now().Add(-time.Second)}) // already expired
+	// Plant an entry that is already expired under any policy config.
+	impl.state.cache.Store(key, validationEntry{tokenExpiry: time.Now().Add(-time.Second), validatedAt: time.Now().Add(-time.Second)}) // already expired
 
 	headers := map[string]string{"Authorization": basicAuthHeader("c1", "s1")}
 	impl.OnRequestHeaders(context.Background(), newReqCtx(headers), params)
@@ -874,7 +907,8 @@ func TestOnRequestHeaders_Dynamic_ShortToken_ClampedToOneSecond_NotFallback(t *t
 	if !ok {
 		t.Fatal("expected cache entry")
 	}
-	remaining := time.Until(v.(validationEntry).expiresAt)
+	ve := v.(validationEntry)
+	remaining := time.Until(impl.cacheEffectiveDeadline(ve))
 	if remaining > 10*time.Second {
 		t.Errorf("short token should be clamped to ~1s, not fall back to 1h: remaining=%v", remaining)
 	}
@@ -904,7 +938,8 @@ func TestOnRequestHeaders_Dynamic_MissingExpiresIn_Uses1hFallback(t *testing.T) 
 	if !ok {
 		t.Fatal("expected cache entry")
 	}
-	remaining := time.Until(v.(validationEntry).expiresAt)
+	ve := v.(validationEntry)
+	remaining := time.Until(impl.cacheEffectiveDeadline(ve))
 	if remaining < 50*time.Minute {
 		t.Errorf("missing expires_in should use ~1h fallback, got remaining=%v", remaining)
 	}
@@ -1203,7 +1238,7 @@ func fillCounterMap(limit int, window time.Duration) *failureTracker {
 	ft := &failureTracker{}
 	for i := 0; i < maxClientCounterEntries; i++ {
 		id := fmt.Sprintf("fill-client-%d", i)
-		ft.checkAndReserve(id, limit, window) //nolint:errcheck
+		ft.checkAndReserve(context.Background(), id, limit, window) //nolint:errcheck
 	}
 	return ft
 }
@@ -1213,8 +1248,8 @@ func TestFailureTracker_OverflowPath_ThrottlesAfterLimit(t *testing.T) {
 	ft := fillCounterMap(2, time.Minute)
 
 	// First two new clients each consume one overflow slot — should succeed.
-	rsv1, err1 := ft.checkAndReserve("new-client-1", 2, time.Minute)
-	rsv2, err2 := ft.checkAndReserve("new-client-2", 2, time.Minute)
+	rsv1, err1 := ft.checkAndReserve(context.Background(), "new-client-1", 2, time.Minute)
+	rsv2, err2 := ft.checkAndReserve(context.Background(), "new-client-2", 2, time.Minute)
 	if err1 != nil {
 		t.Fatalf("first overflow slot: unexpected error: %v", err1)
 	}
@@ -1223,7 +1258,7 @@ func TestFailureTracker_OverflowPath_ThrottlesAfterLimit(t *testing.T) {
 	}
 
 	// Third new client exceeds the limit — must get throttleError.
-	_, err3 := ft.checkAndReserve("new-client-3", 2, time.Minute)
+	_, err3 := ft.checkAndReserve(context.Background(), "new-client-3", 2, time.Minute)
 	if err3 == nil {
 		t.Fatal("expected throttleError when overflow counter is at limit, got nil")
 	}
@@ -1240,7 +1275,7 @@ func TestFailureTracker_OverflowPath_ReleaseDecrementsOverflow(t *testing.T) {
 	ft := fillCounterMap(1, time.Minute)
 
 	// First new client hits the overflow counter — succeeds.
-	rsv1, err := ft.checkAndReserve("new-client-1", 1, time.Minute)
+	rsv1, err := ft.checkAndReserve(context.Background(), "new-client-1", 1, time.Minute)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1249,16 +1284,16 @@ func TestFailureTracker_OverflowPath_ReleaseDecrementsOverflow(t *testing.T) {
 	}
 
 	// Second new client must be throttled (limit reached).
-	_, err2 := ft.checkAndReserve("new-client-2", 1, time.Minute)
+	_, err2 := ft.checkAndReserve(context.Background(), "new-client-2", 1, time.Minute)
 	if err2 == nil {
 		t.Fatal("expected throttleError before release, got nil")
 	}
 
 	// Release the first overflow slot.
-	ft.releaseReservation("new-client-1", rsv1)
+	ft.releaseReservation(context.Background(), "new-client-1", rsv1)
 
 	// Now a new client should succeed again.
-	_, err3 := ft.checkAndReserve("new-client-3", 1, time.Minute)
+	_, err3 := ft.checkAndReserve(context.Background(), "new-client-3", 1, time.Minute)
 	if err3 != nil {
 		t.Fatalf("expected success after overflow slot released, got: %v", err3)
 	}
@@ -1282,11 +1317,11 @@ func TestFailureTracker_OverflowPath_ValidClientGets429OnFullMap(t *testing.T) {
 	// Fill the counter map with entries that each have one slot reserved (one failure).
 	for i := 0; i < maxClientCounterEntries; i++ {
 		id := fmt.Sprintf("fill-%d", i)
-		impl.state.failures.checkAndReserve(id, 1, time.Minute) //nolint:errcheck
+		impl.state.failures.checkAndReserve(context.Background(), id, 1, time.Minute) //nolint:errcheck
 	}
 
 	// Exhaust the overflow counter by reserving its one slot.
-	impl.state.failures.checkAndReserve("overflow-filler", 1, time.Minute) //nolint:errcheck
+	impl.state.failures.checkAndReserve(context.Background(), "overflow-filler", 1, time.Minute) //nolint:errcheck
 
 	// A new valid client should now get 429 because the overflow slot is consumed.
 	ctx := newReqCtx(map[string]string{
@@ -1306,7 +1341,7 @@ func TestFailureTracker_OverflowWindow_ResetsIndependently(t *testing.T) {
 	ft := fillCounterMap(1, time.Minute)
 
 	// Consume the overflow slot.
-	rsv, err := ft.checkAndReserve("new-client-1", 1, time.Minute)
+	rsv, err := ft.checkAndReserve(context.Background(), "new-client-1", 1, time.Minute)
 	if err != nil {
 		t.Fatalf("first overflow: unexpected error: %v", err)
 	}
@@ -1320,8 +1355,83 @@ func TestFailureTracker_OverflowWindow_ResetsIndependently(t *testing.T) {
 	ft.mu.Unlock()
 
 	// A new client should now succeed because the overflow window has reset.
-	_, err2 := ft.checkAndReserve("new-client-2", 1, time.Minute)
+	_, err2 := ft.checkAndReserve(context.Background(), "new-client-2", 1, time.Minute)
 	if err2 != nil {
 		t.Fatalf("expected success after overflow window reset, got: %v", err2)
+	}
+}
+
+func TestSharedCacheHonorsReadingAPIMaxCacheTTL(t *testing.T) {
+	// This test verifies Fix 1: each API applies its own maxCacheTTL at read time
+	// rather than using the baked-in deadline stored by the writing API.
+	//
+	// API A: maxCacheTTL=1h  — long TTL, would cache for a long time
+	// API B: maxCacheTTL=100ms — short TTL, entry must expire quickly
+	//
+	// Steps:
+	//  1. API A populates the cache for credential pair (c1,s1).
+	//  2. Wait > 100ms (B's TTL lapses, A's has not).
+	//  3. API B reads from the same shared cache with its own maxCacheTTL=100ms.
+	//     The entry should be expired from B's perspective, so B must call the IdP.
+	//  4. If the IdP is gone (closed), B gets a 503, proving it was not served from cache.
+
+	srv := fakeTokenServer(http.StatusOK, 3600) // long expires_in
+
+	paramsA := map[string]interface{}{
+		"tokenEndpoint": srv.URL,
+		"expiryBuffer":  "0s",
+		"maxCacheTTL":   "1h",
+	}
+	paramsB := map[string]interface{}{
+		"tokenEndpoint": srv.URL,
+		"expiryBuffer":  "0s",
+		"maxCacheTTL":   "100ms",
+	}
+
+	pA, err := GetPolicy(policy.PolicyMetadata{}, paramsA)
+	if err != nil {
+		t.Fatalf("GetPolicy A: %v", err)
+	}
+	pB, err := GetPolicy(policy.PolicyMetadata{}, paramsB)
+	if err != nil {
+		t.Fatalf("GetPolicy B: %v", err)
+	}
+	implA := pA.(*ClientSecretBasicPolicy)
+	implB := pB.(*ClientSecretBasicPolicy)
+
+	headers := map[string]string{"Authorization": basicAuthHeader("c1", "s1")}
+
+	// Step 1: API A caches the credential successfully.
+	r1 := implA.OnRequestHeaders(context.Background(), newReqCtx(headers), paramsA)
+	if _, ok := r1.(policy.UpstreamRequestHeaderModifications); !ok {
+		t.Fatalf("expected success from API A, got %T", r1)
+	}
+
+	// Both A and B share the same endpointState (same token endpoint URL).
+	// Confirm they point to the same state object.
+	if implA.state != implB.state {
+		t.Fatal("expected A and B to share the same endpointState")
+	}
+
+	// Step 2: Wait for B's maxCacheTTL to lapse.
+	time.Sleep(150 * time.Millisecond)
+
+	// Step 3+4: Close the IdP so any IdP call → 503.
+	srv.Close()
+
+	// API B must NOT be served from cache (its TTL has lapsed).
+	r2 := implB.OnRequestHeaders(context.Background(), newReqCtx(headers), paramsB)
+	if _, ok := r2.(policy.UpstreamRequestHeaderModifications); ok {
+		t.Error("API B was served a cached 200 that should have expired under its maxCacheTTL=100ms")
+	}
+
+	// Step: Confirm API A's cache entry is still valid (its TTL is 1h).
+	// We need a fresh IdP that accepts the call — here we just check the cache directly.
+	entry, ok := implA.state.cache.Load(cacheKey("c1", "s1"))
+	if !ok {
+		t.Fatal("expected cache entry to still exist for API A")
+	}
+	if dl := implA.cacheEffectiveDeadline(entry.(validationEntry)); time.Now().After(dl) {
+		t.Error("API A's cache entry should still be valid under its maxCacheTTL=1h")
 	}
 }

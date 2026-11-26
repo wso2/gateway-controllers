@@ -179,10 +179,9 @@ parameters:
         Metadata key under which the IdP-issued access token is stored in
         SharedContext.Metadata after a successful dynamic validation. Downstream
         policies (e.g. header-transform) can read it via ${meta.<key>}. Has no
-        effect in static mode. Override only when the default key conflicts with
-        another policy.
-      default: upstream-access-token
-      minLength: 1
+        effect in static mode. Leave unset to keep the token out of metadata
+        (recommended when no downstream policy needs it). Set to
+        "upstream-access-token" to restore the previous default behaviour.
       maxLength: 256
 
     # ── Subscription key protection ───────────────────────────────────────────
@@ -218,106 +217,107 @@ systemParameters:
     failureBackend:
       type: string
       description: |
-        Backend used to track per-clientId failure counts (dynamic mode only).
-        "memory" (default) keeps counts in-process — each gateway replica counts
-        independently. "redis" shares counts across all replicas via a Redis
-        instance, so failureRateLimit applies per clientId across the whole pod
-        fleet rather than per pod.
+        Backend for per-clientId failure counters. "memory" (default) tracks failures
+        per replica; replicas operate independently. "redis" shares counts atomically
+        across all replicas, so the per-clientId limit is enforced cluster-wide.
       enum: [memory, redis]
       default: memory
+      "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.failure_backend}"
 
-    redis.host:
-      type: string
-      description: Redis server hostname or IP address. Required when failureBackend=redis.
-      default: localhost
-
-    redis.port:
-      type: integer
-      description: Redis server port.
-      default: 6379
-      minimum: 1
-      maximum: 65535
-
-    redis.password:
-      type: string
-      description: Redis password. Leave empty for unauthenticated connections.
-
-    redis.username:
-      type: string
-      description: Redis username for ACL-based authentication (Redis 6+).
-
-    redis.db:
-      type: integer
-      description: Redis database index to select after connecting.
-      default: 0
-      minimum: 0
-
-    redis.failureMode:
-      type: string
-      description: |
-        Behaviour when the Redis connection is unavailable. "open" (default) falls
-        back to in-memory counting so requests are not blocked. "closed" returns
-        an error at policy-load time if the initial Redis ping fails.
-      enum: [open, closed]
-      default: open
-
-    redis.keyPrefix:
-      type: string
-      description: |
-        Prefix prepended to every Redis key written by this policy instance.
-        Override when multiple independent gateway clusters share one Redis.
-      default: "csb:failure:"
-
-    redis.connectionTimeout:
-      type: string
-      description: Timeout for establishing a Redis connection. Go duration string.
-      default: 5s
-      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
-
-    redis.readTimeout:
-      type: string
-      description: Timeout for Redis read operations. Go duration string.
-      default: 3s
-      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
-
-    redis.writeTimeout:
-      type: string
-      description: Timeout for Redis write operations. Go duration string.
-      default: 3s
-      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
-
-    redis.poolSize:
-      type: integer
-      description: |
-        Size of the Redis connection pool. 0 uses go-redis default
-        (10 × GOMAXPROCS).
-      default: 0
-      minimum: 0
-
-    redis.tls.enabled:
-      type: boolean
-      description: Enable TLS for the Redis connection.
-      default: false
-
-    redis.tls.caFile:
-      type: string
-      description: Path to a PEM file containing the CA certificate(s) to trust.
-
-    redis.tls.serverName:
-      type: string
-      description: Server name used for TLS SNI and certificate verification.
-
-    redis.tls.certFile:
-      type: string
-      description: Path to the client certificate PEM file for mutual TLS.
-
-    redis.tls.keyFile:
-      type: string
-      description: Path to the private key PEM file matching redis.tls.certFile.
-
-    redis.tls.insecureSkipVerify:
-      type: boolean
-      description: |
-        Disable Redis TLS certificate verification. For development only —
-        do not use in production.
-      default: false
+    redis:
+      type: object
+      additionalProperties: false
+      description: Redis connection settings. Used only when failureBackend=redis.
+      properties:
+        host:
+          type: string
+          default: localhost
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.host}"
+        port:
+          type: integer
+          default: 6379
+          minimum: 1
+          maximum: 65535
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.port}"
+        password:
+          type: string
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.password}"
+        username:
+          type: string
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.username}"
+        db:
+          type: integer
+          default: 0
+          minimum: 0
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.db}"
+        failureMode:
+          type: string
+          enum: [open, closed]
+          default: open
+          description: |
+            "open" falls back to per-replica in-memory counting when Redis is
+            unreachable. "closed" returns a startup error if the initial ping fails.
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.failure_mode}"
+        keyPrefix:
+          type: string
+          default: "csb:failure:"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.key_prefix}"
+        connectionTimeout:
+          type: string
+          default: 5s
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.connection_timeout}"
+        readTimeout:
+          type: string
+          default: 3s
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.read_timeout}"
+        writeTimeout:
+          type: string
+          default: 3s
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.write_timeout}"
+        requestTimeout:
+          type: string
+          default: 200ms
+          description: |
+            Per-call timeout applied via context.WithTimeout to each Redis operation
+            during request processing. Bounds the latency impact when Redis is slow or
+            unreachable. Defaults to 200ms.
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.request_timeout}"
+        poolSize:
+          type: integer
+          default: 0
+          minimum: 0
+          description: Maximum number of connections in the pool. 0 uses go-redis default.
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.pool_size}"
+        tls:
+          type: object
+          additionalProperties: false
+          properties:
+            enabled:
+              type: boolean
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.enabled}"
+            caFile:
+              type: string
+              description: Path to PEM CA file for server certificate verification.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.ca_file}"
+            serverName:
+              type: string
+              description: Override SNI name sent to the server.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.server_name}"
+            certFile:
+              type: string
+              description: Path to PEM client certificate for mTLS.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.cert_file}"
+            keyFile:
+              type: string
+              description: Path to PEM client private key for mTLS.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.key_file}"
+            insecureSkipVerify:
+              type: boolean
+              default: false
+              description: Disable TLS server certificate verification. Development only.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.insecure_skip_verify}"
