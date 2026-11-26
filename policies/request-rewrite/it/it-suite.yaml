@@ -42,6 +42,46 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
-      - name: request-rewrite
+      - name: request-rewrite-path
+        tags: "gateway-version>=1.2.0"
         features:
-          - features/request_rewrite.feature
+          - features/request_rewrite_path.feature
+      # Gateway 1.1.0 forwards a rewritten path of an operation ending in /* with the API context
+      # instead of the upstream base path (wso2/api-platform#2071, fixed in 1.2.0 by
+      # wso2/api-platform#2072), so scenarios tagged @known-issue-gw-1.1.0 are skipped there.
+      - name: request-rewrite-path-gw-1.1.0
+        tags: "gateway-version<1.2.0;~@known-issue-gw-1.1.0"
+        features:
+          - features/request_rewrite_path.feature
+      - name: request-rewrite-query
+        features:
+          - features/request_rewrite_query.feature
+      - name: request-rewrite-method
+        features:
+          - features/request_rewrite_method.feature
+      - name: request-rewrite-matching
+        features:
+          - features/request_rewrite_matching.feature
+      - name: request-rewrite-scope
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/request_rewrite_scope.feature
+      # Gateway 1.1.0 sends a dynamic endpoint's request under the API's own upstream base path
+      # instead of the target upstream definition's (fixed in 1.2.0 by wso2/api-platform#2000), so
+      # scenarios tagged @known-issue-gw-1.1.0 are skipped there.
+      - name: request-rewrite-scope-gw-1.1.0
+        tags: "gateway-version<1.2.0;~@known-issue-gw-1.1.0"
+        features:
+          - features/request_rewrite_scope.feature
+      - name: request-rewrite-security
+        features:
+          - features/request_rewrite_security.feature
+      - name: request-rewrite-lifecycle
+        features:
+          - features/request_rewrite_lifecycle.feature
+      - name: request-rewrite-validation
+        features:
+          - features/request_rewrite_validation.feature
+      - name: request-rewrite-restart
+        features:
+          - features/request_rewrite_restart.feature

@@ -1,0 +1,10 @@
+{
+  "body": {
+    "error": "Configuration Error",
+    "message": "invalid queryRewrite configuration: query rule name cannot be empty"
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 500
+}
