@@ -39,20 +39,22 @@ import (
 )
 
 // failureIncrScript atomically increments a Redis counter, sets its expiry on
-// creation, and enforces a per-window limit. Returns [count, ttl_seconds] on
-// success (count ≥ 1), or [-1, ttl_seconds] when the counter is already at
+// creation, and enforces a per-window limit. Returns [count, pttl_ms] on
+// success (count ≥ 1), or [-1, pttl_ms] when the counter is already at
 // the limit (the increment is immediately reversed so the key is not inflated).
+// pttl_ms is the remaining window in milliseconds, used to set windowEnd on
+// the reservation so a release after the window expires is skipped.
 var failureIncrScript = redis.NewScript(`
 local count = redis.call('INCR', KEYS[1])
 if count == 1 then
     redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
 end
-local ttl = redis.call('TTL', KEYS[1])
+local pttl = redis.call('PTTL', KEYS[1])
 if count > tonumber(ARGV[1]) then
     redis.call('DECR', KEYS[1])
-    return {-1, ttl}
+    return {-1, pttl}
 end
-return {count, ttl}
+return {count, pttl}
 `)
 
 // failureDecrScript conditionally decrements the counter only if the key
@@ -278,7 +280,8 @@ type overflowThrottleEntry struct {
 // reservation identifies which counter was incremented by checkAndReserve so that
 // releaseReservation can decrement the correct counter and verify the window is still active.
 // For the in-memory path, isOverflow/windowEnd identify the slot. For the Redis path,
-// redisKey names the key to DECR; isOverflow and windowEnd are zero in that case.
+// redisKey names the key to DECR and windowEnd holds the window expiry (from PTTL at
+// reservation time); isOverflow is zero for Redis reservations.
 type reservation struct {
 	isOverflow bool
 	windowEnd  time.Time
@@ -331,22 +334,28 @@ func (f *failureTracker) checkAndReserveRedis(ctx context.Context, clientId stri
 	if err != nil {
 		return reservation{}, err // infrastructure error — caller decides fallback
 	}
-	count, ttlSecs := res[0], res[1]
+	count, pttlMs := res[0], res[1]
 	if count < 0 {
-		retryAfter := time.Duration(ttlSecs) * time.Second
+		retryAfter := time.Duration(pttlMs) * time.Millisecond
 		if retryAfter < time.Second {
 			retryAfter = time.Second
 		}
 		return reservation{}, throttleError{clientId: clientId, retryAfter: retryAfter}
 	}
-	return reservation{redisKey: key}, nil
+	windowEnd := time.Now().Add(time.Duration(pttlMs) * time.Millisecond)
+	return reservation{redisKey: key, windowEnd: windowEnd}, nil
 }
 
 // releaseReservationRedis decrements the Redis counter using a conditional Lua script
 // that only DECRs when the key exists and its value is positive. This prevents creating
 // a -1 key when the window has already expired and Redis removed the key.
+// If the reservation's windowEnd has passed, the DECR is skipped: the original window
+// has expired and a later window's counter must not be decremented.
 func (f *failureTracker) releaseReservationRedis(ctx context.Context, rsv reservation) {
 	if rsv.redisKey == "" {
+		return
+	}
+	if !rsv.windowEnd.IsZero() && time.Now().After(rsv.windowEnd) {
 		return
 	}
 	rCtx, cancel := context.WithTimeout(ctx, f.redis.requestTimeout)
@@ -696,15 +705,26 @@ func GetPolicy(
 				PoolSize:     poolSize,
 				TLSConfig:    tlsCfg,
 			}, connKey, connTimeout)
-			if created && pingErr != nil {
+			// For cached clients in failureMode=closed, ping again: getOrCreateCsbRedisClient
+			// returns created=false when a client already exists, skipping its ping. A second
+			// GetPolicy call would then load successfully even if Redis is unreachable.
+			if !created && failureMode != "open" {
+				pctx, pcancel := context.WithTimeout(context.Background(), connTimeout)
+				pingErr = rdb.Ping(pctx).Err()
+				pcancel()
+			}
+			if pingErr != nil {
 				if failureMode != "open" {
 					return nil, fmt.Errorf("client-secret-basic: Redis ping failed and failureMode=closed: %w", pingErr)
 				}
 				slog.Warn("client-secret-basic: Redis ping failed but failureMode=open; proceeding with in-memory fallback until Redis recovers", "error", pingErr)
 			}
 			redisCfg = &failureRedisConfig{
-				rdb:            rdb,
-				keyPrefix:      keyPrefix,
+				rdb: rdb,
+				// Append a hash of the token endpoint to scope counters per IdP.
+				// Two APIs with different endpoints but the same keyPrefix and Redis
+				// instance will never share a failure counter.
+				keyPrefix:      keyPrefix + clientCounterKey(cfg.TokenEndpoint) + ":",
 				failOpen:       failureMode == "open",
 				requestTimeout: requestTimeout,
 			}
