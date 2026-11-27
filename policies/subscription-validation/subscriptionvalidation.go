@@ -124,8 +124,8 @@ func mergeConfig(base PolicyConfig, params map[string]interface{}) PolicyConfig 
 
 // windowDuration converts a throttle unit string to a time.Duration.
 func windowDuration(unit string) time.Duration {
-	switch strings.ToLower(unit) {
-	case "min":
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "min", "minute":
 		return time.Minute
 	case "hour":
 		return time.Hour
@@ -148,6 +148,8 @@ func entryThrottleUnitString(window time.Duration) string {
 		return "Hour"
 	case 24 * time.Hour:
 		return "Day"
+	case 30 * 24 * time.Hour:
+		return "Month"
 	default:
 		return window.String()
 	}
