@@ -57,6 +57,9 @@ type Steps struct {
 	stoppedRedis string
 	// docker runs the docker CLI; tests replace it.
 	docker func(ctx context.Context, args ...string) (string, error)
+	// now and sleep stand in for the clock in the window step; tests replace them.
+	now   func() time.Time
+	sleep func(ctx context.Context, d time.Duration) error
 }
 
 func newSteps(base requestBase, topo *frameworkruntime.Topology) *Steps {
@@ -76,5 +79,6 @@ func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, topo *framework
 	s.registerRedis(sc)
 	s.registerReplicas(sc)
 	s.registerControlPlane(sc)
+	s.registerWindow(sc)
 	sc.Step(`^I store the value "([^"]*)" as "([^"]*)"$`, storeValue)
 }

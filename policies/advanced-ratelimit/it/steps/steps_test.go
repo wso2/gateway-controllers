@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cucumber/godog"
 
@@ -541,5 +542,64 @@ func TestRedisCounterReachesRejectsGlobCharacters(t *testing.T) {
 		if err := s.redisCounterReaches(scenarioContext(), fragment, 1); err == nil {
 			t.Errorf("fragment %q should be rejected", fragment)
 		}
+	}
+}
+
+func TestWaitForWindowRoom(t *testing.T) {
+	at := func(s string) func() time.Time {
+		return func() time.Time {
+			parsed, err := time.Parse(time.RFC3339, s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return parsed
+		}
+	}
+	tests := []struct {
+		name     string
+		now      string
+		duration string
+		minLeft  int
+		wantWait time.Duration
+		wantErr  string
+	}{
+		{name: "plenty of the window left", now: "2026-11-26T10:30:00Z", duration: "1h", minLeft: 30},
+		{name: "exactly the minimum left", now: "2026-11-26T10:59:30Z", duration: "1h", minLeft: 30},
+		{name: "waits for the boundary", now: "2026-11-26T10:59:55Z", duration: "1h", minLeft: 30, wantWait: 5*time.Second + 100*time.Millisecond},
+		{name: "just after a boundary", now: "2026-11-26T11:00:01Z", duration: "1h", minLeft: 30},
+		{name: "short window", now: "2026-11-26T11:00:04Z", duration: "6s", minLeft: 3, wantWait: 2*time.Second + 100*time.Millisecond},
+		{name: "bad duration", now: "2026-11-26T11:00:04Z", duration: "an hour", minLeft: 3, wantErr: "not a positive Go duration"},
+		{name: "minimum not below the window", now: "2026-11-26T11:00:04Z", duration: "1m", minLeft: 60, wantErr: "cannot ask for"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var slept time.Duration
+			s := &Steps{
+				now:   at(tt.now),
+				sleep: func(_ context.Context, d time.Duration) error { slept = d; return nil },
+			}
+			err := s.waitForWindowRoom(context.Background(), tt.duration, tt.minLeft)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if slept != tt.wantWait {
+				t.Fatalf("slept %s, want %s", slept, tt.wantWait)
+			}
+		})
+	}
+}
+
+func TestWaitForWindowRoomStopsWhenTheContextEnds(t *testing.T) {
+	s := &Steps{now: func() time.Time { return time.Date(2026, 11, 26, 10, 59, 59, 0, time.UTC) }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.waitForWindowRoom(ctx, "1h", 30); err == nil {
+		t.Fatal("expected the cancelled context to end the wait")
 	}
 }
