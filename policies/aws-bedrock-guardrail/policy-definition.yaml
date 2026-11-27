@@ -1,5 +1,5 @@
 name: aws-bedrock-guardrail
-version: v1.5.0
+version: v1.6.0
 description: |
   Validate request or response content with AWS Bedrock Guardrails.
 
@@ -114,8 +114,9 @@ parameters:
           x-wso2-policy-advanced-param: false
           description: |
             Session name used when assuming the role. This is what appears in
-            the target account's CloudTrail, so prefer a value identifying this
-            API. Defaults to "bedrock-guardrail-session".
+            the target account's CloudTrail. Defaults to
+            "wso2-gw-<apiName>[-<apiVersion>]" derived from the API, or
+            "bedrock-guardrail-session" when the API has neither.
           pattern: "^[\\w+=,.@-]{2,64}$"
         awsAccessKeyID:
           type: string
@@ -180,8 +181,20 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
+            JSONPath to the content to validate; supports [n], [-1], [*] and .*. Every string
+            under a selected object or array is validated. MCP tool calls: "$.params.arguments".
+            Empty validates the whole payload. Tried before fallbackJsonPaths.
           default: "$.messages[-1].content"
+        fallbackJsonPaths:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPaths to try, in order, when jsonPath finds no text to validate. The first
+            path that finds text is validated. A request no path matches is handled as a
+            jsonPath miss. Same syntax as jsonPath.
+          items:
+            type: string
+            minLength: 1
         redactPII:
           type: boolean
           x-wso2-policy-advanced-param: true
@@ -217,12 +230,31 @@ parameters:
           type: string
           x-wso2-policy-advanced-param: false
           description: |
-            JSONPath expression to extract a specific value from JSON payload.
-            A streamed response reaching the buffered path — which happens when
-            another policy on the route requires the whole body — is read as
-            Server-Sent Events with streamingJsonPath instead, since this path
-            addresses a non-streamed shape and cannot match one.
+            JSONPath to the content to validate; supports [n], [-1], [*] and .*. Every string
+            under a selected object or array is validated. MCP tool results:
+            "$.result.content[*].text". Empty validates the whole payload. Streamed LLM
+            responses use streamingJsonPath instead. Tried before fallbackJsonPaths.
           default: "$.choices[0].message.content"
+        fallbackJsonPaths:
+          type: array
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPaths to try, in order, when jsonPath finds no text to validate. The first
+            path that finds text is validated. A response no path matches is handled as a
+            jsonPath miss. Same syntax as jsonPath. Streamed LLM responses use
+            streamingJsonPath instead.
+          items:
+            type: string
+            minLength: 1
+        redactPII:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            If true, PII the guardrail anonymizes in the response is replaced with "*****",
+            and request placeholders are not restored. If false (default), it is replaced
+            with its type, such as {EMAIL}, and request placeholders are restored.
+            Always true when request.redactPII is true.
+          default: false
         passthroughOnError:
           type: boolean
           x-wso2-policy-advanced-param: true
@@ -254,7 +286,9 @@ parameters:
             streamed response carries text incrementally under a different field
             than a buffered one, and no single path addresses both. The default
             suits the OpenAI streaming format, which is also what the
-            openai-to-bedrock-transformer emits.
+            openai-to-bedrock-transformer emits. Use dotted member names, each
+            with at most one array index; quoted members, wildcards and
+            chained indexes are rejected.
           default: "$.choices[0].delta.content"
         streamingTextUnitChars:
           type: integer

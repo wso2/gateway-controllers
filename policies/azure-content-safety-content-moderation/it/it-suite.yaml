@@ -16,9 +16,9 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The integration suite of the azure-content-safety-content-moderation policy. Feature paths are
-# relative to this directory. Give a runner a tags entry, "gateway-version>=X.Y.Z", only when the
-# policy needs a gateway release newer than the oldest one tested.
+# The integration suite of the azure-content-safety-content-moderation policy. Feature and overlay
+# paths are relative to this directory. Give a runner a tags entry, "gateway-version>=X.Y.Z", only
+# when the policy needs a gateway release newer than the oldest one tested.
 
 suite: azure-content-safety-content-moderation
 
@@ -34,8 +34,11 @@ defaults:
     propagation: 60s
 
 blocks:
+  # The overlay points the policy's Azure endpoint and key at the testbench content-safety
+  # service. Configurations rejected when the API is created do not depend on it, so their
+  # runners share this block.
   - name: azure-content-safety-content-moderation
-    parallel: 1
+    parallel: 4
     components:
       - name: platform-gateway
         db:
@@ -49,3 +52,44 @@ blocks:
       - name: azure-content-safety-content-moderation
         features:
           - features/azure_content_safety_content_moderation.feature
+      - name: azure-content-safety-content-moderation-valid-configuration
+        features:
+          - features/azure_content_safety_content_moderation_valid_configuration.feature
+      - name: azure-content-safety-content-moderation-content-handling
+        features:
+          - features/azure_content_safety_content_moderation_content_handling.feature
+      - name: azure-content-safety-content-moderation-validation
+        features:
+          - features/azure_content_safety_content_moderation_validation.feature
+      - name: azure-content-safety-content-moderation-invalid-azure-settings
+        features:
+          - features/azure_content_safety_content_moderation_invalid_azure_settings.feature
+      - name: azure-content-safety-content-moderation-service-errors
+        features:
+          - features/azure_content_safety_content_moderation_service_errors.feature
+      # Gateway 1.2.0 and later convert a numeric string policy parameter to the integer its
+      # schema declares; earlier gateways reject it (the next runner).
+      - name: azure-content-safety-content-moderation-string-threshold
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/azure_content_safety_content_moderation_string_threshold.feature
+      # Gateways before 1.2.0 reject a numeric string where a policy parameter's schema declares
+      # an integer.
+      - name: azure-content-safety-content-moderation-string-threshold-validation
+        tags: "gateway-version<1.2.0"
+        features:
+          - features/azure_content_safety_content_moderation_string_threshold_validation.feature
+
+  # A gateway without Azure Content Safety configuration: the overlay above would give one to
+  # every runner in its block.
+  - name: azure-content-safety-content-moderation-unconfigured
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: azure-content-safety-content-moderation-missing-azure-configuration
+        features:
+          - features/azure_content_safety_content_moderation_missing_azure_configuration.feature

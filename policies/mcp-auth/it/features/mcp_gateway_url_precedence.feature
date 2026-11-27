@@ -91,6 +91,9 @@ Feature: MCP gateway URL precedence
       """
       {"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"warmup","version":"1.0.0"}}}
       """
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "Authorization" to "Bearer ${CTX:token}"

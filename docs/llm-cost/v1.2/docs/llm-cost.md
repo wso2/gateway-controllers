@@ -56,6 +56,27 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
   gomodule: github.com/wso2/gateway-controllers/policies/llm-cost@v1
 ```
 
+### Adding Your Own Pricing
+
+You can add your own model pricing to [`gateway/configs/llm-pricing/model_prices.json`](https://github.com/wso2/api-platform/blob/main/gateway/configs/llm-pricing/model_prices.json) in the api-platform repository (`configs/llm-pricing/model_prices.json` in the gateway distribution), either for a model it does not carry or to replace its rates. Docker Compose mounts it at `/etc/policy-engine/llm-pricing/model_prices.json`, the default `pricing_file`. Add a key to the file's top-level object:
+
+```json
+"my-org-llm": {
+  "provider": "openai",
+  "input_cost_per_token": 1e-06,
+  "output_cost_per_token": 4e-06,
+  "cache_read_input_token_cost": 2.5e-07
+}
+```
+
+- **Key**: The model name from the response, or from the request when the response names none. The name is lowercased for lookup but keys are not, so a key with an uppercase letter never matches. Matching is on the whole key, so a dated snapshot such as `my-org-llm-2026-01-01` needs its own entry.
+- **Rates**: USD per token, so `1e-06` is $1.00 per million. Set at least `input_cost_per_token` and `output_cost_per_token`. Other rates use names such as `cache_creation_input_token_cost`, `output_cost_per_reasoning_token`, `input_cost_per_audio_token`, `input_cost_per_token_above_200k_tokens`, or `input_cost_per_token_priority`. An unknown or misspelt name is ignored without a warning.
+- **Missing rates**: Reasoning, audio, and image tokens fall back to the input or output rate, and 1-hour cache writes to `cache_creation_input_token_cost`. Otherwise, cache reads and writes with no rate cost nothing, so set `cache_read_input_token_cost` and `cache_creation_input_token_cost` if the provider reports them.
+- **`provider`**: Selects the provider's calculator, which adds non-token charges such as web search and handles provider-specific billing such as Gemini thinking tokens or Anthropic's geo and speed multipliers. Match the provider's other entries exactly, for example `openai`, `anthropic`, `gemini`, `vertex_ai-language-models`, `mistral`, or `bedrock`. Any other value, or none, skips that handling and may misprice the call.
+- **Existing models**: Edit the entry rather than adding a duplicate key.
+
+The file is read once, so restart the gateway runtime after editing it, for example with `docker compose restart gateway-runtime`. Invalid JSON stops the policy from being created, with an error naming the file. An entry with a wrongly typed token rate, such as a string, is skipped with a warning naming its key.
+
 ### Template Fields Used
 
 The shipped templates already declare everything below. This section matters when you are writing a template for a provider of your own. A template covers extraction and per-token pricing on its own; a charge that is not a token count, or a multiplier applied to the total, additionally needs a calculator in the policy.
@@ -276,6 +297,6 @@ Analytics separately receives the same cost together with the model and the thre
 ## Notes
 
 - A route with no `LlmProviderTemplate` cannot be priced. The cost is reported as `0.0000000000` with status `not_calculated`, and a warning is logged.
-- The same applies when the model is missing from the pricing file. The warning names what was looked for, and the request still goes through.
+- The same applies when the model is missing from the pricing file. The warning names what was looked for, and the request still goes through. To price it, add an entry as described in [Adding Your Own Pricing](#adding-your-own-pricing).
 - The pricing file is read once and kept for the life of the process, so a restart is needed after editing it.
 - A billing tier the policy does not recognise, or one the model has no special rate for, is charged at the standard rate. This is normal and is not treated as a failure.

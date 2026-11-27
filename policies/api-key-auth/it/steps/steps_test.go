@@ -26,6 +26,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -135,35 +139,6 @@ func TestSendRequestExpectingRejectionFailsOnATimeout(t *testing.T) {
 	err := steps.sendRequestExpectingRejection(newScenarioContext(), "GET", "/probe")
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "expected the gateway to reject the request")
-}
-
-func TestSendRequestOverHTTP2PublishesTheHTTP2Response(t *testing.T) {
-	var protocols http.Protocols
-	protocols.SetUnencryptedHTTP2(true)
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Seen-Key", r.Header.Get("API-Key"))
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	server.Config.Protocols = &protocols
-	server.Start()
-	t.Cleanup(server.Close)
-
-	steps := newSteps(fakeBase{url: server.URL, headers: map[string]string{"API-Key": "k1"}}, nil)
-	ctx := newScenarioContext()
-
-	require.NoError(t, steps.sendRequestOverHTTP2(ctx, "get", "/probe"))
-	resp, err := httpx.Published(ctx)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
-	require.Equal(t, "k1", resp.Headers.Get("X-Seen-Key"))
-}
-
-func TestSendRequestOverHTTP2RejectsAServerThatDoesNotSpeakHTTP2(t *testing.T) {
-	steps := newStepsWithServer(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	err := steps.sendRequestOverHTTP2(newScenarioContext(), "GET", "/probe")
-	require.ErrorContains(t, err, "HTTP/2")
 }
 
 func TestConcurrentCyclingRowsParsesValuesAndAbsentMarker(t *testing.T) {
@@ -319,6 +294,59 @@ func TestProcessSignalScriptTargetsTheCommandSuffixWithoutPkill(t *testing.T) {
 	require.Contains(t, script, "kill -STOP")
 	require.NotContains(t, script, "pkill")
 	require.NotContains(t, script, "pgrep")
+}
+
+func TestProcessSignalScriptSignalsEveryMatchAndWaitsForTheSignalToTakeEffect(t *testing.T) {
+	for signal, settled := range map[string]string{
+		"STOP": `STOP) [ "$s" = T ]`,
+		"CONT": `CONT) [ "$s" != T ]`,
+		"KILL": `KILL) { [ "$s" = gone ]`,
+	} {
+		script := processSignalScript(signal, "policy-engine")
+		require.Contains(t, script, "kill -"+signal+` "$pid" || exit 1`, signal)
+		require.Contains(t, script, settled, signal)
+		require.Contains(t, script, `exit 1`)
+	}
+	script := processSignalScript("STOP", "policy-engine")
+	require.NotContains(t, script, "&& exit 0", "a match must not end the scan before the other processes are signalled")
+}
+
+// The script is real shell run inside the gateway images, so it is run here when a Linux /proc and
+// bash are present, against a process whose command line ends the way the engine's does.
+func TestProcessSignalScriptStopsAndResumesARealProcess(t *testing.T) {
+	if _, err := os.Stat("/proc/self/stat"); err != nil {
+		t.Skip("needs a Linux /proc")
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("needs bash")
+	}
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("needs sleep")
+	}
+	binary, err := os.ReadFile(sleep)
+	require.NoError(t, err)
+	// A copy of a real binary, not a script: a script's command line starts with its interpreter.
+	target := filepath.Join(t.TempDir(), "fake-policy-engine")
+	require.NoError(t, os.WriteFile(target, binary, 0o755))
+	proc := exec.Command(target, "1000")
+	require.NoError(t, proc.Start())
+	t.Cleanup(func() { _ = proc.Process.Kill(); _ = proc.Wait() })
+
+	run := func(signal string) error {
+		return exec.Command(bash, "-c", processSignalScript(signal, "fake-policy-engine")).Run()
+	}
+	state := func() string {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", proc.Process.Pid))
+		require.NoError(t, err)
+		text := string(stat)
+		return text[strings.LastIndex(text, ") ")+2 : strings.LastIndex(text, ") ")+3]
+	}
+	require.NoError(t, run("STOP"))
+	require.Equal(t, "T", state(), "the script returns only once the process is stopped")
+	require.NoError(t, run("CONT"))
+	require.NotEqual(t, "T", state())
 }
 
 func TestResumeStoppedProcessesClearsTheList(t *testing.T) {

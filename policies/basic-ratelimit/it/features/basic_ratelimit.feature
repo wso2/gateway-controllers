@@ -295,9 +295,12 @@ Feature: Basic rate limiting policy
       | spec.version           | ${CTX:apiVersion}                |
       | spec.context           | ${CTX:apiContext}/$version       |
       | spec.upstream.main.url | http://testbench:3000            |
-      | spec.policies          | [{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":5,"duration":"1h"}]}}] |
+      | spec.policies          | [{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":50,"duration":"1h"}]}}] |
       | spec.operations        | [{"method":"GET","path":"/health","policies":[{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":100,"duration":"1h"}]}}]},{"method":"GET","path":"/resource-a"},{"method":"GET","path":"/resource-b","policies":[{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":3,"duration":"1h"}]}}]}] |
     Then the resource creation response should indicate successful deployment
+    # Every route also counts against the API-level quota, and the readiness poll below spends an
+    # unknown number of requests from it. The quota is large enough for any number of polls, and the
+    # API-level 429 is reached by sending more requests than it can hold.
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
     When I send 3 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource-b"
@@ -307,9 +310,9 @@ Feature: Basic rate limiting policy
     Then the response status code should be 429
     And the response header "X-RateLimit-Limit" should be "3"
 
-    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/resource-a"
+    When I send 60 "GET" requests to "${CTX:apiContext}/${CTX:apiVersion}/resource-a"
     Then the response status code should be 429
-    And the response header "X-RateLimit-Limit" should be "5"
+    And the response header "X-RateLimit-Limit" should be "50"
 
     When I delete the API "${CTX:apiName}"
     Then the response should be successful

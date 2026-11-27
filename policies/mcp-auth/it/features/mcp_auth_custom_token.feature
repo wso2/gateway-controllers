@@ -56,6 +56,9 @@ Feature: mcp-auth with a custom token header, scheme and failure status
     # Polling an empty POST until 403 waits until the routes are live; it never reaches the mock.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 403
+    # The 403 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
       """
@@ -104,6 +107,9 @@ Feature: mcp-auth with a custom token header, scheme and failure status
 
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 403
+    # The 403 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I get a JWT token from the mock JWKS server with issuer "http://testbench:3001/token" and store it as "token"
     And I set header "X-MCP-Token" to "Token ${CTX:token}"

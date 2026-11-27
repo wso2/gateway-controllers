@@ -16,9 +16,9 @@
  * under the License.
  */
 
-// Package steps holds the step definitions only the request-rewrite policy's scenarios need. The shared
-// steps in tests/it/common/steps are bound before these, so search them first and do not repeat
-// one here.
+// Package steps holds the step definitions only the request-rewrite policy's scenarios need. The
+// shared steps in tests/it/common/steps are bound before these, so search them first and do not
+// repeat one here.
 package steps
 
 import (

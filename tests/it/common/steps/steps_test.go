@@ -505,6 +505,43 @@ func TestSendConcurrentRejectsInvalidCount(t *testing.T) {
 // sendConcurrent is a funnel exception: it clears the previously published response and
 // publishes none of its own, whether its requests succeed or fail, so a later response
 // assertion can neither pass against a stale response nor read an arbitrary concurrent one.
+func TestSendUntilStatusAndBodyContainsWaitsForTheBodyNotJustTheStatus(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		// The first answers are the router's 503 with no body; only later does it carry the cause.
+		if calls.Add(1) > 2 {
+			_, _ = w.Write([]byte("upstream connect error or disconnect/reset before headers"))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+
+	ctx := publishedContext(t, &httpx.Response{StatusCode: http.StatusTeapot})
+	require.NoError(t, base.sendUntilStatusAndBodyContains(ctx, "get", "/api/v1/resource", http.StatusServiceUnavailable,
+		"upstream connect error"))
+	require.GreaterOrEqual(t, int(calls.Load()), 3, "a 503 with an empty body must not satisfy the wait")
+	resp, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	require.Contains(t, string(resp.Body), "upstream connect error")
+}
+
 func TestSendConcurrentLeavesNoPublishedResponse(t *testing.T) {
 	var mu sync.Mutex
 	seen := map[string]string{}
@@ -711,6 +748,36 @@ func TestStoreResponseHeaderRequiresTheHeader(t *testing.T) {
 
 	require.ErrorContains(t, base.storeResponseHeader(ctx, "X-Missing", "missing"), "did not send it")
 	require.ErrorContains(t, base.storeResponseHeader(ctx, "ETag", ""), "empty key")
+}
+
+// A generated identity replaces a scenario header of the same name in any case, so the request
+// always carries the generated value; other scenario headers are kept.
+func TestSetRequestHeaderReplacesNamesDifferingOnlyInCase(t *testing.T) {
+	headers := withRequestHeaders(map[string]string{
+		"x-request-id": "from-scenario",
+		"X-REQUEST-ID": "also-from-scenario",
+		"Accept":       "application/json",
+	})
+	setRequestHeader(headers, "X-Request-Id", "request-1")
+	require.Equal(t, map[string]string{"X-Request-Id": "request-1", "Accept": "application/json"}, headers)
+}
+
+// A header passes only when it is sent once with the wanted value; a second value, before or after
+// it, fails, as does an absent header.
+func TestResponseHeaderOnlyValue(t *testing.T) {
+	base := &Base{}
+	withValues := func(values ...string) context.Context {
+		return publishedContext(t, &httpx.Response{StatusCode: 200, Headers: http.Header{"X-Set": values}})
+	}
+
+	require.NoError(t, base.responseHeaderOnlyValue(withValues("gateway-value"), "x-set", "gateway-value"))
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues("gateway-value", "backend"), "X-Set", "gateway-value"),
+		"only the value")
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues("backend", "gateway-value"), "X-Set", "gateway-value"),
+		"only the value")
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues("backend"), "X-Set", "gateway-value"),
+		"only the value")
+	require.ErrorContains(t, base.responseHeaderOnlyValue(withValues(), "X-Set", "gateway-value"), "only the value")
 }
 
 func TestResponseHeaderNotEquals(t *testing.T) {
@@ -998,6 +1065,133 @@ func TestSendAllConcurrentlyExpectingChecksEachStatus(t *testing.T) {
 		sendAllConcurrentlyExpecting(context.Background(), client, requests, []int{200}, 4), "expected statuses")
 }
 
+func TestConcurrentExpectationCheck(t *testing.T) {
+	ok := &httpx.Response{StatusCode: http.StatusOK, Body: []byte(`{"body":"item 7"}`)}
+	blocked := &httpx.Response{StatusCode: http.StatusUnprocessableEntity, Body: []byte(`{"reason":"blocked"}`)}
+
+	require.NoError(t, concurrentExpectation{}.check(ok))
+	require.ErrorContains(t, concurrentExpectation{}.check(blocked), "returned")
+	require.ErrorContains(t, concurrentExpectation{}.check(nil), "returned no response")
+	require.NoError(t, concurrentExpectation{status: 422, contains: "blocked"}.check(blocked))
+	require.ErrorContains(t, concurrentExpectation{status: 200}.check(blocked), "want status 200")
+	require.NoError(t, concurrentExpectation{status: 200, contains: "item 7"}.check(ok))
+	require.ErrorContains(t, concurrentExpectation{status: 200, contains: "item 8"}.check(ok), `without "item 8"`)
+}
+
+func TestCycledRequests(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	require.NoError(t, tcontext.Set(ctx, "word", "contraband"))
+
+	rows, err := cycledRequests(ctx, headerTable(t,
+		[]string{"body", "status", "contains"},
+		[]string{`{"q":"{i}"}`, "200", "{i}"},
+		[]string{` {"q":"${CTX:word} {i}"} `, "422", ""},
+	))
+	require.NoError(t, err)
+	require.Equal(t, []cycledRequest{
+		{body: `{"q":"{i}"}`, status: 200, contains: "{i}"},
+		{body: `{"q":"contraband {i}"}`, status: 422},
+	}, rows)
+
+	rows, err = cycledRequests(ctx, headerTable(t, []string{"status", "body"}, []string{"204", ""}))
+	require.NoError(t, err)
+	require.Equal(t, []cycledRequest{{status: 204}}, rows)
+
+	for name, tc := range map[string]struct {
+		table *godog.Table
+		want  string
+	}{
+		"nil table":       {nil, "header row and at least one request row"},
+		"header only":     {headerTable(t, []string{"body", "status"}), "header row and at least one request row"},
+		"unknown column":  {headerTable(t, []string{"body", "code"}, []string{"", "200"}), `unknown column "code"`},
+		"duplicate":       {headerTable(t, []string{"body", "body"}, []string{"", ""}), `duplicate column "body"`},
+		"no status":       {headerTable(t, []string{"body"}, []string{""}), "status column is required"},
+		"no body":         {headerTable(t, []string{"status"}, []string{"200"}), "body column is required"},
+		"short row":       {headerTable(t, []string{"body", "status"}, []string{"200"}), "row 1 must contain 2 cells"},
+		"bad status":      {headerTable(t, []string{"body", "status"}, []string{"", "ok"}), `invalid status "ok"`},
+		"status too low":  {headerTable(t, []string{"body", "status"}, []string{"", "99"}), `invalid status "99"`},
+		"status too high": {headerTable(t, []string{"body", "status"}, []string{"", "600"}), `invalid status "600"`},
+		"missing context": {headerTable(t, []string{"body", "status"}, []string{"${CTX:absent}", "200"}), "absent"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := cycledRequests(ctx, tc.table)
+			require.ErrorContains(t, err, tc.want)
+		})
+	}
+}
+
+func TestSendConcurrentCyclingChecksEachResponse(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen[r.URL.Path] = r.Method + " " + r.Header.Get("Content-Type") + " " + string(body)
+		mu.Unlock()
+		if strings.Contains(string(body), "blocked") {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+		}
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+	stale := &httpx.Response{StatusCode: http.StatusTeapot}
+
+	ctx := publishedContext(t, stale)
+	require.NoError(t, base.sendConcurrentCycling(ctx, 4, "post", "/items/{i}", headerTable(t,
+		[]string{"body", "status", "contains"},
+		[]string{`{"allowed":{i}}`, "200", `{"allowed":{i}}`},
+		[]string{`{"blocked":{i}}`, "422", `{"blocked":{i}}`},
+	)))
+	require.Equal(t, map[string]string{
+		"/items/1": `POST application/json {"allowed":1}`,
+		"/items/2": `POST application/json {"blocked":2}`,
+		"/items/3": `POST application/json {"allowed":3}`,
+		"/items/4": `POST application/json {"blocked":4}`,
+	}, seen)
+	_, err = httpx.Published(ctx)
+	require.ErrorContains(t, err, "no response has been published")
+
+	// Each response is checked against its own row: a wrong status and a body without its own
+	// number both fail, naming the request.
+	ctx = publishedContext(t, stale)
+	err = base.sendConcurrentCycling(ctx, 2, "POST", "/items/{i}", headerTable(t,
+		[]string{"body", "status", "contains"},
+		[]string{`{"blocked":{i}}`, "200", ""},
+		[]string{`{"allowed":{i}}`, "200", `{"allowed":1}`},
+	))
+	require.ErrorContains(t, err, "request 1 of 2 returned")
+	require.ErrorContains(t, err, `request 2 of 2 returned a body without "{\"allowed\":1}"`)
+	_, err = httpx.Published(ctx)
+	require.ErrorContains(t, err, "no response has been published")
+
+	for _, n := range []int{0, -1, maxConcurrentSendRequests + 1} {
+		require.ErrorContains(t, base.sendConcurrentCycling(ctx, n, "POST", "/items",
+			headerTable(t, []string{"body", "status"}, []string{"", "200"})), "must be between")
+	}
+	require.ErrorContains(t, base.sendConcurrentCycling(ctx, 1, "POST", "/items", nil), "header row")
+	require.ErrorContains(t, base.sendConcurrentCycling(ctx, 1, "POST", "/items/${CTX:absent}",
+		headerTable(t, []string{"body", "status"}, []string{"", "200"})), "absent")
+	require.ErrorContains(t, sendEachConcurrentlyChecking(context.Background(), httpx.NewClient(httpx.Options{}),
+		1, func(int) httpx.Request { return httpx.Request{} }, []concurrentExpectation{{}, {}}, 1),
+		"2 expectations for 1 requests")
+}
+
 func TestSendConcurrentAlternatingRejectsInvalidInput(t *testing.T) {
 	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
 	table := headerTable(t, []string{"v", "200"})
@@ -1007,4 +1201,277 @@ func TestSendConcurrentAlternatingRejectsInvalidInput(t *testing.T) {
 	}
 	require.ErrorContains(t, (&Base{}).sendConcurrentAlternating(ctx, 2, "GET", "/p", " ", table),
 		"header name is required")
+}
+
+func TestSendOverHTTP2ReturnsTheHTTP2Response(t *testing.T) {
+	var protocols http.Protocols
+	protocols.SetUnencryptedHTTP2(true)
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Seen-Key", r.Header.Get("API-Key"))
+		w.Header().Set("X-Seen-Authority", r.Host)
+		w.Header().Set("X-Seen-Proto", r.Proto)
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"ok":false}`))
+	}))
+	server.Config.Protocols = &protocols
+	server.Start()
+	t.Cleanup(server.Close)
+
+	resp, err := sendOverHTTP2(context.Background(), "GET", server.URL+"/probe", "spoofed.example",
+		map[string]string{"API-Key": "k1"})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	require.Equal(t, "k1", resp.Headers.Get("X-Seen-Key"))
+	require.Equal(t, "spoofed.example", resp.Headers.Get("X-Seen-Authority"))
+	require.Equal(t, "HTTP/2.0", resp.Headers.Get("X-Seen-Proto"))
+	require.Equal(t, `{"ok":false}`, string(resp.Body))
+	require.Equal(t, "GET", resp.Method)
+}
+
+func TestSendOverHTTP2FailsAgainstAServerThatDoesNotSpeakHTTP2(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+
+	// The h2c client cannot talk to an HTTP/1-only server, so the request itself fails.
+	_, err := sendOverHTTP2(context.Background(), "GET", server.URL+"/probe", "", nil)
+	require.ErrorContains(t, err, "over HTTP/2")
+}
+
+func TestRequireHTTP2RejectsAnHTTP1Response(t *testing.T) {
+	require.NoError(t, requireHTTP2(&http.Response{ProtoMajor: 2, Proto: "HTTP/2.0"}, "GET", "http://gw/p"))
+	err := requireHTTP2(&http.Response{ProtoMajor: 1, Proto: "HTTP/1.1"}, "GET", "http://gw/p")
+	require.ErrorContains(t, err, `expected an HTTP/2 response from GET http://gw/p, got protocol "HTTP/1.1"`)
+}
+
+func TestReadLimitedBodyRejectsAnOversizedBody(t *testing.T) {
+	body, err := readLimitedBody(strings.NewReader("small"))
+	require.NoError(t, err)
+	require.Equal(t, "small", string(body))
+
+	_, err = readLimitedBody(strings.NewReader(strings.Repeat("x", maxHTTP2ResponseBodyBytes+1)))
+	require.ErrorContains(t, err, "byte limit")
+}
+
+// fakeIdentifiedBase stands in for the shared base: it resolves paths against a test server and
+// returns fixed scenario headers and host.
+type fakeIdentifiedBase struct {
+	url     string
+	headers map[string]string
+	host    string
+}
+
+func (f fakeIdentifiedBase) GatewayURL(path string) (string, error) { return f.url + path, nil }
+
+func (f fakeIdentifiedBase) ScenarioHeaders(context.Context) map[string]string { return f.headers }
+
+func (f fakeIdentifiedBase) RequestHost(context.Context) string { return f.host }
+
+func identifiedContext() context.Context {
+	return tcontext.WithLocal(context.Background(), tcontext.NewLocal("test-runner"))
+}
+
+func identifiedSteps(base fakeIdentifiedBase) *concurrentIdentifiedSteps {
+	return newConcurrentIdentifiedSteps(base, httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}))
+}
+
+// echoingGateway returns the request headers as {"headers":{...}} after letting modify change
+// them, standing in for the gateway in front of the echo backend.
+func echoingGateway(t *testing.T, modify func(request, response http.Header)) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers := r.Header.Clone()
+		if modify != nil {
+			modify(headers, w.Header())
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"headers": headers})
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestConcurrentIdentifiedPassesWhenTheHeaderIsRemoved(t *testing.T) {
+	var withExtra, withHost atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Internal-Token") != "" {
+			withExtra.Add(1)
+		}
+		if r.Host == "api.example" && r.Header.Get("X-Scenario") == "kept" {
+			withHost.Add(1)
+		}
+		headers := r.Header.Clone()
+		headers.Del("X-Internal-Token")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"headers": headers})
+	}))
+	t.Cleanup(server.Close)
+
+	ctx := identifiedContext()
+	require.NoError(t, tcontext.Set(ctx, "apiPath", "/api/v1/get"))
+	steps := identifiedSteps(fakeIdentifiedBase{
+		url: server.URL, headers: map[string]string{"X-Scenario": "kept"}, host: "api.example",
+	})
+
+	require.NoError(t, steps.sendConcurrentIdentified(ctx, 10, "get", "${CTX:apiPath}", "X-Request-Id", "X-Internal-Token"))
+	require.Equal(t, int32(5), withExtra.Load(), "every other request carries the extra header")
+	require.Equal(t, int32(10), withHost.Load(), "every request carries the scenario's headers and host")
+	require.NoError(t, everyRequestEchoedOwnIdentityWithout(ctx, "X-Request-Id", "X-Internal-Token"))
+	require.NoError(t, noConcurrentResponseCarriesHeader(ctx, "X-Removed-Response"))
+}
+
+func TestConcurrentIdentifiedFailsWhenTheHeaderReachesTheBackend(t *testing.T) {
+	server := echoingGateway(t, nil)
+	ctx := identifiedContext()
+
+	require.NoError(t, identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 4, "GET", "/get", "X-Request-Id", "X-Internal-Token"))
+	err := everyRequestEchoedOwnIdentityWithout(ctx, "X-Request-Id", "X-Internal-Token")
+	require.ErrorContains(t, err, "2 of 4 concurrent requests failed the check")
+	require.ErrorContains(t, err, "the backend received X-Internal-Token")
+}
+
+func TestConcurrentIdentifiedFailsWhenAnIdentityLeaks(t *testing.T) {
+	// The fake gateway removes X-Internal-Token correctly but gives every request the first
+	// request's X-Request-Id, as a leak between requests would.
+	server := echoingGateway(t, func(request, _ http.Header) {
+		request.Del("X-Internal-Token")
+		request.Set("X-Request-Id", "request-1")
+	})
+	ctx := identifiedContext()
+
+	require.NoError(t, identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 3, "GET", "/get", "X-Request-Id", "X-Internal-Token"))
+	err := everyRequestEchoedOwnIdentityWithout(ctx, "X-Request-Id", "X-Internal-Token")
+	require.ErrorContains(t, err, "2 of 3 concurrent requests failed the check")
+	require.ErrorContains(t, err, "request-2: the backend received X-Request-Id [request-1]")
+}
+
+func TestConcurrentIdentifiedFailsWhenTheIdentityHeaderIsMissing(t *testing.T) {
+	server := echoingGateway(t, func(request, _ http.Header) { request.Del("X-Internal-Token") })
+	ctx := identifiedContext()
+
+	require.NoError(t, identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 2, "GET", "/get", "X-Request-Id", "X-Internal-Token"))
+	err := everyRequestEchoedOwnIdentityWithout(ctx, "X-Correlation-Id", "X-Internal-Token")
+	require.ErrorContains(t, err, "the backend received no X-Correlation-Id header")
+}
+
+func TestConcurrentIdentifiedPassesWhenTheHeaderIsSetToTheConfiguredValue(t *testing.T) {
+	// The fake gateway overwrites the client's X-Tenant with the configured value and adds the
+	// configured response header, as set-headers does.
+	server := echoingGateway(t, func(request, response http.Header) {
+		request.Set("X-Tenant", "configured")
+		response.Set("X-Gateway-Response", "configured")
+	})
+	ctx := identifiedContext()
+
+	require.NoError(t, identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 6, "GET", "/get", "X-Request-Id", "X-Tenant"))
+	require.NoError(t, everyRequestEchoedOwnIdentityWith(ctx, "X-Request-Id", "X-Tenant", "configured"))
+	require.NoError(t, everyConcurrentResponseCarriesHeader(ctx, "X-Gateway-Response", "configured"))
+}
+
+func TestConcurrentIdentifiedFailsWhenTheClientValueSurvives(t *testing.T) {
+	server := echoingGateway(t, nil)
+	ctx := identifiedContext()
+
+	require.NoError(t, identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 4, "GET", "/get", "X-Request-Id", "X-Tenant"))
+	err := everyRequestEchoedOwnIdentityWith(ctx, "X-Request-Id", "X-Tenant", "configured")
+	require.ErrorContains(t, err, "4 of 4 concurrent requests failed the check")
+	require.ErrorContains(t, err, `request-1: the backend received X-Tenant [secret-1], want "configured"`)
+	require.ErrorContains(t, err, "request-2: the backend received no X-Tenant header")
+}
+
+func TestConcurrentResponseHeaderAssertionsReportTheHeader(t *testing.T) {
+	server := echoingGateway(t, func(_, response http.Header) { response.Set("X-Removed-Response", "removed") })
+	ctx := identifiedContext()
+
+	require.NoError(t, identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 2, "GET", "/get", "X-Request-Id", "X-Internal-Token"))
+	err := noConcurrentResponseCarriesHeader(ctx, "X-Removed-Response")
+	require.ErrorContains(t, err, "2 of 2 concurrent requests failed the check")
+	require.ErrorContains(t, err, `response header X-Removed-Response is ["removed"]`)
+
+	err = everyConcurrentResponseCarriesHeader(ctx, "X-Removed-Response", "configured")
+	require.ErrorContains(t, err, `response header X-Removed-Response is ["removed"], want "configured"`)
+}
+
+func TestSendConcurrentIdentifiedRejectsInvalidInput(t *testing.T) {
+	steps := identifiedSteps(fakeIdentifiedBase{url: "http://127.0.0.1:1"})
+	ctx := identifiedContext()
+
+	require.ErrorContains(t, steps.sendConcurrentIdentified(ctx, 0, "GET", "/get", "X-Request-Id", "X-Internal-Token"),
+		"between 1 and 1000")
+	require.ErrorContains(t, steps.sendConcurrentIdentified(ctx, 1001, "GET", "/get", "X-Request-Id", "X-Internal-Token"),
+		"between 1 and 1000")
+	require.ErrorContains(t, steps.sendConcurrentIdentified(ctx, 2, "GET", "/get", " ", "X-Internal-Token"),
+		"need a name")
+	require.ErrorContains(t, steps.sendConcurrentIdentified(ctx, 2, "GET", "/get", "X-Request-Id", "x-request-id"),
+		"must differ")
+}
+
+func TestSendConcurrentIdentifiedStopsWhenTheScenarioIsCancelled(t *testing.T) {
+	server := echoingGateway(t, nil)
+	ctx, cancel := context.WithCancel(identifiedContext())
+	cancel()
+
+	err := identifiedSteps(fakeIdentifiedBase{url: server.URL}).sendConcurrentIdentified(
+		ctx, 2*maxConcurrentSendInFlight, "GET", "/get", "X-Request-Id", "X-Internal-Token")
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+func TestConcurrentAssertionsRequireAConcurrentSend(t *testing.T) {
+	ctx := identifiedContext()
+	require.ErrorContains(t, everyRequestEchoedOwnIdentityWithout(ctx, "X-Request-Id", "X-Internal-Token"),
+		"no concurrent requests have been sent")
+	require.ErrorContains(t, everyRequestEchoedOwnIdentityWith(ctx, "X-Request-Id", "X-Tenant", "configured"),
+		"no concurrent requests have been sent")
+	require.ErrorContains(t, noConcurrentResponseCarriesHeader(ctx, "X-Removed-Response"),
+		"no concurrent requests have been sent")
+	require.ErrorContains(t, everyConcurrentResponseCarriesHeader(ctx, "X-Gateway-Response", "configured"),
+		"no concurrent requests have been sent")
+}
+
+func TestCheckEchoedIdentity(t *testing.T) {
+	noCheck := func(map[string]any) string { return "" }
+	ok := identifiedResult{identity: "request-1", response: &httpx.Response{
+		StatusCode: 200, Body: []byte(`{"headers":{"X-Request-Id":["request-1"]}}`),
+	}}
+	require.Empty(t, checkEchoedIdentity(ok, "x-request-id", noCheck))
+
+	failed := identifiedResult{identity: "request-2", err: errors.New("connection reset")}
+	require.Contains(t, checkEchoedIdentity(failed, "X-Request-Id", noCheck), "request failed")
+
+	require.Contains(t, checkEchoedIdentity(identifiedResult{identity: "request-3"}, "X-Request-Id", noCheck),
+		"no response")
+
+	rejected := identifiedResult{identity: "request-4", response: &httpx.Response{StatusCode: 503}}
+	require.Contains(t, checkEchoedIdentity(rejected, "X-Request-Id", noCheck), "status 503")
+
+	notEcho := identifiedResult{identity: "request-5", response: &httpx.Response{StatusCode: 200, Body: []byte("plain")}}
+	require.Contains(t, checkEchoedIdentity(notEcho, "X-Request-Id", noCheck), "parsing the echoed response")
+
+	duplicated := identifiedResult{identity: "request-7", response: &httpx.Response{
+		StatusCode: 200, Body: []byte(`{"headers":{"X-Request-Id":["request-7","request-8"]}}`),
+	}}
+	require.Contains(t, checkEchoedIdentity(duplicated, "X-Request-Id", noCheck), "[request-7 request-8]")
+
+	rejectedByCheck := checkEchoedIdentity(ok, "X-Request-Id", func(map[string]any) string { return "custom reason" })
+	require.Equal(t, "request-1: custom reason", rejectedByCheck)
+}
+
+func TestEchoedStrings(t *testing.T) {
+	values, ok := echoedStrings("one")
+	require.True(t, ok)
+	require.Equal(t, []string{"one"}, values)
+
+	values, ok = echoedStrings([]any{"a", 2})
+	require.True(t, ok)
+	require.Equal(t, []string{"a", "2"}, values)
+
+	_, ok = echoedStrings(map[string]any{})
+	require.False(t, ok)
 }

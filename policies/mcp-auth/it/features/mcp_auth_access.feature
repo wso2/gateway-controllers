@@ -60,6 +60,9 @@ Feature: mcp-auth access decisions by group and exceptions
     # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
       """
@@ -126,6 +129,9 @@ Feature: mcp-auth access decisions by group and exceptions
     # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
       """
@@ -187,6 +193,9 @@ Feature: mcp-auth access decisions by group and exceptions
     # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
       """
@@ -248,6 +257,9 @@ Feature: mcp-auth access decisions by group and exceptions
     # Polling an empty POST until 401 waits until the routes are live; it never reaches the mock.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send this request to "${CTX:mcpContext}/mcp":
       """
@@ -314,6 +326,9 @@ Feature: mcp-auth access decisions by group and exceptions
     # Polling an empty POST until 401 waits until the routes are live.
     When I clear all headers
     And I send a "POST" request to "${CTX:mcpContext}/mcp" until status 401
+    # The 401 is answered before the upstream, so also wait until the upstream is warm; this
+    # reads only the router's state and sends nothing to the backend.
+    And I wait until the router can forward "${CTX:mcpContext}/mcp" to its upstream
 
     When I use the MCP Client to send "add" tools/call request to "${CTX:mcpContext}/mcp"
     Then the response status code should be 401

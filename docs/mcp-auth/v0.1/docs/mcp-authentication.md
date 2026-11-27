@@ -9,7 +9,7 @@ The MCP Authentication policy is designed to secure traffic to Model Context Pro
 
 ## Features
 
-- **Access Token Validation**: Validates JWT access tokens using configured key managers. Please refer the [JWT Authentication Policy](../../../gateway/policies/jwt-authentication.md) for more information on how the key validation works.
+- **Access Token Validation**: Validates JWT access tokens using configured key managers. Please refer the [JWT Authentication Policy](../../../jwt-auth/v0.1/docs/jwt-authentication.md) for more information on how the key validation works.
 - **Protected Resource Metadata**: Intercepts `GET /.well-known/oauth-protected-resource` requests to return resource metadata, including authorization servers and supported scopes.
 - **Standardized Error Handling**: Returns `WWW-Authenticate` headers with `resource_metadata` on authentication failures.
 - **Configurable Validation**: Supports issuer, audience, scope, and custom claim validation.

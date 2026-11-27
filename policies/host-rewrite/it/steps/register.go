@@ -25,7 +25,12 @@ import (
 	"github.com/cucumber/godog"
 
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
+
+	sharedsteps "github.com/wso2/gateway-controllers/tests/it/common/steps"
 )
 
-// Register binds the policy's own steps to the scenario.
-func Register(_ *godog.ScenarioContext, _ *frameworkruntime.Topology) {}
+// Register binds the policy's own steps to the scenario. They build on the shared request steps'
+// base for the gateway URL, the scenario's headers and the request host.
+func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, _ *frameworkruntime.Topology) {
+	newSteps(base).register(sc)
+}

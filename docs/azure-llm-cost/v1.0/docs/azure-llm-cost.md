@@ -62,6 +62,34 @@ Inside the `gateway/build.yaml`, ensure the policy module is added under `polici
   gomodule: github.com/wso2/gateway-controllers/policies/azure-llm-cost@v1
 ```
 
+### Adding Your Own Pricing
+
+You can add your own model pricing to [`gateway/configs/llm-pricing/model_prices.json`](https://github.com/wso2/api-platform/blob/main/gateway/configs/llm-pricing/model_prices.json) in the api-platform repository (`configs/llm-pricing/model_prices.json` in the gateway distribution), either for a model it does not carry or to replace its rates. Docker Compose mounts it at `/etc/policy-engine/llm-pricing/model_prices.json`, the default `pricing_file`. This policy reads only keys starting with `azure/` or `azure_ai/`. Add yours to the file's top-level object:
+
+```json
+"azure/my-custom-model": {
+  "provider": "azure",
+  "input_cost_per_token": 1e-06,
+  "output_cost_per_token": 4e-06,
+  "cache_read_input_token_cost": 5e-07
+},
+"azure/eu/my-custom-model": {
+  "provider": "azure",
+  "input_cost_per_token": 1.1e-06,
+  "output_cost_per_token": 4.4e-06,
+  "cache_read_input_token_cost": 5.5e-07
+}
+```
+
+- **Key**: `azure/<model>` for Azure OpenAI, `azure/<region>/<model>` for one `region` only, or `azure_ai/<model>` for Azure AI Foundry. Azure OpenAI routes try `azure/<region>/` then `azure/`; Foundry routes try `azure_ai/` first, then the same two. The prefix must be lowercase or the entry is ignored; the rest of the key is matched without regard to case, but in full.
+- **`<model>`**: On chat completions, the model Azure reports, often a dated snapshot such as `gpt-4o-mini-2024-07-18`, is used if it has an entry, and the `modelMappings` model only if it does not. On the Responses endpoints, it is the `modelMappings` model, or the deployment name if unmapped. In the example, `my-custom-model` is priced from `azure/eu/my-custom-model` for a deployment mapped with `region: eu`, and from `azure/my-custom-model` otherwise.
+- **Rates**: USD per token, so `1e-06` is $1.00 per million. Set `input_cost_per_token` and `output_cost_per_token`; an entry with neither is unpriced, and no further key is tried. The policy also reads `cache_read_input_token_cost`, `cache_creation_input_token_cost`, `cache_creation_input_token_cost_above_1hr`, `input_cost_per_audio_token`, `output_cost_per_audio_token`, `output_cost_per_reasoning_token`, `search_context_cost_per_query`, and the `_priority`, `_above_272k_tokens`, and `_above_272k_tokens_priority` forms of the input, output, and cache-read rates. Other fields are ignored.
+- **Missing rates**: Audio and reasoning tokens fall back to the input or output rate, and 1-hour cache writes to `cache_creation_input_token_cost`. Otherwise, cache reads, cache writes, and web search queries with no rate cost nothing, so set `cache_read_input_token_cost` for prompt caching, and `cache_creation_input_token_cost` too if the provider bills cache writes, as Anthropic does.
+- **`provider`**: Informational only; the key prefix decides the catalog.
+- **Existing models**: Edit the entry calls are actually priced from, rather than adding a duplicate key. That may be a dated snapshot or an `azure/<region>/` key such as `azure/global-standard/<model>`.
+
+The file is read once, so restart the gateway runtime after editing it, for example with `docker compose restart gateway-runtime`. Invalid JSON stops the policy from being created, with an error naming the file. An entry with a wrongly typed token rate, such as a string, is skipped with a warning naming its key.
+
 ## Reference Scenarios
 
 This policy runs in the response phase and should be placed before any cost-consuming policy in the chain. Every scenario below depends on the provider using one of the two Azure templates, `azure-openai` or `azureai-foundry`, since the policy reads that template to decide which catalog applies.

@@ -23,10 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"strings"
-	"time"
 
 	"github.com/cucumber/godog"
 
@@ -36,14 +33,10 @@ import (
 	stepscommon "github.com/wso2/gateway-controllers/tests/it/common/steps/common"
 )
 
-// maxResponseBodyBytes matches the funnel client's cap on a response body.
-const maxResponseBodyBytes = 10 << 20
-
 func (s *Steps) registerDataPlane(sc *godog.ScenarioContext) {
 	sc.Step(`^the response should be a server error$`, s.responseServerError)
 	sc.Step(`^I generate a (\d+)-character value from "([^"]*)" and store it as "([^"]*)"$`, s.generateSizedValue)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" expecting rejection$`, s.sendRequestExpectingRejection)
-	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" over HTTP/2$`, s.sendRequestOverHTTP2)
 	s.registerConcurrentRequests(sc)
 }
 
@@ -114,68 +107,6 @@ func isConnectionRejection(err error) bool {
 	return strings.Contains(err.Error(), "connection reset")
 }
 
-// sendRequestOverHTTP2 fails unless the gateway answers on HTTP/2. The funnel's client speaks
-// only HTTP/1.1, so the request uses a client of its own and the response is published through
-// the funnel.
-func (s *Steps) sendRequestOverHTTP2(ctx context.Context, method, path string) error {
-	resolved, err := stepscommon.Expand(ctx, path)
-	if err != nil {
-		return err
-	}
-	target, err := s.base.GatewayURL(resolved)
-	if err != nil {
-		return err
-	}
-	parsed, err := url.Parse(target)
-	if err != nil {
-		return fmt.Errorf("parsing the gateway URL %q: %w", target, err)
-	}
-
-	request := &http.Request{
-		Method: strings.ToUpper(method),
-		URL:    parsed,
-		Host:   s.base.RequestHost(ctx),
-		Header: make(http.Header),
-	}
-	for name, value := range s.base.ScenarioHeaders(ctx) {
-		request.Header.Set(name, value)
-	}
-
-	var protocols http.Protocols
-	protocols.SetUnencryptedHTTP2(true)
-	transport := &http.Transport{Protocols: &protocols}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{
-		Timeout:       requestTimeout,
-		Transport:     transport,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
-
-	httpx.ClearPublished(ctx)
-	started := time.Now()
-	resp, err := client.Do(request.WithContext(ctx))
-	if err != nil {
-		return fmt.Errorf("sending %s %s over HTTP/2: %w (the gateway may not accept unencrypted HTTP/2)",
-			request.Method, target, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.ProtoMajor != 2 {
-		return fmt.Errorf("expected an HTTP/2 response from %s %s, got protocol %q", request.Method, target, resp.Proto)
-	}
-	body, err := readBody(resp.Body)
-	if err != nil {
-		return fmt.Errorf("reading the body of %s %s: %w", request.Method, target, err)
-	}
-	return s.funnel.Publish(ctx, &httpx.Response{
-		StatusCode: resp.StatusCode,
-		Body:       body,
-		Headers:    resp.Header.Clone(),
-		Method:     request.Method,
-		URL:        target,
-		Elapsed:    time.Since(started),
-	})
-}
-
 // tableRows returns the two cells of each row of a two-column table.
 func tableRows(table *godog.Table) ([][2]string, error) {
 	if table == nil || len(table.Rows) == 0 {
@@ -189,15 +120,4 @@ func tableRows(table *godog.Table) ([][2]string, error) {
 		rows = append(rows, [2]string{row.Cells[0].Value, row.Cells[1].Value})
 	}
 	return rows, nil
-}
-
-func readBody(r io.Reader) ([]byte, error) {
-	body, err := io.ReadAll(io.LimitReader(r, maxResponseBodyBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(body) > maxResponseBodyBytes {
-		return nil, fmt.Errorf("response body exceeds the %d-byte limit", maxResponseBodyBytes)
-	}
-	return body, nil
 }

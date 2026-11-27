@@ -205,6 +205,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the response should contain Prometheus metrics$`, b.responseContainsPrometheusMetrics)
 	sc.Step(`^the response should contain metric "([^"]*)"$`, b.responseContainsMetric)
 	sc.Step(`^the response header "([^"]*)" should be "([^"]*)"$`, b.responseHeaderEquals)
+	sc.Step(`^the response header "([^"]*)" should have only the value "([^"]*)"$`, b.responseHeaderOnlyValue)
 	sc.Step(`^the response header "([^"]*)" should contain "([^"]*)"$`, b.responseHeaderContains)
 	sc.Step(`^the response header "([^"]*)" should not contain "([^"]*)"$`, b.responseHeaderNotContains)
 	sc.Step(`^the response header "([^"]*)" should not be "([^"]*)"$`, b.responseHeaderNotEquals)
@@ -264,6 +265,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^I generate a unique API context from "([^"]*)" and store it as "([^"]*)"$`,
 		b.generateUniqueContext)
 	sc.Step(`^I send a "([^"]*)" request( over HTTPS)? to "([^"]*)"$`, b.sendRequestOnListener)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" over HTTP/2$`, b.sendRequestOverHTTP2)
 	sc.Step(`^I send (\d+) "([^"]*)" requests to "([^"]*)"$`, b.sendRepeated)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" alternating the "([^"]*)" header:$`,
 		b.sendConcurrentAlternating)
@@ -271,6 +273,9 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendConcurrent)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" with per-request body:$`,
 		b.sendConcurrentWithBody)
+	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" cycling through:$`,
+		b.sendConcurrentCycling)
+	newConcurrentIdentifiedSteps(b, b.funnel.Client()).register(sc)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+)$`, b.sendUntilStatus)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) or (\d+)$`, b.sendUntilStatusOneOf)
@@ -298,6 +303,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		})
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the response body contains "([^"]*)" with body:$`,
 		b.sendUntilBodyContains)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) and the response body contains "([^"]*)"$`,
+		b.sendUntilStatusAndBodyContains)
 }
 
 func (b *Base) responseSuccessful(ctx context.Context) error {
@@ -667,6 +674,53 @@ func sendEachConcurrently(
 	if wants != nil && len(wants) != n {
 		return fmt.Errorf("got %d expected statuses for %d requests", len(wants), n)
 	}
+	var expected []concurrentExpectation
+	if wants != nil {
+		expected = make([]concurrentExpectation, n)
+		for i, want := range wants {
+			expected[i] = concurrentExpectation{status: want}
+		}
+	}
+	return sendEachConcurrentlyChecking(ctx, client, n, build, expected, inFlight)
+}
+
+// concurrentExpectation is what the response to one concurrent request must be: the status, and
+// text its body contains. A zero status accepts any successful status; an empty contains checks
+// nothing in the body.
+type concurrentExpectation struct {
+	status   int
+	contains string
+}
+
+// check returns why resp does not meet the expectation, or nil.
+func (e concurrentExpectation) check(resp *httpx.Response) error {
+	switch {
+	case e.status == 0 && !resp.Succeeded():
+		return fmt.Errorf("returned %s", resp.Describe())
+	case e.status != 0 && resp.StatusCode != e.status:
+		return fmt.Errorf("returned %s, want status %d", resp.Describe(), e.status)
+	case e.contains != "" && !strings.Contains(resp.Text(), e.contains):
+		return fmt.Errorf("returned a body without %q: %s", e.contains, resp.Describe())
+	}
+	return nil
+}
+
+// sendEachConcurrentlyChecking is sendEachConcurrently with a full expectation per request. The
+// response to request i must meet expected[i]; with no expectations, every response must
+// succeed.
+func sendEachConcurrentlyChecking(
+	ctx context.Context, client *httpx.Client, n int, build func(i int) httpx.Request,
+	expected []concurrentExpectation, inFlight int,
+) error {
+	if client == nil {
+		return fmt.Errorf("an HTTP client is required")
+	}
+	if inFlight <= 0 {
+		return fmt.Errorf("the in-flight request limit must be positive, got %d", inFlight)
+	}
+	if expected != nil && len(expected) != n {
+		return fmt.Errorf("got %d expectations for %d requests", len(expected), n)
+	}
 	slots := make(chan struct{}, inFlight)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
@@ -674,15 +728,15 @@ func sendEachConcurrently(
 		wg.Go(func() {
 			slots <- struct{}{}
 			defer func() { <-slots }()
+			var want concurrentExpectation
+			if expected != nil {
+				want = expected[i]
+			}
 			resp, err := client.Do(ctx, build(i), 0, 0)
-			switch {
-			case err != nil:
+			if err != nil {
 				errs[i] = fmt.Errorf("request %d of %d: %w", i+1, n, err)
-			case wants == nil && !resp.Succeeded():
-				errs[i] = fmt.Errorf("request %d of %d returned %s", i+1, n, resp.Describe())
-			case wants != nil && resp.StatusCode != wants[i]:
-				errs[i] = fmt.Errorf("request %d of %d returned %s, want status %d",
-					i+1, n, resp.Describe(), wants[i])
+			} else if err := want.check(resp); err != nil {
+				errs[i] = fmt.Errorf("request %d of %d %w", i+1, n, err)
 			}
 		})
 	}
@@ -691,7 +745,8 @@ func sendEachConcurrently(
 }
 
 // requestNumberPlaceholder is replaced with the request's 1-based number in the path and body
-// of each request sendConcurrentWithBody sends.
+// of each request sendConcurrentWithBody sends, and in the path, body and expected text of each
+// request sendConcurrentCycling sends.
 const requestNumberPlaceholder = "{i}"
 
 // sendConcurrentWithBody invokes a data-plane path n times concurrently. Request i (1-based)
@@ -751,6 +806,119 @@ func numberedRequests(
 			Body: bytes.ReplaceAll(body, []byte(requestNumberPlaceholder), []byte(strconv.Itoa(i+1))),
 		}
 	}, nil
+}
+
+// cycledRequest is one request row of the table sendConcurrentCycling cycles through.
+type cycledRequest struct {
+	body     string
+	status   int
+	contains string
+}
+
+// sendConcurrentCycling invokes a data-plane path n times concurrently. The table's header row
+// names its columns: body, status and, optionally, contains. Request i (1-based) sends the body
+// of request row ((i-1) mod rows), and its response must have that row's status and contain its
+// text. Every {i} in the path, a body or an expected text is replaced with i, so related requests
+// and responses can be told apart. Like sendConcurrent, it publishes no response.
+func (b *Base) sendConcurrentCycling(ctx context.Context, n int, method, path string, table *godog.Table) error {
+	if n <= 0 || n > maxConcurrentSendRequests {
+		return fmt.Errorf("the concurrent request count must be between 1 and %d, got %d",
+			maxConcurrentSendRequests, n)
+	}
+	rows, err := cycledRequests(ctx, table)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	urls := make([]string, n)
+	expected := make([]concurrentExpectation, n)
+	for i := range n {
+		number := strconv.Itoa(i + 1)
+		if urls[i], err = b.gatewayURL(strings.ReplaceAll(resolved, requestNumberPlaceholder, number)); err != nil {
+			return err
+		}
+		row := rows[i%len(rows)]
+		expected[i] = concurrentExpectation{
+			status:   row.status,
+			contains: strings.ReplaceAll(row.contains, requestNumberPlaceholder, number),
+		}
+	}
+	method = strings.ToUpper(method)
+	host := b.requestHost(ctx)
+	shared := b.scenarioHeaders(ctx)
+	build := func(i int) httpx.Request {
+		headers := maps.Clone(shared)
+		if headers == nil {
+			headers = map[string]string{}
+		}
+		var body []byte
+		if row := rows[i%len(rows)]; row.body != "" {
+			body = []byte(strings.ReplaceAll(row.body, requestNumberPlaceholder, strconv.Itoa(i+1)))
+			if headers["Content-Type"] == "" {
+				headers["Content-Type"] = "application/json"
+			}
+		}
+		return httpx.Request{Method: method, URL: urls[i], Headers: headers, Host: host, Body: body}
+	}
+	httpx.ClearPublished(ctx)
+	return sendEachConcurrentlyChecking(ctx, b.funnel.Client(), n, build, expected, maxConcurrentSendInFlight)
+}
+
+// cycledRequests reads the table of sendConcurrentCycling, expanding context references in every
+// cell.
+func cycledRequests(ctx context.Context, table *godog.Table) ([]cycledRequest, error) {
+	if table == nil || len(table.Rows) < 2 {
+		return nil, fmt.Errorf("a table with a header row and at least one request row is required")
+	}
+	columns := map[string]int{}
+	for i, cell := range table.Rows[0].Cells {
+		name := strings.TrimSpace(cell.Value)
+		if name != "body" && name != "status" && name != "contains" {
+			return nil, fmt.Errorf("unknown column %q; the columns are body, status and contains", name)
+		}
+		if _, seen := columns[name]; seen {
+			return nil, fmt.Errorf("duplicate column %q", name)
+		}
+		columns[name] = i
+	}
+	for _, name := range []string{"body", "status"} {
+		if _, ok := columns[name]; !ok {
+			return nil, fmt.Errorf("the %s column is required", name)
+		}
+	}
+	rows := make([]cycledRequest, 0, len(table.Rows)-1)
+	for i, row := range table.Rows[1:] {
+		if row == nil || len(row.Cells) != len(columns) {
+			return nil, fmt.Errorf("request row %d must contain %d cells", i+1, len(columns))
+		}
+		cell := func(name string) (string, error) {
+			at, ok := columns[name]
+			if !ok {
+				return "", nil
+			}
+			return stepscommon.Expand(ctx, strings.TrimSpace(row.Cells[at].Value))
+		}
+		var parsed cycledRequest
+		var err error
+		if parsed.body, err = cell("body"); err != nil {
+			return nil, err
+		}
+		if parsed.contains, err = cell("contains"); err != nil {
+			return nil, err
+		}
+		status, err := cell("status")
+		if err != nil {
+			return nil, err
+		}
+		if parsed.status, err = strconv.Atoi(status); err != nil || parsed.status < 100 || parsed.status > 599 {
+			return nil, fmt.Errorf("request row %d has an invalid status %q", i+1, status)
+		}
+		rows = append(rows, parsed)
+	}
+	return rows, nil
 }
 
 // sendUntilStatus invokes a data-plane path until it answers with the wanted status.
@@ -1083,6 +1251,46 @@ func (b *Base) sendUntilBodyContains(ctx context.Context, method, path, want str
 			strings.ToUpper(method), url, wantValue))
 }
 
+// sendUntilStatusAndBodyContains polls a data-plane path until it answers with the wanted status
+// AND a body containing the wanted substring.
+//
+// A status alone cannot tell a failure the scenario is about from one that comes before it. A
+// route that has just been deployed can answer 503 from the router with an empty body while its
+// cluster is still converging, and the same 503 later carries the upstream error text the
+// scenario asserts on. Waiting for both lets the assertion that follows read a settled response.
+func (b *Base) sendUntilStatusAndBodyContains(ctx context.Context, method, path string, wantStatus int, want string) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	url, err := b.gatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	wantValue, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	headers := b.scenarioHeaders(ctx)
+
+	return stepscommon.AwaitResponse(ctx,
+		func(ctx context.Context) (*httpx.Response, error) {
+			response, sendErr := b.funnel.Send(ctx, httpx.Request{
+				Method: strings.ToUpper(method), URL: url, Headers: headers,
+				Host: b.requestHost(ctx),
+			})
+			if sendErr != nil {
+				return nil, retry.Transient(sendErr)
+			}
+			return response, nil
+		},
+		func(r *httpx.Response) bool {
+			return r != nil && r.StatusCode == wantStatus && strings.Contains(string(r.Body), wantValue)
+		},
+		fmt.Sprintf("waiting for %s %s to return %d with a body containing %q",
+			strings.ToUpper(method), url, wantStatus, wantValue))
+}
+
 func (b *Base) statusCodeIs(ctx context.Context, want int) error {
 	resp, err := httpx.Published(ctx)
 	if err != nil {
@@ -1285,6 +1493,26 @@ func (b *Base) responseHeaderEquals(ctx context.Context, name, want string) erro
 	got := resp.Headers.Get(name)
 	if got != resolved {
 		return fmt.Errorf("expected header %q to be %q, got %q (%s)",
+			name, resolved, got, resp.Describe())
+	}
+	return nil
+}
+
+// responseHeaderOnlyValue asserts that a header is sent exactly once, with the wanted value.
+// responseHeaderEquals reads only the first value, so it cannot tell a replaced header from one
+// that still carries a second, older value after the wanted one.
+func (b *Base) responseHeaderOnlyValue(ctx context.Context, name, want string) error {
+	resp, err := httpx.Published(ctx)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	got := resp.Headers.Values(name)
+	if len(got) != 1 || got[0] != resolved {
+		return fmt.Errorf("expected header %q to have only the value %q, got %q (%s)",
 			name, resolved, got, resp.Describe())
 	}
 	return nil
@@ -1649,21 +1877,30 @@ func (b *Base) echoedHeaderValues(ctx context.Context, name, want string) ([]str
 		return nil, "", fmt.Errorf("expected echoed header %q to exist in response", name)
 	}
 
-	// A JSON echo may render a header as a string or an array of values.
+	values, ok := echoedStrings(value)
+	if !ok {
+		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+	}
+	if len(values) == 0 {
+		return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
+	}
+	return values, resolved, nil
+}
+
+// echoedStrings returns the values of an echoed header. A JSON echo renders a header as a string
+// or an array of values; ok is false for any other shape.
+func echoedStrings(value any) ([]string, bool) {
 	switch v := value.(type) {
 	case string:
-		return []string{v}, resolved, nil
+		return []string{v}, true
 	case []any:
-		if len(v) == 0 {
-			return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
-		}
 		values := make([]string, len(v))
 		for i, item := range v {
 			values[i] = fmt.Sprintf("%v", item)
 		}
-		return values, resolved, nil
+		return values, true
 	default:
-		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+		return nil, false
 	}
 }
 

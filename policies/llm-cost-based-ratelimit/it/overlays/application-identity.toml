@@ -16,13 +16,12 @@
 # under the License.
 # --------------------------------------------------------------------
 
-# The system parameters the v1.0.x line of aws-bedrock-guardrail requires.
-awsbedrock_guardrail_region = "us-east-1"
-awsbedrock_guardrail_id = "test-guardrail-id"
-awsbedrock_guardrail_version = "DRAFT"
-awsbedrock_access_key_id = "test-access-key"
-awsbedrock_secret_access_key = "test-secret-key"
-awsbedrock_session_token = ""
-awsbedrock_role_arn = ""
-awsbedrock_role_region = ""
-awsbedrock_role_external_id = ""
+# A key manager that reads the application from the client_id claim, which jwt-auth records as
+# x-wso2-application-id for the policies that key on the application.
+[[policy_configurations.jwtauth_v1.keymanagers]]
+name = "mock-jwks-appid"
+issuer = "http://testbench:3001/token"
+applicationIdClaim = "client_id"
+
+[policy_configurations.jwtauth_v1.keymanagers.jwks.remote]
+uri = "http://testbench:3001/jwks"

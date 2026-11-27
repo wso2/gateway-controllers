@@ -27,7 +27,7 @@ import (
 	"github.com/wso2/gateway-controllers/policies/aws-bedrock-guardrail/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+var config = suite.Config{Register: steps.Register, Companions: []string{"prompt-decorator"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

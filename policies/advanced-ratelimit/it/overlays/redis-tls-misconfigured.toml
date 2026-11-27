@@ -1,0 +1,33 @@
+# --------------------------------------------------------------------
+# Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+#
+# WSO2 LLC. licenses this file to you under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except
+# in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+# --------------------------------------------------------------------
+
+# Redis over TLS with a CA bundle that does not exist. The policy refuses to be built, whatever the
+# failure mode, because a TLS misconfiguration is an operator error and not a Redis outage.
+[policy_configurations.ratelimit_v1]
+algorithm = "fixed-window"
+backend = "redis"
+
+[policy_configurations.ratelimit_v1.redis]
+host = "redis"
+port = 6379
+failure_mode = "open"
+connection_timeout = "1s"
+
+[policy_configurations.ratelimit_v1.redis.tls]
+enabled = true
+ca_file = "/etc/policy-engine/certs/missing-ca.pem"

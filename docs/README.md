@@ -30,10 +30,10 @@ All available policies, sorted alphabetically.
 <!-- POLICY_TABLE_START -->
 | Policy | Categories | Description |
 |--------|------------|-------------|
+| [Amazon Bedrock Guardrails](./aws-bedrock-guardrail/v1.6/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against Amazon Bedrock Guardrails. |
 | [Analytics Header Filter](./analytics-header-filter/v1.0/docs/analytics-header-filter.md) | Logging, Analytics & Monitoring | The Analytics Header Filter policy allows you to control which request and response headers are included in analytics data using allow or deny modes. |
 | [API Key Auth](./api-key-auth/v1.3/docs/apikey-authentication.md) | Security, AI, WebSub, WebBroker | Implements API Key Authentication to protect APIs with pre-shared API keys. |
 | [AWS Authentication](./aws-authentication/v0.11/docs/aws-authentication.md) | Security, AI | Signs outbound requests to AWS-hosted backends using AWS Signature Version 4 (SigV4). |
-| [AWS Bedrock Guardrail](./aws-bedrock-guardrail/v1.4/docs/aws-bedrock-guardrail.md) | Guardrails, AI | Validates request or response body content against AWS Bedrock Guardrails. |
 | [Azure Content Safety Content Moderation](./azure-content-safety-content-moderation/v1.1/docs/azure-content-safety.md) | Guardrails, AI | Validates request or response body content against Azure Content Safety API for content moderation. |
 | [Azure LLM Cost](./azure-llm-cost/v1.0/docs/azure-llm-cost.md) | AI | Calculates the monetary cost of LLM API calls made to Azure OpenAI Service and Azure AI Foundry at response time and stores the result in SharedContext for use by downstream policies. |
 | [Backend JWT](./backend-jwt/v2.0/docs/backend-jwt.md) | Security | Generates a signed JWT containing authenticated user information and injects it into the upstream request header. |
@@ -49,7 +49,7 @@ All available policies, sorted alphabetically.
 | [Interceptor Service](./interceptor-service/v1.1/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.1/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.1/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
-| [JWT Auth](./jwt-auth/v1.6/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
+| [JWT Auth](./jwt-auth/v1.7/docs/jwt-authentication.md) | Security, AI, WebSub, WebBroker | Validates JWT access tokens included in API requests. |
 | [LLM Cost](./llm-cost/v1.2/docs/llm-cost.md) | AI | Calculates the monetary cost of LLM API calls at response time from the token field locations declared in the route's LlmProviderTemplate, and stores the result in SharedContext for use by downstream policies. |
 | [LLM Cost Based Ratelimit](./llm-cost-based-ratelimit/v1.3/docs/llm-cost-based-ratelimit.md) | AI | A specialized rate limiting policy that enforces monetary budget limits on LLM API usage. |
 | [LLM Header Router](./llm-header-router/v0.9/docs/llm-header-router.md) | AI | Selects an LLM provider for OpenAI Chat Completions requests using a configurable request header. |
