@@ -184,6 +184,7 @@ Feature: Interceptor service policy across request types, other policies and con
       | spec.upstream.main.url | http://testbench:3000 |
       | spec.operations        | [{"method":"GET","path":"/items","policies":[{"name":"basic-auth","version":"v1","params":{"username":"is-user","password":"is-pass-0123"}},{"name":"basic-ratelimit","version":"v1","params":{"limits":[{"requests":2,"duration":"1h"}]}},{"name":"interceptor-service","version":"v1","params":{"endpoint":"${CTX:faultBase}/${CTX:apiName}/scripted/${CTX:apiName}","request":{}}}]}] |
     Then the resource creation response should indicate successful deployment
+    When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/items" until status 401
 
     When I send a "PUT" request to the "fault-injection" service at "/test/scripts/${CTX:apiName}" with body:
