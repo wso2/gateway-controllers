@@ -1,0 +1,10 @@
+{
+  "name": "client-secret-basic",
+  "displayName": "Client Secret Basic",
+  "version": "1.0",
+  "provider": "Choreo Labs",
+  "categories": [
+    "Security"
+  ],
+  "description": "Validates client credentials from the Authorization: Basic header (base64-encoded clientId:clientSecret). Supports static validation against configured credential pairs and dynamic validation via an OAuth2 client_credentials token endpoint with in-process caching. On success the Authorization header is stripped and the client identity is injected for subscription validation."
+}

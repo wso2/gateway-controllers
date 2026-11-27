@@ -1,0 +1,322 @@
+name: client-secret-basic
+version: v1.0.0
+description: |
+  Validates Authorization: Basic credentials (base64 clientId:clientSecret).
+
+  Static mode — validates against configured credential pairs; no external call.
+
+  Dynamic mode — validates via an OAuth2 client_credentials request to
+  tokenEndpoint. Results are cached (capped by maxCacheTTL). Concurrent requests
+  are deduplicated. Per-clientId failure limiting returns 429 when exhausted;
+  network/server failures return 503. Set tokenMetadataKey to store the IdP
+  access token in SharedContext.Metadata for downstream policies.
+
+  Modes are mutually exclusive: set tokenEndpoint (dynamic) or
+  credentials/clientId/clientSecret (static), never both.
+
+  On success: AuthType=ClientCredentials; Subject/CredentialID set to clientId;
+  Authorization and Subscription-Key headers stripped;
+  Metadata["x-wso2-application-id"] set to clientId.
+  All 401 responses carry WWW-Authenticate: Basic.
+
+  Subscription key protection: any request carrying the subscription key header
+  (default: Subscription-Key) is rejected with 401 before subscription-validation
+  runs. This prevents a client from using another subscription's key to obtain a
+  different plan. Configure subscriptionKeyHeader to match the value set in
+  subscription-validation if a non-default header name is used. If
+  subscription-validation is also configured with a subscriptionKeyCookie, set
+  the same cookie name in subscriptionKeyCookie to close the cookie vector too.
+
+parameters:
+  type: object
+  additionalProperties: false
+  oneOf:
+    - description: Static mode — multi-client credentials array
+      required: [credentials]
+      not:
+        anyOf:
+          - required: [tokenEndpoint]
+          - required: [clientId]
+          - required: [clientSecret]
+    - description: Static mode — single client (backward-compatible)
+      required: [clientId, clientSecret]
+      not:
+        anyOf:
+          - required: [tokenEndpoint]
+          - required: [credentials]
+    - description: Dynamic mode — OAuth2 token endpoint
+      required: [tokenEndpoint]
+      not:
+        anyOf:
+          - required: [credentials]
+          - required: [clientId]
+          - required: [clientSecret]
+
+  properties:
+    # ── Static mode ──────────────────────────────────────────────────────────
+    credentials:
+      type: array
+      x-wso2-policy-advanced-param: false
+      description: |
+        One or more client credential pairs (static mode). Each entry must have
+        a unique clientId. Use instead of the flat clientId/clientSecret params
+        when multiple callers need independent credentials.
+      minItems: 1
+      items:
+        type: object
+        additionalProperties: false
+        required:
+          - clientId
+          - clientSecret
+        properties:
+          clientId:
+            type: string
+            minLength: 1
+            maxLength: 256
+          clientSecret:
+            type: string
+            minLength: 1
+            maxLength: 1024
+
+    clientId:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Single client ID (static mode, backward-compatible). Use the
+        credentials array for multi-client deployments.
+      minLength: 1
+      maxLength: 256
+
+    clientSecret:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        Single client secret matching clientId (static mode, backward-compatible).
+      minLength: 1
+      maxLength: 1024
+
+    # ── Dynamic mode ─────────────────────────────────────────────────────────
+    tokenEndpoint:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: |
+        OAuth2 token endpoint URL (dynamic mode). When set, the policy decodes
+        the Authorization: Basic header and validates the credentials by
+        performing a client_credentials token request using HTTP Basic
+        authentication. Successful token issuance is treated as proof that the
+        credentials are valid. Mutually exclusive with credentials/clientId.
+      minLength: 1
+      maxLength: 2048
+
+    tokenRequestTimeout:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        HTTP timeout for token endpoint requests (dynamic mode).
+        Accepts a Go duration string, e.g. "10s" or "1m30s". Must be positive.
+        Defaults to "10s".
+      default: 10s
+      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+      not:
+        pattern: "^(0+(\\.0+)?(ns|us|µs|ms|s|m|h))+$"
+
+    expiryBuffer:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        How far ahead of the token's expires_in the cached validation result is
+        treated as stale (dynamic mode). Prevents using a token within its final
+        seconds of validity. Accepts a Go duration string, e.g. "30s" or "1m30s".
+        Defaults to "30s". Set to "0s" to cache until the exact expiry.
+      default: 30s
+      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+
+    maxCacheTTL:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Maximum time a successful dynamic validation result is cached, regardless
+        of the token endpoint's expires_in value (dynamic mode). This is the
+        effective credential revocation window: a revoked credential stays cached
+        at most this long. Accepts a Go duration string, e.g. "5m" or "1m30s".
+        Must be positive. Defaults to "5m".
+      default: 5m
+      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+      not:
+        pattern: "^(0+(\\.0+)?(ns|us|µs|ms|s|m|h))+$"
+
+    failureRateLimit:
+      type: integer
+      x-wso2-policy-advanced-param: true
+      description: |
+        Maximum number of distinct failed credential attempts allowed per clientId
+        per failureWindow before the policy returns 429 Too Many Requests (dynamic
+        mode). Prevents repeated wrong-password attempts from exhausting IdP
+        resources. Each unique (clientId, secret) pair counts once; a known-bad
+        pair repeated is served from the wrongCreds cache and does not count.
+        Defaults to 3.
+      default: 3
+      minimum: 1
+
+    failureWindow:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Tumbling window over which the per-clientId failure counter resets
+        (dynamic mode). Once failureRateLimit distinct wrong credentials are seen
+        within this window, further requests for that clientId return 429 until
+        the window ends. Accepts a Go duration string, e.g. "30s" or "1m30s".
+        Must be positive. Defaults to "30s".
+      default: 30s
+      pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+      not:
+        pattern: "^(0+(\\.0+)?(ns|us|µs|ms|s|m|h))+$"
+
+    tokenMetadataKey:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Metadata key under which the IdP-issued access token is stored in
+        SharedContext.Metadata after a successful dynamic validation. Downstream
+        policies (e.g. header-transform) can read it via ${meta.<key>}. Has no
+        effect in static mode. Leave unset to keep the token out of metadata
+        (recommended when no downstream policy needs it). Set to
+        "upstream-access-token" to restore the previous default behaviour.
+      maxLength: 256
+
+    # ── Subscription key protection ───────────────────────────────────────────
+    subscriptionKeyHeader:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Header name that subscription-validation reads as the subscription key.
+        Any request carrying this header is rejected with 401 before
+        subscription-validation runs, preventing subscription plan spoofing.
+        Must match the subscriptionKeyHeader value configured in
+        subscription-validation. Defaults to "Subscription-Key".
+      default: Subscription-Key
+      minLength: 1
+      maxLength: 256
+
+    subscriptionKeyCookie:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Cookie name that subscription-validation is configured to accept as a
+        subscription key. When set, any request carrying a cookie with this name
+        is rejected with 401 before subscription-validation runs. Leave empty
+        (the default) when subscription-validation is not configured with a
+        subscriptionKeyCookie.
+      maxLength: 256
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    failureBackend:
+      type: string
+      description: |
+        Backend for per-clientId failure counters. "memory" (default) tracks failures
+        per replica; replicas operate independently. "redis" shares counts atomically
+        across all replicas, so the per-clientId limit is enforced cluster-wide.
+      enum: [memory, redis]
+      default: memory
+      "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.failure_backend}"
+
+    redis:
+      type: object
+      additionalProperties: false
+      description: Redis connection settings. Used only when failureBackend=redis.
+      properties:
+        host:
+          type: string
+          default: localhost
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.host}"
+        port:
+          type: integer
+          default: 6379
+          minimum: 1
+          maximum: 65535
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.port}"
+        password:
+          type: string
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.password}"
+        username:
+          type: string
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.username}"
+        db:
+          type: integer
+          default: 0
+          minimum: 0
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.db}"
+        failureMode:
+          type: string
+          enum: [open, closed]
+          default: open
+          description: |
+            "open" falls back to per-replica in-memory counting when Redis is
+            unreachable. "closed" returns a startup error if the initial ping fails.
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.failure_mode}"
+        keyPrefix:
+          type: string
+          default: "csb:failure:"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.key_prefix}"
+        connectionTimeout:
+          type: string
+          default: 5s
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.connection_timeout}"
+        readTimeout:
+          type: string
+          default: 3s
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.read_timeout}"
+        writeTimeout:
+          type: string
+          default: 3s
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.write_timeout}"
+        requestTimeout:
+          type: string
+          default: 200ms
+          description: |
+            Per-call timeout applied via context.WithTimeout to each Redis operation
+            during request processing. Bounds the latency impact when Redis is slow or
+            unreachable. Defaults to 200ms.
+          pattern: "^([0-9]+(\\.[0-9]+)?(ns|us|µs|ms|s|m|h))+$"
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.request_timeout}"
+        poolSize:
+          type: integer
+          default: 0
+          minimum: 0
+          description: Maximum number of connections in the pool. 0 uses go-redis default.
+          "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.pool_size}"
+        tls:
+          type: object
+          additionalProperties: false
+          properties:
+            enabled:
+              type: boolean
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.enabled}"
+            caFile:
+              type: string
+              description: Path to PEM CA file for server certificate verification.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.ca_file}"
+            serverName:
+              type: string
+              description: Override SNI name sent to the server.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.server_name}"
+            certFile:
+              type: string
+              description: Path to PEM client certificate for mTLS.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.cert_file}"
+            keyFile:
+              type: string
+              description: Path to PEM client private key for mTLS.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.key_file}"
+            insecureSkipVerify:
+              type: boolean
+              default: false
+              description: Disable TLS server certificate verification. Development only.
+              "wso2/defaultValue": "${config.policy_configurations.client_secret_basic_v1.redis.tls.insecure_skip_verify}"
