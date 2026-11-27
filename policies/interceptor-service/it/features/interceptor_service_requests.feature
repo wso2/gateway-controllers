@@ -49,9 +49,9 @@ Feature: Interceptor service policy across request types, other policies and con
   # The first call reflects what the interceptor received; the second shows what the backend received.
   # The request phase sends the request headers by default, so the reflected payload carries them.
   Scenario Outline: Invoke with different HTTP methods, query parameters, path parameters, and custom headers (<method>)
-    Given I generate a unique value from "is-r10" and store it as "apiName"
-    And I generate a unique API version from "is-r10" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r10" and store it as "apiContext"
+    Given I generate a unique value from "is-methods" and store it as "apiName"
+    And I generate a unique API version from "is-methods" and store it as "apiVersion"
+    And I generate a unique API context from "/is-methods" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -99,9 +99,9 @@ Feature: Interceptor service policy across request types, other policies and con
       | PATCH  |
 
   Scenario: Send empty, JSON, Unicode, and large payloads (empty)
-    Given I generate a unique value from "is-r11e" and store it as "apiName"
-    And I generate a unique API version from "is-r11e" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r11e" and store it as "apiContext"
+    Given I generate a unique value from "is-payload-empty" and store it as "apiName"
+    And I generate a unique API version from "is-payload-empty" and store it as "apiVersion"
+    And I generate a unique API context from "/is-payload-empty" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -125,9 +125,9 @@ Feature: Interceptor service policy across request types, other policies and con
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/payload" until status 404
 
   Scenario Outline: Send empty, JSON, Unicode, and large payloads (<case>)
-    Given I generate a unique value from "is-r11" and store it as "apiName"
-    And I generate a unique API version from "is-r11" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r11" and store it as "apiContext"
+    Given I generate a unique value from "is-payloads" and store it as "apiName"
+    And I generate a unique API version from "is-payloads" and store it as "apiVersion"
+    And I generate a unique API context from "/is-payloads" and store it as "apiContext"
     And I generate a value of 512 KiB of "x" and store it as "largeBody"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -171,9 +171,9 @@ Feature: Interceptor service policy across request types, other policies and con
   # them. Two counted calls, one for each allowed request, show that neither the request without
   # credentials nor the throttled one reached the interceptor.
   Scenario: Combine interceptor with authentication and rate limiting
-    Given I generate a unique value from "is-r12" and store it as "apiName"
-    And I generate a unique API version from "is-r12" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r12" and store it as "apiContext"
+    Given I generate a unique value from "is-auth-ratelimit" and store it as "apiName"
+    And I generate a unique API version from "is-auth-ratelimit" and store it as "apiVersion"
+    And I generate a unique API context from "/is-auth-ratelimit" and store it as "apiContext"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -221,9 +221,9 @@ Feature: Interceptor service policy across request types, other policies and con
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/items" until status 404
 
   Scenario: Apply request transformation before the interceptor
-    Given I generate a unique value from "is-r13" and store it as "apiName"
-    And I generate a unique API version from "is-r13" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r13" and store it as "apiContext"
+    Given I generate a unique value from "is-transform-before" and store it as "apiName"
+    And I generate a unique API version from "is-transform-before" and store it as "apiVersion"
+    And I generate a unique API context from "/is-transform-before" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -246,9 +246,9 @@ Feature: Interceptor service policy across request types, other policies and con
 
   # The upstream records what it received; the mediator converts the JSON body it is handed to XML.
   Scenario: Apply another transformation after the interceptor
-    Given I generate a unique value from "is-r14" and store it as "apiName"
-    And I generate a unique API version from "is-r14" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r14" and store it as "apiContext"
+    Given I generate a unique value from "is-transform-after" and store it as "apiName"
+    And I generate a unique API version from "is-transform-after" and store it as "apiVersion"
+    And I generate a unique API context from "/is-transform-after" and store it as "apiContext"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -284,9 +284,9 @@ Feature: Interceptor service policy across request types, other policies and con
   # The poll waits until a request shows the new configuration. The five requests after it check
   # that every later request does too, and none falls back to the old configuration.
   Scenario: Update or remove interceptor configuration on a deployed API (update)
-    Given I generate a unique value from "is-r15u" and store it as "apiName"
-    And I generate a unique API version from "is-r15u" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r15u" and store it as "apiContext"
+    Given I generate a unique value from "is-update" and store it as "apiName"
+    And I generate a unique API version from "is-update" and store it as "apiVersion"
+    And I generate a unique API context from "/is-update" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -370,9 +370,9 @@ Feature: Interceptor service policy across request types, other policies and con
   # for 200, the first response the interceptor no longer touches. The five requests after it check
   # that every later request is untouched too, and none falls back to the old configuration.
   Scenario: Update or remove interceptor configuration on a deployed API (remove)
-    Given I generate a unique value from "is-r15r" and store it as "apiName"
-    And I generate a unique API version from "is-r15r" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r15r" and store it as "apiContext"
+    Given I generate a unique value from "is-remove" and store it as "apiName"
+    And I generate a unique API version from "is-remove" and store it as "apiVersion"
+    And I generate a unique API context from "/is-remove" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -436,9 +436,9 @@ Feature: Interceptor service policy across request types, other policies and con
   # and checks every response: each must return the status in its own value's row, so a reply that
   # reached the wrong request, or a request that was not intercepted (200), fails it.
   Scenario: Send concurrent/high-volume requests through the interceptor
-    Given I generate a unique value from "is-r17" and store it as "apiName"
-    And I generate a unique API version from "is-r17" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r17" and store it as "apiContext"
+    Given I generate a unique value from "is-concurrent" and store it as "apiName"
+    And I generate a unique API version from "is-concurrent" and store it as "apiVersion"
+    And I generate a unique API context from "/is-concurrent" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |

@@ -37,9 +37,9 @@ Feature: Interceptor service policy failures in the gateway logs
   # requests to /short, each with the one Authorization value in its table, and checks that every
   # response is the 500 in that row; the log must then hold the failure but not the credential.
   Scenario: Send slow/high-volume interceptor traffic and inspect logs/audit behavior
-    Given I generate a unique value from "is-r30" and store it as "apiName"
-    And I generate a unique API version from "is-r30" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r30" and store it as "apiContext"
+    Given I generate a unique value from "is-slow-traffic" and store it as "apiName"
+    And I generate a unique API version from "is-slow-traffic" and store it as "apiVersion"
+    And I generate a unique API context from "/is-slow-traffic" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -75,9 +75,9 @@ Feature: Interceptor service policy failures in the gateway logs
   # scenario's failures are timeouts, which log a different error, so exactly one line names
   # status 503. None of the client's credentials may appear in the error response or the logs.
   Scenario: Verify handling of sensitive data such as Authorization, cookies, API keys, and interceptor credentials (failures)
-    Given I generate a unique value from "is-r28f" and store it as "apiName"
-    And I generate a unique API version from "is-r28f" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r28f" and store it as "apiContext"
+    Given I generate a unique value from "is-failure-logs" and store it as "apiName"
+    And I generate a unique API version from "is-failure-logs" and store it as "apiVersion"
+    And I generate a unique API context from "/is-failure-logs" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -90,18 +90,18 @@ Feature: Interceptor service policy failures in the gateway logs
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
     When I set header "X-Testbench-Interceptor-Request-Status" to "503"
-    And I set header "Authorization" to "Bearer is-r28-log-token-0123456789"
-    And I set header "Cookie" to "session=is-r28-log-cookie"
-    And I set header "X-API-Key" to "is-r28-log-key"
+    And I set header "Authorization" to "Bearer is-fail-token-0123456789"
+    And I set header "Cookie" to "session=is-fail-cookie"
+    And I set header "X-API-Key" to "is-fail-key"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/fail"
     Then the response status code should be 500
     And the response should match the expected error response "interceptor-service-request-call-failed"
     And the "gateway-runtime" service logs should have exactly 1 line containing:
       | InterceptorService: returning 500 to client |
       | interceptor returned status 503             |
-    And the "gateway-runtime" service logs should not contain "is-r28-log-token-0123456789"
-    And the "gateway-runtime" service logs should not contain "is-r28-log-cookie"
-    And the "gateway-runtime" service logs should not contain "is-r28-log-key"
+    And the "gateway-runtime" service logs should not contain "is-fail-token-0123456789"
+    And the "gateway-runtime" service logs should not contain "is-fail-cookie"
+    And the "gateway-runtime" service logs should not contain "is-fail-key"
 
     When I clear all headers
     And I authenticate using basic auth as "admin"

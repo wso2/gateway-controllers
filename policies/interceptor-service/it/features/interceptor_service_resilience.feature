@@ -39,9 +39,9 @@ Feature: Interceptor service policy when the interceptor call fails
 
   # passthroughOnError is left at its default, false, so the failed call returns 500.
   Scenario Outline: Configure an invalid or unreachable interceptor endpoint (<case>)
-    Given I generate a unique value from "is-r18" and store it as "apiName"
-    And I generate a unique API version from "is-r18" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r18" and store it as "apiContext"
+    Given I generate a unique value from "is-bad-endpoint" and store it as "apiName"
+    And I generate a unique API version from "is-bad-endpoint" and store it as "apiVersion"
+    And I generate a unique API context from "/is-bad-endpoint" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -79,9 +79,9 @@ Feature: Interceptor service policy when the interceptor call fails
   # Go's URL parser rejects "not a url", so the policy cannot be built for /intercepted, although
   # the API deploys. The gateway answers that route with its own 500; the other route keeps working.
   Scenario: Configure an invalid or unreachable interceptor endpoint (endpoint the policy rejects)
-    Given I generate a unique value from "is-r18n" and store it as "apiName"
-    And I generate a unique API version from "is-r18n" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r18n" and store it as "apiContext"
+    Given I generate a unique value from "is-invalid-url" and store it as "apiName"
+    And I generate a unique API version from "is-invalid-url" and store it as "apiVersion"
+    And I generate a unique API context from "/is-invalid-url" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -111,9 +111,9 @@ Feature: Interceptor service policy when the interceptor call fails
 
   # passthroughOnError is left at its default, false, so the failed call returns 500.
   Scenario Outline: Interceptor returns HTTP 4xx or 5xx responses (request phase, <status>)
-    Given I generate a unique value from "is-r19q" and store it as "apiName"
-    And I generate a unique API version from "is-r19q" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r19q" and store it as "apiContext"
+    Given I generate a unique value from "is-error-req" and store it as "apiName"
+    And I generate a unique API version from "is-error-req" and store it as "apiVersion"
+    And I generate a unique API context from "/is-error-req" and store it as "apiContext"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -152,9 +152,9 @@ Feature: Interceptor service policy when the interceptor call fails
 
   # passthroughOnError is left at its default, false, so the failed call returns 500.
   Scenario Outline: Interceptor returns HTTP 4xx or 5xx responses (response phase, <status>)
-    Given I generate a unique value from "is-r19s" and store it as "apiName"
-    And I generate a unique API version from "is-r19s" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r19s" and store it as "apiContext"
+    Given I generate a unique value from "is-error-resp" and store it as "apiName"
+    And I generate a unique API version from "is-error-resp" and store it as "apiVersion"
+    And I generate a unique API context from "/is-error-resp" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -188,9 +188,9 @@ Feature: Interceptor service policy when the interceptor call fails
   # The interceptor answers after 2 seconds: /short gives up after 500 ms, /long waits 5 seconds.
   # passthroughOnError is left at its default, false, so the timed-out call returns 500.
   Scenario: Interceptor exceeds the configured timeout (request phase)
-    Given I generate a unique value from "is-r20q" and store it as "apiName"
-    And I generate a unique API version from "is-r20q" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r20q" and store it as "apiContext"
+    Given I generate a unique value from "is-timeout-request" and store it as "apiName"
+    And I generate a unique API version from "is-timeout-request" and store it as "apiVersion"
+    And I generate a unique API context from "/is-timeout-request" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -221,9 +221,9 @@ Feature: Interceptor service policy when the interceptor call fails
   # The interceptor answers after 2 seconds: /short gives up after 500 ms, /long waits 5 seconds.
   # passthroughOnError is left at its default, false, so the timed-out call returns 500.
   Scenario: Interceptor exceeds the configured timeout (response phase)
-    Given I generate a unique value from "is-r20s" and store it as "apiName"
-    And I generate a unique API version from "is-r20s" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r20s" and store it as "apiContext"
+    Given I generate a unique value from "is-timeout-response" and store it as "apiName"
+    And I generate a unique API version from "is-timeout-response" and store it as "apiVersion"
+    And I generate a unique API context from "/is-timeout-response" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -254,9 +254,9 @@ Feature: Interceptor service policy when the interceptor call fails
   # The interceptor answers 200 with these exact bytes.
   # passthroughOnError is left at its default, false, so the unusable reply returns 500.
   Scenario Outline: Interceptor returns malformed or unexpected data (<case>)
-    Given I generate a unique value from "is-r21" and store it as "apiName"
-    And I generate a unique API version from "is-r21" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r21" and store it as "apiContext"
+    Given I generate a unique value from "is-malformed-reply" and store it as "apiName"
+    And I generate a unique API version from "is-malformed-reply" and store it as "apiVersion"
+    And I generate a unique API context from "/is-malformed-reply" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -295,9 +295,9 @@ Feature: Interceptor service policy when the interceptor call fails
   # base64-encoded, over the 1 MiB reply limit. /big-ok sends the same body to an interceptor that
   # answers {}. passthroughOnError is left at its default, false, so the oversize reply returns 500.
   Scenario: Interceptor returns malformed or unexpected data (oversize reply)
-    Given I generate a unique value from "is-r21o" and store it as "apiName"
-    And I generate a unique API version from "is-r21o" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r21o" and store it as "apiContext"
+    Given I generate a unique value from "is-oversize-reply" and store it as "apiName"
+    And I generate a unique API version from "is-oversize-reply" and store it as "apiVersion"
+    And I generate a unique API context from "/is-oversize-reply" and store it as "apiContext"
     And I generate a value of 800 KiB of "x" and store it as "bigBody"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -334,9 +334,9 @@ Feature: Interceptor service policy when the interceptor call fails
 
   # ?statusCode=503 makes the backend answer 503, still with its JSON description of the request.
   Scenario: Backend fails after successful interception
-    Given I generate a unique value from "is-r22" and store it as "apiName"
-    And I generate a unique API version from "is-r22" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r22" and store it as "apiContext"
+    Given I generate a unique value from "is-backend-fails" and store it as "apiName"
+    And I generate a unique API version from "is-backend-fails" and store it as "apiVersion"
+    And I generate a unique API context from "/is-backend-fails" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |

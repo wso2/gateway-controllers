@@ -31,9 +31,9 @@ Feature: Interceptor service policy across gateway restarts
     And I authenticate using basic auth as "admin"
 
   Scenario: Restart or scale gateway replicas with interceptor enabled (restart gateway-runtime)
-    Given I generate a unique value from "is-r16" and store it as "apiName"
-    And I generate a unique API version from "is-r16" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r16" and store it as "apiContext"
+    Given I generate a unique value from "is-restart-runtime" and store it as "apiName"
+    And I generate a unique API version from "is-restart-runtime" and store it as "apiVersion"
+    And I generate a unique API context from "/is-restart-runtime" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -64,9 +64,9 @@ Feature: Interceptor service policy across gateway restarts
   # configuration from the restarted controller: interception then shows the controller still serves
   # the API with its interceptor attachment.
   Scenario: Restart or scale gateway replicas with interceptor enabled (restart gateway-controller, then gateway-runtime)
-    Given I generate a unique value from "is-r16c" and store it as "apiName"
-    And I generate a unique API version from "is-r16c" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r16c" and store it as "apiContext"
+    Given I generate a unique value from "is-restart-controller" and store it as "apiName"
+    And I generate a unique API version from "is-restart-controller" and store it as "apiVersion"
+    And I generate a unique API context from "/is-restart-controller" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |

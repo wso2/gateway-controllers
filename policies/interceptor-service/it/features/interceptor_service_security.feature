@@ -48,9 +48,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # records what reaches the upstream: its lookup answers 204 while nothing has, and 200 once a
   # request has. The right password then gives one call and one record, so both checks can see a call.
   Scenario: Invoke with invalid credentials when authentication is configured before the interceptor
-    Given I generate a unique value from "is-r23" and store it as "apiName"
-    And I generate a unique API version from "is-r23" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r23" and store it as "apiContext"
+    Given I generate a unique value from "is-invalid-creds" and store it as "apiName"
+    And I generate a unique API version from "is-invalid-creds" and store it as "apiVersion"
+    And I generate a unique API context from "/is-invalid-creds" and store it as "apiContext"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
     When I create API from "resources/templates/rest-api.yaml" with values:
@@ -105,9 +105,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # credentials. Authentication still runs first, in the request header phase, before the
   # interceptor sees the body: the wrong password gets 401 and no call reaches the interceptor.
   Scenario: Attempt to spoof or modify identity/authorization headers through the client or interceptor
-    Given I generate a unique value from "is-r24" and store it as "apiName"
-    And I generate a unique API version from "is-r24" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r24" and store it as "apiContext"
+    Given I generate a unique value from "is-spoof-identity" and store it as "apiName"
+    And I generate a unique API version from "is-spoof-identity" and store it as "apiVersion"
+    And I generate a unique API context from "/is-spoof-identity" and store it as "apiContext"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -154,9 +154,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # shows what the backend received. Raw CR/LF in a header is not sent: HTTP clients and the
   # gateway's listener reject it before the policy runs.
   Scenario: Send malicious header/body content such as CRLF, script-like, SQL-like, or malformed input
-    Given I generate a unique value from "is-r25" and store it as "apiName"
-    And I generate a unique API version from "is-r25" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r25" and store it as "apiContext"
+    Given I generate a unique value from "is-hostile-content" and store it as "apiName"
+    And I generate a unique API version from "is-hostile-content" and store it as "apiVersion"
+    And I generate a unique API context from "/is-hostile-content" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -215,10 +215,10 @@ Feature: Interceptor service policy against hostile and sensitive input
   # called directly, which shows it counts calls when they happen. The policy takes its endpoint only
   # from its configuration, so the field names tried stand for any the client might choose.
   Scenario: Attempt to control the interceptor destination using request headers, query parameters, body content, or URLs
-    Given I generate a unique value from "is-r26" and store it as "apiName"
-    And I generate a unique API version from "is-r26" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r26" and store it as "apiContext"
-    And I generate a unique value from "is-r26-decoy" and store it as "decoyName"
+    Given I generate a unique value from "is-destination" and store it as "apiName"
+    And I generate a unique API version from "is-destination" and store it as "apiVersion"
+    And I generate a unique API context from "/is-destination" and store it as "apiContext"
+    And I generate a unique value from "is-destination-decoy" and store it as "decoyName"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -287,9 +287,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # check can make /untrusted fail. The policy has no client certificate setting, so mTLS is not
   # tested.
   Scenario: Use HTTPS/mTLS for the interceptor and test valid and invalid certificates
-    Given I generate a unique value from "is-r27" and store it as "apiName"
-    And I generate a unique API version from "is-r27" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r27" and store it as "apiContext"
+    Given I generate a unique value from "is-https" and store it as "apiName"
+    And I generate a unique API version from "is-https" and store it as "apiVersion"
+    And I generate a unique API context from "/is-https" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -322,9 +322,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # /reflect path makes the interceptor answer with the payload it received: the body is in it, the
   # credentials are not.
   Scenario: Verify handling of sensitive data such as Authorization, cookies, API keys, and interceptor credentials (headers excluded)
-    Given I generate a unique value from "is-r28h" and store it as "apiName"
-    And I generate a unique API version from "is-r28h" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r28h" and store it as "apiContext"
+    Given I generate a unique value from "is-headers-excluded" and store it as "apiName"
+    And I generate a unique API version from "is-headers-excluded" and store it as "apiVersion"
+    And I generate a unique API context from "/is-headers-excluded" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -337,9 +337,9 @@ Feature: Interceptor service policy against hostile and sensitive input
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
 
     When I set header "Content-Type" to "application/json"
-    And I set header "Authorization" to "Bearer sec28-token-0123456789"
-    And I set header "Cookie" to "session=sec28-cookie"
-    And I set header "X-API-Key" to "sec28-key"
+    And I set header "Authorization" to "Bearer is-excluded-token-0123456789"
+    And I set header "Cookie" to "session=is-excluded-cookie"
+    And I set header "X-API-Key" to "is-excluded-key"
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/items" with body:
       """
       {"k":"v"}
@@ -348,9 +348,9 @@ Feature: Interceptor service policy against hostile and sensitive input
     # requestBody is base64 of the client body {"k":"v"}.
     And the JSON response field "requestBody" should be "eyJrIjoidiJ9"
     And the JSON response field "requestHeaders" should not exist
-    And the response body should not contain "sec28-token-0123456789"
-    And the response body should not contain "sec28-cookie"
-    And the response body should not contain "sec28-key"
+    And the response body should not contain "is-excluded-token-0123456789"
+    And the response body should not contain "is-excluded-cookie"
+    And the response body should not contain "is-excluded-key"
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -362,9 +362,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # policy returns its 500 and nothing reaches the upstream, which the capture service records
   # (204 while nothing has arrived). A successful call then shows the record appear.
   Scenario: Simulate interceptor failure or compromise while handling a security-sensitive request (failure)
-    Given I generate a unique value from "is-r29f" and store it as "apiName"
-    And I generate a unique API version from "is-r29f" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r29f" and store it as "apiContext"
+    Given I generate a unique value from "is-sensitive-failure" and store it as "apiName"
+    And I generate a unique API version from "is-sensitive-failure" and store it as "apiVersion"
+    And I generate a unique API context from "/is-sensitive-failure" and store it as "apiContext"
     And I resolve the "capture" service URL at "" and store it as "captureUpstream"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -406,9 +406,9 @@ Feature: Interceptor service policy against hostile and sensitive input
   # gateway's 503, so the reply cannot send the request anywhere the API does not already route.
   # alt-upstream has no base path, so unlike the next scenario this runs on every gateway version.
   Scenario: Simulate interceptor failure or compromise while handling a security-sensitive request (compromised reply)
-    Given I generate a unique value from "is-r29c" and store it as "apiName"
-    And I generate a unique API version from "is-r29c" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r29c" and store it as "apiContext"
+    Given I generate a unique value from "is-compromised-reply" and store it as "apiName"
+    And I generate a unique API version from "is-compromised-reply" and store it as "apiVersion"
+    And I generate a unique API context from "/is-compromised-reply" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion               | ${CTX:gatewaySpecVersion} |
       | name                     | ${CTX:apiName} |

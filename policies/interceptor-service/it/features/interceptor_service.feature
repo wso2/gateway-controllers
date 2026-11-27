@@ -163,9 +163,9 @@ Feature: Interceptor service policies
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
   Scenario: Configure a valid request interceptor and invoke the API
-    Given I generate a unique value from "is-r01" and store it as "apiName"
-    And I generate a unique API version from "is-r01" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r01" and store it as "apiContext"
+    Given I generate a unique value from "is-request" and store it as "apiName"
+    And I generate a unique API version from "is-request" and store it as "apiVersion"
+    And I generate a unique API context from "/is-request" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -188,9 +188,9 @@ Feature: Interceptor service policies
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/items" until status 404
 
   Scenario: Configure a valid response interceptor and invoke the API
-    Given I generate a unique value from "is-r02" and store it as "apiName"
-    And I generate a unique API version from "is-r02" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r02" and store it as "apiContext"
+    Given I generate a unique value from "is-response" and store it as "apiName"
+    And I generate a unique API version from "is-response" and store it as "apiVersion"
+    And I generate a unique API context from "/is-response" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -217,9 +217,9 @@ Feature: Interceptor service policies
   # the client sees what a response-only attachment with default flags sends: the response headers
   # and body, but not the request headers and body.
   Scenario: Configure a valid response interceptor and invoke the API (default flags)
-    Given I generate a unique value from "is-r02d" and store it as "apiName"
-    And I generate a unique API version from "is-r02d" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r02d" and store it as "apiContext"
+    Given I generate a unique value from "is-response-defaults" and store it as "apiName"
+    And I generate a unique API version from "is-response-defaults" and store it as "apiVersion"
+    And I generate a unique API context from "/is-response-defaults" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -248,9 +248,9 @@ Feature: Interceptor service policies
   # request phase ran first and passed its context on. responseCode 200 shows the response phase ran
   # after the upstream answered.
   Scenario: Configure both request and response interception
-    Given I generate a unique value from "is-r03" and store it as "apiName"
-    And I generate a unique API version from "is-r03" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r03" and store it as "apiContext"
+    Given I generate a unique value from "is-both-phases" and store it as "apiName"
+    And I generate a unique API version from "is-both-phases" and store it as "apiVersion"
+    And I generate a unique API context from "/is-both-phases" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -275,9 +275,9 @@ Feature: Interceptor service policies
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/items" until status 404
 
   Scenario: Interceptor modifies the request body
-    Given I generate a unique value from "is-r08" and store it as "apiName"
-    And I generate a unique API version from "is-r08" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r08" and store it as "apiContext"
+    Given I generate a unique value from "is-request-body" and store it as "apiName"
+    And I generate a unique API version from "is-request-body" and store it as "apiVersion"
+    And I generate a unique API context from "/is-request-body" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -307,9 +307,9 @@ Feature: Interceptor service policies
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/items" until status 404
 
   Scenario: Apply the interceptor at API level and invoke multiple operations
-    Given I generate a unique value from "is-r04" and store it as "apiName"
-    And I generate a unique API version from "is-r04" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r04" and store it as "apiContext"
+    Given I generate a unique value from "is-api-level" and store it as "apiName"
+    And I generate a unique API version from "is-api-level" and store it as "apiVersion"
+    And I generate a unique API context from "/is-api-level" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -341,9 +341,9 @@ Feature: Interceptor service policies
 
   # One counted call for the two requests shows that /without never called the interceptor.
   Scenario: Apply the interceptor only to a selected operation
-    Given I generate a unique value from "is-r05" and store it as "apiName"
-    And I generate a unique API version from "is-r05" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r05" and store it as "apiContext"
+    Given I generate a unique value from "is-op-level" and store it as "apiName"
+    And I generate a unique API version from "is-op-level" and store it as "apiVersion"
+    And I generate a unique API context from "/is-op-level" and store it as "apiContext"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -385,9 +385,9 @@ Feature: Interceptor service policies
   # The interceptor answers {}. The count shows it was called, so the request reaches the backend
   # unchanged because of that reply, not because the call was skipped.
   Scenario: Interceptor returns the request/response without modification (request)
-    Given I generate a unique value from "is-r06q" and store it as "apiName"
-    And I generate a unique API version from "is-r06q" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r06q" and store it as "apiContext"
+    Given I generate a unique value from "is-unchanged-req" and store it as "apiName"
+    And I generate a unique API version from "is-unchanged-req" and store it as "apiVersion"
+    And I generate a unique API context from "/is-unchanged-req" and store it as "apiContext"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -437,9 +437,9 @@ Feature: Interceptor service policies
   # The interceptor answers {}. The count shows the response phase called it, so the response comes
   # back unchanged because of that reply, not because the call was skipped.
   Scenario: Interceptor returns the request/response without modification (response)
-    Given I generate a unique value from "is-r06s" and store it as "apiName"
-    And I generate a unique API version from "is-r06s" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r06s" and store it as "apiContext"
+    Given I generate a unique value from "is-unchanged-resp" and store it as "apiName"
+    And I generate a unique API version from "is-unchanged-resp" and store it as "apiVersion"
+    And I generate a unique API context from "/is-unchanged-resp" and store it as "apiContext"
     And I resolve the "fault-injection" service URL at "" and store it as "faultBase"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
@@ -477,9 +477,9 @@ Feature: Interceptor service policies
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
 
   Scenario: Interceptor adds, modifies, and removes request headers
-    Given I generate a unique value from "is-r07" and store it as "apiName"
-    And I generate a unique API version from "is-r07" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r07" and store it as "apiContext"
+    Given I generate a unique value from "is-request-headers" and store it as "apiName"
+    And I generate a unique API version from "is-request-headers" and store it as "apiVersion"
+    And I generate a unique API context from "/is-request-headers" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -511,9 +511,9 @@ Feature: Interceptor service policies
   # X-Removed-Response: removed to its JSON reply. The interceptor replaces the first, removes the
   # third and replaces the body, so only X-Denied-Response reaches the client as the backend sent it.
   Scenario: Interceptor modifies response headers and body
-    Given I generate a unique value from "is-r09" and store it as "apiName"
-    And I generate a unique API version from "is-r09" and store it as "apiVersion"
-    And I generate a unique API context from "/is-r09" and store it as "apiContext"
+    Given I generate a unique value from "is-resp-headers-body" and store it as "apiName"
+    And I generate a unique API version from "is-resp-headers-body" and store it as "apiVersion"
+    And I generate a unique API context from "/is-resp-headers-body" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion} |
       | name                   | ${CTX:apiName} |
@@ -545,9 +545,9 @@ Feature: Interceptor service policies
   # Gateway 1.1.0 does not apply a named upstream's base path, so this runs on 1.2.0 and later.
   Scenario: Interceptor routes the request to a named upstream
     Given the gateway version satisfies ">=1.2.0"
-    And I generate a unique value from "is-dyn" and store it as "apiName"
-    And I generate a unique API version from "is-dyn" and store it as "apiVersion"
-    And I generate a unique API context from "/is-dyn" and store it as "apiContext"
+    And I generate a unique value from "is-named-upstream" and store it as "apiName"
+    And I generate a unique API version from "is-named-upstream" and store it as "apiVersion"
+    And I generate a unique API context from "/is-named-upstream" and store it as "apiContext"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion               | ${CTX:gatewaySpecVersion} |
       | name                     | ${CTX:apiName} |
