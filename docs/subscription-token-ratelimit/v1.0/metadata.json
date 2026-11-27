@@ -2,7 +2,7 @@
   "name": "subscription-token-ratelimit",
   "displayName": "Subscription Token Rate Limit",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "AI",
     "Security"

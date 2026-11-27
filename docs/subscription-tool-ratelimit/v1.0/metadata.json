@@ -2,7 +2,7 @@
   "name": "subscription-tool-ratelimit",
   "displayName": "Subscription Tool Rate Limit",
   "version": "1.0",
-  "provider": "WSO2",
+  "provider": "Choreo Labs",
   "categories": [
     "MCP",
     "Security"
