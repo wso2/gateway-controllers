@@ -791,6 +791,24 @@ func TestServiceLogLinesCountRejectsZero(t *testing.T) {
 	}
 }
 
+// The absence check passes only for a log that was read: a note written in place of an unread log
+// would otherwise pass for any text.
+func TestCheckLogsNotContain(t *testing.T) {
+	readable := "───── gateway-runtime ─────\nlevel=INFO msg=\"request served\"\n"
+	require.NoError(t, checkLogsNotContain(readable, "gateway-runtime", "secret-value"))
+	require.ErrorContains(t, checkLogsNotContain(readable+"secret-value\n", "gateway-runtime", "secret-value"),
+		"unexpectedly contain")
+
+	for _, note := range []string{
+		"(no stack to read logs from)",
+		"───── gateway-runtime ─────\n(could not locate service: no such service)\n",
+		"───── gateway-runtime ─────\n(could not read logs: connection refused)\n",
+		"───── gateway-runtime ─────\n(log read failed: runtime: output exceeds the 67108864-byte limit)\n",
+	} {
+		require.ErrorContains(t, checkLogsNotContain(note, "gateway-runtime", "secret-value"), "cannot check")
+	}
+}
+
 func TestLogFragmentsFromTable(t *testing.T) {
 	local := tcontext.NewLocal("runner")
 	local.Set("deployment", "stray-deployment-run1")

@@ -16,21 +16,16 @@
  * under the License.
  */
 
-// Package steps holds the step definitions only the remove-headers policy's scenarios need. The shared
-// steps in tests/it/common/steps are bound before these, so search them first and do not repeat
-// one here.
+// Package steps holds the step definitions only the remove-headers policy's scenarios need. The
+// shared steps in tests/it/common/steps are bound before these, so search them first and do not
+// repeat one here.
 package steps
 
 import (
 	"github.com/cucumber/godog"
 
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
-
-	sharedsteps "github.com/wso2/gateway-controllers/tests/it/common/steps"
 )
 
-// Register binds the policy's own steps to the scenario. They build on the shared request steps'
-// base for the gateway URL, the scenario's headers and the request host.
-func Register(sc *godog.ScenarioContext, base *sharedsteps.Base, _ *frameworkruntime.Topology) {
-	newSteps(base).register(sc)
-}
+// Register binds the policy's own steps to the scenario.
+func Register(_ *godog.ScenarioContext, _ *frameworkruntime.Topology) {}
