@@ -27,7 +27,13 @@ import (
 	"github.com/wso2/gateway-controllers/policies/request-rewrite/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// RR23 and RR30 chain request-rewrite with basic-auth, basic-ratelimit and dynamic-endpoint, so a
+// direct go test run builds them into its gateway too. host-rewrite, which RR23 also uses, is
+// always built.
+var config = suite.Config{
+	Register:   steps.Register,
+	Companions: []string{"basic-auth", "basic-ratelimit", "dynamic-endpoint"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
