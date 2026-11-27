@@ -1,0 +1,339 @@
+name: mistral-moderation
+version: v0.2.0
+displayName: Mistral Moderation
+description: |
+  Validates request and response content with the Mistral moderation API
+  (mistral-moderation-2603), as raw text or as a conversation, and blocks
+  content whose category scores reach the configured thresholds.
+
+parameters:
+  type: object
+  properties:
+    request:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: Specifies content moderation settings for request payloads.
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables moderation of the request flow. Set to false to switch it off
+            without removing the rest of the request configuration.
+          default: true
+        moderationMode:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            How the request is moderated. "text" sends the text at jsonPath to
+            Mistral's raw-text endpoint (POST /v1/moderations). "conversation"
+            sends the chat messages at messagesPath to the conversational endpoint
+            (POST /v1/chat/moderations), which classifies the last message in the
+            context of the earlier ones. Mistral recommends conversation for chat
+            APIs.
+          enum: ["text", "conversation"]
+          default: "text"
+        messagesPath:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            The JSONPath of the chat messages array in the request body
+            (conversation mode only). Each message needs a role (system, developer,
+            user, assistant, tool or function) and string or content-part content.
+          minLength: 1
+          default: "$.messages"
+        jsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            In text mode, the JSONPath of the text to moderate. Supports array
+            indexes (including negative indexes) and the [*] wildcard, which
+            moderates every matched value together. Leave empty to moderate the
+            whole body. Not used on the request in conversation mode.
+          default: "$.messages[-1].content"
+        passthroughOnError:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            Specifies whether requests continue when the moderation check cannot
+            be completed (Mistral API error, timeout, invalid response, or a
+            JSONPath that cannot be read). True allows passthrough; false blocks.
+            A detected violation is always blocked.
+          default: false
+        showAssessment:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            Specifies whether blocked requests include the violating categories
+            with their scores and thresholds. The moderated content is never
+            included.
+          default: false
+        timeout:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            Maximum time to wait for the Mistral moderation API, as a Go duration
+            string (for example "5s" or "1500ms"), up to "30s". On timeout,
+            passthroughOnError decides whether traffic continues.
+          default: "5s"
+        categoryThresholds:
+          type: object
+          x-wso2-policy-advanced-param: false
+          description: |
+            Per-category score thresholds (0 to 1). Content whose score is greater
+            than or equal to a category's threshold is blocked. Set a category to
+            -1 to disable it. sexual, hate_and_discrimination, violence_and_threats
+            and selfharm default to 0.5; every other category is evaluated only
+            when given a threshold.
+          additionalProperties: false
+          properties:
+            sexual:
+              type: number
+              description: |
+                Score threshold for sexual content. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            hate_and_discrimination:
+              type: number
+              description: |
+                Score threshold for hate and discrimination. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            violence_and_threats:
+              type: number
+              description: |
+                Score threshold for violence and threats. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            dangerous:
+              type: number
+              description: |
+                Score threshold for dangerous content (for example instructions that enable harm). Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            criminal:
+              type: number
+              description: |
+                Score threshold for criminal content (for example facilitating illegal activity). Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            selfharm:
+              type: number
+              description: |
+                Score threshold for self-harm. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            health:
+              type: number
+              description: |
+                Score threshold for unqualified health advice. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            financial:
+              type: number
+              description: |
+                Score threshold for unqualified financial advice. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            law:
+              type: number
+              description: |
+                Score threshold for unqualified legal advice. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            pii:
+              type: number
+              description: |
+                Score threshold for personally identifiable information. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            jailbreaking:
+              type: number
+              description: |
+                Score threshold for jailbreaking (attempts to override model instructions). Use -1 to disable.
+              minimum: -1
+              maximum: 1
+    response:
+      type: object
+      x-wso2-policy-advanced-param: false
+      description: Specifies content moderation settings for response payloads.
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+          x-wso2-policy-advanced-param: false
+          description: |
+            Enables moderation of the response flow. Set to false to switch it off
+            without removing the rest of the response configuration.
+          default: true
+        moderationMode:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            How the response is moderated. "text" sends the reply at jsonPath to
+            Mistral's raw-text endpoint (POST /v1/moderations). "conversation"
+            appends the reply as an assistant message to the request's messages at
+            messagesPath and sends them to the conversational endpoint
+            (POST /v1/chat/moderations), so the reply is judged against the prompt
+            that produced it. Mistral recommends conversation for chat APIs.
+          enum: ["text", "conversation"]
+          default: "text"
+        messagesPath:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            The JSONPath of the chat messages array in the original request body,
+            used as context for the reply (conversation mode only). When the
+            messages cannot be read, the reply is classified on its own.
+          minLength: 1
+          default: "$.messages"
+        jsonPath:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            The JSONPath of the reply to moderate, in both modes. Supports array
+            indexes (including negative indexes) and the [*] wildcard, which
+            moderates every matched value together. Leave empty to moderate the
+            whole body.
+          default: "$.choices[0].message.content"
+        streamingJsonPath:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            JSONPath of the reply text in each event of a streamed (stream: true)
+            response. The stream is buffered and its events reassembled into the
+            complete reply, which is moderated before any of it reaches the client.
+            Defaults to the OpenAI streaming format.
+          minLength: 1
+          default: "$.choices[0].delta.content"
+        passthroughOnError:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            Specifies whether responses continue when the moderation check cannot
+            be completed (Mistral API error, timeout, invalid response, or a
+            JSONPath that cannot be read). True allows passthrough; false blocks.
+            A detected violation is always blocked.
+          default: false
+        showAssessment:
+          type: boolean
+          x-wso2-policy-advanced-param: true
+          description: |
+            Specifies whether blocked responses include the violating categories
+            with their scores and thresholds. The moderated content is never
+            included.
+          default: false
+        timeout:
+          type: string
+          x-wso2-policy-advanced-param: true
+          description: |
+            Maximum time to wait for the Mistral moderation API, as a Go duration
+            string (for example "5s" or "1500ms"), up to "30s". On timeout,
+            passthroughOnError decides whether traffic continues.
+          default: "5s"
+        categoryThresholds:
+          type: object
+          x-wso2-policy-advanced-param: false
+          description: |
+            Per-category score thresholds (0 to 1). Content whose score is greater
+            than or equal to a category's threshold is blocked. Set a category to
+            -1 to disable it. sexual, hate_and_discrimination, violence_and_threats
+            and selfharm default to 0.5; every other category is evaluated only
+            when given a threshold.
+          additionalProperties: false
+          properties:
+            sexual:
+              type: number
+              description: |
+                Score threshold for sexual content. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            hate_and_discrimination:
+              type: number
+              description: |
+                Score threshold for hate and discrimination. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            violence_and_threats:
+              type: number
+              description: |
+                Score threshold for violence and threats. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            dangerous:
+              type: number
+              description: |
+                Score threshold for dangerous content (for example instructions that enable harm). Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            criminal:
+              type: number
+              description: |
+                Score threshold for criminal content (for example facilitating illegal activity). Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            selfharm:
+              type: number
+              description: |
+                Score threshold for self-harm. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+              default: 0.5
+            health:
+              type: number
+              description: |
+                Score threshold for unqualified health advice. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            financial:
+              type: number
+              description: |
+                Score threshold for unqualified financial advice. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            law:
+              type: number
+              description: |
+                Score threshold for unqualified legal advice. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            pii:
+              type: number
+              description: |
+                Score threshold for personally identifiable information. Use -1 to disable.
+              minimum: -1
+              maximum: 1
+            jailbreaking:
+              type: number
+              description: |
+                Score threshold for jailbreaking (attempts to override model instructions). Use -1 to disable.
+              minimum: -1
+              maximum: 1
+  anyOf:
+    - required: [ request ]
+    - required: [ response ]
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    apiKey:
+      type: string
+      description: |
+        Mistral API key. When empty, the policy reads the MISTRAL_API_KEY
+        environment variable of the policy engine.
+      default: ""
+      "wso2/defaultValue": "${config.policy_configurations.mistral_moderation_v1.api_key}"
+    model:
+      type: string
+      description: Mistral moderation model.
+      default: "mistral-moderation-2603"
+      "wso2/defaultValue": "${config.policy_configurations.mistral_moderation_v1.model}"

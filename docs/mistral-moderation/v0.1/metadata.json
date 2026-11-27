@@ -1,0 +1,11 @@
+{
+  "name": "mistral-moderation",
+  "displayName": "Mistral Moderation",
+  "version": "0.1",
+  "provider": "Choreo Labs",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Validates request or response body content with the Mistral moderation API (mistral-moderation-2603).\nModerates raw text (/v1/moderations) or a conversation (/v1/chat/moderations), where the last message is judged in the context of the earlier ones and a reply is judged against its prompt.\nScores content across eleven categories (sexual, hate and discrimination, violence and threats, dangerous, criminal, self-harm, health, financial, law, PII and jailbreaking) and blocks content whose score reaches a configurable per-category threshold.\nSupports JSONPath extraction, streamed (stream: true) and non-streamed responses (a streamed reply is reassembled and moderated before it is delivered), separate configuration for request and response phases, and a configurable timeout. The Mistral API key is configured by the gateway administrator, never in the API definition."
+}
