@@ -518,6 +518,135 @@ func TestValidatePayload_JSONPathExtraction(t *testing.T) {
 	}
 }
 
+// Quotes in the extracted message are content and must be counted
+func TestValidatePayload_CountsQuotes(t *testing.T) {
+	p := &ContentLengthGuardrailPolicy{}
+
+	tests := []struct {
+		name     string
+		content  string
+		byteLen  int
+		wantPass bool
+	}{
+		{name: "wrapping quotes counted", content: `"Hello"`, byteLen: 7, wantPass: true},
+		{name: "wrapping quotes not stripped", content: `"Hello"`, byteLen: 5, wantPass: false},
+		{name: "trailing quote counted", content: `He said "hi"`, byteLen: 12, wantPass: true},
+		{name: "lone quote counted", content: `"`, byteLen: 1, wantPass: true},
+		{name: "multiline wrapping quotes counted", content: "\"line1\nline2\"", byteLen: 13, wantPass: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload, err := json.Marshal(map[string]interface{}{
+				"messages": []map[string]string{{"content": tc.content}},
+			})
+			if err != nil {
+				t.Fatalf("failed to marshal payload: %v", err)
+			}
+
+			result := p.validatePayload(payload, ContentLengthGuardrailPolicyParams{
+				Min:      tc.byteLen,
+				Max:      tc.byteLen,
+				JsonPath: DefaultJSONPath,
+			}, false)
+
+			if tc.wantPass {
+				if _, ok := result.(policy.UpstreamRequestModifications); !ok {
+					t.Fatalf("expected pass for %q at %d bytes, got %T", tc.content, tc.byteLen, result)
+				}
+				return
+			}
+			imm, ok := result.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse for %q at %d bytes, got %T", tc.content, tc.byteLen, result)
+			}
+			if imm.StatusCode != GuardrailErrorCode {
+				t.Fatalf("expected status %d, got %d", GuardrailErrorCode, imm.StatusCode)
+			}
+		})
+	}
+}
+
+// Quotes count toward both limits, and the limits are still enforced around them
+func TestValidatePayload_QuoteBoundaries(t *testing.T) {
+	p := &ContentLengthGuardrailPolicy{}
+
+	tests := []struct {
+		name       string
+		content    string
+		min        int
+		max        int
+		rawBody    bool
+		isResponse bool
+		invert     bool
+		wantPass   bool
+	}{
+		{name: "quotes push content over max", content: `"Hello"`, min: 1, max: 6},
+		{name: "quotes push single char over max", content: `"a"`, min: 1, max: 2},
+		{name: "max enforced without quotes", content: "Hello world", min: 1, max: 5},
+		{name: "min enforced without quotes", content: "ab", min: 4, max: 10},
+		{name: "quotes satisfy min", content: `"ab"`, min: 4, max: 10, wantPass: true},
+		{name: "inner quotes counted", content: `say "hi" now`, min: 1, max: 11},
+		{name: "whitespace around quotes trimmed over max", content: `   "Hi"   `, min: 1, max: 3},
+		{name: "whitespace around quotes trimmed exact", content: `   "Hi"   `, min: 4, max: 4, wantPass: true},
+		{name: "raw body quotes counted", content: `"hello"`, min: 1, max: 5, rawBody: true},
+		{name: "invert quotes move content out of range", content: `"ab"`, min: 1, max: 3, invert: true, wantPass: true},
+		{name: "invert quotes keep content in range", content: `"a"`, min: 1, max: 3, invert: true},
+		{name: "response quotes push content over max", content: `"Hello"`, min: 1, max: 6, isResponse: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			params := ContentLengthGuardrailPolicyParams{
+				Min:    tc.min,
+				Max:    tc.max,
+				Invert: tc.invert,
+			}
+			payload := []byte(tc.content)
+			if !tc.rawBody {
+				var err error
+				payload, err = json.Marshal(map[string]interface{}{
+					"messages": []map[string]string{{"content": tc.content}},
+				})
+				if err != nil {
+					t.Fatalf("failed to marshal payload: %v", err)
+				}
+				params.JsonPath = DefaultJSONPath
+			}
+
+			result := p.validatePayload(payload, params, tc.isResponse)
+
+			if tc.isResponse {
+				resp, ok := result.(policy.DownstreamResponseModifications)
+				if !ok {
+					t.Fatalf("expected DownstreamResponseModifications for %q, got %T", tc.content, result)
+				}
+				if tc.wantPass && resp.StatusCode != nil {
+					t.Fatalf("expected pass for %q, got status %d", tc.content, *resp.StatusCode)
+				}
+				if !tc.wantPass && (resp.StatusCode == nil || *resp.StatusCode != GuardrailErrorCode) {
+					t.Fatalf("expected status %d for %q, got %#v", GuardrailErrorCode, tc.content, resp.StatusCode)
+				}
+				return
+			}
+
+			if tc.wantPass {
+				if _, ok := result.(policy.UpstreamRequestModifications); !ok {
+					t.Fatalf("expected pass for %q in range %d-%d, got %T", tc.content, tc.min, tc.max, result)
+				}
+				return
+			}
+			imm, ok := result.(policy.ImmediateResponse)
+			if !ok {
+				t.Fatalf("expected ImmediateResponse for %q in range %d-%d, got %T", tc.content, tc.min, tc.max, result)
+			}
+			if imm.StatusCode != GuardrailErrorCode {
+				t.Fatalf("expected status %d, got %d", GuardrailErrorCode, imm.StatusCode)
+			}
+		})
+	}
+}
+
 func TestBuildAssessmentObject(t *testing.T) {
 	p := &ContentLengthGuardrailPolicy{}
 
