@@ -1816,7 +1816,7 @@ func (p *AWSBedrockGuardrailPolicy) redactedFlush(
 		return flush, false, false
 	}
 
-	rewritten, changed = rewriteAcrossFrames(flush, rp.StreamingJsonPath, rewrites)
+	rewritten, changed = rewriteAcrossFrames(flush, rp.StreamingJsonPath, rewrites, true)
 
 	joined := extractSSEDeltaContent(rewritten, rp.StreamingJsonPath)
 	for _, r := range rewrites {
@@ -3097,24 +3097,147 @@ func (p *AWSBedrockGuardrailPolicy) rewriteHeld(
 
 // restoreHeld puts the request phase's placeholders back into withheld bytes.
 // Under redactPII nothing was masked to be restored.
+//
+// This is the last restore a delivered stream gets, and it sees more text than
+// restoreFlushFrames did: the withheld buffer spans every flush since the last
+// release, so a placeholder the upstream began in one flush and finished in the
+// next is whole here even though it was whole in neither flush alone.
 func (p *AWSBedrockGuardrailPolicy) restoreHeld(
 	heldBytes string,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) string {
+	return p.restorePlaceholderFrames(heldBytes, respCtx, rp)
+}
+
+// restorePlaceholderFrames puts the request phase's placeholders back into the
+// frames of one buffer of event-stream bytes.
+//
+// The buffer's text is read as a whole and written back across the frames that
+// carry it (rewriteAcrossFrames), which is the only way a placeholder is found
+// at all: a model emits "EMAIL_0000" as several token events -- " email is
+// EMAIL" in one, "_0000" in the next -- so a restore that read one frame at a
+// time matched nothing and the client received the placeholder. Redaction has
+// always rewritten across frames for the same reason (redactedFlush); this is
+// the restore direction of it.
+//
+// Frames carrying a choice the policy does not read are outside that joined
+// text, so restoreOtherChoiceFrames covers them in a second pass.
+//
+// Under redactPII nothing was masked to a placeholder, so there is nothing to
+// restore.
+func (p *AWSBedrockGuardrailPolicy) restorePlaceholderFrames(
+	chunkStr string,
+	respCtx *policy.ResponseStreamContext,
+	rp AWSBedrockGuardrailPolicyParams,
+) string {
 	if rp.RedactPII {
-		return heldBytes
+		return chunkStr
 	}
 	maskedPII, ok := respCtx.Metadata[MetadataKeyPIIEntities].(map[string]string)
 	if !ok || len(maskedPII) == 0 {
-		return heldBytes
+		return chunkStr
 	}
-	if rewritten, changed := rewriteSSEDeltaContent(heldBytes, rp.StreamingJsonPath, func(frameText string) string {
-		return p.restorePIIInResponse(frameText, maskedPII)
-	}); changed {
-		return rewritten
+	restored := chunkStr
+	if rewritten, changed := rewriteAcrossFrames(restored, rp.StreamingJsonPath,
+		placeholderRestores(maskedPII), false); changed {
+		restored = rewritten
 	}
-	return heldBytes
+	if rewritten, changed := p.restoreOtherChoiceFrames(restored, rp.StreamingJsonPath, maskedPII); changed {
+		restored = rewritten
+	}
+	return restored
+}
+
+// restoreOtherChoiceFrames restores the frames the across-frames pass leaves
+// alone: those carrying a choice the policy does not read (readsAnotherChoice).
+//
+// rewriteAcrossFrames reads exactly the frames frameText reads, so its joined
+// text and its offsets agree with what was assessed -- which means a second
+// choice is outside it. A placeholder there is still the client's own value and
+// still has to be put back, so each such frame is restored on its own. That
+// finds a placeholder lying whole in one frame; a placeholder split across two
+// frames of a choice nothing assesses is not covered, as it was not before.
+func (p *AWSBedrockGuardrailPolicy) restoreOtherChoiceFrames(
+	chunkStr, streamingJsonPath string,
+	maskedPII map[string]string,
+) (string, bool) {
+	lines := strings.Split(chunkStr, "\n")
+	changed := false
+
+	for i, line := range lines {
+		carriage := strings.HasSuffix(line, "\r")
+		payload, prefix, ok := sseDataPayload(strings.TrimSuffix(line, "\r"))
+		if !ok {
+			continue
+		}
+		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
+			continue
+		}
+		if !frameReadsAnotherChoice(payload, streamingJsonPath) {
+			continue // the across-frames pass owns this frame
+		}
+		frame, ok := decodeFrame(payload)
+		if !ok {
+			continue
+		}
+		original, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
+		if err != nil {
+			continue
+		}
+		replacement := p.restorePIIInResponse(original, maskedPII)
+		if replacement == original {
+			continue
+		}
+		if err := utils.SetValueAtJSONPath(frame, streamingJsonPath, replacement); err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
+				"jsonPath", streamingJsonPath, "error", err)
+			continue
+		}
+		encoded, err := encodeJSON(frame)
+		if err != nil {
+			slog.Debug("AWSBedrockGuardrail: failed to marshal restored SSE frame", "error", err)
+			continue
+		}
+		rebuilt := prefix + string(encoded)
+		if carriage {
+			rebuilt += "\r"
+		}
+		lines[i] = rebuilt
+		changed = true
+	}
+
+	if !changed {
+		return chunkStr, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// placeholderRestores lists the request phase's placeholders as replacements
+// back to the values they stand for, longest placeholder first so a placeholder
+// that contains another is replaced whole.
+//
+// It is piiReplacements read backwards: the request turned each original into a
+// placeholder, and this turns each placeholder back into its original. Stating
+// it as a []piiReplacement is what lets a restore go through the same
+// across-frames rewriter the redaction path uses.
+func placeholderRestores(maskedPIIEntities map[string]string) []piiReplacement {
+	restores := make([]piiReplacement, 0, len(maskedPIIEntities))
+	for original, placeholder := range maskedPIIEntities {
+		if placeholder == "" {
+			continue
+		}
+		restores = append(restores, piiReplacement{match: placeholder, replacement: original})
+	}
+	// Longest first, then by placeholder, so the order does not depend on map
+	// iteration and two runs rewrite a buffer identically.
+	sort.Slice(restores, func(i, j int) bool {
+		if len(restores[i].match) != len(restores[j].match) {
+			return len(restores[i].match) > len(restores[j].match)
+		}
+		return restores[i].match < restores[j].match
+	})
+	return restores
 }
 
 // errRedactionFailed marks the error body sent when a reported value could not
@@ -3335,32 +3458,16 @@ func (p *AWSBedrockGuardrailPolicy) releaseBytes(
 // flush is accumulated, assessed or split.
 //
 // releaseBytes still restores at delivery, which is not redundant: a placeholder
-// split across two flushes is in neither frame here and only becomes whole
-// later. That case is the documented limitation -- such a value reaches the
-// client without having been assessed -- and is unchanged by this.
+// split across two flushes is whole in neither flush here, and only becomes
+// whole in the withheld buffer that holds both. Such a value is assessed as the
+// placeholder rather than as the value it stands for -- the remaining
+// limitation -- but it is restored before it reaches the client.
 func (p *AWSBedrockGuardrailPolicy) restoreFlushFrames(
 	chunkStr string,
 	respCtx *policy.ResponseStreamContext,
 	rp AWSBedrockGuardrailPolicyParams,
 ) string {
-	if rp.RedactPII {
-		return chunkStr
-	}
-	raw, exists := respCtx.Metadata[MetadataKeyPIIEntities]
-	if !exists {
-		return chunkStr
-	}
-	maskedPII, ok := raw.(map[string]string)
-	if !ok || len(maskedPII) == 0 {
-		return chunkStr
-	}
-	rewritten, changed := rewriteSSEDeltaContent(chunkStr, rp.StreamingJsonPath, func(frameText string) string {
-		return p.restorePIIInResponse(frameText, maskedPII)
-	})
-	if !changed {
-		return chunkStr
-	}
-	return rewritten
+	return p.restorePlaceholderFrames(chunkStr, respCtx, rp)
 }
 
 // effectiveTextUnit returns the batch size to assess at.
@@ -4498,7 +4605,13 @@ type sseTextFrame struct {
 // after it. Frames are kept -- one emptied of text still carries its event -- so
 // the stream keeps its shape and only the text changes. A frame whose text does
 // not change is passed through byte-for-byte.
-func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiReplacement) (string, bool) {
+//
+// stripLogprobs drops the log probabilities of a frame this rewrites. Masking
+// sets it: the tokens beside a masked value hold the value itself, so they go
+// with it. A restore does not, because the tokens there spell out the
+// placeholder, not the value, and dropping them would take log probabilities a
+// client asked for away for nothing -- the buffered restore keeps them too.
+func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiReplacement, stripLogprobs bool) (string, bool) {
 	if len(replacements) == 0 {
 		return chunkStr, false
 	}
@@ -4567,7 +4680,9 @@ func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiR
 		if replacement == f.value {
 			continue
 		}
-		dropLogprobs(f.frame)
+		if stripLogprobs {
+			dropLogprobs(f.frame)
+		}
 		if err := utils.SetValueAtJSONPath(f.frame, streamingJsonPath, replacement); err != nil {
 			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
 				"jsonPath", streamingJsonPath, "error", err)
@@ -4585,62 +4700,6 @@ func rewriteAcrossFrames(chunkStr, streamingJsonPath string, replacements []piiR
 		lines[f.line] = rebuilt
 		changed = true
 	}
-	if !changed {
-		return chunkStr, false
-	}
-	return strings.Join(lines, "\n"), true
-}
-
-// rewriteSSEDeltaContent applies transform to the text at streamingJsonPath in
-// every data frame of chunkStr, returning the rewritten flush and whether
-// anything changed. A frame whose payload is not JSON, carries no text at that
-// path, or is unchanged by transform is passed through byte-for-byte.
-func rewriteSSEDeltaContent(chunkStr string, streamingJsonPath string, transform func(string) string) (string, bool) {
-	lines := strings.Split(chunkStr, "\n")
-	changed := false
-
-	for i, line := range lines {
-		carriage := strings.HasSuffix(line, "\r")
-		trimmed := strings.TrimSuffix(line, "\r")
-		payload, prefix, ok := sseDataPayload(trimmed)
-		if !ok {
-			continue
-		}
-		if t := strings.TrimSpace(payload); t == "" || t == sseDone {
-			continue
-		}
-
-		frame, ok := decodeFrame(payload)
-		if !ok {
-			continue
-		}
-		original, err := utils.ExtractStringValueFromJsonpath([]byte(payload), streamingJsonPath)
-		if err != nil {
-			continue
-		}
-		replacement := transform(original)
-		if replacement == original {
-			continue
-		}
-		if err := utils.SetValueAtJSONPath(frame, streamingJsonPath, replacement); err != nil {
-			slog.Debug("AWSBedrockGuardrail: failed to set streaming value at JSONPath",
-				"jsonPath", streamingJsonPath, "error", err)
-			continue
-		}
-		rewrittenPayload, err := encodeJSON(frame)
-		if err != nil {
-			slog.Debug("AWSBedrockGuardrail: failed to marshal rewritten SSE frame", "error", err)
-			continue
-		}
-
-		rebuilt := prefix + string(rewrittenPayload)
-		if carriage {
-			rebuilt += "\r"
-		}
-		lines[i] = rebuilt
-		changed = true
-	}
-
 	if !changed {
 		return chunkStr, false
 	}

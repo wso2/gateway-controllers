@@ -624,12 +624,8 @@ func TestRegression_RepeatedValuePastTheBatchBoundaryIsMasked(t *testing.T) {
 
 func TestRegression_FrameRewriteKeepsIntegerPrecision(t *testing.T) {
 	frame := "data: {\"id\":9007199254740993,\"choices\":[{\"delta\":{\"content\":\"EMAIL_0000\"}}]}\n\n"
-	out, changed := rewriteSSEDeltaContent(frame, ResponseDefaultStreamingJSONPath, func(string) string { return "x@y.z" })
-	if !changed || !strings.Contains(out, "9007199254740993") || !strings.Contains(out, "x@y.z") {
-		t.Fatalf("integer field corrupted by frame rewrite: %q", out)
-	}
-	out, changed = rewriteAcrossFrames(frame, ResponseDefaultStreamingJSONPath, []piiReplacement{{match: "EMAIL_0000", replacement: "{EMAIL}"}})
-	if !changed || !strings.Contains(out, "9007199254740993") {
+	out, changed := rewriteAcrossFrames(frame, ResponseDefaultStreamingJSONPath, []piiReplacement{{match: "EMAIL_0000", replacement: "{EMAIL}"}}, true)
+	if !changed || !strings.Contains(out, "9007199254740993") || !strings.Contains(out, "{EMAIL}") {
 		t.Fatalf("integer field corrupted by the cross-frame rewrite: %q", out)
 	}
 }
