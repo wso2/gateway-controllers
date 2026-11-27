@@ -283,16 +283,19 @@ Feature: Respond scope and chaining
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
 
-  # RES18: set-headers and log-message come after respond, so they never run: nothing is logged
-  # for the request and set-headers' response header is missing. The /logged operation runs
-  # log-message without respond; its line appears after the respond request was answered, so the
-  # logs were read past the point where the skipped line would have been.
+  # RES18: set-headers and log-message come after respond, so they never run. The client sends its
+  # own X-Client-Tag on /orders, which log-message would log whether or not set-headers ran: its
+  # value must not be in the log, nor the value set-headers would add, and set-headers' response
+  # header is missing. The /logged operation runs log-message without respond; its line appears
+  # after the respond request was answered, so the logs were read past the point where a line for
+  # /orders would have been.
   Scenario: Skip the policies after respond
     Given I generate a unique value from "res-after" and store it as "apiName"
     And I generate a unique API version from "res-after" and store it as "apiVersion"
     And I generate a unique API context from "/res-after" and store it as "apiContext"
     And I generate a unique value from "res-skipped" and store it as "skippedValue"
     And I generate a unique value from "res-logged" and store it as "loggedValue"
+    And I generate a unique value from "res-client-tag" and store it as "clientTag"
     When I create API from "resources/templates/rest-api.yaml" with values:
       | apiVersion             | ${CTX:gatewaySpecVersion}             |
       | name                   | ${CTX:apiName}                        |
@@ -305,7 +308,8 @@ Feature: Respond scope and chaining
     When I clear all headers
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
 
-    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/orders"
+    When I set header "X-Client-Tag" to "${CTX:clientTag}"
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/orders"
     Then the response status code should be 200
     And the response header "X-Set-On-Response" should not exist
     And the response body should be:
@@ -313,9 +317,11 @@ Feature: Respond scope and chaining
       chain ends here
       """
 
-    When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/logged"
+    When I clear all headers
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/logged"
     Then the response status code should be 200
     And the "gateway-runtime" service logs should contain "${CTX:loggedValue}"
+    And the "gateway-runtime" service logs should not contain "${CTX:clientTag}"
     And the "gateway-runtime" service logs should not contain "${CTX:skippedValue}"
 
     When I clear all headers

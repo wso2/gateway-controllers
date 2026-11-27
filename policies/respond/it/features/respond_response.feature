@@ -128,7 +128,8 @@ Feature: Respond status, body and headers
       | 599                  | 599     | {"statusCode":599,"body":"highest status"}    | 599    | highest status    |
 
   # RES04: The response must match the one recorded from the policy before a change
-  # (resources/expected-error-responses), so a change a client could observe fails.
+  # (resources/expected-error-responses), so a change a client could observe fails. The recorded
+  # comparison only checks that Retry-After is present, so its configured value is checked too.
   Scenario: Return the recorded maintenance response unchanged
     Given I generate a unique value from "res-maintenance" and store it as "apiName"
     And I generate a unique API version from "res-maintenance" and store it as "apiVersion"
@@ -148,6 +149,7 @@ Feature: Respond status, body and headers
     When I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/maintenance"
     Then the response status code should be 503
     And the response should match the expected error response "respond-configured-503"
+    And the response header "Retry-After" should be "3600"
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
