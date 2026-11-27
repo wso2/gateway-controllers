@@ -61,6 +61,7 @@ All available policies, sorted alphabetically.
 | [MCP Rewrite](./mcp-rewrite/v1.2/docs/mcp-rewrite.md) | MCP | MCP Rewrite policy defines user-facing tools, resources, and prompts and maps them to backend capability names using optional "target" fields. |
 | [MCP Spec Validation](./mcp-spec-validation/v0.10/docs/mcp-spec-validation.md) | MCP, Security | Validates incoming MCP requests for conformance with the MCP specification applicable to the declared protocol version. |
 | [MCP Tool Schema Validator](./mcp-tool-schema-validator/v0.10/docs/mcp-tool-schema-validator.md) | MCP, Security | Validates MCP tools/call arguments and structured results against JSON Schemas configured per tool. |
+| [Mistral Shieldstral Content Safety](./mistral-shieldstral-content-safety/v0.1/docs/mistral-shieldstral-content-safety.md) | Guardrails, AI | Screens request or response body content using Mistral's open-weight Shieldstral 1.0 safety classifier, self-hosted behind an OpenAI-compatible endpoint such as vLLM. |
 | [Model Round Robin](./model-round-robin/v1.2/docs/model-round-robin.md) | AI | Implements round-robin load balancing for AI models. |
 | [Model Weighted Round Robin](./model-weighted-round-robin/v1.2/docs/model-weighted-round-robin.md) | AI | Implements weighted round-robin load balancing for AI models. |
 | [Mutual TLS Auth](./mtls-auth/v0.10/docs/mtls-authentication.md) | Security | Authenticates API callers using mutual TLS. |
