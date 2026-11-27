@@ -1,0 +1,77 @@
+name: cert-signer
+version: v1.0.0
+description: |
+  Generates a short-lived RS256-signed JWT using a pre-shared certificate identity and injects
+  it into a configurable upstream request header. The backend verifies the signature using the
+  certificate's public key — the cert is never sent per-request.
+
+  Default header: Authorization: Cert <compact-RS256-jwt>
+
+  JWT claims: iss (cert CN), sub (application ID from SharedContext.Metadata["x-wso2-application-id"];
+  absent value is rejected with 401), iat, exp (iat + ttlSeconds), jti (from configurable request
+  header; falls back to random UUID).
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    certPem:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: PEM-encoded X.509 certificate (mutually exclusive with certFile).
+    certFile:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: Path to PEM cert file in the gateway-runtime container.
+      default: /etc/gateway/mtls/tls.crt
+    keyPem:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: PEM-encoded RSA private key (mutually exclusive with keyFile).
+    keyFile:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: Path to PEM key file in the gateway-runtime container.
+      default: /etc/gateway/mtls/tls.key
+    scheme:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: Token prefix written before the JWT in the header value (default Cert).
+      default: Cert
+      minLength: 1
+      maxLength: 64
+      pattern: "^[a-zA-Z0-9\\-]+$"
+    signatureHeader:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: HTTP request header to set with the JWT value (default Authorization). Override to place the token in a custom header such as x-client-signature.
+      default: Authorization
+      minLength: 1
+      maxLength: 256
+    issuer:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: JWT iss claim. Defaults to the certificate's Common Name (CN).
+    jtiHeader:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: >
+        Name of the incoming request header to use as the JWT jti claim, replicating
+        the DataPower amp.request.headers["x-global-transaction-id"] behaviour.
+        Falls back to a random UUID when the header is absent. Default: x-global-transaction-id.
+      default: x-global-transaction-id
+    audience:
+      type: string
+      x-wso2-policy-advanced-param: false
+      description: JWT aud claim (optional; omitted from the token when not set).
+    ttlSeconds:
+      type: integer
+      x-wso2-policy-advanced-param: false
+      description: JWT lifetime in seconds (exp = iat + ttlSeconds). Default 300 (5 min).
+      default: 300
+      minimum: 10
+      maximum: 3600
+
+systemParameters:
+  type: object
+  properties: {}

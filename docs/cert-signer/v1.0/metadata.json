@@ -1,0 +1,10 @@
+{
+  "name": "cert-signer",
+  "displayName": "Certificate Signer",
+  "version": "1.0",
+  "provider": "Choreo Labs",
+  "categories": [
+    "Security"
+  ],
+  "description": "Generates a short-lived RS256-signed JWT from a gateway-secret-backed TLS identity and injects it into a configurable upstream request header. The backend verifies the JWT signature using the pre-shared certificate public key."
+}
