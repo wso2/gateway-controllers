@@ -85,6 +85,8 @@ type IntelligentModelRoutingPolicy struct {
 	contentPath     string
 	requestModel    RequestModelConfig
 	llmConfig       LLMClientConfig
+	auth            authentication
+	tokens          tokenSource // identity modes only
 	httpClient      *http.Client
 }
 
@@ -96,17 +98,32 @@ func GetPolicy(
 	params map[string]interface{},
 ) (policy.Policy, error) {
 	p := &IntelligentModelRoutingPolicy{
-		httpClient: &http.Client{Timeout: llmHTTPTimeout},
+		httpClient: &http.Client{
+			Timeout: llmHTTPTimeout,
+			// Go keeps custom headers such as api-key on a redirect to another host, so following one
+			// could send the credential to a resource nobody configured.
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 	}
 
 	if err := parseParams(params, p); err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
+	}
+	if p.auth.usesIdentity() {
+		tokens, err := useIdentity(p.auth)
+		if err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		p.tokens = tokens
 	}
 
 	slog.Debug("IntelligentModelRouting: Policy initialized",
 		"rules", len(p.routingRules),
 		"defaultModel", p.defaultModel,
 		"llmProvider", p.llmConfig.Provider,
+		"authenticationType", p.auth.typ,
 	)
 
 	return p, nil
@@ -174,7 +191,9 @@ func (p *IntelligentModelRoutingPolicy) OnRequestBody(
 	userPrompt := buildClassificationPrompt(p.routingRules, userText)
 	llmResponse, err := p.callLLM(ctx, ClassificationSystemPrompt, userPrompt)
 	if err != nil {
-		slog.Debug("IntelligentModelRouting: LLM call failed, using default model", "error", err)
+		if !logIdentityFailure(ctx, err, p.auth, "LLM call failed, using default model") {
+			slog.Debug("IntelligentModelRouting: LLM call failed, using default model", "error", err)
+		}
 		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
@@ -355,6 +374,16 @@ type chatCompletionResponse struct {
 	} `json:"choices"`
 }
 
+// llmStatusError is a non-200 answer from the LLM, so a caller can tell a refused token apart.
+type llmStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *llmStatusError) Error() string {
+	return fmt.Sprintf("LLM returned status %d: %s", e.StatusCode, e.Body)
+}
+
 // callLLM sends a chat completion request to the configured LLM provider and returns
 // the text response. This replaces the Java llmProvider.getChatCompletion() call.
 func (p *IntelligentModelRoutingPolicy) callLLM(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
@@ -382,9 +411,15 @@ func (p *IntelligentModelRoutingPolicy) callLLM(ctx context.Context, systemPromp
 
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Set auth header based on provider type
-	switch p.llmConfig.Provider {
-	case "AZURE_OPENAI":
+	// The identity's token in an identity mode, otherwise the key in the provider's header.
+	switch {
+	case p.tokens != nil:
+		token, err := p.accessToken(ctx)
+		if err != nil {
+			return "", err
+		}
+		httpReq.Header.Set("Authorization", "Bearer "+token)
+	case p.llmConfig.Provider == "AZURE_OPENAI":
 		httpReq.Header.Set("api-key", p.llmConfig.APIKey)
 	default: // OPENAI and others use Bearer token
 		httpReq.Header.Set("Authorization", "Bearer "+p.llmConfig.APIKey)
@@ -398,7 +433,7 @@ func (p *IntelligentModelRoutingPolicy) callLLM(ctx context.Context, systemPromp
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("LLM returned status %d: %s", resp.StatusCode, string(respBody))
+		return "", &llmStatusError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	var llmResp chatCompletionResponse
@@ -534,6 +569,22 @@ func parseLLMConfig(params map[string]interface{}, p *IntelligentModelRoutingPol
 		p.llmConfig.Model = model
 	} else if provider == "OPENAI" {
 		return fmt.Errorf("'llmModel' is required for OPENAI provider")
+	}
+
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return err
+	}
+	if auth.usesIdentity() && provider != "AZURE_OPENAI" {
+		return fmt.Errorf("%s authentication is only supported for the AZURE_OPENAI LLM provider", auth.typ)
+	}
+	if err := checkAllowedEndpoint(params, endpoint); err != nil {
+		return err
+	}
+	p.auth = auth
+	// An identity mode never sends a key, so the gateway's key is not read.
+	if auth.usesIdentity() {
+		return nil
 	}
 
 	apiKey, ok := params["llmApiKey"].(string)

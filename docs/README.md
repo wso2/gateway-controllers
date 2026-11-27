@@ -45,7 +45,7 @@ All available policies, sorted alphabetically.
 | [Error Response Formatter](./error-response-formatter/v1.0/docs/error-response-formatter.md) | Transformation | Renders a gateway-generated error into an operator-defined shape, and sets the headers that go with it. |
 | [Granite Guardian Prompt Injection](./granite-guardian-prompt-injection/v0.10/docs/granite-guardian-prompt-injection.md) | Guardrails, AI | Detects prompt injection and jailbreak attempts in LLM API requests using IBM Granite Guardian 3.3 8B. |
 | [Host Rewrite](./host-rewrite/v1.1/docs/host-rewrite.md) | Transformation | Sets the Host/:authority header sent to the upstream. |
-| [Intelligent Model Routing](./intelligent-model-routing/v0.9/docs/intelligent-model-routing.md) | AI | Routes AI/LLM requests to different models using LLM-powered classification. |
+| [Intelligent Model Routing](./intelligent-model-routing/v0.10/docs/intelligent-model-routing.md) | AI | Routes AI/LLM requests to different models using LLM-powered classification. |
 | [Interceptor Service](./interceptor-service/v1.1/docs/interceptor-service.md) | Transformation | Invokes a user-defined HTTP interceptor service in the request and/or response phase. |
 | [JSON Schema Guardrail](./json-schema-guardrail/v1.1/docs/json-schema.md) | Guardrails, AI | Validates request or response body content against a JSON Schema. |
 | [JSON/XML Mediator](./json-xml-mediator/v1.1/docs/json-xml-mediator.md) | Transformation | Mediates request and response payloads between downstream and upstream JSON/XML formats. |
