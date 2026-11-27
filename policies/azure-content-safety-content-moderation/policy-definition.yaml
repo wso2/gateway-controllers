@@ -1,12 +1,82 @@
 name: azure-content-safety-content-moderation
-version: v1.1.0
+version: v1.2.0
 description: |
   Validates request and response content with Azure Content Safety moderation
   checks.
 
 parameters:
   type: object
+  additionalProperties: false
   properties:
+    azureContentSafetyEndpoint:
+      type: string
+      format: uri
+      x-wso2-policy-advanced-param: true
+      description: |
+        Azure Content Safety endpoint for this API (without trailing slash, e.g.,
+        https://your-resource.cognitiveservices.azure.com). Leave unset to use
+        the gateway's azurecontentsafety_endpoint. The gateway's
+        azurecontentsafety_allowed_endpoints can limit the endpoints an API may
+        use.
+      minLength: 1
+    azureContentSafetyKey:
+      type: string
+      x-wso2-policy-advanced-param: true
+      description: |
+        Azure Content Safety subscription key for this API, sent with
+        authentication type api-key. Leave unset to use the gateway's
+        azurecontentsafety_key. Stored as a literal value in the API
+        definition; prefer an Azure identity where possible.
+      minLength: 1
+    azureAuth:
+      type: object
+      x-wso2-policy-advanced-param: true
+      additionalProperties: false
+      description: |
+        How this API's checks authenticate to Azure Content Safety. Omit it to
+        send the subscription key. The gateway's
+        azurecontentsafety_allowed_auth_types can limit the types an API may
+        use.
+      properties:
+        authenticationType:
+          type: string
+          x-wso2-policy-advanced-param: false
+          description: |
+            "api-key", the default, sends the subscription key: the API's
+            azureContentSafetyKey, or the gateway's azurecontentsafety_key. The
+            other types send a Microsoft Entra ID
+            access token for the gateway's Azure identity instead.
+            "workload-identity" uses AKS Workload Identity: the gateway pod runs
+            with a service account federated with a Microsoft Entra ID identity.
+            "managed-identity" uses a managed identity of the host the gateway
+            runs on, from the Azure Instance Metadata Service of a VM, VM scale
+            set or AKS node. "container-apps" uses a managed identity of the
+            Azure Container Apps app the gateway runs in. The identity needs the
+            Cognitive Services User role on the Content Safety resource.
+          enum:
+            - api-key
+            - workload-identity
+            - managed-identity
+            - container-apps
+          default: api-key
+        clientId:
+          type: string
+          x-wso2-policy-advanced-param: false
+          pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          description: |
+            Application (client) ID of the identity, for the Azure identity
+            types. With workload-identity, defaults to AZURE_CLIENT_ID. With
+            managed-identity or container-apps, selects a user-assigned identity;
+            leave it unset for the host's or app's system-assigned identity.
+            Ignored with api-key, but a value that is set must still be a GUID.
+        scope:
+          type: string
+          x-wso2-policy-advanced-param: false
+          pattern: "^\\S+/\\.default$"
+          description: |
+            Scope of the access token, for the Azure identity types. Defaults to
+            "https://cognitiveservices.azure.com/.default". Ignored with api-key,
+            but a value that is set must still end in /.default.
     request:
       type: object
       x-wso2-policy-advanced-param: false
@@ -145,9 +215,39 @@ systemParameters:
       "wso2/defaultValue": "${config.azurecontentsafety_endpoint}"
     azureContentSafetyKey:
       type: string
-      description: Azure Content Safety API subscription key for authentication.
+      description: |
+        Azure Content Safety API subscription key, sent by every API whose
+        azureAuth.authenticationType is api-key, the default, unless the API has
+        its own. Not needed when every API uses an Azure identity.
       minLength: 1
       "wso2/defaultValue": "${config.azurecontentsafety_key}"
+    azureContentSafetyAllowedAuthTypes:
+      type: array
+      items:
+        type: string
+        enum:
+          - api-key
+          - workload-identity
+          - managed-identity
+          - container-apps
+      description: |
+        If non-empty, the authentication types this gateway's APIs may choose
+        in azureAuth.authenticationType. An API without azureAuth uses api-key
+        and is checked as such. Leave out api-key to stop APIs sending the key;
+        list only api-key to keep them off the gateway's Azure identities. Empty
+        (the default) places no limit.
+      "wso2/defaultValue": "${config.azurecontentsafety_allowed_auth_types}"
+    azureContentSafetyAllowedEndpoints:
+      type: array
+      items:
+        type: string
+      description: |
+        If non-empty, the endpoints this gateway's APIs may call, including the
+        gateway's own azurecontentsafety_endpoint. Checked against the endpoint
+        an API uses, its own or the gateway's, so the gateway's key and tokens
+        for its Azure identity are only sent to listed resources. Entries match
+        regardless of case and of a trailing slash. Empty (the default) places
+        no limit.
+      "wso2/defaultValue": "${config.azurecontentsafety_allowed_endpoints}"
   required:
     - azureContentSafetyEndpoint
-    - azureContentSafetyKey

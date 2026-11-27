@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -55,7 +56,7 @@ func TestValidateAzureConfigParams(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := validateAzureConfigParams(tt.params)
+			_, err := validateAzureConfigParams(tt.params)
 			if err == nil {
 				t.Fatalf("expected error, got nil")
 			}
@@ -285,6 +286,32 @@ func TestAzureContentSafetyPolicy_APISuccess_NoViolation(t *testing.T) {
 	action := p.OnRequestBody(context.Background(), azureRequestContext(`{"messages":"hello"}`), nil)
 	if _, ok := action.(policy.UpstreamRequestModifications); !ok {
 		t.Fatalf("expected UpstreamRequestModifications on non-violation, got %T", action)
+	}
+}
+
+// The endpoint allowlist ignores every trailing slash, so the request URL must too.
+func TestAzureContentSafetyPolicy_EndpointTrailingSlashes(t *testing.T) {
+	for _, slashes := range []string{"", "/", "//"} {
+		t.Run("endpoint+"+strconv.Quote(slashes), func(t *testing.T) {
+			srv := azureMockServer(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/contentsafety/text:analyze" {
+					t.Errorf("unexpected path: %s", r.URL.Path)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"categoriesAnalysis":[{"category":"Hate","severity":0}]}`))
+			})
+			defer srv.Close()
+
+			p := mustGetAzurePolicy(t, map[string]interface{}{
+				"azureContentSafetyEndpoint": srv.URL + slashes,
+				"azureContentSafetyKey":      "k",
+				"request":                    map[string]interface{}{"jsonPath": "$.messages"},
+			})
+			action := p.OnRequestBody(context.Background(), azureRequestContext(`{"messages":"hello"}`), nil)
+			if _, ok := action.(policy.UpstreamRequestModifications); !ok {
+				t.Fatalf("expected UpstreamRequestModifications, got %T", action)
+			}
+		})
 	}
 }
 
@@ -526,7 +553,7 @@ func TestAzureContentSafety_ExtractionFailureDeclaresFault(t *testing.T) {
 	p := &AzureContentSafetyContentModerationPolicy{}
 	params := AzureContentSafetyPolicyParams{JsonPath: "$.text", HateSeverityThreshold: 2}
 	for _, isResponse := range []bool{false, true} {
-		got := p.validatePayload([]byte(`not-json`), params, isResponse)
+		got := p.validatePayload(context.Background(), []byte(`not-json`), params, isResponse)
 		if isResponse {
 			assertNoVerdictFault(t, got, `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error extracting value from JSONPath","direction":"RESPONSE","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`, policy.FaultCodeMediationFailed, policy.FaultTypeMediation, policy.DirectionResponse)
 		} else {
@@ -586,7 +613,7 @@ func TestAzureContentSafety_APIFailureDeclaresFault(t *testing.T) {
 	p := &AzureContentSafetyContentModerationPolicy{endpoint: server.URL, apiKey: "key", client: server.Client()}
 	params := AzureContentSafetyPolicyParams{JsonPath: "$.text", HateSeverityThreshold: 2}
 	for _, isResponse := range []bool{false, true} {
-		got := p.validatePayload([]byte(`{"text":"hello"}`), params, isResponse)
+		got := p.validatePayload(context.Background(), []byte(`{"text":"hello"}`), params, isResponse)
 		wantBody := `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Azure Content Safety API","direction":"REQUEST","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`
 		if isResponse {
 			wantBody = `{"message":{"action":"GUARDRAIL_INTERVENED","actionReason":"Error calling Azure Content Safety API","direction":"RESPONSE","interveningGuardrail":"AzureContentSafetyContentModeration"},"type":"AZURE_CONTENT_SAFETY_CONTENT_MODERATION"}`

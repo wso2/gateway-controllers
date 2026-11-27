@@ -85,7 +85,12 @@ var textCleanRegexCompiled = regexp.MustCompile(TextCleanRegex)
 type AzureContentSafetyContentModerationPolicy struct {
 	// Static configuration from params
 	endpoint string
-	apiKey   string
+	apiKey   string // api-key mode only
+
+	// auth is how the policy authenticates to Azure Content Safety, and tokens gets the access
+	// token in an identity mode (nil in api-key mode).
+	auth   authentication
+	tokens tokenSource
 
 	// HTTP client for connection reuse and pooling
 	client *http.Client
@@ -113,16 +118,20 @@ func GetPolicy(
 	params map[string]interface{},
 ) (policy.Policy, error) {
 	// Validate and extract static configuration from params
-	if err := validateAzureConfigParams(params); err != nil {
+	auth, err := validateAzureConfigParams(params)
+	if err != nil {
 		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
 	p := &AzureContentSafetyContentModerationPolicy{
 		endpoint: getStringParam(params, "azureContentSafetyEndpoint"),
-		apiKey:   getStringParam(params, "azureContentSafetyKey"),
+		auth:     auth,
 		client: &http.Client{
 			Timeout: requestTimeout,
 		},
+	}
+	if !auth.usesIdentity() {
+		p.apiKey = getStringParam(params, "azureContentSafetyKey")
 	}
 
 	// Extract and parse request parameters if present
@@ -150,7 +159,15 @@ func GetPolicy(
 		return nil, fmt.Errorf("at least one of 'request' or 'response' parameters must be provided")
 	}
 
-	slog.Debug("AzureContentSafety: Policy initialized", "endpoint", p.endpoint, "hasRequestParams", p.hasRequestParams, "hasResponseParams", p.hasResponseParams)
+	if auth.usesIdentity() {
+		tokens, err := useIdentity(auth)
+		if err != nil {
+			return nil, err
+		}
+		p.tokens = tokens
+	}
+
+	slog.Debug("AzureContentSafety: Policy initialized", "endpoint", p.endpoint, "authenticationType", auth.typ, "hasRequestParams", p.hasRequestParams, "hasResponseParams", p.hasResponseParams)
 
 	return p, nil
 }
@@ -270,35 +287,45 @@ func getStringParam(params map[string]interface{}, key string) string {
 	return ""
 }
 
-// validateAzureConfigParams validates Azure configuration parameters (from params)
-func validateAzureConfigParams(params map[string]interface{}) error {
+// validateAzureConfigParams validates Azure configuration parameters (from params) and returns how
+// the policy authenticates. The endpoint and key are the gateway's unless the API overrides them;
+// the endpoint must be one the gateway allows, and the key is required in api-key mode only.
+func validateAzureConfigParams(params map[string]interface{}) (authentication, error) {
 	// Validate azureContentSafetyEndpoint (required)
 	endpointRaw, ok := params["azureContentSafetyEndpoint"]
 	if !ok {
-		return fmt.Errorf("'azureContentSafetyEndpoint' parameter is required")
+		return authentication{}, fmt.Errorf("'azureContentSafetyEndpoint' parameter is required")
 	}
 	endpoint, ok := endpointRaw.(string)
 	if !ok {
-		return fmt.Errorf("'azureContentSafetyEndpoint' must be a string")
+		return authentication{}, fmt.Errorf("'azureContentSafetyEndpoint' must be a string")
 	}
 	if endpoint == "" {
-		return fmt.Errorf("'azureContentSafetyEndpoint' cannot be empty")
+		return authentication{}, fmt.Errorf("'azureContentSafetyEndpoint' cannot be empty")
+	}
+	if err := checkAllowedEndpoint(params, endpoint); err != nil {
+		return authentication{}, err
 	}
 
-	// Validate azureContentSafetyKey (required)
+	auth, err := parseAuthentication(params)
+	if err != nil || auth.usesIdentity() {
+		return auth, err
+	}
+
+	// Validate azureContentSafetyKey (required in api-key mode)
 	apiKeyRaw, ok := params["azureContentSafetyKey"]
 	if !ok {
-		return fmt.Errorf("'azureContentSafetyKey' parameter is required")
+		return auth, fmt.Errorf("'azureContentSafetyKey' parameter is required")
 	}
 	apiKey, ok := apiKeyRaw.(string)
 	if !ok {
-		return fmt.Errorf("'azureContentSafetyKey' must be a string")
+		return auth, fmt.Errorf("'azureContentSafetyKey' must be a string")
 	}
 	if apiKey == "" {
-		return fmt.Errorf("'azureContentSafetyKey' cannot be empty")
+		return auth, fmt.Errorf("'azureContentSafetyKey' cannot be empty")
 	}
 
-	return nil
+	return auth, nil
 }
 
 // OnRequestBody validates request body content
@@ -311,7 +338,7 @@ func (p *AzureContentSafetyContentModerationPolicy) OnRequestBody(ctx context.Co
 	if reqCtx.Body != nil {
 		content = reqCtx.Body.Content
 	}
-	return p.validatePayload(content, p.requestParams, false).(policy.RequestAction)
+	return p.validatePayload(ctx, content, p.requestParams, false).(policy.RequestAction)
 }
 
 // OnResponseBody validates response body content
@@ -324,11 +351,11 @@ func (p *AzureContentSafetyContentModerationPolicy) OnResponseBody(ctx context.C
 	if respCtx.ResponseBody != nil {
 		content = respCtx.ResponseBody.Content
 	}
-	return p.validatePayload(content, p.responseParams, true).(policy.ResponseAction)
+	return p.validatePayload(ctx, content, p.responseParams, true).(policy.ResponseAction)
 }
 
 // validatePayload validates payload against Azure Content Safety, returning policy actions.
-func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []byte, params AzureContentSafetyPolicyParams, isResponse bool) interface{} {
+func (p *AzureContentSafetyContentModerationPolicy) validatePayload(ctx context.Context, payload []byte, params AzureContentSafetyPolicyParams, isResponse bool) interface{} {
 	categoryMap := p.buildCategoryMap(params)
 	categories := p.getValidCategories(categoryMap)
 
@@ -363,7 +390,24 @@ func (p *AzureContentSafetyContentModerationPolicy) validatePayload(payload []by
 	extractedValue = textCleanRegexCompiled.ReplaceAllString(extractedValue, "")
 	extractedValue = strings.TrimSpace(extractedValue)
 
-	categoriesAnalysis, err := p.callAzureContentSafetyAPI(p.endpoint, p.apiKey, extractedValue, categories)
+	// In an identity mode the token is fetched once per check, before the call and its retries.
+	// Failing to get one fails the check the way a failed call does.
+	credentialHeader, credential := "Ocp-Apim-Subscription-Key", p.apiKey
+	if p.tokens != nil {
+		token, err := p.accessToken(ctx, isResponse)
+		if err != nil {
+			if params.PassthroughOnError {
+				if isResponse {
+					return policy.DownstreamResponseModifications{}
+				}
+				return policy.UpstreamRequestModifications{}
+			}
+			return withFault(p.buildErrorResponse("Error calling Azure Content Safety API", errNoAccessToken, isResponse, params.ShowAssessment, nil, "", ""), checkFailureFault(errNoAccessToken.Error()+": "+err.Error(), isResponse))
+		}
+		credentialHeader, credential = "Authorization", "Bearer "+token
+	}
+
+	categoriesAnalysis, err := p.callAzureContentSafetyAPI(p.endpoint, credentialHeader, credential, extractedValue, categories)
 	if err != nil {
 		if params.PassthroughOnError {
 			slog.Debug("AzureContentSafety: API call error, passthrough enabled", "error", err, "isResponse", isResponse)
@@ -466,14 +510,11 @@ func (p *AzureContentSafetyContentModerationPolicy) getValidCategories(categoryM
 	return categories
 }
 
-// callAzureContentSafetyAPI calls Azure Content Safety API
-func (p *AzureContentSafetyContentModerationPolicy) callAzureContentSafetyAPI(endpoint, apiKey, text string, categories []string) ([]map[string]interface{}, error) {
-	// Ensure endpoint doesn't end with /
-	if strings.HasSuffix(endpoint, "/") {
-		endpoint = strings.TrimSuffix(endpoint, "/")
-	}
-
-	serviceURL := endpoint + endpointSuffix
+// callAzureContentSafetyAPI calls Azure Content Safety API, sending credential in credentialHeader:
+// the subscription key in Ocp-Apim-Subscription-Key, or a bearer token in Authorization.
+func (p *AzureContentSafetyContentModerationPolicy) callAzureContentSafetyAPI(endpoint, credentialHeader, credential, text string, categories []string) ([]map[string]interface{}, error) {
+	// Every trailing slash goes, as the endpoint allowlist ignores them all.
+	serviceURL := strings.TrimRight(endpoint, "/") + endpointSuffix
 
 	requestBody := map[string]interface{}{
 		"text":               text,
@@ -488,8 +529,8 @@ func (p *AzureContentSafetyContentModerationPolicy) callAzureContentSafetyAPI(en
 	}
 
 	headers := map[string]string{
-		"Content-Type":              "application/json",
-		"Ocp-Apim-Subscription-Key": apiKey,
+		"Content-Type":   "application/json",
+		credentialHeader: credential,
 	}
 
 	// Make HTTP request with retry
