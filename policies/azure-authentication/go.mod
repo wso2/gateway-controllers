@@ -1,6 +1,6 @@
 module github.com/wso2/gateway-controllers/policies/azure-authentication
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/wso2/api-platform/sdk/ai v0.2.4
