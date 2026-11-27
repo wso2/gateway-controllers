@@ -1,11 +1,14 @@
 package subscriptionvalidation
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
 	policyenginev1 "github.com/wso2/api-platform/sdk/core/policyengine"
@@ -494,6 +497,136 @@ func TestOnRequestHeaders_NoRateLimitWithoutPlan(t *testing.T) {
 		if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
 			t.Fatalf("request %d should be allowed (no throttle plan), got %#v", i+1, action)
 		}
+	}
+}
+
+// --- throttle units ----------------------------------------------------------
+
+func TestWindowDuration(t *testing.T) {
+	for unit, want := range map[string]time.Duration{
+		"MINUTE":     time.Minute,
+		"HOUR":       time.Hour,
+		"DAY":        24 * time.Hour,
+		"MONTH":      30 * 24 * time.Hour,
+		"Min":        time.Minute,
+		"Hour":       time.Hour,
+		"Day":        24 * time.Hour,
+		"Month":      30 * 24 * time.Hour,
+		"minute":     time.Minute,
+		"MIN":        time.Minute,
+		" MINUTE ":   time.Minute,
+		"\tMinute\n": time.Minute,
+		"":           0,
+		"MINUTES":    0,
+		"m":          0,
+		"SECOND":     0,
+		"WEEK":       0,
+		"YEAR":       0,
+	} {
+		if got := windowDuration(unit); got != want {
+			t.Errorf("windowDuration(%q) = %v, want %v", unit, got, want)
+		}
+	}
+}
+
+func TestEntryThrottleUnitString(t *testing.T) {
+	for window, want := range map[time.Duration]string{
+		time.Minute:         "Min",
+		time.Hour:           "Hour",
+		24 * time.Hour:      "Day",
+		30 * 24 * time.Hour: "Month",
+		2 * time.Minute:     "2m0s",
+	} {
+		if got := entryThrottleUnitString(window); got != want {
+			t.Errorf("entryThrottleUnitString(%v) = %q, want %q", window, got, want)
+		}
+	}
+}
+
+func TestOnRequestHeaders_RateLimitEnforcedForEveryUnit(t *testing.T) {
+	for _, tc := range []struct {
+		unit, label   string
+		windowSeconds int
+	}{
+		{"MINUTE", "Min", 60},
+		{"Min", "Min", 60},
+		{" minute ", "Min", 60},
+		{"HOUR", "Hour", 3600},
+		{"DAY", "Day", 86400},
+		{"MONTH", "Month", 2592000},
+		{"Month", "Month", 2592000},
+	} {
+		t.Run(tc.unit, func(t *testing.T) {
+			store := newStore([]policyenginev1.SubscriptionData{
+				{
+					APIId:              "api-1",
+					SubscriptionToken:  policyenginev1.HashSubscriptionToken("tok-1"),
+					Status:             "ACTIVE",
+					ThrottleLimitCount: 2,
+					ThrottleLimitUnit:  tc.unit,
+					StopOnQuotaReach:   true,
+				},
+			})
+			p := newPolicy(defaultCfg(), store)
+
+			for i := 0; i < 2; i++ {
+				assertSuccess(t, p.OnRequestHeaders(context.Background(), headerCtxWithToken("api-1", "tok-1", ""), make(map[string]interface{})))
+			}
+
+			resp := mustImmediate(t, p.OnRequestHeaders(context.Background(), headerCtxWithToken("api-1", "tok-1", ""), make(map[string]interface{})))
+			if resp.StatusCode != 429 {
+				t.Fatalf("expected status 429, got %d", resp.StatusCode)
+			}
+			assertBody(t, resp, `{"error":"rate_limit_exceeded","message":"Subscription quota exceeded: 2 requests per `+tc.label+`"}`)
+			assertRateLimitHeaders(t, resp, 2, 0)
+			if got, want := resp.Headers["RateLimit-Policy"], "2;w="+strconv.Itoa(tc.windowSeconds); got != want {
+				t.Fatalf("RateLimit-Policy = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestOnRequestHeaders_UnknownUnitAllowsAndWarnsOnce(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	sub := func(apiID string) policyenginev1.SubscriptionData {
+		return policyenginev1.SubscriptionData{
+			APIId:              apiID,
+			SubscriptionToken:  policyenginev1.HashSubscriptionToken("tok-1"),
+			Status:             "ACTIVE",
+			ThrottleLimitCount: 1,
+			ThrottleLimitUnit:  "WEEK",
+			StopOnQuotaReach:   true,
+		}
+	}
+	p := newPolicy(defaultCfg(), newStore([]policyenginev1.SubscriptionData{
+		sub("api-unknown-unit-1"), sub("api-unknown-unit-2"),
+	}))
+
+	send := func(apiID string, n int) {
+		for i := 0; i < n; i++ {
+			action := p.OnRequestHeaders(context.Background(), headerCtxWithToken(apiID, "tok-1", ""), make(map[string]interface{}))
+			if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
+				t.Fatalf("%s request %d should be allowed (unit not enforced), got %#v", apiID, i+1, action)
+			}
+		}
+	}
+	const warning = "unrecognised throttle limit unit"
+
+	send("api-unknown-unit-1", 5)
+	if got := strings.Count(logs.String(), warning); got != 1 {
+		t.Fatalf("expected 1 warning after 5 requests to one API, got %d:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "apiId=api-unknown-unit-1") || !strings.Contains(logs.String(), "throttleLimitUnit=WEEK") {
+		t.Fatalf("warning should name the API and the unit, got:\n%s", logs.String())
+	}
+
+	send("api-unknown-unit-2", 3)
+	if got := strings.Count(logs.String(), warning); got != 2 {
+		t.Fatalf("expected one more warning for a second API, got %d in total:\n%s", got, logs.String())
 	}
 }
 

@@ -54,6 +54,8 @@ type SubscriptionValidationPolicy struct {
 }
 
 var (
+	// unknownUnitWarned holds the API and unit pairs already logged as unrecognised.
+	unknownUnitWarned sync.Map
 	sharedRateLimitMu = &sync.Mutex{}
 	ins               = &SubscriptionValidationPolicy{
 		cfg: PolicyConfig{
@@ -124,8 +126,8 @@ func mergeConfig(base PolicyConfig, params map[string]interface{}) PolicyConfig 
 
 // windowDuration converts a throttle unit string to a time.Duration.
 func windowDuration(unit string) time.Duration {
-	switch strings.ToLower(unit) {
-	case "min":
+	switch strings.ToLower(strings.TrimSpace(unit)) {
+	case "min", "minute":
 		return time.Minute
 	case "hour":
 		return time.Hour
@@ -148,6 +150,8 @@ func entryThrottleUnitString(window time.Duration) string {
 		return "Hour"
 	case 24 * time.Hour:
 		return "Day"
+	case 30 * 24 * time.Hour:
+		return "Month"
 	default:
 		return window.String()
 	}
@@ -341,6 +345,10 @@ func (p *SubscriptionValidationPolicy) validateByToken(apiID, token string) (pol
 func (p *SubscriptionValidationPolicy) checkRateLimit(apiID, token string, entry *policyenginev1.SubscriptionEntry) policy.RequestAction {
 	window := windowDuration(entry.ThrottleLimitUnit)
 	if window == 0 {
+		if _, seen := unknownUnitWarned.LoadOrStore(apiID+"|"+entry.ThrottleLimitUnit, struct{}{}); !seen {
+			slog.Warn("subscriptionValidation: unrecognised throttle limit unit; rate limit not enforced",
+				"apiId", apiID, "throttleLimitUnit", entry.ThrottleLimitUnit)
+		}
 		return nil
 	}
 
