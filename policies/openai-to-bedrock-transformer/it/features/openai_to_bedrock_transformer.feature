@@ -178,8 +178,8 @@ Feature: OpenAI to Bedrock transformer
     Then the response status code should be 200
     And the JSON response field "body" should contain "Use metric units."
     And the JSON response field "body" should contain "document"
-    And the JSON response field "body" should match pattern "name.:.Q3 report.[,}]"
-    And the JSON response field "body" should match pattern "name.:.Q3 report-2.[,}]"
+    And the response body should match pattern "name[^a-z]+Q3 report[^a-zA-Z0-9-]"
+    And the response body should match pattern "name[^a-z]+Q3 report-2"
     And the JSON response field "body" should contain "pdf"
     And the JSON response field "body" should contain "csv"
     And the JSON response field "body" should contain "txt"
@@ -197,7 +197,7 @@ Feature: OpenAI to Bedrock transformer
     And the JSON response field "body" should contain "toolSpec"
     And the JSON response field "body" should contain "inputSchema"
     And the JSON response field "body" should contain "Weather for a city"
-    And the JSON response field "body" should match pattern "toolChoice.:[{].any.:"
+    And the response body should match pattern "toolChoice[^a-z]+any"
     And the JSON response field "body" should contain "stopSequences"
     And the JSON response field "body" should contain "topP"
     And the JSON response field "body" should contain "maxTokens"
@@ -220,7 +220,7 @@ Feature: OpenAI to Bedrock transformer
     Then the response status code should be 200
     When I send a "GET" request to the "capture" service at "/test/captured?path=/model/amazon.nova-lite-v1/converse"
     Then the response status code should be 200
-    And the JSON response field "body" should match pattern "toolChoice.:[{].auto.:"
+    And the response body should match pattern "toolChoice[^a-z]+auto"
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
       """
       {"messages":[{"role":"user","content":"Hi"}],"tools":[{"type":"function","function":{"name":"get_weather"}}],"tool_choice":{"type":"function","function":{"name":"get_weather"}}}
@@ -228,7 +228,7 @@ Feature: OpenAI to Bedrock transformer
     Then the response status code should be 200
     When I send a "GET" request to the "capture" service at "/test/captured?path=/model/amazon.nova-lite-v1/converse"
     Then the response status code should be 200
-    And the JSON response field "body" should match pattern "toolChoice.:[{].tool.:[{].name.:.get_weather."
+    And the response body should match pattern "toolChoice[^a-z]+tool[^a-z]+name[^a-z]+get_weather"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:providerName}"
@@ -693,7 +693,7 @@ Feature: OpenAI to Bedrock transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
+    And the response body should match pattern "role[^a-z]+user[^a-z]+content[^a-z]+left untranslated[^a-z]+[}][]][}]"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:otherName}"

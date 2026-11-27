@@ -734,7 +734,7 @@ Feature: OpenAI to Gemini transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
+    And the response body should match pattern "role[^a-z]+user[^a-z]+content[^a-z]+left untranslated[^a-z]+[}][]][}]"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:otherName}"

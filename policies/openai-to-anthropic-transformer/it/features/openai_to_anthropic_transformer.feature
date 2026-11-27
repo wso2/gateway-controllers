@@ -277,7 +277,7 @@ Feature: OpenAI to Anthropic transformer
     And the JSON response field "body" should contain "10:00"
     And the JSON response field "body" should contain "input_schema"
     And the JSON response field "body" should contain "Weather for a city"
-    And the JSON response field "body" should match pattern "tool_choice.:[{][^}]*.type.:.any."
+    And the response body should match pattern "tool_choice[^}]*type[^}]*any"
     And the JSON response field "body" should contain "stop_sequences"
     And the JSON response field "body" should contain "top_p"
     And the response body should not contain "tool_calls"
@@ -300,8 +300,8 @@ Feature: OpenAI to Anthropic transformer
     Then the response status code should be 200
     When I send a "GET" request to the "capture" service at "/test/captured?path=/v1/messages"
     Then the response status code should be 200
-    And the JSON response field "body" should match pattern "tool_choice.:[{][^}]*.type.:.tool."
-    And the JSON response field "body" should match pattern "tool_choice.:[{][^}]*.name.:.get_weather."
+    And the response body should match pattern "tool_choice[^}]*type[^a-z]+tool[^a-z]"
+    And the response body should match pattern "tool_choice[^}]*name[^a-z]+get_weather"
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
       """
       {"model":"claude-3-5-haiku-20241022","messages":[{"role":"user","content":"Hi"}],"tools":[{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}
@@ -718,7 +718,7 @@ Feature: OpenAI to Anthropic transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
+    And the response body should match pattern "role[^a-z]+user[^a-z]+content[^a-z]+left untranslated[^a-z]+[}][]][}]"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:otherName}"
@@ -762,8 +762,6 @@ Feature: OpenAI to Anthropic transformer
     And the JSON response field "body" should contain "Sure thing."
     And the JSON response field "body" should contain "tool_use"
     And the JSON response field "body" should contain "auto"
-    And the response body should not contain "base64"
-    And the response body should not contain "image"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:providerName}"

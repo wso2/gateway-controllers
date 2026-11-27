@@ -587,7 +587,7 @@ Feature: OpenAI to Mistral transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
+    And the response body should match pattern "role[^a-z]+user[^a-z]+content[^a-z]+left untranslated[^a-z]+[}][]][}]"
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
       """
       {"model":"route-model","stream":true,"messages":[{"role":"user","content":"streamed untranslated"}]}

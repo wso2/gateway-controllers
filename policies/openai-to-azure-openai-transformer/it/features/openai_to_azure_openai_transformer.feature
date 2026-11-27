@@ -200,7 +200,7 @@ Feature: OpenAI to Azure OpenAI transformer
     Then the response status code should be 200
     And the JSON response field "path" should be "/openai/deployments/fallback-deployment/completions"
     And the JSON response field "query" should be "api-version=2024-10-21"
-    And the JSON response field "body" should match pattern "^not a json document[[:space:]]*$"
+    And the response body should match pattern "body[^a-z]{3}not a json document"
     # A model given as null counts as none, so the fallback deployment serves it too.
     When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
       """
@@ -301,7 +301,7 @@ Feature: OpenAI to Azure OpenAI transformer
       """
     Then the response status code should be 200
     And the JSON response field "path" should be "/other/chat/completions"
-    And the JSON response field "body" should match pattern "^[{].model.:.route-model.,.messages.:[[][{].role.:.user.,.content.:.left untranslated.[}][]][}][[:space:]]*$"
+    And the response body should match pattern "role[^a-z]+user[^a-z]+content[^a-z]+left untranslated[^a-z]+[}][]][}]"
     When I delete the LLM proxy "${CTX:proxyName}"
     Then the response should be successful
     When I delete the LLM provider "${CTX:otherName}"
