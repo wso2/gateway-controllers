@@ -76,9 +76,10 @@ parameters:
             has no model or does not parse, an unreadable text body, an
             ambiguous multipart form, a query string or path that cannot be
             decoded, and a model given more than once (including a key that
-            differs only in case, such as MODEL, a model[] key, or a model
-            behind a ';' separator) are rejected either way. A model field in a
-            multipart or form body is always checked.
+            differs only in case, such as MODEL, a model[] key or part, a
+            model behind a ';' separator, or a ';' inside the model value) are
+            rejected either way. A model field in a multipart or form body is
+            always checked.
     fallback:
       title: Fallback
       type: object
@@ -158,7 +159,7 @@ systemParameters:
       properties:
         location:
           type: string
-          enum: [payload, header, queryParam, pathParam]
+          enum: [payload, body, header, queryParam, pathParam]
         identifier:
           type: string
           minLength: 1

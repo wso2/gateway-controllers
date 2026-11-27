@@ -780,3 +780,83 @@ func TestCheckNoRepeatedMembers(t *testing.T) {
 		}
 	}
 }
+
+// A ';' inside the model value is a second pair to a parser that also splits on ';',
+// which would read only the part before it, so the request is rejected, never checked
+// as one longer name a deny list does not hold.
+func TestHardening_SemicolonInsideTheModelValue(t *testing.T) {
+	query := denyList(t, queryModel())
+	for _, path := range []string{"/p/chat?model=gpt-4-32k;x=1", "/p/chat?model=gpt-4-32k;", "/p/chat?x=1&model=gpt-4-32k;v=2&y=3"} {
+		wantStatus(t, onHeaders(query, headerContext("POST", path, nil)), 400)
+	}
+	wantStatus(t, onHeaders(query, headerContext("POST", "/p/chat?model=gpt-4o&x=1", nil)), forward)
+
+	form := denyList(t, payloadModel())
+	urlencoded := "application/x-www-form-urlencoded"
+	wantStatus(t, onBody(t, form, bodyContext("POST", urlencoded, "model=gpt-4-32k;&language=en")), 400)
+	wantStatus(t, onBody(t, form, bodyContext("POST", urlencoded, "model=gpt-4o&language=en")), forward)
+
+	// Matrix parameters: servers such as Tomcat strip ";v=1" from a path segment.
+	path := denyList(t, pathModel())
+	for _, p := range []string{"/p/models/gpt-4-32k;v=1/chat", "/p/models/gpt-4-32k%3Bv=1/chat"} {
+		wantStatus(t, onHeaders(path, headerContext("POST", p, nil)), 400)
+	}
+	wantStatus(t, onHeaders(path, headerContext("POST", "/p/models/gpt-4o/chat", nil)), forward)
+}
+
+// A multipart part named model[] or model[0] is the model to bracket-aware form
+// binders, exactly as it is in a URL-encoded body, so it is never skipped or ignored.
+func TestHardening_MultipartBracketedModelNames(t *testing.T) {
+	p := strictSkip(t, payloadModel())
+	mp := "multipart/form-data; boundary=b"
+	part := func(name, value string) string {
+		return "--b\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n"
+	}
+	for _, name := range []string{"model[]", "model[0]", "MODEL[]", " model[x]"} {
+		wantStatus(t, onBody(t, p, bodyContext("POST", mp, part(name, "llama-3")+"--b--\r\n")), 400)
+		wantStatus(t, onBody(t, p, bodyContext("POST", mp, part("model", "gpt-4o")+part(name, "llama-3")+"--b--\r\n")), 400)
+	}
+	// Other names that only start like the key are not the model.
+	wantStatus(t, onBody(t, p, bodyContext("POST", mp, part("model", "gpt-4o")+part("models", "x")+part("model_id", "y")+"--b--\r\n")), forward)
+}
+
+// The leading lookbehind form other LLM policies accept is read as the model that
+// follows the prefix, and a fallback rewrites only that model.
+func TestGetPolicy_PathLookbehindIsTheModelAfterThePrefix(t *testing.T) {
+	lookbehind := map[string]any{"location": "pathParam", "identifier": `(?<=models/)[a-zA-Z0-9.\-]+`}
+	p := governed(t, lookbehind)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/v1beta/models/gpt-4o:generateContent", nil)), forward)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/v1beta/models/llama-3:generateContent", nil)), 404)
+	action := onHeaders(p, headerContext("POST", "/v1beta/models/old-model:generateContent", nil))
+	mods, ok := action.(policy.UpstreamRequestHeaderModifications)
+	if !ok || mods.Path == nil || *mods.Path != "/v1beta/models/gpt-4o:generateContent" {
+		t.Fatalf("lookbehind fallback = %#v, want the path rewritten to gpt-4o", action)
+	}
+
+	for _, bad := range []string{`(?<=models/`, `(?<=)[a-z]+`, `(?<=models/)`} {
+		_, err := GetPolicy(policy.PolicyMetadata{}, map[string]any{
+			"requestModel": map[string]any{"location": "pathParam", "identifier": bad},
+			"access":       allowOnly("gpt-4o"),
+		})
+		if err == nil {
+			t.Errorf("GetPolicy(%q) succeeded, want an error", bad)
+		}
+	}
+}
+
+// "body" is the older name of the payload location.
+func TestGetPolicy_BodyIsThePayloadLocation(t *testing.T) {
+	p := strictSkip(t, map[string]any{"location": "body", "identifier": "$.model"})
+	wantStatus(t, onBody(t, p, jsonBody(`{"model":"gpt-4o"}`)), forward)
+	wantStatus(t, onBody(t, p, jsonBody(`{"model":"llama-3"}`)), 404)
+}
+
+// The awsbedrock template of gateway 1.2.0 has no '%' in its model class, so an
+// inference-profile ARN, which carries an encoded '/', cannot be read whole and is
+// rejected rather than checked against a part of it.
+func TestHardening_ArnWithoutPercentInTheTemplate(t *testing.T) {
+	p := strictSkip(t, map[string]any{"location": "pathParam", "identifier": `model/([A-Za-z0-9.:-]+)/`})
+	arn := "/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123%3Aapplication-inference-profile%2Fabc/converse"
+	wantStatus(t, onHeaders(p, headerContext("POST", arn, nil)), 400)
+	wantStatus(t, onHeaders(p, headerContext("POST", "/model/gpt-4o/converse", nil)), forward)
+}

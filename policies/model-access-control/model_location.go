@@ -94,6 +94,10 @@ func parseModelLocation(raw any, rewrites bool) (modelLocation, error) {
 		return modelLocation{}, err
 	}
 
+	// "body" is the older name of "payload", still accepted by the other model policies.
+	if location == "body" {
+		location = string(locationPayload)
+	}
 	loc := modelLocation{kind: locationKind(location), identifier: identifier}
 	switch loc.kind {
 	case locationPayload:
@@ -112,23 +116,82 @@ func parseModelLocation(raw any, rewrites bool) (modelLocation, error) {
 			return modelLocation{}, fmt.Errorf("'requestModel.identifier' must be a query parameter name, got %q", identifier)
 		}
 	case locationPath:
-		re, err := regexp.Compile(identifier)
+		re, group, err := compilePathExpression(identifier)
 		if err != nil {
 			return modelLocation{}, fmt.Errorf("'requestModel.identifier' is not a valid RE2 expression: %w", err)
 		}
 		// Rewriting replaces exactly one capture group, so it can never touch the
 		// prefix or suffix the expression also matches.
-		if rewrites && re.NumSubexp() < 1 {
+		if rewrites && group < 1 {
 			return modelLocation{}, fmt.Errorf("'requestModel.identifier' must have a capture group for the model when 'fallback' is set")
 		}
 		loc.pathRegex = re
-		if re.NumSubexp() > 0 {
-			loc.pathGroup = 1
-		}
+		loc.pathGroup = group
 	default:
 		return modelLocation{}, fmt.Errorf("'requestModel.location' must be one of payload, header, queryParam or pathParam, got %q", location)
 	}
 	return loc, nil
+}
+
+// lookbehindModelGroup names the group that holds the model when a lookbehind
+// expression is rewritten.
+const lookbehindModelGroup = "mac_model"
+
+// compilePathExpression compiles a pathParam expression and returns the group that
+// holds the model: the named group of a rewritten lookbehind, else the first group,
+// else 0 (the whole match). RE2 has no lookbehind, so a leading "(?<=prefix)model",
+// which other LLM provider templates and policies use, becomes
+// "(?:prefix)(?P<mac_model>model)": the same model, read and rewritten in its group.
+func compilePathExpression(expression string) (*regexp.Regexp, int, error) {
+	const prefix = "(?<="
+	normalized, named := expression, false
+	if strings.HasPrefix(expression, prefix) {
+		body := expression[len(prefix):]
+		closing, depth, inClass := -1, 0, false
+		for i := 0; i < len(body) && closing < 0; i++ {
+			switch body[i] {
+			case '\\':
+				i++
+			case '[':
+				inClass = true
+			case ']':
+				inClass = false
+			case '(':
+				if !inClass {
+					depth++
+				}
+			case ')':
+				if inClass {
+					continue
+				}
+				if depth == 0 {
+					closing = i
+				} else {
+					depth--
+				}
+			}
+		}
+		if closing < 0 {
+			return nil, 0, fmt.Errorf("unterminated lookbehind")
+		}
+		behind, model := body[:closing], body[closing+1:]
+		if behind == "" || model == "" {
+			return nil, 0, fmt.Errorf("a lookbehind must hold a prefix and be followed by the model expression")
+		}
+		normalized = "(?:" + behind + ")(?P<" + lookbehindModelGroup + ">" + model + ")"
+		named = true
+	}
+	re, err := regexp.Compile(normalized)
+	if err != nil {
+		return nil, 0, err
+	}
+	switch {
+	case named:
+		return re, re.SubexpIndex(lookbehindModelGroup), nil
+	case re.NumSubexp() > 0:
+		return re, 1, nil
+	}
+	return re, 0, nil
 }
 
 // parseJSONPath accepts the dotted subset of JSONPath the SDK helpers implement
@@ -293,6 +356,11 @@ func (l modelLocation) matchPath(rawPath string) (model string, start, end int, 
 		return "", 0, 0, false, nil
 	}
 	from, to := idx[group], idx[group+1]
+	// Servers such as Tomcat strip ";name=value" matrix parameters from a path
+	// segment, so the upstream would read only the part before the ';'.
+	if strings.IndexByte(decoded[from:to], ';') >= 0 {
+		return "", 0, 0, false, errAmbiguousModel
+	}
 	if touchesKeptEscape(decoded, from, to) {
 		return "", 0, 0, false, errMalformedModel
 	}
@@ -441,6 +509,11 @@ func scanQuery(raw string, start int, key string) (queryValue, error) {
 		}
 		if decodedKey == key {
 			valueStart := cursor + valueOffset
+			// A parser that also splits on ';' reads only the part before it, which
+			// may be a model this check never sees.
+			if strings.IndexByte(raw[valueStart:end], ';') >= 0 {
+				return queryValue{}, errAmbiguousModel
+			}
 			value, err := url.QueryUnescape(raw[valueStart:end])
 			if err != nil {
 				return queryValue{}, errMalformedModel
@@ -570,8 +643,9 @@ func extractFromForm(kind formKind, boundary string, body []byte, key string) (s
 				return "", false, err
 			}
 			if name != key {
-				// Form binders such as ASP.NET's match field names ignoring case.
-				if strings.EqualFold(strings.TrimSpace(name), key) {
+				// Form binders such as ASP.NET's match field names ignoring case, and
+				// binders such as PHP's, Rack's or multer's read "model[]" as "model".
+				if formNameVariant(name, key) {
 					return "", false, errAmbiguousModel
 				}
 				continue
@@ -622,6 +696,19 @@ func partName(part *multipart.Part) (string, error) {
 		return "", errMalformedModel
 	}
 	return params["name"], nil
+}
+
+// formNameVariant reports whether a multipart field name that is not exactly key is
+// read as key by some form binder: the same name in another case or with surrounding
+// spaces, or the name followed by a bracket suffix such as "[]" or "[0]".
+func formNameVariant(name, key string) bool {
+	if strings.EqualFold(strings.TrimSpace(name), key) {
+		return true
+	}
+	if open := strings.IndexByte(name, '['); open >= 0 {
+		return strings.EqualFold(strings.TrimSpace(name[:open]), key)
+	}
+	return false
 }
 
 // rewriteForm replaces the model field of a form body. A URL-encoded body changes

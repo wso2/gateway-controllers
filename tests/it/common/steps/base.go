@@ -1237,40 +1237,7 @@ func (b *Base) sendUntilJSONFieldStringLength(
 // overall length, leaving a length check satisfied against wording that has not actually
 // changed to what the scenario expects next. A substring check catches that case.
 func (b *Base) sendUntilBodyContains(ctx context.Context, method, path, want string, body *godog.DocString) error {
-	resolved, err := stepscommon.Expand(ctx, path)
-	if err != nil {
-		return err
-	}
-	url, err := b.gatewayURL(resolved)
-	if err != nil {
-		return err
-	}
-	wantValue, err := stepscommon.Expand(ctx, want)
-	if err != nil {
-		return err
-	}
-	headers := b.scenarioHeaders(ctx)
-	payload, err := b.expandBody(ctx, body, headers)
-	if err != nil {
-		return err
-	}
-
-	return stepscommon.AwaitResponse(ctx,
-		func(ctx context.Context) (*httpx.Response, error) {
-			response, sendErr := b.funnel.Send(ctx, httpx.Request{
-				Method: strings.ToUpper(method), URL: url, Body: payload, Headers: headers,
-				Host: b.requestHost(ctx),
-			})
-			if sendErr != nil {
-				return nil, retry.Transient(sendErr)
-			}
-			return response, nil
-		},
-		func(r *httpx.Response) bool {
-			return r != nil && r.StatusCode == 200 && strings.Contains(string(r.Body), wantValue)
-		},
-		fmt.Sprintf("waiting for %s %s to answer with a body containing %q",
-			strings.ToUpper(method), url, wantValue))
+	return b.sendUntilStatusAndBodyContainsWithBody(ctx, method, path, 200, want, body)
 }
 
 func (b *Base) statusCodeIs(ctx context.Context, want int) error {

@@ -451,3 +451,138 @@ Feature: Model access control cannot be bypassed by the shape of a request
     Then the response should be successful
     When I delete the LLM provider template "${CTX:headerTemplateName}"
     Then the response should be successful
+
+  Scenario: A semicolon inside the model, a bracketed multipart name or a non-string model cannot slip past a deny list
+    Given I generate a unique resource name from "mac-semi-template" and store it as "templateName"
+    And I generate a unique value from "mac-semi-template" and store it as "templateDisplayName"
+    And I generate a unique resource name from "mac-semi-provider" and store it as "uriProviderName"
+    And I generate a unique value from "mac-semi-provider" and store it as "uriProviderDisplayName"
+    And I generate a unique API version from "mac-semi-provider" and store it as "uriProviderVersion"
+    And I generate a unique API context from "/mac-semi-provider" and store it as "uriProviderContext"
+    And I generate a unique resource name from "mac-part-provider" and store it as "bodyProviderName"
+    And I generate a unique value from "mac-part-provider" and store it as "bodyProviderDisplayName"
+    And I generate a unique API version from "mac-part-provider" and store it as "bodyProviderVersion"
+    And I generate a unique API context from "/mac-part-provider" and store it as "bodyProviderContext"
+    When I create LLM provider template from "resources/templates/llm-provider-template.yaml" with values:
+      | apiVersion            | ${CTX:gatewaySpecVersion}                      |
+      | name                  | ${CTX:templateName}                            |
+      | displayName           | ${CTX:templateDisplayName}                     |
+      | spec.requestModel     | {"location":"queryParam","identifier":"model"} |
+      | spec.resourceMappings | {"resources":[{"resource":"/deployments/*","requestModel":{"location":"pathParam","identifier":"/deployments/([^/]+)/chat"}}]} |
+    Then the response status code should be 201
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}                     |
+      | name               | ${CTX:uriProviderName}                        |
+      | displayName        | ${CTX:uriProviderDisplayName}                 |
+      | version            | ${CTX:uriProviderVersion}                     |
+      | template           | ${CTX:templateName}                           |
+      | spec.context       | ${CTX:uriProviderContext}                     |
+      | spec.upstream.url  | ${CTX:captureUpstream}/${CTX:uriProviderName} |
+      | accessControl.mode | allow_all                                     |
+      | spec.policies      | [{"name":"model-access-control","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"access":{"mode":"deny","models":["gpt-4-32k"]}}},{"path":"/deployments/*","methods":["POST"],"params":{"access":{"mode":"deny","models":["gpt-4-32k"]}}}]}] |
+    Then the response status code should be 201
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}                      |
+      | name               | ${CTX:bodyProviderName}                        |
+      | displayName        | ${CTX:bodyProviderDisplayName}                 |
+      | version            | ${CTX:bodyProviderVersion}                     |
+      | template           | openai                                         |
+      | spec.context       | ${CTX:bodyProviderContext}                     |
+      | spec.upstream.url  | ${CTX:captureUpstream}/${CTX:bodyProviderName} |
+      | accessControl.mode | allow_all                                      |
+      | spec.policies      | [{"name":"model-access-control","version":"v0","paths":[{"path":"/audio/transcriptions","methods":["POST"],"params":{"access":{"mode":"deny","models":["gpt-4-32k"],"onMissingModel":"skip"}}}]}] |
+    Then the response status code should be 201
+
+    # A query model: a parser that splits on ';' would read only the denied model.
+    When I send a "POST" request to "${CTX:uriProviderContext}/chat/completions?model=gpt-4o" until status 200 with body:
+      """
+      {"messages":[]}
+      """
+    Then the JSON response field "query" should be "model=gpt-4o"
+    When I send a "POST" request to "${CTX:uriProviderContext}/chat/completions?model=gpt-4-32k;x=1" with body:
+      """
+      {"messages":[]}
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+
+    # A path model: a server that strips matrix parameters would read only the denied model.
+    When I send a "POST" request to "${CTX:uriProviderContext}/deployments/gpt-4o/chat" until status 200 with body:
+      """
+      {"messages":[]}
+      """
+    Then the JSON response field "path" should be "/${CTX:uriProviderName}/deployments/gpt-4o/chat"
+    When I send a "POST" request to "${CTX:uriProviderContext}/deployments/gpt-4-32k;v=1/chat" with body:
+      """
+      {"messages":[]}
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+    When I send a "POST" request to "${CTX:uriProviderContext}/deployments/gpt-4-32k%3Bv=1/chat" with body:
+      """
+      {"messages":[]}
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+
+    # A form value: the same ';' split.
+    When I set header "Content-Type" to "application/x-www-form-urlencoded"
+    And I send a "POST" request to "${CTX:bodyProviderContext}/audio/transcriptions" until status 400 with body:
+      """
+      model=gpt-4-32k;x=1
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+
+    # A multipart part named model[] or model[0] is the model to a binder that strips brackets,
+    # alone or next to a permitted model, and even with onMissingModel skip.
+    When I set header "Content-Type" to "multipart/form-data; boundary=mac-b"
+    And I send a "POST" request to "${CTX:bodyProviderContext}/audio/transcriptions" with body:
+      """
+      --mac-b
+      Content-Disposition: form-data; name="model[]"
+
+      gpt-4-32k
+      --mac-b--
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+    When I send a "POST" request to "${CTX:bodyProviderContext}/audio/transcriptions" with body:
+      """
+      --mac-b
+      Content-Disposition: form-data; name="model"
+
+      whisper-1
+      --mac-b
+      Content-Disposition: form-data; name="model[0]"
+
+      gpt-4-32k
+      --mac-b--
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+
+    # A different field name is not the model.
+    When I send a "POST" request to "${CTX:bodyProviderContext}/audio/transcriptions" with body:
+      """
+      --mac-b
+      Content-Disposition: form-data; name="models"
+
+      gpt-4-32k
+      --mac-b
+      Content-Disposition: form-data; name="model"
+
+      whisper-1
+      --mac-b--
+      """
+    Then the response status code should be 200
+    And the response body should contain "whisper-1"
+
+    # A model that is not a string is unreadable, not absent, so skip does not forward it.
+    When I set header "Content-Type" to "application/json"
+    And I send a "POST" request to "${CTX:bodyProviderContext}/audio/transcriptions" with body:
+      """
+      {"model":["gpt-4-32k"]}
+      """
+    Then the response should match the expected error response "model-access-control-invalid-model"
+
+    When I delete the LLM provider "${CTX:uriProviderName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:bodyProviderName}"
+    Then the response should be successful
+    When I delete the LLM provider template "${CTX:templateName}"
+    Then the response should be successful

@@ -114,7 +114,7 @@ func TestGetPolicy_RejectsInvalidConfiguration(t *testing.T) {
 		{"pattern can expand empty", withMapping(map[string]any{"mappingPatterns": []any{patternRule("(.*)", "$1", "")}}), "empty model name"},
 		{"too many mapping patterns", withMapping(map[string]any{"mappingPatterns": make([]any, maxPatterns+1)}), "at most"},
 		{"missing requestModel", map[string]any{"access": allowOnly("a")}, "'requestModel' is required"},
-		{"requestModel unsupported location", with("requestModel", map[string]any{"location": "body", "identifier": "$.model"}), "must be one of"},
+		{"requestModel unsupported location", with("requestModel", map[string]any{"location": "cookie", "identifier": "model"}), "must be one of"},
 		{"requestModel blank identifier", with("requestModel", map[string]any{"location": "payload", "identifier": " "}), "must not be empty"},
 		{"payload root identifier", with("requestModel", map[string]any{"location": "payload", "identifier": "$"}), "document root"},
 		{"payload wildcard identifier", with("requestModel", map[string]any{"location": "payload", "identifier": "$.choices.*.model"}), "dotted JSONPath"},

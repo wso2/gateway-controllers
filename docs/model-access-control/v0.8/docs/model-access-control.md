@@ -104,8 +104,8 @@ override when the template has one. It is not a user-configurable parameter.
 
 | System parameter | Type | Required | Description |
 |---|---|---|---|
-| `requestModel.location` | string | Yes | `payload`, `header`, `queryParam` or `pathParam`. |
-| `requestModel.identifier` | string | Yes | A dotted JSONPath such as `$.model` for `payload` (an array index such as `items[0]` cannot follow a key that contains `-`), a header name for `header`, a query parameter name for `queryParam`, or an RE2 expression for `pathParam`. When `mappingPatterns` is configured, a `pathParam` expression must have a capture group around the model, for example `/models/([^/]+)/chat`. |
+| `requestModel.location` | string | Yes | `payload`, `header`, `queryParam` or `pathParam`. `body` is accepted as the older name of `payload`. |
+| `requestModel.identifier` | string | Yes | A dotted JSONPath such as `$.model` for `payload` (an array index such as `items[0]` cannot follow a key that contains `-`), a header name for `header`, a query parameter name for `queryParam`, or an RE2 expression for `pathParam`. When `mappingPatterns` is configured, a `pathParam` expression must have a capture group around the model, for example `/models/([^/]+)/chat`. A leading lookbehind such as `(?<=models/)[a-zA-Z0-9.\-]+`, which RE2 does not support, is read as the model that follows the prefix. |
 
 For `payload`, the policy buffers the request body. For the other locations it
 reads only the request headers and the path, and never buffers the body.
@@ -379,7 +379,10 @@ Anything an upstream parser could read as a second model counts:
   one that differs only in case or surrounding spaces (`MODEL`, `Model`), one
   with an array suffix (`model[]`), or one behind a `;` separator
   (`x=1;model=...`);
-- two multipart parts named `model` in any case;
+- a `;` inside a query or form model value (`model=gpt-4o;x=1`), because a parser
+  that splits on `;` reads only the part before it;
+- two multipart parts named `model` in any case, or a part whose name has an
+  array suffix (`model[]`, `model[0]`), even when it is the only model part;
 - a repeated JSON key on the model's path, including keys that differ only in
   case (`model` and `MODEL`);
 - two matches of the `pathParam` expression in one path, also after encoded
@@ -389,7 +392,14 @@ Anything an upstream parser could read as a second model counts:
 ### Model in the path (`pathParam`)
 
 - An encoded slash (`%2F`) inside the model stays part of it, so a Bedrock
-  inference-profile ARN is read and rewritten whole.
+  inference-profile ARN is read and rewritten whole when the template's
+  expression allows `%` in the model, as `model/([A-Za-z0-9.:%-]+)/` does. The
+  awsbedrock template of gateway 1.2.0 uses `model/([A-Za-z0-9.:-]+)/`, so on
+  that gateway a request that names its model by ARN is rejected with `400`,
+  even when the ARN is permitted; a model named by its ID is not affected.
+- A `;` inside the model's path segment (`/models/gpt-4o;v=1/`) is rejected,
+  because servers such as Tomcat strip matrix parameters and would read only
+  the part before it.
 - If the template's expression cannot read past an encoded character, the
   request is rejected instead of checking only part of the model.
 - A path with a `.` or `..` segment, written plainly or encoded (`%2e%2e`, or

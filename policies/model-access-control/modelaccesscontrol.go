@@ -420,7 +420,7 @@ func (p *Policy) OnRequestBody(_ context.Context, reqCtx *policy.RequestContext,
 	facts := factsFrom(reqCtx.SharedContext)
 	skippable := mayCarryNoModel(reqCtx.Method, reqCtx.Headers)
 
-	if reqCtx.Body == nil || !reqCtx.Body.Present || len(strings.TrimSpace(string(reqCtx.Body.Content))) == 0 {
+	if reqCtx.Body == nil || !reqCtx.Body.Present || len(bytes.TrimSpace(reqCtx.Body.Content)) == 0 {
 		return p.passOrReject(p.missing(facts, skippable, nil))
 	}
 	content := reqCtx.Body.Content
