@@ -49,6 +49,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/wso2/api-platform/tests/framework/core/catalog/shared"
+	testbenchcatalog "github.com/wso2/api-platform/tests/framework/core/catalog/testbench"
 	"github.com/wso2/api-platform/tests/framework/core/cleanup"
 	"github.com/wso2/api-platform/tests/framework/core/components"
 	frameworkruntime "github.com/wso2/api-platform/tests/framework/core/runtime"
@@ -59,6 +60,7 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/util/tcontext"
 	"github.com/wso2/api-platform/tests/framework/core/util/testpki"
 	"github.com/wso2/api-platform/tests/framework/testbench/services/capture"
+	"github.com/wso2/api-platform/tests/framework/testbench/services/faultinjection"
 	stepscommon "github.com/wso2/gateway-controllers/tests/it/common/steps/common"
 )
 
@@ -87,6 +89,32 @@ func TestAwaitMappedTestbenchServiceProbesMappedEndpoint(t *testing.T) {
 		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: time.Second}), 0, 0),
 	}
 	require.NoError(t, gateway.awaitMappedTestbenchService(context.Background(), "capture"))
+}
+
+func TestFaultInjectionServiceResolvesToTheBlockPartition(t *testing.T) {
+	// The catalog's definition, so a renamed endpoint or component fails here.
+	instance, err := components.NewInstance(testbenchcatalog.Testbench(), 0, 1, "127.0.0.1", map[int]int{faultinjection.Port: 41026})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	block := &topology.ResolvedBlock{Name: "interceptor-service/sqlite"}
+	gateway := &Gateway{topo: &frameworkruntime.Topology{Instances: instances, Block: block}}
+	key := block.PartitionKey()
+	require.NotEmpty(t, key)
+
+	upstream, err := gateway.serviceUpstreamURL(context.Background(), "fault-injection", "")
+	require.NoError(t, err)
+	require.Equal(t, fmt.Sprintf("http://testbench:%d/%s", faultinjection.Port, key), upstream)
+
+	scripts, err := gateway.serviceURL(context.Background(), "fault-injection", "/test/scripts/case-1")
+	require.NoError(t, err)
+	require.Equal(t, "http://127.0.0.1:41026/"+key+"/test/scripts/case-1", scripts)
+
+	unpartitioned := &Gateway{topo: &frameworkruntime.Topology{Instances: instances}}
+	_, err = unpartitioned.serviceUpstreamURL(context.Background(), "fault-injection", "")
+	require.ErrorContains(t, err, "requires a block partition")
+	_, err = unpartitioned.serviceURL(context.Background(), "fault-injection", "/test/scripts/case-1")
+	require.ErrorContains(t, err, "requires a block partition")
 }
 
 func TestServiceUpstreamURLPreservesServiceBasePath(t *testing.T) {
