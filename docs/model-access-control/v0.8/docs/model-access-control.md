@@ -105,7 +105,7 @@ override when the template has one. It is not a user-configurable parameter.
 | System parameter | Type | Required | Description |
 |---|---|---|---|
 | `requestModel.location` | string | Yes | `payload`, `header`, `queryParam` or `pathParam`. `body` is accepted as the older name of `payload`. |
-| `requestModel.identifier` | string | Yes | A dotted JSONPath such as `$.model` for `payload` (an array index such as `items[0]` cannot follow a key that contains `-`), a header name for `header`, a query parameter name for `queryParam`, or an RE2 expression for `pathParam`. When `mappingPatterns` is configured, a `pathParam` expression must have a capture group around the model, for example `/models/([^/]+)/chat`. A leading lookbehind such as `(?<=models/)[a-zA-Z0-9.\-]+`, which RE2 does not support, is read as the model that follows the prefix. |
+| `requestModel.identifier` | string | Yes | A dotted JSONPath such as `$.model` for `payload` (an array index cannot be applied directly to a key that contains `-`: `foo-bar[0]` is rejected, while `$.foo-bar.items[0].model` is accepted), a header name for `header`, a query parameter name for `queryParam`, or an RE2 expression for `pathParam`. When `mappingPatterns` is configured, a `pathParam` expression must have a capture group around the model, for example `/models/([^/]+)/chat`. A leading lookbehind such as `(?<=models/)[a-zA-Z0-9.\-]+`, which RE2 does not support, is read as the model that follows the prefix. |
 
 For `payload`, the policy buffers the request body. For the other locations it
 reads only the request headers and the path, and never buffers the body.
