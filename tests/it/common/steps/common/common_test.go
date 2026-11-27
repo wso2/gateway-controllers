@@ -78,6 +78,24 @@ func TestGenerateAPIVersionAndStore(t *testing.T) {
 	require.Regexp(t, `^v1\.0\.[1-9][0-9]{0,5}$`, value)
 }
 
+func TestGenerateUUIDAndStore(t *testing.T) {
+	ctx := commonContext()
+	require.NoError(t, GenerateUUIDAndStore(ctx, "first"))
+	require.NoError(t, GenerateUUIDAndStore(ctx, "second"))
+
+	first, err := StoredValue(ctx, "first")
+	require.NoError(t, err)
+	second, err := StoredValue(ctx, "second")
+	require.NoError(t, err)
+	uuidV4 := `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`
+	require.Regexp(t, uuidV4, first)
+	require.Regexp(t, uuidV4, second)
+	require.NotEqual(t, first, second)
+
+	require.ErrorContains(t, GenerateUUIDAndStore(context.Background(), "id"), "runner context")
+	require.ErrorContains(t, GenerateUUIDAndStore(ctx, " "), "empty key")
+}
+
 func TestGenerateAndStoreRejectsInvalidContext(t *testing.T) {
 	require.ErrorContains(t, GenerateAndStore(context.Background(), "api", "name"), "runner context")
 	require.ErrorContains(t, GenerateAndStore(commonContext(), "api", " "), "empty key")
