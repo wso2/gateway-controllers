@@ -1254,6 +1254,67 @@ func TestReadLimitedBodyRejectsAnOversizedBody(t *testing.T) {
 	require.ErrorContains(t, err, "byte limit")
 }
 
+func TestSendUntilStatusAndBodyContains(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/deployed":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"model_not_found"}}`))
+		case "/not-deployed":
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"Not Found"}`))
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":{"code":"model_not_found"}}`))
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+	body := &godog.DocString{Content: `{}`}
+
+	// newCtx bounds each wait, so a step that never succeeds fails quickly.
+	newCtx := func(t *testing.T) context.Context {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		t.Cleanup(cancel)
+		local := tcontext.NewLocal("runner")
+		local.Set("code", "model_not_found")
+		return tcontext.WithLocal(ctx, local)
+	}
+
+	t.Run("matching status and body text succeeds, with the text expanded", func(t *testing.T) {
+		require.NoError(t, base.sendUntilStatusAndBodyContainsWithBody(newCtx(t), "POST", "/deployed",
+			http.StatusNotFound, "${CTX:code}", body))
+	})
+	t.Run("matching status without the body text fails", func(t *testing.T) {
+		require.Error(t, base.sendUntilStatusAndBodyContainsWithBody(newCtx(t), "POST", "/not-deployed",
+			http.StatusNotFound, "model_not_found", body))
+	})
+	t.Run("body text with the wrong status fails", func(t *testing.T) {
+		require.Error(t, base.sendUntilStatusAndBodyContainsWithBody(newCtx(t), "POST", "/broken",
+			http.StatusNotFound, "model_not_found", body))
+	})
+	t.Run("status-only step succeeds on a matching status", func(t *testing.T) {
+		require.NoError(t, base.sendUntilStatusWithBody(newCtx(t), "POST", "/not-deployed",
+			http.StatusNotFound, body))
+	})
+}
+
 // fakeIdentifiedBase stands in for the shared base: it resolves paths against a test server and
 // returns fixed scenario headers and host.
 type fakeIdentifiedBase struct {

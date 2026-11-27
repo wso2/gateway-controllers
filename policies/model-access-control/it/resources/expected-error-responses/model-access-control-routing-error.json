@@ -1,0 +1,13 @@
+{
+  "body": {
+    "error": {
+      "code": "routing_error",
+      "message": "The request could not be routed.",
+      "type": "server_error"
+    }
+  },
+  "headers": {
+    "content-type": "application/json"
+  },
+  "status": 500
+}

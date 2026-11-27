@@ -1,0 +1,10 @@
+{
+  "name": "model-access-control",
+  "displayName": "Model Access Control",
+  "version": "0.8",
+  "provider": "Choreo Labs",
+  "categories": [
+    "AI"
+  ],
+  "description": "Checks the requested model against an allow or deny list before the request reaches the LLM provider. A denied model goes to a matching fallback model (and provider) if one is configured; otherwise it is rejected with 404 model_not_found. Responses are not modified."
+}

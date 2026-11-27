@@ -283,6 +283,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendUntilStatusAt)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) with body:$`,
 		b.sendUntilStatusWithBody)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) and the response body contains "([^"]*)" with body:$`,
+		b.sendUntilStatusAndBodyContainsWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until header "([^"]*)" is( not)? "([^"]*)"$`,
 		func(ctx context.Context, method, path, name, negation, want string) error {
 			return b.sendUntilHeaderMatches(ctx, method, path, name, want, negation != "", nil)
@@ -944,7 +946,21 @@ func (b *Base) expandBody(ctx context.Context, body *godog.DocString, headers ma
 func (b *Base) sendUntilStatusWithBody(
 	ctx context.Context, method, path string, want int, body *godog.DocString,
 ) error {
+	return b.sendUntilStatusAndBodyContainsWithBody(ctx, method, path, want, "", body)
+}
+
+// sendUntilStatusAndBodyContainsWithBody polls a data-plane path until it answers with the wanted
+// status and, when contains is not empty, a body holding that text. The body check tells a
+// response from the deployed route apart from the router's own answer for a route not yet
+// deployed, which can share the status.
+func (b *Base) sendUntilStatusAndBodyContainsWithBody(
+	ctx context.Context, method, path string, want int, contains string, body *godog.DocString,
+) error {
 	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	contains, err = stepscommon.Expand(ctx, contains)
 	if err != nil {
 		return err
 	}
@@ -972,8 +988,18 @@ func (b *Base) sendUntilStatusWithBody(
 			}
 			return response, nil
 		},
-		func(r *httpx.Response) bool { return r != nil && r.StatusCode == want },
-		fmt.Sprintf("waiting for %s %s to return %d", strings.ToUpper(method), url, want))
+		func(r *httpx.Response) bool {
+			return r != nil && r.StatusCode == want &&
+				(contains == "" || strings.Contains(string(r.Body), contains))
+		},
+		fmt.Sprintf("waiting for %s %s to return %d%s", strings.ToUpper(method), url, want, bodyWaitSuffix(contains)))
+}
+
+func bodyWaitSuffix(contains string) string {
+	if contains == "" {
+		return ""
+	}
+	return fmt.Sprintf(" with a body containing %q", contains)
 }
 
 func (b *Base) sendUntilStatusOneOf(ctx context.Context, method, path string, wantA, wantB int) error {
@@ -1215,40 +1241,7 @@ func (b *Base) sendUntilJSONFieldStringLength(
 // overall length, leaving a length check satisfied against wording that has not actually
 // changed to what the scenario expects next. A substring check catches that case.
 func (b *Base) sendUntilBodyContains(ctx context.Context, method, path, want string, body *godog.DocString) error {
-	resolved, err := stepscommon.Expand(ctx, path)
-	if err != nil {
-		return err
-	}
-	url, err := b.gatewayURL(resolved)
-	if err != nil {
-		return err
-	}
-	wantValue, err := stepscommon.Expand(ctx, want)
-	if err != nil {
-		return err
-	}
-	headers := b.scenarioHeaders(ctx)
-	payload, err := b.expandBody(ctx, body, headers)
-	if err != nil {
-		return err
-	}
-
-	return stepscommon.AwaitResponse(ctx,
-		func(ctx context.Context) (*httpx.Response, error) {
-			response, sendErr := b.funnel.Send(ctx, httpx.Request{
-				Method: strings.ToUpper(method), URL: url, Body: payload, Headers: headers,
-				Host: b.requestHost(ctx),
-			})
-			if sendErr != nil {
-				return nil, retry.Transient(sendErr)
-			}
-			return response, nil
-		},
-		func(r *httpx.Response) bool {
-			return r != nil && r.StatusCode == 200 && strings.Contains(string(r.Body), wantValue)
-		},
-		fmt.Sprintf("waiting for %s %s to answer with a body containing %q",
-			strings.ToUpper(method), url, wantValue))
+	return b.sendUntilStatusAndBodyContainsWithBody(ctx, method, path, 200, want, body)
 }
 
 // sendUntilStatusAndBodyContains polls a data-plane path until it answers with the wanted status
