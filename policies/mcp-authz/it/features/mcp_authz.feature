@@ -898,6 +898,9 @@ Feature: MCP proxies governed by mcp-authz
   # tools * alone, because the method rule * governs every tools/call. Their controls are in the
   # outline "A call a rule names is governed". An initialize polled until 200 waits until the route
   # is live; initialize is a bare method, which no rule governs.
+  # A method rule governs only a method of two parts whose first part is tools, resources or
+  # prompts. resources/templates/list has three parts, so it passes even under methods *, or under
+  # a rule that names it; such a rule deploys but can never apply (MAZ #33).
   Scenario Outline: A request mcp-authz does not check reaches the MCP server (<case>)
     Given I generate a unique resource name from "mcp-authz-unchecked" and store it as "mcpName"
     And I generate a unique value from "mcp-authz-unchecked" and store it as "mcpDisplayName"
@@ -949,6 +952,13 @@ Feature: MCP proxies governed by mcp-authz
       | notification               | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | POST   | {"jsonrpc":"2.0","method":"notifications/initialized"}                                           | 202    |
       # MAZ #41: a tools/call with no tool name matches no tool rule, not even *; the server reports the unknown tool.
       | tools/call with no name    | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}                                                         | POST   | {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"arguments":{"a":2,"b":3}}}              | 200    |
+
+    Examples: methods no rule can govern
+      | case                           | rules                                                                                                           | method | body                                                         | status |
+      # MAZ #33: resources/templates/list has three parts, so the method rule * does not govern it.
+      | templates/list, methods *      | {"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]} | POST   | {"jsonrpc":"2.0","id":1,"method":"resources/templates/list"} | 200    |
+      # MAZ #33: not even a rule naming resources/templates/list governs it; the rule can never apply.
+      | templates/list, rule naming it | {"methods":[{"name":"resources/templates/list","scopes":{"allOf":["maz-all"]}}]}                                | POST   | {"jsonrpc":"2.0","id":1,"method":"resources/templates/list"} | 200    |
 
   # A body mcp-authz cannot read as one JSON-RPC request gets its 400 before any rule is looked at,
   # so the answer is the same whether a rule would have applied (tools *) or not (a rule that names
@@ -1003,6 +1013,56 @@ Feature: MCP proxies governed by mcp-authz
       | batch, no rule applies          | {"tools":[{"name":"maz-other","scopes":{"allOf":["maz-all"]}}]} | [{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}},{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}] |
       # MAZ #44: method sent as a number where no rule would apply.
       | numeric method, no rule applies | {"tools":[{"name":"maz-other","scopes":{"allOf":["maz-all"]}}]} | {"jsonrpc":"2.0","id":1,"method":5,"params":{"name":"add","arguments":{"a":2,"b":3}}}                                                                                                               |
+
+  # MAZ #39: mcp-authz checks only a POST whose operation path is /mcp or under /mcp/, so
+  # /resource/mcp is not the MCP path although it ends in /mcp (isMcpPath). On an MCP
+  # proxy, other paths never reach it: the router has no route for them and answers 404. So this
+  # scenario attaches mcp-authz (tools * and methods *, no mcp-auth) to three POST operations of a
+  # REST API. A tools/call to /mcp gets mcp-authz's 401; the same body to /mcpx and /resource/mcp
+  # is not checked and reaches the testbench echo backend, which reports the path it received.
+  Scenario: mcp-authz on a REST API checks only the MCP path
+    Given I generate a unique value from "mcp-authz-rest" and store it as "apiName"
+    And I generate a unique API version from "mcp-authz-rest" and store it as "apiVersion"
+    And I generate a unique API context from "/mcp-authz-rest" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3000 |
+      | spec.operations        | [{"method":"POST","path":"/mcp","policies":[{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}]},{"method":"POST","path":"/mcpx","policies":[{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}]},{"method":"POST","path":"/resource/mcp","policies":[{"name":"mcp-authz","version":"v1","params":{"tools":[{"name":"*","scopes":{"allOf":["maz-all"]}}],"methods":[{"name":"*","scopes":{"allOf":["maz-all"]}}]}}]}] |
+    Then the resource creation response should indicate successful deployment
+
+    When I clear all headers
+    And I set header "Content-Type" to "application/json"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/mcp" until status 401 with body:
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}
+      """
+    Then the JSON response field "message" should be "Unauthorized: authentication required for this MCP capability"
+    And the response header "x-envoy-upstream-service-time" should not exist
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/mcpx" with body:
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "path" should be "/mcpx"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/resource/mcp" with body:
+      """
+      {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"add","arguments":{"a":2,"b":3}}}
+      """
+    Then the response status code should be 200
+    And the JSON response field "path" should be "/resource/mcp"
+    And the response header "x-envoy-upstream-service-time" should exist
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
 
   # MAZ #40: mcp-authz ignores the query string when it picks the requests to check, so a query
   # string does not let a call around a rule. mcp-auth sits in front, and polling without a token
