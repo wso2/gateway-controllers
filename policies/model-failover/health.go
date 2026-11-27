@@ -1,0 +1,654 @@
+/*
+ * Copyright (c) 2026, WSO2 LLC. (https://www.wso2.com).
+ *
+ * WSO2 LLC. licenses this file to you under the Apache License,
+ * Version 2.0 (the "License"); you may not use this file except
+ * in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+package modelfailover
+
+import (
+	"sync"
+	"time"
+)
+
+// SuspensionReason names which criterion suspended a target. It is carried into the
+// suspension record so an operator can tell a hard outage from intermittent degradation from
+// creeping slowness, without reconstructing it from raw logs (FR-018d).
+type SuspensionReason string
+
+const (
+	ReasonConsecutiveFailures SuspensionReason = "consecutive_failures"
+	ReasonErrorRate           SuspensionReason = "error_rate"
+	ReasonLatency             SuspensionReason = "latency_p95"
+)
+
+// RecoveryEvent reports a target returning to normal rotation after suspension.
+//
+// Emitted only on the LAST probe of the run, not on each one: a target is either in rotation
+// or not, and reporting every successful probe would read as several recoveries where there
+// was one. ProbesRequired is carried so a reader can tell a one-probe recovery from the
+// several-probe run that actually happened.
+type RecoveryEvent struct {
+	Target         Target
+	ProbesRequired int
+	// SuspendedForSeconds is the duration that had been applied, so a recovery line can be
+	// matched to the suspension line it ends.
+	SuspendedForSeconds int
+	// EscalationStep is where the target sits on the backoff ladder as it returns. A target
+	// recovering at step 3 has been round this loop before and is worth attention even
+	// though it is, right now, healthy.
+	EscalationStep int
+}
+
+// SuspensionEvent describes one suspension, for telemetry.
+type SuspensionEvent struct {
+	Target Target
+	Reason SuspensionReason
+	// Observed is the value that crossed the threshold: the consecutive count, the error
+	// rate percentage, or the p95 in milliseconds.
+	Observed int
+	// SampleSize is the number of requests in the window, for the windowed criteria. It is
+	// what distinguishes "50% of 2 requests" from "50% of 2000".
+	SampleSize int
+	// DurationSeconds is the suspension applied, after any doubling.
+	DurationSeconds int
+	// EscalationStep is how many times this target has been suspended without earning a
+	// reset. Step 1 is the base duration; each later step doubles until the cap.
+	EscalationStep int
+}
+
+// Admission is the receipt for one admission decision.
+//
+// It exists because admitting a HALF-OPEN target has a side effect — it consumes that target's
+// single probe slot — and the outcome of that attempt arrives much later, from a different
+// phase, by which time the slot may already belong to somebody else. The receipt names the
+// reservation, so an outcome can be matched to the probe it belongs to and a reservation that
+// was never dispatched can be handed straight back.
+//
+// The zero value is the receipt for "no probe was reserved", which is what an ordinary healthy
+// target yields and what every non-probe code path should pass.
+type Admission struct {
+	// Probe is true when this admission consumed a half-open target's probe slot.
+	Probe bool
+	// ID names the reservation. Monotonic per store, so a reservation issued after a lease
+	// expired never matches the outcome of the one it replaced.
+	ID uint64
+}
+
+// probe reports whether this receipt refers to the reservation currently held by h.
+//
+// Deliberately false for the zero value even when a probe is in flight: an outcome that did not
+// reserve the slot must never resolve it, or a request admitted while the target was healthy
+// could close a probe opened a moment later by somebody else.
+func (a Admission) probe(h *targetHealth) bool {
+	return a.Probe && a.ID != 0 && a.ID == h.probeID
+}
+
+// targetHealth is the per-target runtime state.
+type targetHealth struct {
+	consecutiveFailures int
+	suspendedUntil      time.Time
+	// currentDurationSeconds is the duration applied to the NEXT suspension. It doubles on
+	// each re-suspension up to the cap, and resets to the base after a healthy period.
+	currentDurationSeconds int
+	escalationStep         int
+	// healthySince is when the target last became healthy. Staying healthy for
+	// BackoffResetSeconds is what earns the reset to base.
+	healthySince time.Time
+	window       *rollingWindow
+	// lastSeen is when this target was last looked up. Only used to evict entries nothing
+	// refers to any more — see sweepIdleLocked.
+	lastSeen time.Time
+
+	// --- half-open probing, once a suspension window has ended ---
+	//
+	// halfOpen means the window has ended but the target has NOT earned its place back.
+	// It is admitted one request at a time until RecoverAfterSuccesses succeed in a row.
+	halfOpen bool
+	// probeSuccesses counts the run so far. Any failure resets it by re-suspending.
+	probeSuccesses int
+	// probeInFlight is the "one at a time" gate: while a probe is out, every other request
+	// sees the target as unavailable.
+	probeInFlight bool
+	// probeLeaseUntil bounds that gate. An outcome can go missing — the request was
+	// abandoned, the chain never reached this member, the stream died — and without an
+	// expiry a lost outcome would hold the gate shut forever and the target would never
+	// recover.
+	probeLeaseUntil time.Time
+	// probeID names the reservation currently held, and is what an outcome is matched
+	// against. Without it, an outcome arriving after its own lease expired would resolve
+	// whichever probe happens to be open now — releasing a newer probe's gate and counting
+	// toward its run, on the strength of a request that target answered minutes ago.
+	probeID uint64
+
+	// --- optimistic probe resolution, and how it is taken back ---
+	//
+	// A streamed response commits its status before its body exists, so the response phase
+	// cannot tell a probe that SERVED from one that is about to die mid-stream. Withholding
+	// probe credit there would leave a target whose responses are all streamed suspended
+	// for ever (FR-030p), so the credit is given optimistically and recorded here, where a
+	// later completion verdict for the SAME reservation can take it back.
+	//
+	// unverifiedProbeID is the reservation that was resolved on a provisional status, and
+	// unverifiedProbeSuccesses is the run count as it stood immediately before that credit.
+	unverifiedProbeID        uint64
+	unverifiedProbeSuccesses int
+	// unverifiedRecovered records that the optimistic credit was the one that ENDED the
+	// probe run, so reversing it has to restore the half-open state as well as the count.
+	unverifiedRecovered bool
+}
+
+// probeLeaseSeconds is how long a reserved probe slot is held when no outcome arrives.
+//
+// Short, because a lost outcome delays recovery by exactly this long. Not shorter, because
+// it must comfortably exceed a normal upstream round trip or two probes would run at once.
+const probeLeaseSeconds = 30
+
+// HealthStore tracks per-target health for one operation.
+//
+// State is held per gateway instance and nothing is shared between replicas (FR-020). The
+// consequence is deliberate and documented: each instance learns a failing target
+// independently, so across N instances a target can absorb up to N times the configured
+// threshold before every instance suspends it.
+//
+// Everything outside this type goes through the small interface below, so a shared
+// cross-instance implementation can replace it later without touching the policy's
+// configuration, its per-request semantics, or its telemetry (FR-020a).
+type HealthStore interface {
+	// Admit reports whether the target may receive traffic now, and reserves the probe
+	// slot when the target is half-open.
+	//
+	// It replaces a plain predicate because "may I use it" and "I am using it" are the same
+	// question for a half-open target: only one probe may be outstanding, so the answer
+	// itself consumes the slot. The returned Admission is the receipt — carry it to
+	// whichever Record* call grades this attempt, and hand it to ReleaseProbe if the
+	// attempt is never made.
+	Admit(target Target, now time.Time) (Admission, bool)
+	// ReleaseProbe hands back a reservation whose attempt was never dispatched.
+	//
+	// A chain reserves on every member it admits, but Envoy attempts them one at a time and
+	// usually stops at the first. Without this, every half-open member below the serving one
+	// stays leased for probeLeaseSeconds on the strength of a request that never reached it,
+	// and is excluded from a later request that genuinely needs it.
+	//
+	// A receipt that no longer names the live reservation is ignored, so a late release
+	// cannot open a probe somebody else is holding.
+	ReleaseProbe(target Target, admission Admission, now time.Time)
+	// RecordSuccess clears the consecutive-failure count and feeds the window.
+	//
+	// It returns AT MOST ONE of two events, never both: a recovery when this success
+	// completed a probe run and returned the target to rotation, or a suspension when the
+	// success carried the latency window over its threshold.
+	//
+	// A success suspending a target reads oddly until you look at what the latency rule
+	// measures. A target that is merely slow never fails, so its samples are all successes —
+	// if only a failure could trigger evaluation, FR-018e would be unreachable for exactly
+	// the degradation it was written to catch ("every request still completes under
+	// perAttemptTimeoutMs"). The error-rate rule is NOT evaluated here: a success can only
+	// push a rate down, so there is nothing for it to discover.
+	RecordSuccess(target Target, admission Admission, latency time.Duration, now time.Time) (*RecoveryEvent, *SuspensionEvent)
+	// RecordUnverified records that the target answered without judging whether the
+	// answer COMPLETED. Used when the status line is provisional -- a streamed response
+	// commits its 200 before the body exists, so a stream cut mid-body still reaches the
+	// response phase as the success it started as (FR-030n, FR-030p).
+	//
+	// It deliberately does NOT clear the consecutive-failure count and does NOT add a
+	// sample to the window. Recording a provisional success as a real one is what lets a
+	// provider that truncates everything immunise itself: the reset wipes the counter its
+	// real failures were accumulating, and the sample dilutes the error rate below the
+	// threshold. Recording nothing leaves both to be decided by outcomes we can see.
+	//
+	// Probe accounting is the one exception, and it is deliberate: a half-open probe that
+	// answers still counts toward recovery, because withholding that too would leave a
+	// target whose responses are all streamed suspended forever (FR-030p).
+	RecordUnverified(target Target, admission Admission, now time.Time) *RecoveryEvent
+	// RecordFailure feeds every suspension criterion and returns a non-nil event if this
+	// outcome suspended the target.
+	RecordFailure(target Target, admission Admission, latency time.Duration, now time.Time) *SuspensionEvent
+	// HealthyTargets filters a list down to the targets that may receive traffic, without
+	// reserving a probe slot. Read-only: asking is never an attempt.
+	//
+	// Not published anywhere. Health is this policy's own per-instance state and stays
+	// private — a routing policy consuming it would be depending on a view it cannot
+	// reason about, and it buys nothing, since resolveChain already filters suspended
+	// targets out of the chain wherever they appear.
+	HealthyTargets(targets []Target, now time.Time) []Target
+}
+
+// memoryHealthStore is the in-memory, per-instance implementation.
+type memoryHealthStore struct {
+	mu         sync.Mutex
+	targets    map[string]*targetHealth
+	suspension Suspension
+	// lastSweep bounds how often an insert pays for the idle scan.
+	lastSweep time.Time
+	// nextProbeID issues reservation identities. Monotonic and never reused, so a stale
+	// outcome cannot collide with a live reservation.
+	nextProbeID uint64
+}
+
+// Bounds on the target map.
+//
+// A wildcard member resolves the CLIENT's model into the health key, so a long-running gateway
+// accumulates one entry per distinct model it has ever seen — and nothing removed them. The
+// entries are small, but "one per distinct string a caller can choose" is unbounded by any
+// operator-controlled quantity, which is the shape of a memory exhaustion rather than a leak.
+//
+// Eviction is deliberately conservative: only an entry that is HEALTHY, not probing, and whose
+// window holds nothing can go. Dropping a suspended target would clear its suspension and hand
+// a failing provider its traffic back, which is worse than the growth being bounded.
+const (
+	healthSweepThreshold = 1024
+	healthSweepInterval  = 60 * time.Second
+	healthIdleTTL        = 15 * time.Minute
+)
+
+// sweepIdleLocked drops entries that carry no state worth keeping. Caller holds the lock.
+func (m *memoryHealthStore) sweepIdleLocked(now time.Time) {
+	for key, h := range m.targets {
+		if !h.suspendedUntil.IsZero() && h.suspendedUntil.After(now) {
+			continue // suspended: dropping it would restore traffic to a failing target
+		}
+		if h.halfOpen || h.consecutiveFailures > 0 || h.escalationStep > 0 {
+			continue // mid-recovery or mid-escalation; the state is the point
+		}
+		if total, _ := h.window.counts(now); total > 0 {
+			continue // still inside its window, so it is still being judged
+		}
+		if now.Sub(h.lastSeen) < healthIdleTTL {
+			continue
+		}
+		delete(m.targets, key)
+	}
+}
+
+// NewHealthStore returns the per-instance health store described by FR-020.
+func NewHealthStore(suspension Suspension) HealthStore {
+	return &memoryHealthStore{
+		targets:    make(map[string]*targetHealth),
+		suspension: suspension,
+	}
+}
+
+// suspensionDisabled reports whether a member can ever leave the healthy state.
+//
+// suspendDuration is the master switch, per the reviewed schema: "Set to 0 to disable
+// suspension tracking entirely." A zero-length suspension would otherwise fire every criterion
+// and expire instantly, burning bookkeeping to no effect. Failover still works with suspension
+// off — a failing member is simply re-attempted on every request rather than skipped.
+//
+// With a duration set, a member is still immune when every criterion is itself off.
+func (s Suspension) suspensionDisabled() bool {
+	if s.DurationSeconds <= 0 {
+		return true
+	}
+	return s.ConsecutiveFailures == 0 && s.ErrorRatePercent == 0 && s.P95LatencyMs == 0
+}
+
+func (m *memoryHealthStore) state(target Target, now time.Time) *targetHealth {
+	key := target.Key()
+	h, ok := m.targets[key]
+	if !ok {
+		if len(m.targets) >= healthSweepThreshold && now.Sub(m.lastSweep) >= healthSweepInterval {
+			m.sweepIdleLocked(now)
+			m.lastSweep = now
+		}
+		h = &targetHealth{
+			currentDurationSeconds: m.suspension.DurationSeconds,
+			healthySince:           now,
+			window:                 newRollingWindow(time.Duration(m.suspension.WindowSeconds) * time.Second),
+		}
+		m.targets[key] = h
+	}
+	h.lastSeen = now
+	return h
+}
+
+func (m *memoryHealthStore) Admit(target Target, now time.Time) (Admission, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.admitLocked(target, now)
+}
+
+// ReleaseProbe implements HealthStore.
+func (m *memoryHealthStore) ReleaseProbe(target Target, admission Admission, now time.Time) {
+	if !admission.Probe || admission.ID == 0 {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+	if !h.probeInFlight || !admission.probe(h) {
+		// Either the gate is already open, or it is held by a different reservation. Both
+		// mean this receipt is stale, and opening the gate on it would admit a second
+		// concurrent probe to a target that is still being judged one request at a time.
+		return
+	}
+	// The run itself is untouched: nothing was attempted, so there is nothing to count
+	// either way. Only the gate is handed back.
+	h.probeInFlight = false
+	h.probeID = 0
+}
+
+// transitionLocked applies the time-based state changes: a suspension window ending, and a
+// probe lease expiring. Both are "nothing happened, but time passed" transitions, so they
+// belong in one place rather than being re-derived at every call site.
+func (m *memoryHealthStore) transitionLocked(h *targetHealth, now time.Time) {
+	if !h.suspendedUntil.IsZero() && now.After(h.suspendedUntil) {
+		// The window has ended. The target does NOT go straight back to full rotation: it
+		// enters the half-open state and has to earn its place back one request at a time
+		// (FR-019d). Restoring it in one step would send it a full share of traffic before
+		// anything had checked whether it is still broken.
+		h.suspendedUntil = time.Time{}
+		h.halfOpen = true
+		h.probeSuccesses = 0
+		h.probeInFlight = false
+		h.probeID = 0
+		h.clearUnverifiedProbe()
+		h.consecutiveFailures = 0
+		h.window.reset()
+	}
+	if h.probeInFlight && now.After(h.probeLeaseUntil) {
+		// The probe's outcome never arrived. Release the gate so recovery can continue.
+		// The identity goes with it: the outcome, if it ever turns up, belongs to a
+		// reservation that no longer exists and must not resolve its replacement.
+		h.probeInFlight = false
+		h.probeID = 0
+	}
+}
+
+// admitLocked decides whether this request may use the target, and reserves the probe slot
+// when it is a half-open one. It has a side effect by design: "may I use it" and "I am using
+// it" are the same question when only one probe may be outstanding.
+func (m *memoryHealthStore) admitLocked(target Target, now time.Time) (Admission, bool) {
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+
+	if !h.suspendedUntil.IsZero() {
+		return Admission{}, false
+	}
+	if !h.halfOpen {
+		// No slot was taken, so there is nothing to match an outcome against and nothing
+		// to hand back.
+		return Admission{}, true
+	}
+	if h.probeInFlight {
+		return Admission{}, false
+	}
+	m.nextProbeID++
+	h.probeInFlight = true
+	h.probeLeaseUntil = now.Add(probeLeaseSeconds * time.Second)
+	h.probeID = m.nextProbeID
+	h.clearUnverifiedProbe()
+	return Admission{Probe: true, ID: h.probeID}, true
+}
+
+// clearUnverifiedProbe forgets an optimistic probe credit, because the reservation it belonged
+// to is gone and a verdict for it can no longer be taken back.
+func (h *targetHealth) clearUnverifiedProbe() {
+	h.unverifiedProbeID = 0
+	h.unverifiedProbeSuccesses = 0
+	h.unverifiedRecovered = false
+}
+
+// reportableLocked answers the same question as the admission check WITHOUT reserving
+// anything. Reading health must not consume a half-open target's single probe slot: that slot
+// belongs to a real request, and spending it on a query would stop the target ever recovering.
+func (m *memoryHealthStore) reportableLocked(target Target, now time.Time) bool {
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+	return h.suspendedUntil.IsZero() && !h.halfOpen
+}
+
+func (m *memoryHealthStore) RecordSuccess(target Target, admission Admission, latency time.Duration,
+	now time.Time) (*RecoveryEvent, *SuspensionEvent) {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+	h.consecutiveFailures = 0
+	h.window.add(now, false, latency)
+
+	if h.halfOpen {
+		if !admission.probe(h) {
+			// The target answered, and the window above has the sample, but this
+			// outcome did not reserve the slot that is open now — it belongs to a
+			// reservation whose lease expired. Counting it would release a probe that
+			// is still in flight and credit its run with somebody else's answer.
+			return nil, nil
+		}
+		// A probe came back clean. Release the gate and count it; the target returns to
+		// normal rotation only once the whole run is in (FR-019d).
+		h.probeInFlight = false
+		h.probeID = 0
+		h.clearUnverifiedProbe()
+		h.probeSuccesses++
+		if h.probeSuccesses >= m.suspension.RecoverAfterSuccesses {
+			h.halfOpen = false
+			h.probeSuccesses = 0
+			h.healthySince = now
+			return &RecoveryEvent{
+				Target:              target,
+				ProbesRequired:      m.suspension.RecoverAfterSuccesses,
+				SuspendedForSeconds: h.currentDurationSeconds,
+				EscalationStep:      h.escalationStep,
+			}, nil
+		}
+		return nil, nil
+	}
+
+	// A target that has stayed healthy long enough earns its escalation back to the base
+	// duration. A target that keeps flapping never reaches this and keeps doubling toward
+	// the cap (FR-019c).
+	if !h.healthySince.IsZero() &&
+		now.Sub(h.healthySince) >= time.Duration(m.suspension.BackoffResetSeconds)*time.Second {
+		h.currentDurationSeconds = m.suspension.DurationSeconds
+		h.escalationStep = 0
+	}
+
+	return nil, m.evaluateLatencyLocked(h, target, now)
+}
+
+// evaluateLatencyLocked applies the latency rule to the window as it now stands.
+//
+// Split out because it is the one criterion a SUCCESS can carry over its threshold, so it has
+// to be reachable from both record paths; the consecutive and error-rate rules are about
+// failures and stay where failures are counted.
+func (m *memoryHealthStore) evaluateLatencyLocked(h *targetHealth, target Target,
+	now time.Time) *SuspensionEvent {
+
+	if m.suspension.suspensionDisabled() || m.suspension.P95LatencyMs <= 0 {
+		return nil
+	}
+	// Already suspended, or waiting on a probe: not a second verdict on the same outage,
+	// and never a verdict on the probe that is trying to clear it.
+	if h.halfOpen || (!h.suspendedUntil.IsZero() && now.Before(h.suspendedUntil)) {
+		return nil
+	}
+	total, _ := h.window.counts(now)
+	if total < m.suspension.MinimumRequests {
+		// The same sample-size guard as the error-rate rule (FR-018b): a percentile over
+		// three requests describes nothing.
+		return nil
+	}
+	if p95 := int(h.window.percentile(now, 0.95) / time.Millisecond); p95 >= m.suspension.P95LatencyMs {
+		return m.suspendLocked(h, target, ReasonLatency, p95, total, now)
+	}
+	return nil
+}
+
+func (m *memoryHealthStore) RecordUnverified(target Target, admission Admission, now time.Time) *RecoveryEvent {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+
+	// No window sample and no counter reset: see the interface comment. The only state this
+	// advances is the probe run, because a suspended target has to be able to come back.
+	if !h.halfOpen {
+		return nil
+	}
+	if !admission.probe(h) {
+		return nil
+	}
+	// The credit is OPTIMISTIC: the status was committed before the body existed, so this
+	// says the probe started well, not that it finished. Record what it took so a completion
+	// verdict naming this same reservation can take it back (see RecordFailure).
+	h.probeInFlight = false
+	h.unverifiedProbeID = admission.ID
+	h.unverifiedProbeSuccesses = h.probeSuccesses
+	h.unverifiedRecovered = false
+	h.probeSuccesses++
+	if h.probeSuccesses < m.suspension.RecoverAfterSuccesses {
+		return nil
+	}
+	h.halfOpen = false
+	h.probeSuccesses = 0
+	h.healthySince = now
+	h.unverifiedRecovered = true
+	return &RecoveryEvent{
+		Target:              target,
+		ProbesRequired:      m.suspension.RecoverAfterSuccesses,
+		SuspendedForSeconds: h.currentDurationSeconds,
+		EscalationStep:      h.escalationStep,
+	}
+}
+
+func (m *memoryHealthStore) RecordFailure(target Target, admission Admission, latency time.Duration,
+	now time.Time) *SuspensionEvent {
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	h := m.state(target, now)
+	m.transitionLocked(h, now)
+	m.reverseUnverifiedProbeLocked(h, admission)
+	h.consecutiveFailures++
+	h.window.add(now, true, latency)
+
+	if h.halfOpen && !m.suspension.suspensionDisabled() {
+		// A failed probe re-suspends at once, whatever suspendAfterFailures says. The
+		// target was already suspended; this attempt was the evidence that it is still
+		// broken, and that is the whole point of probing one request at a time.
+		h.probeInFlight = false
+		h.probeID = 0
+		h.halfOpen = false
+		h.probeSuccesses = 0
+		h.clearUnverifiedProbe()
+		return m.suspendLocked(h, target, ReasonConsecutiveFailures, h.consecutiveFailures, 0, now)
+	}
+
+	if m.suspension.suspensionDisabled() {
+		return nil
+	}
+	// Already suspended: a late failure from an in-flight request must not escalate the
+	// target a second time for the same outage.
+	if !h.suspendedUntil.IsZero() && now.Before(h.suspendedUntil) {
+		return nil
+	}
+
+	// The criteria are independent and either can suspend (FR-018c). Consecutive failures
+	// catch a hard-down target fastest, so they are checked first; the windowed rules catch
+	// the degradation that never produces a run.
+	if m.suspension.ConsecutiveFailures > 0 && h.consecutiveFailures >= m.suspension.ConsecutiveFailures {
+		return m.suspendLocked(h, target, ReasonConsecutiveFailures, h.consecutiveFailures, 0, now)
+	}
+
+	total, failures := h.window.counts(now)
+	if total >= m.suspension.MinimumRequests {
+		// The minimum sample size is what stops two failures out of two requests reading as
+		// a 100% error rate and suspending a healthy target during a quiet period (FR-018b).
+		if m.suspension.ErrorRatePercent > 0 {
+			rate := failures * 100 / total
+			if rate >= m.suspension.ErrorRatePercent {
+				return m.suspendLocked(h, target, ReasonErrorRate, rate, total, now)
+			}
+		}
+	}
+
+	return m.evaluateLatencyLocked(h, target, now)
+}
+
+// reverseUnverifiedProbeLocked takes back a probe credit that a provisional status had already
+// banked, when the completion verdict for that same reservation turns out to be a failure.
+//
+// Without this the two halves disagree: the response phase sees a streamed 200 and advances the
+// probe run — which it has to, or a target whose responses are all streamed could never recover
+// (FR-030p) — and the completion verdict then arrives at a target that is back in rotation, so
+// its failure is graded against a healthy target rather than against the probe it actually was.
+// With RecoverAfterSuccesses above one the target simply stays in rotation; with one, it was
+// fully restored by a response that never finished.
+//
+// Restoring the run count, and the half-open state when the credit completed the run, puts the
+// target back where it stood when the probe was dispatched. The failure is then applied by the
+// caller to a half-open target, which re-suspends it at once.
+func (m *memoryHealthStore) reverseUnverifiedProbeLocked(h *targetHealth, admission Admission) {
+	if !admission.Probe || admission.ID == 0 || admission.ID != h.unverifiedProbeID {
+		return
+	}
+	h.probeSuccesses = h.unverifiedProbeSuccesses
+	if h.unverifiedRecovered {
+		h.halfOpen = true
+		h.healthySince = time.Time{}
+	}
+	h.clearUnverifiedProbe()
+}
+
+// suspendLocked applies the escalating backoff and returns the event describing it.
+func (m *memoryHealthStore) suspendLocked(h *targetHealth, target Target, reason SuspensionReason,
+	observed, sampleSize int, now time.Time) *SuspensionEvent {
+
+	if h.escalationStep > 0 {
+		// Re-suspension doubles the previous duration (FR-019a), capped so a target is never
+		// held out of service indefinitely (FR-019b).
+		h.currentDurationSeconds *= 2
+		if h.currentDurationSeconds > m.suspension.MaxDurationSeconds {
+			h.currentDurationSeconds = m.suspension.MaxDurationSeconds
+		}
+	}
+	h.escalationStep++
+	h.suspendedUntil = now.Add(time.Duration(h.currentDurationSeconds) * time.Second)
+	h.consecutiveFailures = 0
+	h.healthySince = time.Time{}
+	h.window.reset()
+
+	return &SuspensionEvent{
+		Target:          target,
+		Reason:          reason,
+		Observed:        observed,
+		SampleSize:      sampleSize,
+		DurationSeconds: h.currentDurationSeconds,
+		EscalationStep:  h.escalationStep,
+	}
+}
+
+func (m *memoryHealthStore) HealthyTargets(targets []Target, now time.Time) []Target {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	healthy := make([]Target, 0, len(targets))
+	for _, target := range targets {
+		if m.reportableLocked(target, now) {
+			healthy = append(healthy, target)
+		}
+	}
+	return healthy
+}
