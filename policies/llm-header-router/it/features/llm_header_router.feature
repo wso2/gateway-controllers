@@ -284,3 +284,31 @@ Feature: LLM header router
     Then the response should be successful
     When I delete the LLM provider "${CTX:primaryName}"
     Then the response should be successful
+
+  # The schema accepts these configurations, but the policy refuses them when the policy engine
+  # builds the route: a header value repeated in another case, and values that are only whitespace.
+  # The policy engine skips such a route and logs why, without affecting other routes.
+  Scenario Outline: A configuration the policy refuses is reported when the route is built (<case>)
+    Given I generate a unique value from "<case>" and store it as "apiName"
+    And I generate a unique API version from "<case>" and store it as "apiVersion"
+    And I generate a unique API context from "/<case>" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion}                                                                                                                       |
+      | name                   | ${CTX:apiName}                                                                                                                                  |
+      | spec.displayName       | ${CTX:apiName}                                                                                                                                  |
+      | spec.version           | ${CTX:apiVersion}                                                                                                                               |
+      | spec.context           | ${CTX:apiContext}/$version                                                                                                                      |
+      | spec.upstream.main.url | http://testbench:3002                                                                                                                           |
+      | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat","policies":[{"name":"llm-header-router","version":"v0","params":<params>}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 200
+    Then the "gateway-runtime" service logs should contain "<message>"
+    When I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 404
+
+    Examples:
+      | case               | params                                                                                                              | message                                   |
+      | lhr-dup            | {"mappings":[{"headerValue":"beta","provider":"beta-provider"},{"headerValue":"BETA","provider":"other-provider"}]} | is duplicated (case-insensitive)          |
+      | lhr-blank-value    | {"mappings":[{"headerValue":"   ","provider":"beta-provider"}]}                                                     | mappings[0].headerValue must not be empty |
+      | lhr-blank-provider | {"headerName":"   ","defaultProvider":"beta-provider","mappings":[{"headerValue":"beta","provider":"   "}]}         | mappings[0].provider must not be empty    |

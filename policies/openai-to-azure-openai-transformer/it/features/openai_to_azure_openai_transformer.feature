@@ -164,3 +164,151 @@ Feature: OpenAI to Azure OpenAI transformer
       """
     Then the response status code should be 400
     And the response should match the expected error response "openai-to-azure-openai-transformer-model-missing"
+
+  # A body that is not JSON names no model, so the fallback deployment is used and the body goes
+  # upstream unchanged; a model that is not a usable string is rejected. A path suffix without a
+  # leading slash gets one.
+  Scenario: The deployment falls back for a body that is not JSON and a malformed model is rejected
+    Given I generate a unique resource name from "o2az-model-provider" and store it as "providerName"
+    And I generate a unique API context from "/o2az-model-provider" and store it as "providerContext"
+    And I generate a unique resource name from "o2az-model-proxy" and store it as "proxyName"
+    And I generate a unique API context from "/o2az-model-proxy" and store it as "proxyContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion} |
+      | name               | ${CTX:providerName}       |
+      | displayName        | O2AZ-Model-Provider       |
+      | version            | v1.0                      |
+      | template           | openai                    |
+      | spec.context       | ${CTX:providerContext}    |
+      | spec.upstream.url  | ${CTX:captureUpstream}    |
+      | accessControl.mode | allow_all                 |
+    Then the response status code should be 201
+    When I create LLM proxy from "resources/templates/llm-proxy.yaml" with values:
+      | apiVersion    | ${CTX:gatewaySpecVersion}                                                                                                                                                                                                   |
+      | name          | ${CTX:proxyName}                                                                                                                                                                                                            |
+      | displayName   | O2AZ-Model-Proxy                                                                                                                                                                                                            |
+      | version       | v1.0                                                                                                                                                                                                                        |
+      | context       | ${CTX:proxyContext}                                                                                                                                                                                                         |
+      | provider.id   | ${CTX:providerName}                                                                                                                                                                                                         |
+      | spec.policies | [{"name":"openai-to-azure-openai-transformer","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"apiVersion":"2024-10-21","model":"fallback-deployment","pathSuffix":"completions"}}]}] |
+    Then the response status code should be 201
+    And I send a "POST" request to "${CTX:proxyContext}/chat/completions" until status 200 with body:
+      """
+      not a json document
+      """
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/openai/deployments/fallback-deployment/completions"
+    Then the response status code should be 200
+    And the JSON response field "path" should be "/openai/deployments/fallback-deployment/completions"
+    And the JSON response field "query" should be "api-version=2024-10-21"
+    And the response body should match pattern "body[^a-z]{3}not a json document"
+    # A model given as null counts as none, so the fallback deployment serves it too.
+    When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
+      """
+      {"model":null,"messages":[{"role":"user","content":"Hello"}]}
+      """
+    Then the response status code should be 200
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/openai/deployments/fallback-deployment/completions"
+    Then the response status code should be 200
+    And the JSON response field "body" should contain "Hello"
+    When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
+      """
+      {"model":42,"messages":[{"role":"user","content":"Hello"}]}
+      """
+    Then the response status code should be 400
+    And the JSON response field "error" should contain "must be a string"
+    When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
+      """
+      {"model":"   ","messages":[{"role":"user","content":"Hello"}]}
+      """
+    Then the response status code should be 400
+    And the JSON response field "error" should contain "must not be blank"
+    When I delete the LLM proxy "${CTX:proxyName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:providerName}"
+    Then the response should be successful
+
+  # ---- generated coverage scenarios: begin ----
+
+  Scenario: The translator runs only for the provider a header router selected for it
+    Given I generate a unique resource name from "o2az-route-primary" and store it as "primaryName"
+    And I generate a unique API context from "/o2az-route-primary" and store it as "primaryContext"
+    And I generate a unique resource name from "o2az-route-target" and store it as "targetName"
+    And I generate a unique API context from "/o2az-route-target" and store it as "targetContext"
+    And I generate a unique resource name from "o2az-route-other" and store it as "otherName"
+    And I generate a unique API context from "/o2az-route-other" and store it as "otherContext"
+    And I generate a unique resource name from "o2az-route-proxy" and store it as "proxyName"
+    And I generate a unique API context from "/o2az-route-proxy" and store it as "proxyContext"
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}      |
+      | name               | ${CTX:primaryName}             |
+      | displayName        | O2AZ-Route-Primary             |
+      | version            | v1.0                           |
+      | template           | openai                         |
+      | spec.context       | ${CTX:primaryContext}          |
+      | spec.upstream.url  | ${CTX:captureUpstream}/primary |
+      | accessControl.mode | allow_all                      |
+    Then the response status code should be 201
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}     |
+      | name               | ${CTX:targetName}             |
+      | displayName        | O2AZ-Route-Target             |
+      | version            | v1.0                          |
+      | template           | openai                        |
+      | spec.context       | ${CTX:targetContext}          |
+      | spec.upstream.url  | ${CTX:captureUpstream}/target |
+      | accessControl.mode | allow_all                     |
+    Then the response status code should be 201
+    When I create LLM provider from "resources/templates/llm-provider.yaml" with values:
+      | apiVersion         | ${CTX:gatewaySpecVersion}    |
+      | name               | ${CTX:otherName}             |
+      | displayName        | O2AZ-Route-Other             |
+      | version            | v1.0                         |
+      | template           | openai                       |
+      | spec.context       | ${CTX:otherContext}          |
+      | spec.upstream.url  | ${CTX:captureUpstream}/other |
+      | accessControl.mode | allow_all                    |
+    Then the response status code should be 201
+    When I create LLM proxy from "resources/templates/llm-proxy.yaml" with values:
+      | apiVersion               | ${CTX:gatewaySpecVersion}                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+      | name                     | ${CTX:proxyName}                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+      | displayName              | O2AZ-Route-Proxy                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+      | version                  | v1.0                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+      | context                  | ${CTX:proxyContext}                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+      | provider.id              | ${CTX:primaryName}                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+      | spec.additionalProviders | [{"id":"${CTX:targetName}","as":"target-provider"},{"id":"${CTX:otherName}","as":"other-provider"}]                                                                                                                                                                                                                                                                                                                                                           |
+      | spec.policies            | [{"name":"llm-header-router","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"mappings":[{"headerValue":"target","provider":"target-provider"},{"headerValue":"other","provider":"other-provider"}]}}]},{"name":"openai-to-azure-openai-transformer","version":"v0","paths":[{"path":"/chat/completions","methods":["POST"],"params":{"apiVersion":"2024-10-21","model":"azure-fallback","providerId":"target-provider"}}]}] |
+    Then the response status code should be 201
+    When I set header "x-provider" to "target"
+    And I send a "POST" request to "${CTX:proxyContext}/chat/completions" until status 200 with body:
+      """
+      {"model":"route-model","messages":[{"role":"user","content":"routed to the target"}]}
+      """
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/target/openai/deployments/route-model/chat/completions"
+    Then the response status code should be 200
+    And the JSON response field "path" should be "/target/openai/deployments/route-model/chat/completions"
+    And the JSON response field "body" should contain "routed to the target"
+    When I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
+      """
+      """
+    Then the response status code should be 200
+    When I send a "GET" request to the "capture" service at "/test/captured?path=/target/openai/deployments/azure-fallback/chat/completions"
+    Then the response status code should be 200
+    And the JSON response field "query" should be "api-version=2024-10-21"
+    When I set header "x-provider" to "other"
+    And I send a "POST" request to "${CTX:proxyContext}/chat/completions" with body:
+      """
+      {"model":"route-model","messages":[{"role":"user","content":"left untranslated"}]}
+      """
+    Then the response status code should be 200
+    And the JSON response field "path" should be "/other/chat/completions"
+    And the response body should match pattern "role[^a-z]+user[^a-z]+content[^a-z]+left untranslated[^a-z]+[}][]][}]"
+    When I delete the LLM proxy "${CTX:proxyName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:otherName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:targetName}"
+    Then the response should be successful
+    When I delete the LLM provider "${CTX:primaryName}"
+    Then the response should be successful
+
+  # ---- generated coverage scenarios: end ----
