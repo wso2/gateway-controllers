@@ -1,9 +1,27 @@
 name: dynamic-endpoint
-version: v1.0.1
+version: v1.1.0
 description: |
-  Routes requests to a dynamically specified upstream definition.
-  This policy reads an upstream name from parameters and routes the request to that upstream.
-  The targetUpstream must match the name of an entry in the API's upstreamDefinitions section.
+  Routes requests to an upstream chosen at runtime.
+  - targetUpstream routes to a fixed target: the entry of that name in the API's own
+    upstreamDefinitions or, when the API has none by that name, the gateway-wide Backend
+    (kind: Backend) of that name.
+  - backendExpression is a CEL expression evaluated for each request against the request
+    context (headers, path, method, shared metadata, API and route, authenticated subject and
+    claims). The string it returns names the gateway-wide Backend to route to, limited to the
+    Backends backendSelector matches. A value that is not a string, not a valid name, unknown or
+    not selectable, or that makes the expression fail (other than by reading an absent value), is
+    rejected with 400 and never reaches an upstream. When the expression yields
+    no value (an absent header, key or claim, or an empty string), onMissingValue decides:
+    fallback (the default) uses targetUpstream if set, else the API's own upstream; reject
+    returns 400. The policy removes no headers; add remove-headers after it to
+    keep a routing header from the backend.
+  - backendKeyExpression is a CEL expression for templated Backends, whose endpoint host contains
+    {key} (for example https://api-{key}.example.com). For a request routed to one, it returns
+    the key that fills {key}, so one Backend reaches a host chosen per request. A request without
+    a valid key is rejected with 400.
+  Adding or changing a Backend never requires the API to be edited or redeployed. A Backend
+  that a deployed API names in targetUpstream can be removed only after that API stops naming
+  it, unless the API has an upstream definition of that name, which it uses instead.
 
 parameters:
   type: object
@@ -12,9 +30,56 @@ parameters:
     targetUpstream:
       type: string
       x-wso2-policy-advanced-param: true
-      description: The name of the upstream definition to route requests to (must match an entry in upstreamDefinitions)
-  required:
-    - targetUpstream
+      x-choreolabs-backend-routing: name
+      description: The upstream to route requests to. An entry of the API's upstreamDefinitions with this name takes precedence; otherwise it names a gateway-wide Backend, and requests get 503 while that Backend does not exist. With backendExpression, used when the expression yields no value.
+    backendExpression:
+      type: string
+      minLength: 1
+      maxLength: 1024
+      x-choreolabs-backend-routing: expression
+      description: |
+        A CEL expression evaluated for each request that returns the name of the gateway-wide
+        Backend to route it to. Requires backendSelector. Variables: request.Headers (map of
+        lower-case header name to values), request.Path, request.Method, request.Metadata,
+        api.Name, api.Version, api.Context, api.Id, route.Name, auth.Subject and auth.Properties
+        (claims set by an earlier authentication policy); CEL string functions such as split and
+        lowerAscii are available. Examples: request.Headers["x-tenant"][0],
+        auth.Properties["tenant_id"], request.Metadata["tenant"].
+    backendSelector:
+      type: object
+      additionalProperties: false
+      description: Limits which Backends backendExpression can select, by label. Required with backendExpression; {} (or empty matchLabels) allows every Backend on the gateway.
+      properties:
+        matchLabels:
+          type: object
+          additionalProperties:
+            type: string
+    backendKeyExpression:
+      type: string
+      minLength: 1
+      maxLength: 1024
+      description: |
+        A CEL expression evaluated for each request routed to a templated Backend, one whose
+        endpoint host contains {key}, such as https://api-{key}.example.com. It returns the key
+        that fills {key}: one lowercase DNS label. It reads the same variables as
+        backendExpression, and is evaluated only when the chosen Backend is templated. A request
+        whose key has no value or isn't a valid label is rejected with 400. Requires
+        targetUpstream or backendExpression. Examples: request.Headers["env"][0].lowerAscii(),
+        request.Metadata["x-wso2-subscription-plan-name"].lowerAscii().replace(" ", "-").
+    onMissingValue:
+      type: string
+      enum:
+        - fallback
+        - reject
+      default: fallback
+      description: What to do when backendExpression yields no value for a request. Only valid with backendExpression.
+  anyOf:
+    - required: [targetUpstream]
+    - required: [backendExpression]
+  dependencies:
+    backendExpression: [backendSelector]
+    backendSelector: [backendExpression]
+    onMissingValue: [backendExpression]
 
 systemParameters:
   type: object
