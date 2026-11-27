@@ -610,7 +610,7 @@ A request with neither `messages` nor `input` matches no path and is answered wi
 #### Request Phase
 
 1. **Content extraction**: Extracts content using `jsonPath`, then the first `fallbackJsonPaths` entry that finds text when it finds none, or uses the entire payload.
-2. **Guardrail evaluation**: Calls `ApplyGuardrail` once with every extracted string, using the effective region, guardrail ID, and version, and the identity resolved from `awsAuth` or the gateway-wide settings.
+2. **Guardrail evaluation**: Calls `ApplyGuardrail` once with every extracted string, using the effective region, guardrail ID, and version, and the identity resolved from `awsAuth` or the gateway-wide settings. The content is sent as `INPUT`, so the guardrail's input settings apply.
 3. **Violation handling**: Blocks and returns HTTP `422` when any finding has the action `BLOCKED`, such as a prompt attack, denied topic, blocked word, or a PII type configured to block. This applies even when PII was also found.
 4. **PII processing**: When every finding is `ANONYMIZED`, masks PII. With `redactPII: false`, masks PII with placeholders for later restoration. With `redactPII: true`, replaces PII with `*****` permanently.
 5. **Error Strategy**: Applies `passthroughOnError` behavior to decide whether to fail closed or allow traffic on Bedrock API failures.
@@ -620,7 +620,7 @@ A request with neither `messages` nor `input` matches no path and is answered wi
 1. **Status check**: When `applicableStatusCodes` is set, a response whose upstream status code is not listed is passed through unchanged and the remaining steps are skipped. A response with an unknown status code is always validated.
 2. **PII restoration**: In masking mode, restores the request's placeholders with the original values when mappings are available from request metadata. The restored text is what the guardrail assesses, because it is what the client receives.
 3. **Content extraction**: Extracts content using `jsonPath`, then the first `fallbackJsonPaths` entry that finds text when it finds none, from a JSON body or from each event of an MCP Server-Sent Events body, using `streamingJsonPath` for a streamed LLM response, or uses the entire payload.
-4. **Guardrail evaluation**: Validates the response content through the guardrail.
+4. **Guardrail evaluation**: Validates the response content through the guardrail. The content is sent as `OUTPUT`, so the guardrail's output settings apply, streamed or not.
 5. **Violation handling**: Blocks and returns HTTP `422` (or ends a stream) when any finding has the action `BLOCKED`.
 6. **PII masking**: PII that the guardrail anonymizes in the response is replaced with its type in braces, such as `{EMAIL}` (or `*****` with `redactPII: true`). This covers PII that the upstream adds, such as an LLM answer or an MCP tool result. A value the request masked and this phase restored, or part of one, is not masked again. A masked JSON response is re-encoded: its object keys are sorted and insignificant whitespace is removed.
 7. **Error Strategy**: Applies `passthroughOnError` behavior for extraction errors and Bedrock API failures.

@@ -1206,3 +1206,58 @@ func TestAWSBedrockGuardrail_CodeNamesWhatBedrockReported(t *testing.T) {
 		t.Fatalf("nil output: expected %q, got %q", policy.GuardrailCodeUnsafeContent, got)
 	}
 }
+
+// Requests are sent to Bedrock as INPUT and responses as OUTPUT on every path, so
+// the guardrail applies its input settings to requests and its output settings to
+// responses.
+func TestApplyGuardrailSourceMatchesTheFlow(t *testing.T) {
+	const tokenStream = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\ndata: [DONE]\n\n"
+	mcpResponse := map[string]interface{}{"enabled": true, "jsonPath": "$.result.content[*].text"}
+	tests := []struct {
+		name string
+		run  func(t *testing.T, client *countingBedrockClient)
+		want types.GuardrailContentSource
+	}{
+		{"request", func(t *testing.T, c *countingBedrockClient) {
+			p := fallbackPathsAttachment(t, "request", map[string]interface{}{}, c)
+			sendRequest(p, map[string]interface{}{}, `{"messages":[{"role":"user","content":"hello"}]}`)
+		}, types.GuardrailContentSourceInput},
+		{"buffered response", func(t *testing.T, c *countingBedrockClient) {
+			p := fallbackPathsAttachment(t, "response", map[string]interface{}{"enabled": true}, c)
+			sendResponse(p, map[string]interface{}{}, `{"choices":[{"message":{"content":"hello"}}]}`)
+		}, types.GuardrailContentSourceOutput},
+		{"buffered token stream", func(t *testing.T, c *countingBedrockClient) {
+			streamingPolicy(c, nil).OnResponseBody(context.Background(),
+				bufferedResponse(map[string]interface{}{}, "text/event-stream", tokenStream), map[string]interface{}{})
+		}, types.GuardrailContentSourceOutput},
+		{"streamed token stream", func(t *testing.T, c *countingBedrockClient) {
+			feedStream(t, streamingPolicy(c, nil), streamCtxWithType("text/event-stream"), []string{sseEvent("hello"), "data: [DONE]\n\n"})
+		}, types.GuardrailContentSourceOutput},
+		{"streamed JSON document", func(t *testing.T, c *countingBedrockClient) {
+			feedStream(t, streamingPolicy(c, nil), streamCtxWithType("application/json"),
+				[]string{`{"choices":[{"message":`, `{"content":"hello"}}]}`})
+		}, types.GuardrailContentSourceOutput},
+		{"buffered MCP event stream", func(t *testing.T, c *countingBedrockClient) {
+			p := fallbackPathsAttachment(t, "response", mcpResponse, c)
+			p.OnResponseBody(context.Background(),
+				bufferedResponse(map[string]interface{}{}, "text/event-stream", mcpResultEvent), map[string]interface{}{})
+		}, types.GuardrailContentSourceOutput},
+		{"streamed MCP event stream", func(t *testing.T, c *countingBedrockClient) {
+			feedStream(t, fallbackPathsAttachment(t, "response", mcpResponse, c), streamCtxWithType("text/event-stream"), []string{mcpResultEvent})
+		}, types.GuardrailContentSourceOutput},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &countingBedrockClient{output: makeNoInterventionOutput()}
+			tt.run(t, client)
+			if len(client.sources) == 0 {
+				t.Fatal("expected a call to Bedrock")
+			}
+			for _, source := range client.sources {
+				if source != tt.want {
+					t.Fatalf("sent as %q, want %q (all calls: %v)", source, tt.want, client.sources)
+				}
+			}
+		})
+	}
+}

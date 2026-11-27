@@ -39,16 +39,18 @@ var _ policy.StreamingResponsePolicy = (*AWSBedrockGuardrailPolicy)(nil)
 // chunk instead of per window still passes every behavioural assertion below
 // while billing one AWS call per token.
 type countingBedrockClient struct {
-	output *bedrockruntime.ApplyGuardrailOutput
-	err    error
-	calls  int
-	texts  []string
+	output  *bedrockruntime.ApplyGuardrailOutput
+	err     error
+	calls   int
+	texts   []string
+	sources []types.GuardrailContentSource
 }
 
-// ApplyGuardrail records the call and the text it carried, so a test can assert
-// how many billable assessments a stream made and what was sent.
+// ApplyGuardrail records the call, the text it carried and its source, so a test
+// can assert how many billable assessments a stream made and what was sent.
 func (c *countingBedrockClient) ApplyGuardrail(_ context.Context, params *bedrockruntime.ApplyGuardrailInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error) {
 	c.calls++
+	c.sources = append(c.sources, params.Source)
 	for _, content := range params.Content {
 		if text, ok := content.(*types.GuardrailContentBlockMemberText); ok {
 			c.texts = append(c.texts, aws.ToString(text.Value.Text))
