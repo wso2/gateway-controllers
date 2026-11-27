@@ -1374,11 +1374,20 @@ func (p *AWSBedrockGuardrailPolicy) loadAWSConfig(ctx context.Context, region st
 	return cfg, nil
 }
 
+// guardrailSource is the ApplyGuardrail source for a check: INPUT for a request and
+// OUTPUT for a response, so the guardrail applies its input or output settings.
+func guardrailSource(isResponse bool) types.GuardrailContentSource {
+	if isResponse {
+		return types.GuardrailContentSourceOutput
+	}
+	return types.GuardrailContentSourceInput
+}
+
 // applyBedrockGuardrail calls AWS Bedrock Guardrail ApplyGuardrail API
 //
 // Each text is sent as its own content block, so a payload with several values to
 // check (every MCP tool argument, say) costs one call rather than one per value.
-func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, awsCfg aws.Config, guardrailID, guardrailVersion string, contents ...string) (*bedrockruntime.ApplyGuardrailOutput, error) {
+func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, awsCfg aws.Config, guardrailID, guardrailVersion string, source types.GuardrailContentSource, contents ...string) (*bedrockruntime.ApplyGuardrailOutput, error) {
 	// Create Bedrock Runtime client
 	newClient := p.newBedrockClientFunc
 	if newClient == nil {
@@ -1399,7 +1408,7 @@ func (p *AWSBedrockGuardrailPolicy) applyBedrockGuardrail(ctx context.Context, a
 	input := &bedrockruntime.ApplyGuardrailInput{
 		GuardrailIdentifier: aws.String(guardrailID),
 		GuardrailVersion:    aws.String(guardrailVersion),
-		Source:              types.GuardrailContentSourceInput,
+		Source:              source,
 		Content:             blocks,
 	}
 
@@ -3518,7 +3527,8 @@ func lastWordEnd(runes []rune, limit int) int {
 	return 0
 }
 
-// applyGuardrailToText runs one ApplyGuardrail call for the given text.
+// applyGuardrailToText runs one ApplyGuardrail call for the given text of a
+// streamed response.
 func (p *AWSBedrockGuardrailPolicy) applyGuardrailToText(text string) (interface{}, error) {
 	loadConfig := p.loadAWSConfigFunc
 	if loadConfig == nil {
@@ -3528,7 +3538,7 @@ func (p *AWSBedrockGuardrailPolicy) applyGuardrailToText(text string) (interface
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
 	}
-	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, text)
+	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, types.GuardrailContentSourceOutput, text)
 	if err != nil {
 		return nil, err
 	}
@@ -4873,7 +4883,7 @@ func (p *AWSBedrockGuardrailPolicy) assessContents(contents []string, params AWS
 		return nil, p.passOrBlock("Error loading AWS config", err, params, isResponse, nil,
 			checkFailureFault("Error loading AWS config", isResponse), payload, restored)
 	}
-	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, contents...)
+	output, err := p.applyBedrockGuardrail(context.Background(), awsCfg, p.guardrailID, p.guardrailVersion, guardrailSource(isResponse), contents...)
 	if err != nil {
 		return nil, p.passOrBlock("Error calling AWS Bedrock Guardrail", err, params, isResponse, nil,
 			checkFailureFault("Error calling AWS Bedrock Guardrail", isResponse), payload, restored)
