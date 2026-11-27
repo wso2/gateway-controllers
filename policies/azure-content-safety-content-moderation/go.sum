@@ -28,6 +28,8 @@ github.com/rogpeppe/go-internal v1.14.1 h1:UQB4HGPB6osV0SQTLymcB4TgvyWu6ZyliaW0t
 github.com/rogpeppe/go-internal v1.14.1/go.mod h1:MaRKkUm5W0goXpeCfT7UZI6fk/L7L7so1lCWt35ZSgc=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
+github.com/wso2/api-platform/sdk/ai v0.2.4 h1:fim78WSUFWJGL4aozSvPVvpMgZNYKnE4rIH/WdEH8CM=
+github.com/wso2/api-platform/sdk/ai v0.2.4/go.mod h1:K0eC3ET4kNosjSx0XGJ8rzWhyk6JNzA2r5jidhX5V+s=
 github.com/wso2/api-platform/sdk/core v0.4.2 h1:duoNqWPEaxYt/AeLupuqeI7ksu2biSMdpA1ugTpHQPY=
 github.com/wso2/api-platform/sdk/core v0.4.2/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
 go.yaml.in/yaml/v3 v3.0.6 h1:zcDfvjXEqTQmpjniUBLc91xYJMB2c4QOFxEF/LCEckM=

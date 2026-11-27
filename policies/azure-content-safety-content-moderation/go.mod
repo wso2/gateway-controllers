@@ -1,6 +1,6 @@
 module github.com/wso2/gateway-controllers/policies/azure-content-safety-content-moderation
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/wso2/api-platform/sdk/ai v0.2.4
@@ -23,4 +23,3 @@ require (
 	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 )
-
