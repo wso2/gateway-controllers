@@ -42,6 +42,32 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
-      - name: respond
+      - name: respond-response
         features:
-          - features/respond.feature
+          - features/respond_response.feature
+      - name: respond-request
+        features:
+          - features/respond_request.feature
+      - name: respond-scope
+        features:
+          - features/respond_scope.feature
+      - name: respond-security
+        features:
+          - features/respond_security.feature
+      - name: respond-lifecycle
+        features:
+          - features/respond_lifecycle.feature
+      - name: respond-validation
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/respond_validation.feature
+      # Gateway 1.1.0 does not convert a numeric string policy parameter to its schema type
+      # (added in 1.2.0 by wso2/api-platform#2934), so scenarios tagged @requires-gw-1.2.0 are
+      # skipped there.
+      - name: respond-validation-gw-1.1.0
+        tags: "gateway-version<1.2.0;~@requires-gw-1.2.0"
+        features:
+          - features/respond_validation.feature
+      - name: respond-restart
+        features:
+          - features/respond_restart.feature

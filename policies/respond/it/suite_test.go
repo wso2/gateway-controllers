@@ -27,7 +27,10 @@ import (
 	"github.com/wso2/gateway-controllers/policies/respond/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+var config = suite.Config{
+	Register:   steps.Register,
+	Companions: []string{"basic-auth", "basic-ratelimit", "log-message"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
