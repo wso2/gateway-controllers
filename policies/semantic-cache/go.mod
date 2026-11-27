@@ -1,10 +1,10 @@
 module github.com/wso2/gateway-controllers/policies/semantic-cache
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/google/uuid v1.6.0
-	github.com/wso2/api-platform/sdk/ai v0.2.5
+	github.com/wso2/api-platform/sdk/ai v0.2.4
 	github.com/wso2/api-platform/sdk/core v0.4.2
 	gopkg.in/yaml.v3 v3.0.1
 )

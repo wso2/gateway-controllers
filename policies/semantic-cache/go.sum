@@ -400,6 +400,8 @@ github.com/valyala/fasthttp v1.6.0/go.mod h1:FstJa9V+Pj9vQ7OJie2qMHdwemEDaDiSdBn
 github.com/valyala/fasttemplate v1.0.1/go.mod h1:UQGH1tvbgY+Nz5t2n7tXsz52dQxojPUpymEIMZ47gx8=
 github.com/valyala/fasttemplate v1.2.1/go.mod h1:KHLXt3tVN2HBp8eijSv/kGJopbvo7S+qRAEEKiv+SiQ=
 github.com/valyala/tcplisten v0.0.0-20161114210144-ceec8f93295a/go.mod h1:v3UYOV9WzVtRmSR+PDvWpU/qWl4Wa5LApYYX4ZtKbio=
+github.com/wso2/api-platform/sdk/ai v0.2.4 h1:fim78WSUFWJGL4aozSvPVvpMgZNYKnE4rIH/WdEH8CM=
+github.com/wso2/api-platform/sdk/ai v0.2.4/go.mod h1:K0eC3ET4kNosjSx0XGJ8rzWhyk6JNzA2r5jidhX5V+s=
 github.com/wso2/api-platform/sdk/core v0.4.2 h1:duoNqWPEaxYt/AeLupuqeI7ksu2biSMdpA1ugTpHQPY=
 github.com/wso2/api-platform/sdk/core v0.4.2/go.mod h1:TgjpOk3QBPc7xEQC+NctWcNq5dSPBkn7wSKh+hULTj8=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
