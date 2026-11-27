@@ -187,7 +187,7 @@ func (p *OpaqueTokenAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *po
 
 	selected := selectProviders(providers, userIssuers)
 	if len(selected) == 0 {
-		slog.Debug("Opaque Token Auth Policy: No provider matches configured issuers", "issuers", userIssuers)
+		slog.Debug("Opaque Token Auth Policy: No provider matches configured issuers", "issuerCount", len(userIssuers))
 		return p.handleAuthFailureHeaders(reqCtx.SharedContext, onFailureStatusCode, errorMessageFormat, errorMessage, "no introspection provider matches configured issuers", policy.FaultCodeMediationFailed, policy.FaultTypeConfiguration)
 	}
 

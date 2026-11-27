@@ -30,6 +30,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	"github.com/wso2/api-platform/sdk/core/utils"
 	ratelimit "github.com/wso2/gateway-controllers/policies/advanced-ratelimit"
 )
 
@@ -268,8 +269,8 @@ func randomString(length int) string {
 // transformToRatelimitParams converts LLM-specific parameters to the advanced-ratelimit structure.
 func transformToRatelimitParams(params map[string]interface{}, template map[string]interface{}, attachedTo policy.Level) map[string]interface{} {
 	slog.Debug("transformToRatelimitParams: starting parameter transformation",
-		"params", params,
-		"template", template,
+		"params", utils.MaskedParams(params),
+		"template", utils.MaskedParams(template),
 		"attachedTo", attachedTo)
 
 	var quotas []interface{}
@@ -418,7 +419,7 @@ func transformToRatelimitParams(params map[string]interface{}, template map[stri
 		"quotasCount", len(quotas),
 		"hasAlgorithm", rlParams["algorithm"] != nil,
 		"hasBackend", rlParams["backend"] != nil,
-		"quotas", quotas)
+		"quotas", utils.MaskedParams(quotas))
 
 	return rlParams
 }

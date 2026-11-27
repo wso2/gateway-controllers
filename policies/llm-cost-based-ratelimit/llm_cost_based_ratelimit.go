@@ -31,6 +31,7 @@ import (
 	"time"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	"github.com/wso2/api-platform/sdk/core/utils"
 	ratelimit "github.com/wso2/gateway-controllers/policies/advanced-ratelimit"
 )
 
@@ -115,7 +116,7 @@ func (p *LLMCostRateLimitPolicy) OnRequestHeaders(ctx context.Context, reqCtx *p
 ) policy.RequestHeaderAction {
 	slog.Debug("OnRequestHeaders: processing LLM cost-based rate limit",
 		"route", p.metadata.RouteName,
-		"params", params)
+		"params", utils.MaskedParams(params))
 
 	providerName, ok := reqCtx.SharedContext.Metadata[MetadataKeyProviderName].(string)
 	if !ok || providerName == "" {
@@ -537,7 +538,7 @@ func randomString(length int) string {
 // The cost multipliers are also scaled so that the final deduction is in the scaled unit.
 func transformToRatelimitParams(params map[string]interface{}) map[string]interface{} {
 	slog.Debug("transformToRatelimitParams: starting parameter transformation",
-		"params", params)
+		"params", utils.MaskedParams(params))
 
 	// Get the budget limits from user parameters
 	budgetLimits := params["budgetLimits"]
@@ -651,7 +652,7 @@ func transformToRatelimitParams(params map[string]interface{}) map[string]interf
 		"quotasCount", len(quotas),
 		"hasAlgorithm", rlParams["algorithm"] != nil,
 		"hasBackend", rlParams["backend"] != nil,
-		"quotas", quotas)
+		"quotas", utils.MaskedParams(quotas))
 
 	return rlParams
 }

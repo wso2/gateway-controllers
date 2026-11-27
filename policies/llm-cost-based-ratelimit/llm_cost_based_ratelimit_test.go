@@ -19,9 +19,12 @@
 package llmcostratelimit
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1199,5 +1202,49 @@ func TestSharedAndConsumerInstancesKeepSeparateState(t *testing.T) {
 	}
 	if md[MetadataKeyCostScaleFactor] != 1000 || md[metadataKeyCostScaleFactorConsumer] != 1000000 {
 		t.Errorf("scale factors were overwritten: %v, %v", md[MetadataKeyCostScaleFactor], md[metadataKeyCostScaleFactorConsumer])
+	}
+}
+
+// TestTransformToRatelimitParams_DebugLogsMaskParamValues checks that the
+// parameter and quota dumps keep their keys but never log a value. Merged
+// params include system parameters such as the Redis password.
+func TestTransformToRatelimitParams_DebugLogsMaskParamValues(t *testing.T) {
+	const redisPassword = "redis-s3cret-password"
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	params := map[string]interface{}{
+		"budgetLimits": []interface{}{
+			map[string]interface{}{"amount": float64(4711), "duration": "17m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "redis",
+		"redis": map[string]interface{}{
+			"host":     "redis.internal.example.com",
+			"password": redisPassword,
+		},
+	}
+
+	result := transformToRatelimitParams(params)
+
+	// Positive control: the values were really processed.
+	if quotas, ok := result["quotas"].([]interface{}); !ok || len(quotas) != 1 {
+		t.Fatalf("expected one quota, got %#v", result["quotas"])
+	}
+
+	// Budget amounts and durations are still logged individually by the
+	// "scaled limit" line; only secret-bearing values are asserted absent here.
+	out := buf.String()
+	for _, value := range []string{redisPassword, "redis.internal.example.com"} {
+		if strings.Contains(out, value) {
+			t.Errorf("debug log contains parameter value %q:\n%s", value, out)
+		}
+	}
+	for _, key := range []string{"budgetLimits", "password", "redis:map[host:*** password:***]", "limits:[map[duration:*** limit:***]]"} {
+		if !strings.Contains(out, key) {
+			t.Errorf("debug log is missing %q:\n%s", key, out)
+		}
 	}
 }

@@ -2478,7 +2478,7 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 				if debugEnabled() {
 					slog.Debug("JWT Auth Policy: Processing key manager",
 						"name", name,
-						"issuer", issuer,
+						"hasIssuer", issuer != "",
 						"scopeClaim", scopeClaim,
 						"applicationIdClaim", applicationIDClaim,
 					)
@@ -2501,7 +2501,6 @@ func (p *JwtAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 							if debugEnabled() {
 								slog.Debug("JWT Auth Policy: Configuring remote JWKS",
 									"keyManager", name,
-									"uri", uri,
 									"certificatePath", certPath,
 									"skipTlsVerify", skipTlsVerify,
 								)

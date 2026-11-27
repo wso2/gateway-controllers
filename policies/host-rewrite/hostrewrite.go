@@ -101,7 +101,7 @@ func (p *HostRewritePolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy
 		}
 	}
 
-	slog.Info("[Host Rewrite]: Rewriting host header", "from", reqCtx.Headers.Get(":authority"), "to", cfg.Host)
+	slog.Debug("[Host Rewrite]: Rewriting host header")
 
 	return policy.UpstreamRequestHeaderModifications{
 		Host: &cfg.Host,
