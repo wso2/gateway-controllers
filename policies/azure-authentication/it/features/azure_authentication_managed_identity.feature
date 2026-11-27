@@ -26,7 +26,7 @@ Feature: Azure Authentication policy with a managed identity
   # container-apps for a managed identity of the Azure Container Apps app the gateway runs in. The
   # gateway runtime has the IDENTITY_ENDPOINT and IDENTITY_HEADER Container Apps gives an app with a
   # managed identity: the testbench entra service's managed identity endpoint under this block's
-  # partition, https://testbench:3028/${CTX:testbenchPartition}/msi/token, and the header value it
+  # partition, https://testbench:3029/${CTX:testbenchPartition}/msi/token, and the header value it
   # requires, "testbench-identity-header". With them set, the policy's Azure Identity SDK sends the
   # token requests of both types there. IMDS's own request format, which managed-identity uses on a
   # VM or AKS node, can't be reached from a container; the unit tests and real Azure runs cover it,
@@ -71,7 +71,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:testbenchPartition}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"<authenticationType>","clientId":"${CTX:clientId}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -81,7 +81,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:secondApiName} |
       | spec.version           | ${CTX:secondApiVersion} |
       | spec.context           | ${CTX:secondApiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:testbenchPartition}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"<authenticationType>","clientId":"${CTX:clientId}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -128,7 +128,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:resourcePartition}/<upstream> |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:resourcePartition}/<upstream> |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"<authenticationType>","scope":"<resource>/.default"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -247,7 +247,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:testbenchPartition}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"<authenticationType>","clientId":"${CTX:clientId}","scope":"<resource>/.default"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -289,7 +289,7 @@ Feature: Azure Authentication policy with a managed identity
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:testbenchPartition}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:testbenchPartition}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"<authenticationType>","clientId":"${CTX:clientId}","tenantId":"contoso.onmicrosoft.com"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -327,7 +327,7 @@ Feature: Azure Authentication policy with a managed identity
       | version            | ${CTX:providerVersion} |
       | template           | azureai-foundry |
       | spec.context       | ${CTX:providerContext} |
-      | spec.upstream.url  | http://testbench:3027/${CTX:testbenchPartition}/foundry |
+      | spec.upstream.url  | http://testbench:3028/${CTX:testbenchPartition}/foundry |
       | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"<authenticationType>","clientId":"${CTX:clientId}"}} |
       | accessControl.mode | allow_all |
     Then the response status code should be 201

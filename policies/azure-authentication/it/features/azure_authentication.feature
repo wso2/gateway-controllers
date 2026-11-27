@@ -29,12 +29,12 @@ Feature: Azure Authentication policy
   #
   # The gateway runtime's identity is tenant 7f3c2a10-4b5e-4c6d-8e9f-0a1b2c3d4e5f and client
   # 5d6e7f80-91a2-4b3c-8d4e-5f6a7b8c9d0e, its authority is the testbench entra service at
-  # https://testbench:3028/ and its federated token is "testbench-federated-identity-token".
+  # https://testbench:3029/ and its federated token is "testbench-federated-identity-token".
   # The entra service issues tokens at /<tenant>/oauth2/v2.0/token and records every token request
   # at /<tenant>/test/requests, with the scope as the policy's Azure Identity SDK sends it: the
   # resource's /.default followed by "openid offline_access profile". The SDK reads the tenant's
   # OpenID configuration before its first token request; that read is not a token request and is
-  # not recorded. Its Entra-protected resources, http://testbench:3027/<tenant>/foundry
+  # not recorded. Its Entra-protected resources, http://testbench:3028/<tenant>/foundry
   # (audience https://ai.azure.com) and .../cognitive (audience https://cognitiveservices.azure.com),
   # answer a valid token with a chat completion echoing the request headers, anything else with
   # 401, and report the token they received in the X-Testbench-Entra-Token, -Tid and -Aud response
@@ -67,7 +67,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName}                                                                                       |
       | spec.version           | ${CTX:apiVersion}                                                                                    |
       | spec.context           | ${CTX:apiContext}/$version                                                                           |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:resourcePartition}/foundry                                               |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:resourcePartition}/foundry                                               |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}]                                                       |
     Then the response should be successful
@@ -98,7 +98,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -108,7 +108,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:secondApiName} |
       | spec.version           | ${CTX:secondApiVersion} |
       | spec.context           | ${CTX:secondApiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -146,7 +146,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/{id}","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -179,7 +179,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/refresh-soon-${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/refresh-soon-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"refresh-soon-${CTX:tenant}"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -210,7 +210,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"},{"method":"GET","path":"/models"}] |
     Then the response should be successful
@@ -238,7 +238,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}]},{"method":"GET","path":"/models"}] |
     Then the response should be successful
 
@@ -264,7 +264,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/cognitive |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/cognitive |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","clientId":"11111111-2222-4333-8444-555555555555","scope":"https://cognitiveservices.azure.com/.default"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -295,7 +295,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -326,7 +326,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"api-key-auth","version":"v1","params":{"key":"API-Key","in":"header"}},{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -365,7 +365,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/<prefix>${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/<prefix>${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"<prefix>${CTX:tenant}"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -400,7 +400,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/invalid-client-${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/invalid-client-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"invalid-client-${CTX:tenant}"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -437,7 +437,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/unavailable-${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/unavailable-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"unavailable-${CTX:tenant}"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -466,7 +466,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/slow-${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/slow-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"slow-${CTX:tenant}","tokenRequestTimeout":"1s"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -493,7 +493,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/reject-once-${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/reject-once-${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"GET","path":"/health"},{"method":"POST","path":"/chat/completions","policies":[{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"reject-once-${CTX:tenant}"}}]}] |
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/health" until status 401
@@ -524,7 +524,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","scope":"https://cognitiveservices.azure.com/.default"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -550,7 +550,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 401
@@ -562,7 +562,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -575,7 +575,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/cognitive |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/cognitive |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","scope":"https://cognitiveservices.azure.com/.default"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -592,7 +592,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/cognitive |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/cognitive |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/chat/completions" until status 401
@@ -615,7 +615,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -630,7 +630,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
@@ -660,7 +660,7 @@ Feature: Azure Authentication policy
       | version            | ${CTX:providerVersion} |
       | template           | azureai-foundry |
       | spec.context       | ${CTX:providerContext} |
-      | spec.upstream.url  | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.url  | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}} |
       | accessControl.mode | allow_all |
     Then the response status code should be 201
@@ -691,7 +691,7 @@ Feature: Azure Authentication policy
       | version            | ${CTX:providerVersion} |
       | template           | azureai-foundry |
       | spec.context       | ${CTX:providerContext} |
-      | spec.upstream.url  | http://testbench:3027/invalid-client-${CTX:tenant}/foundry |
+      | spec.upstream.url  | http://testbench:3028/invalid-client-${CTX:tenant}/foundry |
       | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"workload-identity","tenantId":"invalid-client-${CTX:tenant}"}} |
       | accessControl.mode | allow_all |
     Then the response status code should be 201
@@ -727,7 +727,7 @@ Feature: Azure Authentication policy
       | version            | ${CTX:providerVersion} |
       | template           | azureai-foundry |
       | spec.context       | ${CTX:providerContext} |
-      | spec.upstream.url  | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.url  | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.upstream.auth | {"type":"other","policyName":"azure-authentication","policyVersion":"v0","policyParams":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}","clientId":"not-a-guid"}} |
       | accessControl.mode | allow_all |
     Then the response status code should be 201
@@ -737,7 +737,7 @@ Feature: Azure Authentication policy
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:tenant}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:tenant}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful

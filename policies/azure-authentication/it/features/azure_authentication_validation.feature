@@ -47,7 +47,7 @@ Feature: Azure Authentication policy configuration validation
       | spec.displayName       | ${CTX:apiName}                                                                 |
       | spec.version           | ${CTX:apiVersion}                                                              |
       | spec.context           | ${CTX:apiContext}/$version                                                     |
-      | spec.upstream.main.url | http://testbench:3027/az-invalid-config/foundry                                |
+      | spec.upstream.main.url | http://testbench:3028/az-invalid-config/foundry                                |
       | spec.policies          | [{"name":"azure-authentication","version":"<version>","params":{<params>}}]   |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}]                                 |
     Then the response status code should be 400

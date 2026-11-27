@@ -45,7 +45,7 @@ Feature: Azure Authentication policy with an empty federated token
       | spec.displayName       | ${CTX:apiName} |
       | spec.version           | ${CTX:apiVersion} |
       | spec.context           | ${CTX:apiContext}/$version |
-      | spec.upstream.main.url | http://testbench:3027/${CTX:resourcePartition}/foundry |
+      | spec.upstream.main.url | http://testbench:3028/${CTX:resourcePartition}/foundry |
       | spec.policies          | [{"name":"azure-authentication","version":"v0","params":{"authenticationType":"workload-identity","tenantId":"${CTX:tenant}"}}] |
       | spec.operations        | [{"method":"POST","path":"/chat/completions"}] |
     Then the response should be successful
