@@ -54,8 +54,6 @@ type SubscriptionValidationPolicy struct {
 }
 
 var (
-	// unknownUnitWarned holds the API and unit pairs already logged as unrecognised.
-	unknownUnitWarned sync.Map
 	sharedRateLimitMu = &sync.Mutex{}
 	ins               = &SubscriptionValidationPolicy{
 		cfg: PolicyConfig{
@@ -345,10 +343,6 @@ func (p *SubscriptionValidationPolicy) validateByToken(apiID, token string) (pol
 func (p *SubscriptionValidationPolicy) checkRateLimit(apiID, token string, entry *policyenginev1.SubscriptionEntry) policy.RequestAction {
 	window := windowDuration(entry.ThrottleLimitUnit)
 	if window == 0 {
-		if _, seen := unknownUnitWarned.LoadOrStore(apiID+"|"+entry.ThrottleLimitUnit, struct{}{}); !seen {
-			slog.Warn("subscriptionValidation: unrecognised throttle limit unit; rate limit not enforced",
-				"apiId", apiID, "throttleLimitUnit", entry.ThrottleLimitUnit)
-		}
 		return nil
 	}
 

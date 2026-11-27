@@ -1,10 +1,8 @@
 package subscriptionvalidation
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"strconv"
 	"strings"
 	"testing"
@@ -583,50 +581,6 @@ func TestOnRequestHeaders_RateLimitEnforcedForEveryUnit(t *testing.T) {
 				t.Fatalf("RateLimit-Policy = %q, want %q", got, want)
 			}
 		})
-	}
-}
-
-func TestOnRequestHeaders_UnknownUnitAllowsAndWarnsOnce(t *testing.T) {
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
-	sub := func(apiID string) policyenginev1.SubscriptionData {
-		return policyenginev1.SubscriptionData{
-			APIId:              apiID,
-			SubscriptionToken:  policyenginev1.HashSubscriptionToken("tok-1"),
-			Status:             "ACTIVE",
-			ThrottleLimitCount: 1,
-			ThrottleLimitUnit:  "WEEK",
-			StopOnQuotaReach:   true,
-		}
-	}
-	p := newPolicy(defaultCfg(), newStore([]policyenginev1.SubscriptionData{
-		sub("api-unknown-unit-1"), sub("api-unknown-unit-2"),
-	}))
-
-	send := func(apiID string, n int) {
-		for i := 0; i < n; i++ {
-			action := p.OnRequestHeaders(context.Background(), headerCtxWithToken(apiID, "tok-1", ""), make(map[string]interface{}))
-			if _, ok := action.(policy.UpstreamRequestHeaderModifications); !ok {
-				t.Fatalf("%s request %d should be allowed (unit not enforced), got %#v", apiID, i+1, action)
-			}
-		}
-	}
-	const warning = "unrecognised throttle limit unit"
-
-	send("api-unknown-unit-1", 5)
-	if got := strings.Count(logs.String(), warning); got != 1 {
-		t.Fatalf("expected 1 warning after 5 requests to one API, got %d:\n%s", got, logs.String())
-	}
-	if !strings.Contains(logs.String(), "apiId=api-unknown-unit-1") || !strings.Contains(logs.String(), "throttleLimitUnit=WEEK") {
-		t.Fatalf("warning should name the API and the unit, got:\n%s", logs.String())
-	}
-
-	send("api-unknown-unit-2", 3)
-	if got := strings.Count(logs.String(), warning); got != 2 {
-		t.Fatalf("expected one more warning for a second API, got %d in total:\n%s", got, logs.String())
 	}
 }
 
