@@ -116,7 +116,7 @@ So that overage can be charged apart from the plan's quota, the policy adds thes
 | `x-wso2-subscription-quota-action-requests` | `allowed` (`onExceed: allow`, the request went through) or `rejected` (`onExceed: reject`, the request got 429) | Only when `over` |
 | `x-wso2-subscription-quota-limit-requests` | The window that was exceeded, e.g. "5 requests per 1 minute" | Only when `over` and the window is known |
 
-Every counted request carries it. A request without a subscription (subscription-validation v2 did not run), or whose plan has no request-count condition, carries none of these keys.
+Every counted request carries it. A request without a subscription (subscription-validation v2 did not run), or whose plan has no request-count condition, carries none of these keys. Neither does a request whose limit could not be checked because the rate-limit store (Redis) was unavailable, whatever the `failureMode`: its quota status is unknown.
 
 ## Reference Scenarios
 

@@ -26,7 +26,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -253,9 +255,10 @@ func delegateParams(ec enforcedCondition, costExtraction map[string]interface{},
 	return out
 }
 
-// delegateCacheKey identifies a delegate: a plan's condition with given limits.
+// delegateCacheKey identifies a delegate: a plan's condition with given limits. The condition ID is
+// part of it because the delegate's quota and counter keys are named after it.
 func delegateCacheKey(planID string, ec enforcedCondition, extra string) string {
-	key := ec.Type + "|" + planID + "|" + ec.Signature
+	key := ec.Type + "|" + planID + "|" + ec.ID + "|" + ec.Signature
 	if extra != "" {
 		key += "|" + extra
 	}
@@ -337,8 +340,16 @@ func checkLimit(ctx context.Context, reqCtx *policy.RequestHeaderContext, delega
 	if !ok {
 		return nil, nil
 	}
-	immediate, blocked := rl.OnRequestHeaders(ctx, reqCtx, nil).(policy.ImmediateResponse)
+	action, checked := checkQuota(ctx, reqCtx, rl, ec.ID)
+	immediate, blocked := action.(policy.ImmediateResponse)
 	if !blocked {
+		// With failureMode open, a limiter that couldn't reach its store skips the quota and lets the
+		// request through: its status is unknown, so none is recorded.
+		if !checked {
+			slog.Warn("subscription limit could not be checked; letting the request through",
+				"condition", ec.ID, "subscriptionId", subscriptionID)
+			return nil, nil
+		}
 		return nil, quotaMetadata(ec.ID, quotaWithin, "", "")
 	}
 	// Only a quota rejection means the quota is used up. The limiter failing (its store unreachable,
@@ -363,6 +374,61 @@ func checkLimit(ctx context.Context, reqCtx *policy.RequestHeaderContext, delega
 	metadata := quotaMetadata(ec.ID, quotaOver, quotaRejected, limit)
 	resp.AnalyticsMetadata = metadata
 	return &resp, metadata
+}
+
+// rateLimitResultKey is the request metadata key, before its per-instance suffix, under which
+// advanced-ratelimit lists the quotas it checked in the header phase (a []quotaResult, each with a
+// QuotaName). A quota it skipped because its store failed open is not listed.
+const rateLimitResultKey = "ratelimit:result"
+
+// checkQuota runs the delegate's header-phase check and reports whether it checked the quota
+// named quotaName. The delegate writes its metadata to a copy, which is then merged back, so the
+// keys it set in this call can be told apart from those already there.
+func checkQuota(ctx context.Context, reqCtx *policy.RequestHeaderContext, rl requestHeaderPolicer,
+	quotaName string) (policy.RequestHeaderAction, bool) {
+	if reqCtx.SharedContext == nil {
+		return rl.OnRequestHeaders(ctx, reqCtx, nil), true
+	}
+	shared := reqCtx.SharedContext
+	before := shared.Metadata
+	sc := *shared
+	sc.Metadata = maps.Clone(before)
+	if sc.Metadata == nil {
+		sc.Metadata = map[string]interface{}{}
+	}
+	scoped := *reqCtx
+	scoped.SharedContext = &sc
+	action := rl.OnRequestHeaders(ctx, &scoped, nil)
+
+	checked := false
+	for k, v := range sc.Metadata {
+		if _, existed := before[k]; !existed && strings.HasPrefix(k, rateLimitResultKey) && listsQuota(v, quotaName) {
+			checked = true
+		}
+	}
+	if shared.Metadata == nil {
+		shared.Metadata = map[string]interface{}{}
+	}
+	maps.Copy(shared.Metadata, sc.Metadata)
+	return action, checked
+}
+
+// listsQuota reports whether results, a slice of structs with a QuotaName field, names quotaName.
+func listsQuota(results any, quotaName string) bool {
+	v := reflect.ValueOf(results)
+	if v.Kind() != reflect.Slice {
+		return false
+	}
+	for i := 0; i < v.Len(); i++ {
+		item := reflect.Indirect(v.Index(i))
+		if item.Kind() != reflect.Struct {
+			continue
+		}
+		if name := item.FieldByName("QuotaName"); name.IsValid() && name.Kind() == reflect.String && name.String() == quotaName {
+			return true
+		}
+	}
+	return false
 }
 
 // quotaRejection reports whether the delegate's response rejects a request that went over the

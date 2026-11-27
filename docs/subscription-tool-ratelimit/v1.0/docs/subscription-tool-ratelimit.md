@@ -124,7 +124,7 @@ So that overage can be charged apart from the plan's quota, the policy adds thes
 | `x-wso2-subscription-quota-action-tool-calls` | `allowed` (`onExceed: allow`, the request went through) or `rejected` (`onExceed: reject`, the request got 429) | Only when `over` |
 | `x-wso2-subscription-quota-limit-tool-calls` | The window that was exceeded, e.g. "200 tool calls per 1 hour" | Only when `over` and the window is known |
 
-Only `tools/call` requests carry it; `initialize`, `tools/list` and other methods are not counted and carry nothing from this policy. A request without a subscription (subscription-validation v2 did not run), or whose plan has no tool-call-count condition, carries none of these keys.
+Only `tools/call` requests carry it; `initialize`, `tools/list` and other methods are not counted and carry nothing from this policy. A request without a subscription (subscription-validation v2 did not run), or whose plan has no tool-call-count condition, carries none of these keys. Neither does a request whose limit could not be checked because the rate-limit store (Redis) was unavailable, whatever the `failureMode`: its quota status is unknown.
 
 ## Reference Scenarios
 

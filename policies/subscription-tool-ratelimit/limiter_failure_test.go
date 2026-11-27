@@ -110,6 +110,42 @@ func (r *unreachableRedis) down() {
 // with failureMode closed. The delegate then answers 429 as it does for a used-up quota, but the
 // request must not be recorded as over the quota, and with onExceed allow it is not overage.
 func TestFailClosedLimiterIsNotOverage(t *testing.T) {
+	delegate, reqCtx, ec := delegateOnFailedRedis(t, "closed")
+	check := func(ec enforcedCondition) (*policy.ImmediateResponse, map[string]any) {
+		return checkLimit(context.Background(), reqCtx, delegate, ec, "sub-1", "requests", "")
+	}
+
+	// Reject: the limiter's own 429 is kept, with no quota status.
+	resp, md := check(ec)
+	if resp == nil || resp.StatusCode != 429 || len(resp.AnalyticsMetadata) != 0 || md != nil {
+		t.Fatalf("reject, Redis down: got %#v, %#v; want the limiter's 429 without quota metadata", resp, md)
+	}
+	// Allow: the request passes and is not recorded as overage.
+	allow := ec
+	allow.Reject = false
+	if resp, md := check(allow); resp != nil || md != nil {
+		t.Fatalf("allow, Redis down: got %#v, %#v; want nil, nil", resp, md)
+	}
+}
+
+// TestFailOpenLimiterRecordsNoStatus runs the real rate-limit delegate on a Redis that goes away,
+// with failureMode open. The delegate skips the quota and lets the request through; the request
+// must pass without being recorded as within (or over) the quota, since nothing was checked.
+func TestFailOpenLimiterRecordsNoStatus(t *testing.T) {
+	delegate, reqCtx, ec := delegateOnFailedRedis(t, "open")
+	for _, reject := range []bool{true, false} {
+		c := ec
+		c.Reject = reject
+		if resp, md := checkLimit(context.Background(), reqCtx, delegate, c, "sub-1", "requests", ""); resp != nil || md != nil {
+			t.Fatalf("reject=%v, Redis down, fail-open: got %#v, %#v; want nil, nil", reject, resp, md)
+		}
+	}
+}
+
+// delegateOnFailedRedis builds the real rate-limit delegate on a Redis that then goes away, with the
+// given failureMode, and a request carrying a subscription.
+func delegateOnFailedRedis(t *testing.T, failureMode string) (policy.Policy, *policy.RequestHeaderContext, enforcedCondition) {
+	t.Helper()
 	redis := startUnreachableRedis(t)
 	host, portText, err := net.SplitHostPort(redis.ln.Addr().String())
 	if err != nil {
@@ -122,7 +158,7 @@ func TestFailClosedLimiterIsNotOverage(t *testing.T) {
 	system := map[string]interface{}{
 		"backend": "redis",
 		"redis": map[string]interface{}{
-			"host": host, "port": float64(port), "failureMode": "closed",
+			"host": host, "port": float64(port), "failureMode": failureMode,
 			"connectionTimeout": "200ms", "readTimeout": "200ms", "writeTimeout": "200ms",
 		},
 	}
@@ -140,19 +176,16 @@ func TestFailClosedLimiterIsNotOverage(t *testing.T) {
 		Headers: policy.NewHeaders(nil),
 		Method:  "GET",
 	}
-	check := func(ec enforcedCondition) (*policy.ImmediateResponse, map[string]any) {
-		return checkLimit(context.Background(), reqCtx, delegate, ec, "sub-1", "requests", "")
-	}
+	return delegate, reqCtx, ec
+}
 
-	// Reject: the limiter's own 429 is kept, with no quota status.
-	resp, md := check(ec)
-	if resp == nil || resp.StatusCode != 429 || len(resp.AnalyticsMetadata) != 0 || md != nil {
-		t.Fatalf("reject, Redis down: got %#v, %#v; want the limiter's 429 without quota metadata", resp, md)
-	}
-	// Allow: the request passes and is not recorded as overage.
-	allow := ec
-	allow.Reject = false
-	if resp, md := check(allow); resp != nil || md != nil {
-		t.Fatalf("allow, Redis down: got %#v, %#v; want nil, nil", resp, md)
+// TestDelegateCacheKeyNamesTheCondition: two conditions of one type with the same limits are kept
+// apart, because each delegate's quota and counter keys are named after its condition.
+func TestDelegateCacheKeyNamesTheCondition(t *testing.T) {
+	a := enforcedCondition{ID: "requests", Type: "request-count", Signature: "same"}
+	b := a
+	b.ID = "requests-2"
+	if delegateCacheKey("plan-1", a, "") == delegateCacheKey("plan-1", b, "") {
+		t.Fatalf("conditions %q and %q share a delegate cache key", a.ID, b.ID)
 	}
 }

@@ -135,7 +135,7 @@ So that overage can be charged apart from the plan's quota, the policy adds thes
 | `x-wso2-subscription-quota-action-tokens` | `allowed` (`onExceed: allow`, the request went through) or `rejected` (`onExceed: reject`, the request got 429) | Only when `over` |
 | `x-wso2-subscription-quota-limit-tokens` | The window that was exceeded, e.g. "50000 tokens per 1 day" | Only when `over` and the window is known |
 
-It is decided when the request comes in, before the response's tokens are counted: a request is `within` while the token quota is not used up yet, and `over` once it is. The response that crosses the limit is the last one marked `within`. A request without a subscription (subscription-validation v2 did not run), or whose plan has no token-count condition, carries none of these keys.
+It is decided when the request comes in, before the response's tokens are counted: a request is `within` while the token quota is not used up yet, and `over` once it is. The response that crosses the limit is the last one marked `within`. A request without a subscription (subscription-validation v2 did not run), or whose plan has no token-count condition, carries none of these keys. Neither does a request whose limit could not be checked because the rate-limit store (Redis) was unavailable, whatever the `failureMode`: its quota status is unknown.
 
 ## Reference Scenarios
 
