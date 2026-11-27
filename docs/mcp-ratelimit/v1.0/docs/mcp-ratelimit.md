@@ -9,7 +9,7 @@ The MCP Rate Limit policy applies rate limits to Model Context Protocol (***MCP*
 
 Each configuration entry targets a capability by name (or `"*"` for all capabilities of that type) and declares one or more `(limit, duration)` limits. Multiple entries may be configured in the same policy, mixing exact-name rules with wildcards. Every matched capability is given its own counter — even under a wildcard rule — so one noisy tool cannot exhaust the quota of another.
 
-Enforcement is delegated to the [Advanced Rate Limit policy](./advanced-ratelimit.md) engine, so this policy inherits the same algorithms (GCRA, Fixed Window), in-memory/Redis backends, key extraction options, and rate-limit response headers. When a request is throttled, the policy returns a JSON-RPC 2.0 error envelope (code `-32000`) so MCP clients can parse the failure.
+Enforcement is delegated to the [Advanced Rate Limit policy](../../../advanced-ratelimit/v1.0/docs/advanced-ratelimit.md) engine, so this policy inherits the same algorithms (GCRA, Fixed Window), in-memory/Redis backends, key extraction options, and rate-limit response headers. When a request is throttled, the policy returns a JSON-RPC 2.0 error envelope (code `-32000`) so MCP clients can parse the failure.
 
 ## Features
 
@@ -100,7 +100,7 @@ These parameters are set by the administrator and shared with the Advanced Rate 
 | `memory` | `Memory` object | No | - | In-memory storage configuration (only used when `backend=memory`). |
 | `headers` | `Headers` object | No | - | Controls which rate-limit headers are added to responses. |
 
-See the [Advanced Rate Limit policy](./advanced-ratelimit.md) documentation for the full `redis`, `memory`, and `headers` sub-fields and a sample `config.toml`.
+See the [Advanced Rate Limit policy](../../../advanced-ratelimit/v1.0/docs/advanced-ratelimit.md) documentation for the full `redis`, `memory`, and `headers` sub-fields and a sample `config.toml`.
 
 **Note:**
 
@@ -346,7 +346,7 @@ spec:
 
 **Relationship with the Advanced Rate Limit policy**
 
-This policy is a thin, MCP-aware front end over the [Advanced Rate Limit](./advanced-ratelimit.md) engine. The `algorithm`, `backend`, Redis/memory storage, key-extraction semantics, and response headers all behave identically — refer to that policy's documentation for the full system-parameter reference and header descriptions.
+This policy is a thin, MCP-aware front end over the [Advanced Rate Limit](../../../advanced-ratelimit/v1.0/docs/advanced-ratelimit.md) engine. The `algorithm`, `backend`, Redis/memory storage, key-extraction semantics, and response headers all behave identically — refer to that policy's documentation for the full system-parameter reference and header descriptions.
 
 **Per-capability counters**
 
@@ -358,4 +358,4 @@ When a request matches both an exact-name entry and a wildcard entry, *both* are
 
 **Use with other MCP policies**
 
-Combine with [MCP Authentication](./mcp-authentication.md) and [MCP Authorization](./mcp-authorization.md) for identity-aware throttling (e.g. per-user limits via `keyExtraction`), or with [MCP Access Control](./mcp-acl-list.md) to deny capabilities outright while rate-limiting the rest.
+Combine with [MCP Authentication](../../../mcp-auth/v1.0/docs/mcp-authentication.md) and [MCP Authorization](../../../mcp-authz/v1.0/docs/mcp-authorization.md) for identity-aware throttling (e.g. per-user limits via `keyExtraction`), or with [MCP Access Control](../../../mcp-acl-list/v1.0/docs/mcp-acl-list.md) to deny capabilities outright while rate-limiting the rest.

@@ -2,7 +2,7 @@
 
 Exchanges your API caller's inbound credential (e.g. an access token or JWT) for a different token issued by your backend's own OAuth2 authorization server, then attaches the exchanged token to the request before it reaches your backend. Implements [RFC 8693 Token Exchange](https://www.rfc-editor.org/rfc/rfc8693) (default) and [RFC 7523 JWT Bearer](https://www.rfc-editor.org/rfc/rfc7523).
 
-Use this policy when your backend expects a token issued by its own identity provider, rather than the token your API clients authenticate with. Unlike [`backend-jwt`](../../backend-jwt/v1.0/docs/backend-jwt.md), which mints a gateway-signed token, the token this policy attaches is issued by your backend's authorization server itself — your backend's IdP vouches for it, not the gateway. Your backend's own client credentials stay in the gateway configuration and are never exposed to the API caller, and the caller's original credential never reaches your backend — unless `subjectTokenSource.forwardToken` is enabled.
+Use this policy when your backend expects a token issued by its own identity provider, rather than the token your API clients authenticate with. Unlike [`backend-jwt`](../../../backend-jwt/v1.0/docs/backend-jwt.md), which mints a gateway-signed token, the token this policy attaches is issued by your backend's authorization server itself — your backend's IdP vouches for it, not the gateway. Your backend's own client credentials stay in the gateway configuration and are never exposed to the API caller, and the caller's original credential never reaches your backend — unless `subjectTokenSource.forwardToken` is enabled.
 
 ## How It Works
 

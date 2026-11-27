@@ -5,7 +5,7 @@ title: "Overview"
 
 ## Overview
 
-The LLM Cost policy calculates the monetary cost of an LLM API call at response time and stores the result in `SharedContext.Metadata`. The cost is not exposed as a response header -- it is only available to other policies in the same request pipeline, such as the [LLM Cost Based Ratelimit](../../llm-cost-based-ratelimit/v0.1/docs/llm-cost-based-ratelimit.md) policy.
+The LLM Cost policy calculates the monetary cost of an LLM API call at response time and stores the result in `SharedContext.Metadata`. The cost is not exposed as a response header -- it is only available to other policies in the same request pipeline, such as the [LLM Cost Based Ratelimit](../../../llm-cost-based-ratelimit/v0.1/docs/llm-cost-based-ratelimit.md) policy.
 
 The policy reads the model name from the response body, looks it up in a pricing database, and computes the cost using provider-specific calculators that normalise token usage fields across different response formats.
 

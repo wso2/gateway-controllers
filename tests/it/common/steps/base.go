@@ -205,6 +205,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 	sc.Step(`^the response should contain Prometheus metrics$`, b.responseContainsPrometheusMetrics)
 	sc.Step(`^the response should contain metric "([^"]*)"$`, b.responseContainsMetric)
 	sc.Step(`^the response header "([^"]*)" should be "([^"]*)"$`, b.responseHeaderEquals)
+	sc.Step(`^the response header "([^"]*)" should have only the value "([^"]*)"$`, b.responseHeaderOnlyValue)
 	sc.Step(`^the response header "([^"]*)" should contain "([^"]*)"$`, b.responseHeaderContains)
 	sc.Step(`^the response header "([^"]*)" should not contain "([^"]*)"$`, b.responseHeaderNotContains)
 	sc.Step(`^the response header "([^"]*)" should not be "([^"]*)"$`, b.responseHeaderNotEquals)
@@ -274,6 +275,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendConcurrentWithBody)
 	sc.Step(`^I send (\d+) concurrent "([^"]*)" requests to "([^"]*)" cycling through:$`,
 		b.sendConcurrentCycling)
+	newConcurrentIdentifiedSteps(b, b.funnel.Client()).register(sc)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+)$`, b.sendUntilStatus)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) or (\d+)$`, b.sendUntilStatusOneOf)
@@ -303,6 +305,8 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		})
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until the response body contains "([^"]*)" with body:$`,
 		b.sendUntilBodyContains)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) and the response body contains "([^"]*)"$`,
+		b.sendUntilStatusAndBodyContains)
 }
 
 func (b *Base) responseSuccessful(ctx context.Context) error {
@@ -1240,6 +1244,46 @@ func (b *Base) sendUntilBodyContains(ctx context.Context, method, path, want str
 	return b.sendUntilStatusAndBodyContainsWithBody(ctx, method, path, 200, want, body)
 }
 
+// sendUntilStatusAndBodyContains polls a data-plane path until it answers with the wanted status
+// AND a body containing the wanted substring.
+//
+// A status alone cannot tell a failure the scenario is about from one that comes before it. A
+// route that has just been deployed can answer 503 from the router with an empty body while its
+// cluster is still converging, and the same 503 later carries the upstream error text the
+// scenario asserts on. Waiting for both lets the assertion that follows read a settled response.
+func (b *Base) sendUntilStatusAndBodyContains(ctx context.Context, method, path string, wantStatus int, want string) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	url, err := b.gatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	wantValue, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	headers := b.scenarioHeaders(ctx)
+
+	return stepscommon.AwaitResponse(ctx,
+		func(ctx context.Context) (*httpx.Response, error) {
+			response, sendErr := b.funnel.Send(ctx, httpx.Request{
+				Method: strings.ToUpper(method), URL: url, Headers: headers,
+				Host: b.requestHost(ctx),
+			})
+			if sendErr != nil {
+				return nil, retry.Transient(sendErr)
+			}
+			return response, nil
+		},
+		func(r *httpx.Response) bool {
+			return r != nil && r.StatusCode == wantStatus && strings.Contains(string(r.Body), wantValue)
+		},
+		fmt.Sprintf("waiting for %s %s to return %d with a body containing %q",
+			strings.ToUpper(method), url, wantStatus, wantValue))
+}
+
 func (b *Base) statusCodeIs(ctx context.Context, want int) error {
 	resp, err := httpx.Published(ctx)
 	if err != nil {
@@ -1442,6 +1486,26 @@ func (b *Base) responseHeaderEquals(ctx context.Context, name, want string) erro
 	got := resp.Headers.Get(name)
 	if got != resolved {
 		return fmt.Errorf("expected header %q to be %q, got %q (%s)",
+			name, resolved, got, resp.Describe())
+	}
+	return nil
+}
+
+// responseHeaderOnlyValue asserts that a header is sent exactly once, with the wanted value.
+// responseHeaderEquals reads only the first value, so it cannot tell a replaced header from one
+// that still carries a second, older value after the wanted one.
+func (b *Base) responseHeaderOnlyValue(ctx context.Context, name, want string) error {
+	resp, err := httpx.Published(ctx)
+	if err != nil {
+		return err
+	}
+	resolved, err := stepscommon.Expand(ctx, want)
+	if err != nil {
+		return err
+	}
+	got := resp.Headers.Values(name)
+	if len(got) != 1 || got[0] != resolved {
+		return fmt.Errorf("expected header %q to have only the value %q, got %q (%s)",
 			name, resolved, got, resp.Describe())
 	}
 	return nil
@@ -1806,21 +1870,30 @@ func (b *Base) echoedHeaderValues(ctx context.Context, name, want string) ([]str
 		return nil, "", fmt.Errorf("expected echoed header %q to exist in response", name)
 	}
 
-	// A JSON echo may render a header as a string or an array of values.
+	values, ok := echoedStrings(value)
+	if !ok {
+		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+	}
+	if len(values) == 0 {
+		return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
+	}
+	return values, resolved, nil
+}
+
+// echoedStrings returns the values of an echoed header. A JSON echo renders a header as a string
+// or an array of values; ok is false for any other shape.
+func echoedStrings(value any) ([]string, bool) {
 	switch v := value.(type) {
 	case string:
-		return []string{v}, resolved, nil
+		return []string{v}, true
 	case []any:
-		if len(v) == 0 {
-			return nil, "", fmt.Errorf("expected echoed header %q to hold %q, got empty array", name, resolved)
-		}
 		values := make([]string, len(v))
 		for i, item := range v {
 			values[i] = fmt.Sprintf("%v", item)
 		}
-		return values, resolved, nil
+		return values, true
 	default:
-		return nil, "", fmt.Errorf("expected echoed header %q to be string or array, got %T", name, value)
+		return nil, false
 	}
 }
 

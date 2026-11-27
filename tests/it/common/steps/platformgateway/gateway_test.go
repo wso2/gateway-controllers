@@ -791,6 +791,24 @@ func TestServiceLogLinesCountRejectsZero(t *testing.T) {
 	}
 }
 
+// The absence check passes only for a log that was read: a note written in place of an unread log
+// would otherwise pass for any text.
+func TestCheckLogsNotContain(t *testing.T) {
+	readable := "───── gateway-runtime ─────\nlevel=INFO msg=\"request served\"\n"
+	require.NoError(t, checkLogsNotContain(readable, "gateway-runtime", "secret-value"))
+	require.ErrorContains(t, checkLogsNotContain(readable+"secret-value\n", "gateway-runtime", "secret-value"),
+		"unexpectedly contain")
+
+	for _, note := range []string{
+		"(no stack to read logs from)",
+		"───── gateway-runtime ─────\n(could not locate service: no such service)\n",
+		"───── gateway-runtime ─────\n(could not read logs: connection refused)\n",
+		"───── gateway-runtime ─────\n(log read failed: runtime: output exceeds the 67108864-byte limit)\n",
+	} {
+		require.ErrorContains(t, checkLogsNotContain(note, "gateway-runtime", "secret-value"), "cannot check")
+	}
+}
+
 func TestLogFragmentsFromTable(t *testing.T) {
 	local := tcontext.NewLocal("runner")
 	local.Set("deployment", "stray-deployment-run1")
@@ -4334,4 +4352,47 @@ func TestAwaitUpstreamForwardingFailsFastForARouteWithoutAKnownCluster(t *testin
 	require.ErrorContains(t, g.awaitUpstreamForwarding(ctx, "/per-request"), "picks its cluster per request")
 	require.Less(t, time.Since(start), 5*time.Second)
 	require.Error(t, g.awaitUpstreamForwarding(ctx, "${CTX:missing}"))
+}
+
+func TestUntilEventSatisfiesWaitsForTheEventThatCarriesTheField(t *testing.T) {
+	check := func(event *analyticsEvent) error {
+		if _, ok := traverseJSON(event.Metadata, "isGuardrailHit"); !ok {
+			return fmt.Errorf("latest analytics event metadata has no field %q", "isGuardrailHit")
+		}
+		return nil
+	}
+	var reads int
+	// The first read finds a late event of an earlier request on the same path; the next finds the
+	// event the scenario caused as well.
+	forPath := func(context.Context) ([]analyticsEvent, error) {
+		reads++
+		stale := analyticsEvent{Metadata: map[string]any{"other": "x"}}
+		if reads == 1 {
+			return []analyticsEvent{stale}, nil
+		}
+		return []analyticsEvent{stale, {Metadata: map[string]any{"isGuardrailHit": "true"}}}, nil
+	}
+	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", forPath, check))
+	require.Equal(t, 2, reads)
+}
+
+func TestUntilEventSatisfiesFindsTheRightEventBehindALateOne(t *testing.T) {
+	check := func(event *analyticsEvent) error {
+		if _, ok := traverseJSON(event.Metadata, "isGuardrailHit"); !ok {
+			return fmt.Errorf("latest analytics event metadata has no field %q", "isGuardrailHit")
+		}
+		return nil
+	}
+	var reads int
+	// Both events are already buffered, and the late event of the earlier request was stored last:
+	// the newest event of the path is the wrong one, and the step must still find the right one.
+	forPath := func(context.Context) ([]analyticsEvent, error) {
+		reads++
+		return []analyticsEvent{
+			{Metadata: map[string]any{"isGuardrailHit": "true"}},
+			{Metadata: map[string]any{"other": "x"}},
+		}, nil
+	}
+	require.NoError(t, untilEventSatisfies(context.Background(), "/mcp", forPath, check))
+	require.Equal(t, 1, reads)
 }

@@ -5,7 +5,7 @@ title: "Overview"
 
 ## Overview
 
-The MCP Access Control Logic(***ACL***) List policy provides access control for Model Context Protocol (***MCP***) tools, resources, and prompts using an allow/deny mode with exceptions. This policy filters list responses and enforces access rules on request paths based on configured mode and exceptions. Unlike the [MCP Rewrite policy](./mcp-rewrite.md), this policy does not rewrite capability names or modify list entry contents -- it purely controls visibility and access.
+The MCP Access Control Logic(***ACL***) List policy provides access control for Model Context Protocol (***MCP***) tools, resources, and prompts using an allow/deny mode with exceptions. This policy filters list responses and enforces access rules on request paths based on configured mode and exceptions. Unlike the [MCP Rewrite policy](../../../mcp-rewrite/v1.0/docs/mcp-rewrite.md), this policy does not rewrite capability names or modify list entry contents -- it purely controls visibility and access.
 
 The policy operates on three types of MCP capabilities: tools, resources, and prompts. For each type, you can specify a mode (allow or deny) and a list of exceptions. Requests for capabilities not matching the access control rules are rejected with an appropriate error.
 

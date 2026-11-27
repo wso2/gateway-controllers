@@ -39,16 +39,18 @@ var _ policy.StreamingResponsePolicy = (*AWSBedrockGuardrailPolicy)(nil)
 // chunk instead of per window still passes every behavioural assertion below
 // while billing one AWS call per token.
 type countingBedrockClient struct {
-	output *bedrockruntime.ApplyGuardrailOutput
-	err    error
-	calls  int
-	texts  []string
+	output  *bedrockruntime.ApplyGuardrailOutput
+	err     error
+	calls   int
+	texts   []string
+	sources []types.GuardrailContentSource
 }
 
-// ApplyGuardrail records the call and the text it carried, so a test can assert
-// how many billable assessments a stream made and what was sent.
+// ApplyGuardrail records the call, the text it carried and its source, so a test
+// can assert how many billable assessments a stream made and what was sent.
 func (c *countingBedrockClient) ApplyGuardrail(_ context.Context, params *bedrockruntime.ApplyGuardrailInput, _ ...func(*bedrockruntime.Options)) (*bedrockruntime.ApplyGuardrailOutput, error) {
 	c.calls++
+	c.sources = append(c.sources, params.Source)
 	for _, content := range params.Content {
 		if text, ok := content.(*types.GuardrailContentBlockMemberText); ok {
 			c.texts = append(c.texts, aws.ToString(text.Value.Text))
@@ -1020,33 +1022,65 @@ func TestStreaming_ViolationInALaterUnitOfTheSameFlushTerminates(t *testing.T) {
 
 // ─── SSE field parsing and stream classification ─────────────────────────────
 
-// TestIsSSEChunk_AcceptsEverySSEFieldForm covers the framing variants a real
-// upstream emits. The space after the colon is optional in the specification, so
-// matching "data: " as a literal prefix skips every event from an upstream that
-// omits it, and a flush of keep-alives or id:/retry: lines is still SSE.
-func TestIsSSEChunk_AcceptsEverySSEFieldForm(t *testing.T) {
-	cases := map[string]bool{
-		"data: {\"a\":1}\n\n":                    true,
-		"data:{\"a\":1}\n\n":                     true, // no space — same event
-		"event: message\ndata: {\"a\":1}\n\n":    true,
-		": keep-alive\n\n":                       true, // comment only
-		"id: 42\n\n":                             true,
-		"retry: 3000\n\n":                        true,
-		"{\"choices\":[{\"message\":{}}]}":       false,
-		"":                                       false,
-		strings.Repeat("x", 40) + "\nplain text": false,
+// TestIsEventStreamResponse_ClassifiesByTypeThenFirstLine pins the classification
+// rule. text/event-stream is SSE unless the body is a JSON document; any other response is sniffed by its first
+// non-blank line, which may take any of the specification's field forms (the
+// space after the colon is optional). A later SSE-looking line does not count.
+func TestIsEventStreamResponse_ClassifiesByTypeThenFirstLine(t *testing.T) {
+	cases := []struct {
+		mediaType string
+		body      string
+		want      bool
+	}{
+		{"", "data: {\"a\":1}\n\n", true},
+		{"", "data:{\"a\":1}\n\n", true}, // no space — same event
+		{"", "event: message\ndata: {\"a\":1}\n\n", true},
+		{"", ": keep-alive\n\ndata: {\"a\":1}\n\n", true}, // comment first
+		{"", ": keep-alive\n\n", false},                   // no data line: not an event stream
+		{"", "id: 42\n\n", false},                         // "id: 42" alone is text
+		{"", "id: 42\ndata: {\"a\":1}\n\n", true},
+		{"", "retry: 3000\n\n", false},
+		{"", "\n\ndata: {\"a\":1}\n\n", true}, // leading blank lines
+		{"", "{\"choices\":[{\"message\":{}}]}", false},
+		{"", "", false},
+		// An SSE-looking line after the first does not make a body SSE.
+		{"", "Here is the answer.\nid: step-1\n", false},
+		{"", "Here is the answer.\ndata: x\n", false},
+		{"", "\uFEFFdata: {\"a\":1}\n\n", true}, // byte order mark
+		// text/event-stream is SSE whatever the body looks like.
+		{"text/event-stream", "Here is the answer.\n", true},
+		{"text/event-stream", "x-trace: abc\ndata: {\"a\":1}\n\n", true},
+		// A JSON document labelled text/event-stream is read with jsonPath, as in v1.4.
+		{"text/event-stream", "{\"choices\":[]}", false},
+		{"text/event-stream", "\n  [1, 2]\n", false},
+		// Another type is still sniffed, so a mislabelled event stream is read as
+		// one and withheld until assessed.
+		{"text/plain", "data: {\"a\":1}\n\n", true},
+		{"application/json", "id: 1\n", false},
+		{"text/plain", "id: 42\nname: John\nanswer: here\n", false},
+		{"text/plain", ":) Sure, here is the answer.\n", false},
+		{"application/json", "{\"choices\":[]}", false},
+		{"text/plain", "Here is the answer.\nid: step-1\n", false},
+		// Amazon's framing may already have been rewritten into SSE.
+		{amazonEventStreamMediaType, "data: {\"a\":1}\n\n", true},
+		{amazonEventStreamMediaType, "\x00\x00\x01binary", false},
 	}
-	for input, want := range cases {
-		if got := isSSEChunk(input); got != want {
-			t.Errorf("isSSEChunk(%q) = %v, want %v", input, got, want)
+	for _, c := range cases {
+		if got := isEventStreamResponse(c.mediaType, []byte(c.body)); got != c.want {
+			t.Errorf("isEventStreamResponse(%q, %q) = %v, want %v", c.mediaType, c.body, got, c.want)
 		}
 	}
+}
 
-	// A data line beyond the first few lines must still classify the flush: an
-	// upstream can open with several comments before its first event.
-	late := strings.Repeat(": keep-alive\n\n", 8) + "data: {\"a\":1}\n\n"
-	if !isSSEChunk(late) {
-		t.Errorf("a data line after several comments must still classify as SSE")
+// TestResponseMediaType_StripsParametersAndCase covers the header forms an
+// upstream sends.
+func TestResponseMediaType_StripsParametersAndCase(t *testing.T) {
+	headers := policy.NewHeaders(map[string][]string{"content-type": {"Text/Event-Stream; charset=utf-8"}})
+	if got := responseMediaType(headers); got != "text/event-stream" {
+		t.Errorf("responseMediaType = %q, want text/event-stream", got)
+	}
+	if got := responseMediaType(nil); got != "" {
+		t.Errorf("responseMediaType(nil) = %q, want \"\"", got)
 	}
 }
 
@@ -1106,7 +1140,7 @@ func TestStreaming_KeepsTheSSEPathAcrossUnclassifiableFlushes(t *testing.T) {
 		Chunk: []byte(sseEvent("first words ")), EndOfStream: false,
 	}, map[string]interface{}{})
 
-	if sse, _ := respCtx.Metadata[metaKeySSEStream].(bool); !sse {
+	if sse, _ := respCtx.Metadata[p.stateKey(metaKeySSEStream)].(bool); !sse {
 		t.Fatalf("the stream should have been classified as SSE")
 	}
 
@@ -1115,7 +1149,7 @@ func TestStreaming_KeepsTheSSEPathAcrossUnclassifiableFlushes(t *testing.T) {
 		Chunk: []byte(": keep-alive\n\n"), EndOfStream: false,
 	}, map[string]interface{}{})
 
-	if _, ok := respCtx.Metadata[metaKeyAccStreamedJSONBody]; ok {
+	if _, ok := respCtx.Metadata[p.stateKey(metaKeyAccStreamedJSONBody)]; ok {
 		t.Errorf("a keep-alive flush must not be accumulated as a non-SSE body")
 	}
 }
@@ -1170,11 +1204,10 @@ func TestStreaming_EmptyMidStreamChunkIsStillANoOp(t *testing.T) {
 	}
 }
 
-// TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody covers the
-// non-SSE case: the accumulated body is assessed at end of stream, but a
-// modification cannot be applied to an empty final chunk — returning the body
-// there would deliver the whole response a second time.
-func TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody(t *testing.T) {
+// TestStreaming_EmptyEndOfStreamChunkDeliversTheMaskedNonSSEBody covers the
+// non-SSE case: earlier flushes are withheld, so the accumulated body is assessed
+// at end of stream and delivered masked, in place of the empty final chunk.
+func TestStreaming_EmptyEndOfStreamChunkDeliversTheMaskedNonSSEBody(t *testing.T) {
 	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
 		params.JsonPath = "$.msg"
@@ -1190,12 +1223,19 @@ func TestStreaming_EmptyEndOfStreamChunkDoesNotResendANonSSEBody(t *testing.T) {
 		Chunk: []byte{}, EndOfStream: true,
 	}, map[string]interface{}{})
 
+	assertWholeBodyDelivered(t, action, `{"msg":"mail *****"}`)
+}
+
+// assertWholeBodyDelivered checks the end of a non-SSE stream whose earlier
+// flushes were withheld: the final chunk is replaced by the whole assessed body.
+func assertWholeBodyDelivered(t *testing.T, action policy.StreamingResponseAction, want string) {
+	t.Helper()
 	forward, ok := action.(policy.ForwardResponseChunk)
 	if !ok {
 		t.Fatalf("expected ForwardResponseChunk, got %T", action)
 	}
-	if forward.Body != nil {
-		t.Errorf("an empty final chunk must not be replaced with the accumulated body, got %q", string(forward.Body))
+	if string(forward.Body) != want {
+		t.Errorf("delivered body:\n got %q\nwant %q", forward.Body, want)
 	}
 }
 
@@ -1418,7 +1458,7 @@ func TestStreaming_RetainsADataLineSplitAcrossFlushes(t *testing.T) {
 		Chunk: []byte(first), EndOfStream: false,
 	}, map[string]interface{}{})
 
-	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got == "" {
+	if got, _ := respCtx.Metadata[p.stateKey(metaKeyPartialLine)].(string); got == "" {
 		t.Fatalf("the incomplete line must be retained for the next flush")
 	}
 
@@ -1449,14 +1489,14 @@ func TestStreaming_RetainsADataLineSplitAcrossFlushes(t *testing.T) {
 func TestStreaming_OverlongPartialLineIsNotDeliveredUnassessed(t *testing.T) {
 	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()}, nil)
 	respCtx := streamCtx()
-	respCtx.Metadata[metaKeySSEStream] = true
+	respCtx.Metadata[p.stateKey(metaKeySSEStream)] = true
 
 	oversized := "data: " + strings.Repeat("x", maxPartialLineBytes+100)
 	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
 		Chunk: []byte(oversized), EndOfStream: false,
 	}, map[string]interface{}{})
 
-	if got, _ := respCtx.Metadata[metaKeyPartialLine].(string); got != "" {
+	if got, _ := respCtx.Metadata[p.stateKey(metaKeyPartialLine)].(string); got != "" {
 		t.Errorf("an over-limit fragment must not stay held as a fragment, got %d bytes", len(got))
 	}
 	terminate, ok := action.(policy.TerminateResponseChunk)
@@ -1475,7 +1515,7 @@ func TestStreaming_OverlongPartialLinePassesThroughWhenConfigured(t *testing.T) 
 	p := streamingPolicy(&countingBedrockClient{output: makeNoInterventionOutput()},
 		func(params *AWSBedrockGuardrailPolicyParams) { params.PassthroughOnError = true })
 	respCtx := streamCtx()
-	respCtx.Metadata[metaKeySSEStream] = true
+	respCtx.Metadata[p.stateKey(metaKeySSEStream)] = true
 
 	oversized := "data: " + strings.Repeat("x", maxPartialLineBytes+100)
 	a1 := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
@@ -1516,10 +1556,11 @@ func TestStreaming_EmptyNonSSEBodyIsNotRejected(t *testing.T) {
 	}
 }
 
-// TestStreaming_DoesNotResendANonSSEBodyAfterAForcedFlush covers the other way a
-// rewrite becomes undeliverable: once a flush has gone downstream, replacing a
-// later chunk with the accumulated body would repeat every byte already sent.
-func TestStreaming_DoesNotResendANonSSEBodyAfterAForcedFlush(t *testing.T) {
+// TestStreaming_ForcedFlushOfANonSSEBodyIsWithheldAndMasked covers a body the
+// engine force-flushed before its end: the flush is withheld rather than
+// delivered, so the masking the guardrail asks for at end of stream still
+// applies to every byte.
+func TestStreaming_ForcedFlushOfANonSSEBodyIsWithheldAndMasked(t *testing.T) {
 	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
 		params.JsonPath = "$.msg"
@@ -1527,35 +1568,49 @@ func TestStreaming_DoesNotResendANonSSEBodyAfterAForcedFlush(t *testing.T) {
 	})
 	respCtx := streamCtx()
 
-	// A mid-stream flush: the engine force-flushed, so these bytes are delivered.
-	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+	first := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
 		Chunk: []byte(`{"msg":"mail john`), EndOfStream: false,
 	}, map[string]interface{}{})
-	if forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool); !forwarded {
-		t.Fatalf("a mid-stream non-SSE flush must be recorded as forwarded")
+	if fwd, ok := first.(policy.ForwardResponseChunk); !ok || fwd.Body == nil || len(fwd.Body) != 0 {
+		t.Fatalf("a mid-stream non-SSE flush must be withheld, got %#v", first)
 	}
 
 	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
 		Chunk: []byte(`@example.com"}`), EndOfStream: true,
 	}, map[string]interface{}{})
 
-	forward, ok := action.(policy.ForwardResponseChunk)
-	if !ok {
-		t.Fatalf("expected ForwardResponseChunk, got %T", action)
-	}
-	if forward.Body != nil {
-		t.Errorf("the accumulated body must not be re-sent after an earlier flush, got %q", string(forward.Body))
-	}
+	assertWholeBodyDelivered(t, action, `{"msg":"mail *****"}`)
+}
+
+// TestStreaming_ForcedFlushOfANonSSEBodyIsRestored keeps the other side: a body
+// whose only rewrite puts a request placeholder back is delivered restored.
+func TestStreaming_ForcedFlushOfANonSSEBodyIsRestored(t *testing.T) {
+	client := &countingBedrockClient{output: makeNoInterventionOutput()}
+	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
+		params.JsonPath = "$.msg"
+	})
+	respCtx := streamCtx()
+	respCtx.Metadata[MetadataKeyPIIEntities] = map[string]string{"john@example.com": "EMAIL_0000"}
+
+	p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(`{"msg":"mail `), EndOfStream: false,
+	}, map[string]interface{}{})
+	action := p.OnResponseBodyChunk(context.Background(), respCtx, &policy.StreamBody{
+		Chunk: []byte(`EMAIL_0000"}`), EndOfStream: true,
+	}, map[string]interface{}{})
+
+	assertWholeBodyDelivered(t, action, `{"msg":"mail john@example.com"}`)
 }
 
 // ─── Redaction across frame boundaries ───────────────────────────────────────
 
-// TestStreaming_FailsClosedWhenRedactionSpansFrames is the leak guard. Redaction
-// is written back frame by frame, so a value the model emitted across two events
-// is present in neither frame's text and is replaced in neither. Forwarding it
-// would defeat the one thing redaction mode exists for, so the stream ends
-// instead.
-func TestStreaming_FailsClosedWhenRedactionSpansFrames(t *testing.T) {
+// TestStreaming_RedactsAValueSplitAcrossFrames covers the normal shape of model
+// output: a value emitted over two events. It is found in the flush's text read
+// as a whole and written back across both frames -- the replacement in the frame
+// where the value starts, the rest removed from the next -- so the stream is
+// masked rather than ended. (Previously it was found in neither frame and the
+// stream was ended.)
+func TestStreaming_RedactsAValueSplitAcrossFrames(t *testing.T) {
 	client := &countingBedrockClient{output: makePIIIntervenedOutput("john@example.com")}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
 		params.RedactPII = true
@@ -1568,12 +1623,12 @@ func TestStreaming_FailsClosedWhenRedactionSpansFrames(t *testing.T) {
 		Chunk: []byte(flush), EndOfStream: true,
 	}, map[string]interface{}{})
 
-	term, ok := action.(policy.TerminateResponseChunk)
+	forward, ok := action.(policy.ForwardResponseChunk)
 	if !ok {
-		t.Fatalf("an unredactable value must end the stream, got %T", action)
+		t.Fatalf("a value split across frames must be redacted, got %T", action)
 	}
-	if strings.Contains(string(term.Body), "john@example.com") {
-		t.Errorf("the value must not appear in the final event, got %q", string(term.Body))
+	if want := sseEvent("mail *****") + sseEvent(" now"); string(forward.Body) != want {
+		t.Errorf("redacted flush:\n got %q\nwant %q", forward.Body, want)
 	}
 }
 
@@ -1645,6 +1700,7 @@ func TestStreaming_BoundsTheWithheldBuffer(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
+	respCtx.ResponseHeaders = policy.NewHeaders(map[string][]string{"content-type": {"text/event-stream"}})
 
 	keepAlive := strings.Repeat(": keep-alive\n\n", 100) // ~1.4 KB per flush
 	var delivered int
@@ -1655,7 +1711,7 @@ func TestStreaming_BoundsTheWithheldBuffer(t *testing.T) {
 		delivered += len(action.(policy.ForwardResponseChunk).Body)
 	}
 
-	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
 	if len(held) > maxHeldFlushBytes {
 		t.Errorf("the withheld buffer must stay within its limit, got %d bytes", len(held))
 	}
@@ -1811,12 +1867,12 @@ func TestStreaming_CountsAssessedTextLeftInRetainedFrames(t *testing.T) {
 			Chunk: []byte(frame), EndOfStream: false,
 		}, map[string]interface{}{})
 		if i%20 == 0 {
-			held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+			held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
 			sizes = append(sizes, len(held))
 		}
 	}
 
-	if assessed, _ := respCtx.Metadata[metaKeyAssessedInHeld].(int); assessed < 0 {
+	if assessed, _ := respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)].(int); assessed < 0 {
 		t.Errorf("the carried count must never go negative, got %d", assessed)
 	}
 
@@ -1866,7 +1922,7 @@ func TestStreaming_DeliversByteExactAcrossMidLineSplits(t *testing.T) {
 					params.StreamingTextUnitChars = MinStreamingTextUnitChars
 				})
 			respCtx := streamCtx()
-			respCtx.Metadata[metaKeySSEStream] = true
+			respCtx.Metadata[p.stateKey(metaKeySSEStream)] = true
 
 			var delivered string
 			for off := 0; off < len(input); off += size {
@@ -1963,7 +2019,7 @@ func TestStreaming_NeverReleasesAPartialLineAtTheHeldLimit(t *testing.T) {
 	client := &countingBedrockClient{output: makeNoInterventionOutput()}
 	p := streamingPolicy(client, nil)
 	respCtx := streamCtx()
-	respCtx.Metadata[metaKeySSEStream] = true
+	respCtx.Metadata[p.stateKey(metaKeySSEStream)] = true
 
 	// Fill the withheld buffer with framing that carries no assessable text, so
 	// the character boundary is never reached and the byte limit is what fires.
@@ -1987,7 +2043,7 @@ func TestStreaming_NeverReleasesAPartialLineAtTheHeldLimit(t *testing.T) {
 	if strings.Contains(string(forward.Body), "SECRET") {
 		t.Errorf("an unassessed partial line was released at the byte limit")
 	}
-	if retained, _ := respCtx.Metadata[metaKeyHeldBytes].(string); !strings.Contains(retained, "SECRET") {
+	if retained, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string); !strings.Contains(retained, "SECRET") {
 		t.Errorf("the partial line must stay withheld, got %q", retained)
 	}
 }
@@ -2482,7 +2538,7 @@ func TestStreaming_NonSSEBodyIsNeverForwardedBeforeAssessment(t *testing.T) {
 	if len(actions) != 1 {
 		t.Fatalf("a non-SSE body must be released once, at end of stream; got %d flushes", len(actions))
 	}
-	if forwarded, _ := respCtx.Metadata[metaKeyNonSSEForwarded].(bool); forwarded {
+	if forwarded, _ := respCtx.Metadata[p.stateKey(metaKeyNonSSEForwarded)].(bool); forwarded {
 		t.Fatalf("no non-SSE flush may be delivered before the body has been assessed")
 	}
 
@@ -2521,15 +2577,16 @@ func (c *reportsPIIWhenPresentClient) ApplyGuardrail(_ context.Context, params *
 	return makeNoInterventionOutput(), nil
 }
 
-// TestStreaming_ReportedValueInAWithheldFrameFailsClosed covers the gap between
+// TestStreaming_ReportedValueInAWithheldFrameIsRedacted covers the gap between
 // what a batch assesses and what it releases.
 //
 // The batch boundary generally falls inside a frame, and that frame stays
 // withheld. Its assessed prefix belongs to this batch's decision, but it is
 // delivered later under a different batch's — one that never saw the text. A
 // redaction reported for it would be dropped silently and the value delivered in
-// the clear, so the stream must end instead.
-func TestStreaming_ReportedValueInAWithheldFrameFailsClosed(t *testing.T) {
+// the clear. The decision is carried to the release that delivers the frame, so
+// the value is redacted there. (Previously the stream was ended instead.)
+func TestStreaming_ReportedValueInAWithheldFrameIsRedacted(t *testing.T) {
 	const pii = "john@example.com"
 	client := &reportsPIIWhenPresentClient{pii: pii}
 	p := streamingPolicy(client, func(params *AWSBedrockGuardrailPolicyParams) {
@@ -2555,17 +2612,17 @@ func TestStreaming_ReportedValueInAWithheldFrameFailsClosed(t *testing.T) {
 			delivered += string(v.Body)
 		case policy.TerminateResponseChunk:
 			terminated = true
-			if !v.IsFault {
-				t.Errorf("ending a stream over unredactable content is a failure and must declare IsFault")
-			}
 		}
 	}
 
 	if strings.Contains(delivered, pii) {
 		t.Fatalf("a reported value was delivered unredacted from a withheld frame")
 	}
-	if !terminated {
-		t.Fatalf("expected the stream to end rather than deliver the withheld frame under a later decision")
+	if terminated {
+		t.Fatalf("the withheld frame's value must be redacted on release, not end the stream")
+	}
+	if !strings.Contains(delivered, "*****") || strings.Count(delivered, "abcd ") != 2996 {
+		t.Fatalf("want every frame delivered with the value redacted")
 	}
 }
 
@@ -2594,7 +2651,7 @@ func TestStreaming_UnterminatedLineCannotGrowTheHeldBuffer(t *testing.T) {
 			Chunk: []byte(blob), Index: uint64(i),
 		}, map[string]interface{}{})
 
-		held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+		held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
 		if len(held) > maxHeldFlushBytes {
 			t.Fatalf("flush %d: withheld %d bytes, above the %d limit — an unterminated line must not defeat the cap",
 				i, len(held), maxHeldFlushBytes)
@@ -2971,7 +3028,7 @@ func TestStreaming_ZeroUnitReleasesInPartsPastTheCap(t *testing.T) {
 	if delivered == 0 {
 		t.Fatalf("a response past the withheld limit must be released before the stream ends, or the buffer grows without bound")
 	}
-	held, _ := respCtx.Metadata[metaKeyHeldBytes].(string)
+	held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string)
 	if len(held) > maxHeldFlushBytes {
 		t.Fatalf("withheld %d bytes, above the %d limit", len(held), maxHeldFlushBytes)
 	}
@@ -2993,7 +3050,7 @@ func TestStreaming_OverlongPartialLinePassthroughClearsHeldState(t *testing.T) {
 		params.PassthroughOnError = true
 	})
 	respCtx := streamCtx()
-	respCtx.Metadata[metaKeySSEStream] = true
+	respCtx.Metadata[p.stateKey(metaKeySSEStream)] = true
 
 	var delivered strings.Builder
 	feed := func(b string, idx int, eos bool) {
@@ -3014,19 +3071,19 @@ func TestStreaming_OverlongPartialLinePassthroughClearsHeldState(t *testing.T) {
 
 	// An ordinary event first, short enough to be withheld rather than released.
 	feed(sseEvent(marker), 0, false)
-	if held, _ := respCtx.Metadata[metaKeyHeldBytes].(string); held == "" {
+	if held, _ := respCtx.Metadata[p.stateKey(metaKeyHeldBytes)].(string); held == "" {
 		t.Fatalf("test needs the first event withheld, so the passthrough has state to clear")
 	}
 
 	// The oversized line: unassessable, so passthrough releases everything held.
 	feed("data: "+strings.Repeat("x", maxPartialLineBytes+100), 1, false)
 
-	for _, key := range []string{metaKeyHeldBytes, metaKeyPendingText} {
-		if v, _ := respCtx.Metadata[key].(string); v != "" {
+	for _, key := range []streamStateKey{metaKeyHeldBytes, metaKeyPendingText} {
+		if v, _ := respCtx.Metadata[p.stateKey(key)].(string); v != "" {
 			t.Errorf("%s still holds %d bytes after the passthrough released them", key, len(v))
 		}
 	}
-	if n, _ := respCtx.Metadata[metaKeyAssessedInHeld].(int); n != 0 {
+	if n, _ := respCtx.Metadata[p.stateKey(metaKeyAssessedInHeld)].(int); n != 0 {
 		t.Errorf("metaKeyAssessedInHeld still counts %d characters of released text", n)
 	}
 
