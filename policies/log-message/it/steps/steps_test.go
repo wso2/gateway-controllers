@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/cucumber/godog"
@@ -376,7 +377,7 @@ func TestAwaitInKeepsTheWaitsReadWhenTheLastReadFails(t *testing.T) {
 		}
 		return stackLogs("gateway-runtime", "(log read failed: closed)")
 	}}
-	records, err := awaitIn(context.Background(), logs, "/p", "", 1)
+	records, err := awaitIn(context.Background(), logs, "/p", "", 1, false)
 	if err != nil || len(records) != 1 {
 		t.Errorf("got %d records and error %v, want the wait's one record", len(records), err)
 	}
@@ -389,7 +390,7 @@ func TestAwaitInKeepsTheWaitsReadWhenTheLastReadFails(t *testing.T) {
 		}
 		return fresh
 	}
-	if records, err := awaitIn(context.Background(), logs, "/p", "", 1); err != nil || len(records) != 2 {
+	if records, err := awaitIn(context.Background(), logs, "/p", "", 1, false); err != nil || len(records) != 2 {
 		t.Errorf("got %d records and error %v, want the fresh read's two", len(records), err)
 	}
 }
@@ -439,6 +440,71 @@ func TestReadRecordsRefusesALogThatWasNotRead(t *testing.T) {
 	logs := stackLogs("gateway-controller", "(could not read logs: closed)", "gateway-runtime", textLine(t, rec("REQUEST", "req-1", "/p", nil)))
 	if records, err := readRecords(context.Background(), fixedLog(logs), "/p", ""); err != nil || len(records) != 1 {
 		t.Errorf("got %d records and error %v, want the runtime's one record", len(records), err)
+	}
+}
+
+func TestJoinResponseChunksJoinsOneResponsesChunksOnly(t *testing.T) {
+	payload := func(p string) map[string]any { return map[string]any{"payload": p} }
+	logs := strings.Join([]string{
+		textLine(t, rec("REQUEST", "a", "/p", payload("q1"))),
+		textLine(t, rec("REQUEST", "a", "/p", payload("q2"))),
+		textLine(t, rec("RESPONSE", "a", "/p", payload("r1"))),
+		textLine(t, rec("RESPONSE", "a", "/p", payload("r2"))),
+		textLine(t, rec("RESPONSE", "a", "/p", payload("r3"))),
+		textLine(t, rec("RESPONSE", "a", "/p", map[string]any{"headers": map[string]any{":status": "200"}})),
+		textLine(t, rec("RESPONSE", "b", "/p", payload("s1"))),
+		textLine(t, rec("RESPONSE", "b", "/p", payload("s2"))),
+		textLine(t, rec("RESPONSE", "a", "/p", payload("late"))),
+	}, "\n")
+	got := joinResponseChunks(parseRecords(logs))
+	var flat []string
+	for _, r := range got {
+		value, _ := fieldValue(r, "payload")
+		flat = append(flat, r.str("mediation-flow")+" "+r.str("request-id")+" "+value)
+	}
+	want := []string{"REQUEST a q1", "REQUEST a q2", "RESPONSE a r1r2r3", "RESPONSE a ", "RESPONSE b s1s2", "RESPONSE a late"}
+	if strings.Join(flat, "|") != strings.Join(want, "|") {
+		t.Errorf("joined records:\n%s\nwant:\n%s", strings.Join(flat, "\n"), strings.Join(want, "\n"))
+	}
+	var joined map[string]any
+	if err := json.Unmarshal([]byte(got[2].raw), &joined); err != nil || joined["payload"] != "r1r2r3" || joined["http-method"] != "GET" {
+		t.Errorf("the joined record's raw form is %q (%v)", got[2].raw, err)
+	}
+	// A record with another field differing is not a chunk of the same response.
+	other := parseRecords(strings.Join([]string{
+		textLine(t, rec("RESPONSE", "a", "/p", payload("r1"))),
+		textLine(t, rec("RESPONSE", "a", "/q", payload("r2"))),
+	}, "\n"))
+	if n := len(joinResponseChunks(other)); n != 2 {
+		t.Errorf("records of two paths joined into %d", n)
+	}
+}
+
+func TestAwaitInCountsJoinedChunksOnlyWhenAsked(t *testing.T) {
+	logs := fixedLog(stackLogs("gateway-runtime", strings.Join([]string{
+		textLine(t, rec("REQUEST", "a", "/p", map[string]any{"payload": "q"})),
+		textLine(t, rec("RESPONSE", "a", "/p", map[string]any{"payload": "r1"})),
+		textLine(t, rec("RESPONSE", "a", "/p", map[string]any{"payload": "r2"})),
+	}, "\n")))
+	if records, err := awaitIn(context.Background(), logs, "/p", "", 3, false); err != nil || len(records) != 3 {
+		t.Errorf("without join: got %d records and error %v, want 3", len(records), err)
+	}
+	records, err := awaitIn(context.Background(), logs, "/p", "", 2, true)
+	if err != nil || len(records) != 2 || records[1].str("payload") != "r1r2" {
+		t.Errorf("with join: got %d records and error %v, want the request and one joined response", len(records), err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if _, err := awaitIn(ctx, logs, "/p", "", 3, true); err == nil {
+		t.Error("with join, the wait counted the chunks: three raw records met a wait for three joined ones")
+	}
+}
+
+func TestALiteralFailureShortensALongExpectedValue(t *testing.T) {
+	e := expectation{kind: "literal", value: strings.Repeat("a", 5000)}
+	why := e.check("short", true)
+	if len(why) > 1000 || !strings.Contains(why, "…(5000 bytes)") {
+		t.Errorf("the failure message is %d bytes: %.120q", len(why), why)
 	}
 }
 

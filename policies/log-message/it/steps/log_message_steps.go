@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -52,7 +53,8 @@ func newPolicySteps(topo *frameworkruntime.Topology) *policySteps {
 // register binds the steps below. Add a step here only when no shared step expresses the
 // behaviour, and give it a unit test in steps_test.go.
 func (s *policySteps) register(sc *godog.ScenarioContext) {
-	sc.Step(`^the log-message records for "([^"]*)"(?: with request id "([^"]*)")? should be:$`, s.recordsShouldBe)
+	sc.Step(`^the log-message records for "([^"]*)"(?: with request id "([^"]*)")? should be(, with response chunks joined)?:$`,
+		s.recordsShouldBe)
 	sc.Step(`^the log-message records for "([^"]*)" should be none$`, s.noRecords)
 	sc.Step(`^the log-message records for "([^"]*)" should pair (\d+) requests by request id, each carrying "([^"]*)"$`,
 		s.recordsShouldPair)
@@ -137,6 +139,57 @@ func recordsFor(records []record, path, requestID string) []record {
 		out = append(out, r)
 	}
 	return out
+}
+
+// joinResponseChunks merges each run of adjacent RESPONSE records of one request into one record,
+// its payload theirs joined in log order. The policy writes one RESPONSE record per body chunk it
+// receives, and a reply sent without a Content-Length reaches it in a number of chunks that
+// depends on timing. Records join only when they are the same apart from a string payload; any
+// other record is kept as it is. A joined record's raw form is its fields as compact JSON.
+func joinResponseChunks(records []record) []record {
+	var out []record
+	for _, r := range records {
+		if n := len(out); n > 0 && joinable(out[n-1], r) {
+			out[n-1] = joined(out[n-1], r)
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// joinable reports whether next is a further chunk of prev's response.
+func joinable(prev, next record) bool {
+	if prev.str("mediation-flow") != "RESPONSE" || next.str("request-id") == "" {
+		return false
+	}
+	_, prevText := prev.fields["payload"].(string)
+	_, nextText := next.fields["payload"].(string)
+	if !prevText || !nextText || len(prev.fields) != len(next.fields) {
+		return false
+	}
+	for k, v := range prev.fields {
+		if k != "payload" && !reflect.DeepEqual(v, next.fields[k]) {
+			return false
+		}
+	}
+	return true
+}
+
+// joined is prev with next's payload appended.
+func joined(prev, next record) record {
+	fields := make(map[string]any, len(prev.fields))
+	for k, v := range prev.fields {
+		fields[k] = v
+	}
+	fields["payload"] = prev.str("payload") + next.str("payload")
+	var b bytes.Buffer
+	encoder := json.NewEncoder(&b)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(fields); err != nil {
+		return record{fields: fields, raw: prev.raw + next.raw}
+	}
+	return record{fields: fields, raw: strings.TrimSuffix(b.String(), "\n")}
 }
 
 // fieldValue renders a record field for comparison. "record" is the whole record as written;
@@ -239,7 +292,7 @@ func (e expectation) check(value string, present bool) string {
 		}
 	default:
 		if value != e.value {
-			return fmt.Sprintf("is %q, want %q", truncate(value), e.value)
+			return fmt.Sprintf("is %q, want %q", truncate(value), truncate(e.value))
 		}
 	}
 	return ""
@@ -480,24 +533,32 @@ func readRecords(ctx context.Context, logs runtimeLog, path, requestID string) (
 }
 
 // awaitRecords waits until at least want records of path (and request id) are in the log, then
-// reads the log once more and returns that read. Records reach the container log late when they
+// reads the log once more and returns that read. With join, response chunks are joined
+// (joinResponseChunks) before they are counted. Records reach the container log late when they
 // are large, so the wait polls; the fresh read is what the caller judges. The caller makes the
 // count final by ending the expected records with those of a later request (a fence): records of
 // one process reach the log in the order they were written.
-func (s *policySteps) awaitRecords(ctx context.Context, path, requestID string, want int) ([]record, error) {
+func (s *policySteps) awaitRecords(ctx context.Context, path, requestID string, want int, join bool) ([]record, error) {
 	logs, err := s.logReader()
 	if err != nil {
 		return nil, err
 	}
-	return awaitIn(ctx, logs, path, requestID, want)
+	return awaitIn(ctx, logs, path, requestID, want, join)
 }
 
 // awaitIn is awaitRecords on a resolved runtime log.
-func awaitIn(ctx context.Context, logs runtimeLog, path, requestID string, want int) ([]record, error) {
+func awaitIn(ctx context.Context, logs runtimeLog, path, requestID string, want int, join bool) ([]record, error) {
+	read := func(ctx context.Context) ([]record, error) {
+		records, err := readRecords(ctx, logs, path, requestID)
+		if err != nil || !join {
+			return records, err
+		}
+		return joinResponseChunks(records), nil
+	}
 	var last []record
 	err := retry.Await(ctx, retry.Options{Interval: 200 * time.Millisecond, Fast: true},
 		func(ctx context.Context) (recordSet, error) {
-			records, err := readRecords(ctx, logs, path, requestID)
+			records, err := read(ctx)
 			if err != nil {
 				return nil, retry.Transient(err)
 			}
@@ -509,7 +570,7 @@ func awaitIn(ctx context.Context, logs runtimeLog, path, requestID string, want 
 	if err != nil {
 		return last, err
 	}
-	records, err := readRecords(ctx, logs, path, requestID)
+	records, err := read(ctx)
 	if err != nil {
 		// The wait already read enough records; a read failing now must not fail a passing step.
 		return last, nil
@@ -523,7 +584,10 @@ type recordSet []record
 // Describe lists the records read.
 func (r recordSet) Describe() string { return describe(r) }
 
-func (s *policySteps) recordsShouldBe(ctx context.Context, path, requestID string, table *godog.Table) error {
+// recordsShouldBe checks the records against the table. Its "with response chunks joined" form
+// first joins each response's chunks into one record. Use it only for a reply large enough to be
+// sent in chunks: it would also merge the records of a policy attached twice.
+func (s *policySteps) recordsShouldBe(ctx context.Context, path, requestID, joinChunks string, table *godog.Table) error {
 	path, err := stepscommon.Expand(ctx, path)
 	if err != nil {
 		return err
@@ -536,7 +600,7 @@ func (s *policySteps) recordsShouldBe(ctx context.Context, path, requestID strin
 	if err != nil {
 		return err
 	}
-	records, err := s.awaitRecords(ctx, path, requestID, len(t.rows))
+	records, err := s.awaitRecords(ctx, path, requestID, len(t.rows), joinChunks != "")
 	if err != nil {
 		return err
 	}
@@ -578,7 +642,7 @@ func (s *policySteps) recordsShouldPair(ctx context.Context, path string, n int,
 	if n < 1 || !strings.Contains(marker, "{i}") {
 		return fmt.Errorf("the pairing step needs a request count of at least 1 and a marker with {i}")
 	}
-	records, err := s.awaitRecords(ctx, path, "", 2*n)
+	records, err := s.awaitRecords(ctx, path, "", 2*n, false)
 	if err != nil {
 		return err
 	}

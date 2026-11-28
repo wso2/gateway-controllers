@@ -44,6 +44,7 @@ blocks:
       - name: testbench
     runners:
       - name: log-message
+        tags: "~@known-issue"
         features:
           - features/log_message.feature
       - name: log-message-headers

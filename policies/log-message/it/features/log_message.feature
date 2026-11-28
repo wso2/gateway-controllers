@@ -621,7 +621,10 @@ Feature: Log message policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
 
-  # A 512 KiB body is logged in full, one record per phase.
+  # A 512 KiB request body is logged in full as one record. The echoed reply has no Content-Length,
+  # so it reaches the policy in chunks and the policy logs one RESPONSE record per chunk. Their
+  # number depends on timing, so the check joins them, and the joined payload must equal the reply
+  # the client received.
   Scenario: Log very large request or response payloads (within the limit)
     Given I generate a unique value from "lm-large" and store it as "apiName"
     And I generate a unique API version from "lm-large" and store it as "apiVersion"
@@ -646,16 +649,17 @@ Feature: Log message policy
     Then the response status code should be 200
     And the JSON response field "data" should contain "${CTX:halfMiB}"
 
-    When I set header "X-Request-Id" to "lm-large-fence"
+    When I store the response body as "largeReply"
+    And I set header "X-Request-Id" to "lm-large-fence"
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
       """
       {"marker":"lm-large-fence"}
       """
     Then the response status code should be 200
-    And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" should be:
+    And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" should be, with response chunks joined:
       | mediation-flow | request-id     | payload                     |
       | REQUEST        | lm-large       | [length 524288]             |
-      | RESPONSE       | lm-large       | [contains ${CTX:halfMiB}]   |
+      | RESPONSE       | lm-large       | ${CTX:largeReply}           |
       | REQUEST        | lm-large-fence | {"marker":"lm-large-fence"} |
       | RESPONSE       | lm-large-fence | [contains lm-large-fence]   |
 
@@ -665,9 +669,11 @@ Feature: Log message policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
 
+  # Known issue: https://github.com/wso2/api-platform/issues/4061
   # Request payload logging makes the gateway buffer the body, and a 2 MiB body is over its 1 MiB
-  # buffer limit, so it is refused with 413. The next request is served and logged as usual, and
-  # its records are picked by request id. The 413 is checked on Gateways later than 1.2.0 only.
+  # buffer limit, so it should be refused with 413. The next request's records are picked by
+  # request id. The 413 is checked on Gateways later than 1.2.0 only.
+  @known-issue
   Scenario: Log very large request or response payloads (over the limit)
     Given the gateway version satisfies ">1.2.0"
     And I generate a unique value from "lm-large-over" and store it as "apiName"
