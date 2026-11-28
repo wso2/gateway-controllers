@@ -1,0 +1,11 @@
+{
+  "name": "mistral-shieldstral-content-safety",
+  "displayName": "Mistral Shieldstral Content Safety",
+  "version": "0.1",
+  "provider": "Choreo Labs",
+  "categories": [
+    "Guardrails",
+    "AI"
+  ],
+  "description": "Screens request or response body content using Mistral's open-weight Shieldstral 1.0 safety classifier, self-hosted behind an OpenAI-compatible endpoint such as vLLM.\nAsks a configurable battery of yes/no questions about the extracted text, scores each from the model's yes/no logprobs, and blocks the request or response when any score is above its threshold, or only records the hit in monitor mode.\nSupports an optional API key, JSONPath extraction (including multimodal content parts), separate configuration and an enabled switch for the request and response phases, and a configurable timeout. Enabling response screening disables streaming on the route."
+}
