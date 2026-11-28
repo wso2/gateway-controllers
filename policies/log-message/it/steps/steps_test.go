@@ -312,6 +312,10 @@ func TestJudgePairs(t *testing.T) {
 			{"REQUEST", "a", "m-1-end"}, {"RESPONSE", "a", "m-2-end"},
 			{"REQUEST", "b", "m-2-end"}, {"RESPONSE", "b", "m-1-end"},
 		},
+		"response carrying another request's marker too": {
+			{"REQUEST", "a", "m-1-end"}, {"RESPONSE", "a", "echo m-1-end m-2-end"},
+			{"REQUEST", "b", "m-2-end"}, {"RESPONSE", "b", "m-2-end"},
+		},
 		"same marker twice": {
 			{"REQUEST", "a", "m-1-end"}, {"RESPONSE", "a", "m-1-end"},
 			{"REQUEST", "b", "m-1-end"}, {"RESPONSE", "b", "m-1-end"},
@@ -435,6 +439,14 @@ func TestReadRecordsRefusesALogThatWasNotRead(t *testing.T) {
 	logs := stackLogs("gateway-controller", "(could not read logs: closed)", "gateway-runtime", textLine(t, rec("REQUEST", "req-1", "/p", nil)))
 	if records, err := readRecords(context.Background(), fixedLog(logs), "/p", ""); err != nil || len(records) != 1 {
 		t.Errorf("got %d records and error %v, want the runtime's one record", len(records), err)
+	}
+}
+
+func TestAContainsFailureShortensALongExpectedValue(t *testing.T) {
+	e := expectation{kind: "contains", value: strings.Repeat("a", 5000)}
+	why := e.check("short", true)
+	if len(why) > 1000 || !strings.Contains(why, "…(5000 bytes)") {
+		t.Errorf("the failure message is %d bytes: %.120q", len(why), why)
 	}
 }
 

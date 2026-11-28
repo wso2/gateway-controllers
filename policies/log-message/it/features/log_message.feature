@@ -93,7 +93,7 @@ Feature: Log message policy
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
 
-    When I set header "X-Request-Id" to "lm-resp-both"
+    When I set header "X-Request-Id" to "lm-resp-both-first"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/items"
     Then the response status code should be 200
     And the response should be valid JSON
@@ -103,8 +103,8 @@ Feature: Log message policy
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/items" should be:
       | mediation-flow | request-id         | headers.:status | payload                       |
-      | RESPONSE       | lm-resp-both       | 200             | [absent]                      |
-      | RESPONSE       | lm-resp-both       | [absent]        | [contains lm-resp-both]       |
+      | RESPONSE       | lm-resp-both-first | 200             | [absent]                      |
+      | RESPONSE       | lm-resp-both-first | [absent]        | [contains lm-resp-both-first] |
       | RESPONSE       | lm-resp-both-fence | 200             | [absent]                      |
       | RESPONSE       | lm-resp-both-fence | [absent]        | [contains lm-resp-both-fence] |
 
@@ -523,25 +523,25 @@ Feature: Log message policy
     Then the resource creation response should indicate successful deployment
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
 
-    When I set header "X-Request-Id" to "lm-method-put"
+    When I set header "X-Request-Id" to "lm-method-put-first"
     And I send a "PUT" request to "${CTX:apiContext}/${CTX:apiVersion}/items" with body:
       """
-      {"marker":"lm-method-put"}
+      {"marker":"lm-method-put-first-body"}
       """
     Then the response status code should be 200
 
     When I set header "X-Request-Id" to "lm-method-put-fence"
     And I send a "PUT" request to "${CTX:apiContext}/${CTX:apiVersion}/items" with body:
       """
-      {"marker":"lm-method-put-fence"}
+      {"marker":"lm-method-put-fence-body"}
       """
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/items" should be:
-      | mediation-flow | request-id          | http-method | payload                          |
-      | REQUEST        | lm-method-put       | PUT         | {"marker":"lm-method-put"}       |
-      | RESPONSE       | lm-method-put       | PUT         | [contains lm-method-put]         |
-      | REQUEST        | lm-method-put-fence | PUT         | {"marker":"lm-method-put-fence"} |
-      | RESPONSE       | lm-method-put-fence | PUT         | [contains lm-method-put-fence]   |
+      | mediation-flow | request-id          | http-method | payload                               |
+      | REQUEST        | lm-method-put-first | PUT         | {"marker":"lm-method-put-first-body"} |
+      | RESPONSE       | lm-method-put-first | PUT         | [contains lm-method-put-first-body]   |
+      | REQUEST        | lm-method-put-fence | PUT         | {"marker":"lm-method-put-fence-body"} |
+      | RESPONSE       | lm-method-put-fence | PUT         | [contains lm-method-put-fence-body]   |
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -644,7 +644,7 @@ Feature: Log message policy
       ${CTX:halfMiB}
       """
     Then the response status code should be 200
-    And the JSON response field "data" should contain "aaaaaaaaaaaaaaaaaaaa"
+    And the JSON response field "data" should contain "${CTX:halfMiB}"
 
     When I set header "X-Request-Id" to "lm-large-fence"
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
@@ -653,11 +653,11 @@ Feature: Log message policy
       """
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" should be:
-      | mediation-flow | request-id     | payload                         |
-      | REQUEST        | lm-large       | [length 524288]                 |
-      | RESPONSE       | lm-large       | [contains aaaaaaaaaaaaaaaaaaaa] |
-      | REQUEST        | lm-large-fence | {"marker":"lm-large-fence"}     |
-      | RESPONSE       | lm-large-fence | [contains lm-large-fence]       |
+      | mediation-flow | request-id     | payload                     |
+      | REQUEST        | lm-large       | [length 524288]             |
+      | RESPONSE       | lm-large       | [contains ${CTX:halfMiB}]   |
+      | REQUEST        | lm-large-fence | {"marker":"lm-large-fence"} |
+      | RESPONSE       | lm-large-fence | [contains lm-large-fence]   |
 
     When I clear all headers
     And I authenticate using basic auth as "admin"

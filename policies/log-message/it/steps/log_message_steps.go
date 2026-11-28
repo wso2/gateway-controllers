@@ -231,7 +231,7 @@ func (e expectation) check(value string, present bool) string {
 		}
 	case "contains":
 		if !strings.Contains(value, e.value) {
-			return fmt.Sprintf("is %q, want it to contain %q", truncate(value), e.value)
+			return fmt.Sprintf("is %q, want it to contain %q", truncate(value), truncate(e.value))
 		}
 	case "not-contains":
 		if strings.Contains(value, e.value) {
@@ -371,15 +371,9 @@ func judgePairs(records []record, n int, marker string) error {
 				id, len(p.request), len(p.response))
 		}
 		requestPayload, responsePayload := p.request[0].str("payload"), p.response[0].str("payload")
-		found := 0
-		for i := 1; i <= n; i++ {
-			if !strings.Contains(requestPayload, strings.ReplaceAll(marker, "{i}", strconv.Itoa(i))) {
-				continue
-			}
-			if found != 0 {
-				return fmt.Errorf("request %q carries the markers of %d and %d; make the marker end with a fixed suffix", id, found, i)
-			}
-			found = i
+		found, second := markerOf(requestPayload, marker, n)
+		if second != 0 {
+			return fmt.Errorf("request %q carries the markers of %d and %d; make the marker end with a fixed suffix", id, found, second)
 		}
 		if found == 0 {
 			return fmt.Errorf("request %q REQUEST payload %q carries no marker", id, truncate(requestPayload))
@@ -388,11 +382,32 @@ func judgePairs(records []record, n int, marker string) error {
 			return fmt.Errorf("requests %q and %q both carry marker %d", other, id, found)
 		}
 		used[found] = id
-		if want := strings.ReplaceAll(marker, "{i}", strconv.Itoa(found)); !strings.Contains(responsePayload, want) {
-			return fmt.Errorf("request %q RESPONSE payload does not carry %q, its REQUEST marker: %q", id, want, truncate(responsePayload))
+		got, gotSecond := markerOf(responsePayload, marker, n)
+		if gotSecond != 0 {
+			return fmt.Errorf("request %q RESPONSE payload carries the markers of %d and %d, want only its own: %q",
+				id, got, gotSecond, truncate(responsePayload))
+		}
+		if got != found {
+			return fmt.Errorf("request %q RESPONSE payload does not carry %q, its REQUEST marker: %q",
+				id, strings.ReplaceAll(marker, "{i}", strconv.Itoa(found)), truncate(responsePayload))
 		}
 	}
 	return nil
+}
+
+// markerOf returns the number of the marker payload carries (marker with {i} replaced by 1..n),
+// 0 when it carries none, and the number of a second marker when it carries more than one.
+func markerOf(payload, marker string, n int) (found, second int) {
+	for i := 1; i <= n; i++ {
+		if !strings.Contains(payload, strings.ReplaceAll(marker, "{i}", strconv.Itoa(i))) {
+			continue
+		}
+		if found != 0 {
+			return found, i
+		}
+		found = i
+	}
+	return found, 0
 }
 
 // unreadLogNotes are the notes the framework's stack Logs writes in a service's section in place

@@ -1492,14 +1492,24 @@ func TestBase64BodyDecodesTheBytesAndDefaultsTheContentType(t *testing.T) {
 	lower := map[string]string{"content-type": "image/png"}
 	_, err = base64Body(ctx, "AAE=", lower)
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{"content-type": "image/png"}, lower,
-		"a content-type the scenario set in another case must be kept, with no second entry")
+	require.Equal(t, map[string]string{"Content-Type": "image/png"}, lower,
+		"a content-type the scenario set in another case must be kept, as one entry")
 
 	empty := map[string]string{"content-type": ""}
 	_, err = base64Body(ctx, "AAE=", empty)
 	require.NoError(t, err)
-	require.Equal(t, map[string]string{"content-type": "application/octet-stream"}, empty,
-		"an empty content-type gets the default in place, with no second entry")
+	require.Equal(t, map[string]string{"Content-Type": "application/octet-stream"}, empty,
+		"an empty content-type gets the default, as one entry")
+
+	aliases := map[string]string{"Content-Type": "", "content-type": "image/png", "X-Other": "kept"}
+	_, err = base64Body(ctx, "AAE=", aliases)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"Content-Type": "image/png", "X-Other": "kept"}, aliases,
+		"the non-empty value wins over an empty alias, whatever the map order")
+
+	conflict := map[string]string{"Content-Type": "image/png", "content-type": "text/plain"}
+	_, err = base64Body(ctx, "AAE=", conflict)
+	require.ErrorContains(t, err, "two Content-Type values")
 
 	_, err = base64Body(ctx, "not base64!", map[string]string{})
 	require.ErrorContains(t, err, "is not standard base64")

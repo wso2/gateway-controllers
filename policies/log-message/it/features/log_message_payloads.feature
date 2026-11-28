@@ -185,7 +185,9 @@ Feature: Log message policy payloads
   # The log is JSON text, so the policy writes each byte that is not valid UTF-8 as the
   # replacement character U+FFFD. The echo writes the body it received the same way, so both
   # show FF, FE and 80 in place: content the policy cannot read as text is still logged and passed
-  # on. This also covers content that cannot be parsed.
+  # on. The logged payload equals the body the echo received, 00 and 01 included: 19 characters,
+  # the 17 the contains check names after the two control characters. This also covers content
+  # that cannot be parsed.
   Scenario: Send empty, JSON, XML, text, Unicode, and binary/non-text payloads where applicable (binary)
     Given I generate a unique value from "lm-content-bin" and store it as "apiName"
     And I generate a unique API version from "lm-content-bin" and store it as "apiVersion"
@@ -206,16 +208,17 @@ Feature: Log message policy payloads
     Then the response status code should be 200
     And the JSON response field "data" should contain "��lm-content-bin�"
 
-    When I set header "X-Request-Id" to "lm-content-bin-fence"
+    When I store the JSON response field "data" as "binData"
+    And I set header "X-Request-Id" to "lm-content-bin-fence"
     And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
       """
       lm-content-bin-fence
       """
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" should be:
-      | mediation-flow | request-id           | payload                      |
-      | REQUEST        | lm-content-bin       | [contains ��lm-content-bin�] |
-      | REQUEST        | lm-content-bin-fence | lm-content-bin-fence         |
+      | mediation-flow | request-id           | payload              | payload                      | payload     |
+      | REQUEST        | lm-content-bin       | ${CTX:binData}       | [contains ��lm-content-bin�] | [length 19] |
+      | REQUEST        | lm-content-bin-fence | lm-content-bin-fence | [any]                        | [any]       |
 
     When I clear all headers
     And I authenticate using basic auth as "admin"

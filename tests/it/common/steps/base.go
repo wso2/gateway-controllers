@@ -466,15 +466,25 @@ func base64Body(ctx context.Context, encoded string, headers map[string]string) 
 	if err != nil {
 		return nil, fmt.Errorf("the body %q is not standard base64: %w", resolved, err)
 	}
+	// The scenario may have set the header under several spellings. Send one Content-Type: the
+	// non-empty value, or the binary default when none is set; two different values are an error.
+	contentType := ""
 	for name, value := range headers {
-		if strings.EqualFold(name, "Content-Type") {
-			if value == "" {
-				headers[name] = "application/octet-stream"
-			}
-			return payload, nil
+		if !strings.EqualFold(name, "Content-Type") {
+			continue
 		}
+		if value != "" && contentType != "" && value != contentType {
+			return nil, fmt.Errorf("the scenario sets two Content-Type values, %q and %q", contentType, value)
+		}
+		if value != "" {
+			contentType = value
+		}
+		delete(headers, name)
 	}
-	headers["Content-Type"] = "application/octet-stream"
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	headers["Content-Type"] = contentType
 	return payload, nil
 }
 
