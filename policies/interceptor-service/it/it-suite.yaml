@@ -34,7 +34,32 @@ defaults:
     propagation: 60s
 
 blocks:
+  # The runners create their own APIs and fault-injection scripts under unique names and run at the
+  # same time.
   - name: interceptor-service
+    parallel: 4
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+      # The TLS backend the HTTPS interceptor scenario calls.
+      - name: tls-backend
+    runners:
+      - name: interceptor-service
+        features:
+          - features/interceptor_service.feature
+      - name: interceptor-service-requests
+        features:
+          - features/interceptor_service_requests.feature
+      - name: interceptor-service-resilience
+        features:
+          - features/interceptor_service_resilience.feature
+      - name: interceptor-service-security
+        features:
+          - features/interceptor_service_security.feature
+
+  - name: interceptor-service-restart
     parallel: 1
     components:
       - name: platform-gateway
@@ -42,6 +67,18 @@ blocks:
           matrix: [sqlite, postgres, sqlserver]
       - name: testbench
     runners:
-      - name: interceptor-service
+      - name: interceptor-service-restart
         features:
-          - features/interceptor_service.feature
+          - features/interceptor_service_restart.feature
+
+  - name: interceptor-service-logs
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: interceptor-service-logs
+        features:
+          - features/interceptor_service_logs.feature

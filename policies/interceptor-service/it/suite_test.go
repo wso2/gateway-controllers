@@ -27,7 +27,7 @@ import (
 	"github.com/wso2/gateway-controllers/policies/interceptor-service/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+var config = suite.Config{Register: steps.Register, Companions: []string{"basic-auth", "basic-ratelimit", "json-xml-mediator"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)
