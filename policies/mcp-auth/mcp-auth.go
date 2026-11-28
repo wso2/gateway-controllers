@@ -505,7 +505,7 @@ func (p *McpAuthPolicy) OnRequestHeaders(ctx context.Context, reqCtx *policy.Req
 			for _, ui := range p.Issuers {
 				if issuer, ok := kms[ui]; ok {
 					filteredIssuers = append(filteredIssuers, issuer)
-					slog.Debug("MCP Auth Policy: Added issuer from user configuration", "issuer", issuer)
+					slog.Debug("MCP Auth Policy: Added issuer from user configuration", "issuerCount", len(filteredIssuers))
 				}
 			}
 			issuers = filteredIssuers

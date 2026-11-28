@@ -275,8 +275,7 @@ func GetPolicy(
 		}
 		redisTLSFingerprint = tlsFingerprint
 		if tlsParams.Enabled && tlsParams.InsecureSkipVerify {
-			slog.Warn("Redis TLS certificate verification is disabled (redis.tls.insecureSkipVerify); do not use this in production",
-				"addr", fmt.Sprintf("%s:%d", redisHost, redisPort))
+			slog.Warn("Redis TLS certificate verification is disabled (redis.tls.insecureSkipVerify); do not use this in production")
 		}
 
 		// Get-or-create the process-wide shared client for this connection config.

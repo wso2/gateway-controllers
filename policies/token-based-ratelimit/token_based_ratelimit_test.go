@@ -27,6 +27,7 @@ import (
 	"testing"
 
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
+	"github.com/wso2/api-platform/sdk/core/utils"
 )
 
 // captureSlog temporarily redirects the default slog logger to a buffer for the
@@ -909,5 +910,52 @@ func TestDelegateFaultDeclarationIsPassedThrough(t *testing.T) {
 	}
 	if resp.Fault == nil || resp.Fault.Code != "900800" {
 		t.Fatalf("the delegate's Fault must reach the gateway unchanged, got %+v", resp.Fault)
+	}
+}
+
+// TestTransformToRatelimitParams_DebugLogsMaskParamValues checks that the
+// parameter and quota dumps keep their keys but never log a value. Merged
+// params include system parameters such as the Redis password.
+func TestTransformToRatelimitParams_DebugLogsMaskParamValues(t *testing.T) {
+	const redisPassword = "redis-s3cret-password"
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	params := map[string]interface{}{
+		"promptTokenLimits": []interface{}{
+			map[string]interface{}{"count": float64(4711), "duration": "17m"},
+		},
+		"algorithm": "fixed-window",
+		"backend":   "redis",
+		"redis": map[string]interface{}{
+			"host":     "redis.internal.example.com",
+			"password": redisPassword,
+		},
+	}
+	template := map[string]interface{}{
+		"spec": map[string]interface{}{
+			"promptTokens": map[string]interface{}{"identifier": "$.usage.prompt_tokens"},
+		},
+	}
+
+	result := transformToRatelimitParams(params, template, policy.LevelRoute)
+
+	// Positive control: the values were really processed.
+	if quotas, ok := result["quotas"].([]interface{}); !ok || len(quotas) != 1 {
+		t.Fatalf("expected one quota, got %#v", result["quotas"])
+	}
+
+	out := buf.String()
+	for _, value := range []string{redisPassword, "redis.internal.example.com", "4711", "17m", "$.usage.prompt_tokens"} {
+		if strings.Contains(out, value) {
+			t.Errorf("debug log contains parameter value %q:\n%s", value, out)
+		}
+	}
+	for _, key := range []string{"promptTokenLimits", "password", utils.MaskedLogValue} {
+		if !strings.Contains(out, key) {
+			t.Errorf("debug log is missing %q:\n%s", key, out)
+		}
 	}
 }
