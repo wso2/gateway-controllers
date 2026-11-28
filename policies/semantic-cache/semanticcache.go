@@ -74,6 +74,8 @@ type SemanticCachePolicy struct {
 	cacheUnauthenticated bool
 	jevCacheCheck        jevCacheCheckConfig
 	jevClient            *jevClient
+	// auth is how the policy authenticates to the embedding provider.
+	auth authentication
 }
 
 // callerIdentity resolves the caller principal from metadata, falling back to
@@ -227,6 +229,18 @@ func parseParams(params map[string]interface{}, p *SemanticCachePolicy) error {
 		return fmt.Errorf("'embeddingEndpoint' is required for %s provider", embeddingProvider)
 	}
 
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return err
+	}
+	if err := checkAllowedEndpoint(params, p.embeddingConfig.EmbeddingEndpoint); err != nil {
+		return err
+	}
+	p.auth = auth
+	p.embeddingConfig.AuthenticationType = auth.typ
+	p.embeddingConfig.ClientID = auth.clientID
+	p.embeddingConfig.TokenScope = auth.tokenScope
+
 	// embeddingModel is required for OPENAI and MISTRAL, but not for AZURE_OPENAI
 	// For AZURE_OPENAI, deployment name is in the endpoint URL, so model can be empty
 	var embeddingModel string
@@ -238,18 +252,22 @@ func parseParams(params map[string]interface{}, p *SemanticCachePolicy) error {
 	// Always set EmbeddingModel explicitly (empty string is allowed for AZURE_OPENAI)
 	p.embeddingConfig.EmbeddingModel = embeddingModel
 
-	if apiKey, ok := params["apiKey"].(string); ok && apiKey != "" {
-		p.embeddingConfig.APIKey = apiKey
-	} else {
-		return fmt.Errorf("'apiKey' is required for %s provider", embeddingProvider)
-	}
+	// In an identity mode the SDK gets tokens for the gateway's identity and the key is never
+	// passed on.
+	if !auth.usesIdentity() {
+		if apiKey, ok := params["apiKey"].(string); ok && apiKey != "" {
+			p.embeddingConfig.APIKey = apiKey
+		} else {
+			return fmt.Errorf("'apiKey' is required for %s provider", embeddingProvider)
+		}
 
-	// Set header name based on provider type
-	// Azure OpenAI uses "api-key", others use "Authorization"
-	if embeddingProvider == "AZURE_OPENAI" {
-		p.embeddingConfig.AuthHeaderName = "api-key"
-	} else {
-		p.embeddingConfig.AuthHeaderName = "Authorization"
+		// Set header name based on provider type
+		// Azure OpenAI uses "api-key", others use "Authorization"
+		if embeddingProvider == "AZURE_OPENAI" {
+			p.embeddingConfig.AuthHeaderName = "api-key"
+		} else {
+			p.embeddingConfig.AuthHeaderName = "Authorization"
+		}
 	}
 
 	// Parse vector store provider config
@@ -457,7 +475,10 @@ func (p *SemanticCachePolicy) OnRequestBody(ctx context.Context, reqCtx *policy.
 	// Generate embedding
 	embedding, err := p.embeddingProvider.GetEmbedding(textToEmbed)
 	if err != nil {
-		slog.Debug("SemanticCache: Error generating embedding", "error", err)
+		if !logTokenFailure(ctx, err, p.auth) {
+			logRefusedToken(ctx, err, p.auth)
+			slog.Debug("SemanticCache: Error generating embedding", "error", err)
+		}
 		// Log error but don't block request
 		return policy.UpstreamRequestModifications{}
 	}

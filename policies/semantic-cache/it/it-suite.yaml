@@ -56,3 +56,37 @@ blocks:
       - name: semantic-cache
         features:
           - features/semantic_cache_error_compatibility.feature
+
+  # A gateway with no API key, so a cache hit shows the API's Azure identity authenticated. The
+  # database plays no part in authentication, so this block runs on sqlite only.
+  - name: semantic-cache-identity
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/identity.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      # On gateway 1.1.0 only the controller's checks run: the feature says why.
+      - name: semantic-cache-identity
+        features:
+          - features/semantic_cache_identity.feature
+
+  # A gateway that allows its APIs only workload identity, and only its own embedding resource, so
+  # it needs a block of its own.
+  - name: semantic-cache-allowlist
+    parallel: 1
+    components:
+      - name: platform-gateway
+        overlay: overlays/allowlist.toml
+        dependsOn: [redis]
+      - name: testbench
+      - name: redis
+    runners:
+      # Each scenario needs a cache hit, which this policy doesn't give on gateway 1.1.0 (as for
+      # semantic-cache-policy above), or a gateway newer than 1.2.0.
+      - name: semantic-cache-allowlist
+        tags: "gateway-version>=1.2.0"
+        features:
+          - features/semantic_cache_allowlist.feature

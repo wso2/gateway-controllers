@@ -843,3 +843,96 @@ func assertUpstreamResponseMods(t *testing.T, action policy.ResponseAction) {
 		t.Fatalf("expected DownstreamResponseModifications, got %T", action)
 	}
 }
+
+func azureBaseParams(extra map[string]interface{}) map[string]interface{} {
+	params := map[string]interface{}{
+		"embeddingProvider":   "AZURE_OPENAI",
+		"embeddingEndpoint":   "https://res.openai.azure.com/openai/deployments/d/embeddings?api-version=2024-10-21",
+		"vectorStoreProvider": "REDIS",
+		"similarityThreshold": 0.9,
+		"dbHost":              "localhost",
+		"dbPort":              6379,
+		"embeddingDimension":  1536,
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	return params
+}
+
+func workloadIdentityParams() map[string]interface{} {
+	return map[string]interface{}{"azureAuth": map[string]interface{}{
+		"authenticationType": "workload-identity",
+		"clientId":           testClientID,
+		"scope":              "https://example.test/.default",
+	}}
+}
+
+func TestParseParamsIdentityModeNeedsNoKey(t *testing.T) {
+	p := &SemanticCachePolicy{}
+	if err := parseParams(azureBaseParams(workloadIdentityParams()), p); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	c := p.embeddingConfig
+	if c.AuthenticationType != "workload-identity" || c.ClientID != testClientID || c.TokenScope != "https://example.test/.default" {
+		t.Fatalf("unexpected config: %+v", c)
+	}
+	if p.auth.typ != "workload-identity" {
+		t.Fatalf("unexpected auth: %+v", p.auth)
+	}
+}
+
+func TestParseParamsIdentityModeDropsTheKey(t *testing.T) {
+	extra := workloadIdentityParams()
+	extra["apiKey"] = "gateway-key"
+	p := &SemanticCachePolicy{}
+	if err := parseParams(azureBaseParams(extra), p); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.embeddingConfig.APIKey != "" {
+		t.Fatalf("the key must not be passed on, got %q", p.embeddingConfig.APIKey)
+	}
+}
+
+func TestParseParamsAPIKeyModeStillNeedsAKey(t *testing.T) {
+	err := parseParams(azureBaseParams(nil), &SemanticCachePolicy{})
+	if err == nil || !strings.Contains(err.Error(), "'apiKey' is required") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseParamsRefusesAnUnlistedType(t *testing.T) {
+	err := parseParams(azureBaseParams(map[string]interface{}{
+		"apiKey":                    "k",
+		"embeddingAllowedAuthTypes": []interface{}{"workload-identity"},
+	}), &SemanticCachePolicy{})
+	if err == nil || !strings.Contains(err.Error(), `"api-key" is not allowed`) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestParseParamsRefusesAnUnlistedEndpoint(t *testing.T) {
+	err := parseParams(azureBaseParams(map[string]interface{}{
+		"apiKey":                    "k",
+		"embeddingAllowedEndpoints": []interface{}{"https://other.openai.azure.com"},
+	}), &SemanticCachePolicy{})
+	if err == nil || !strings.Contains(err.Error(), "is not allowed on this gateway") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestGetPolicyRejectsAnIdentityWithANonAzureProvider(t *testing.T) {
+	params := workloadIdentityParams()
+	params["embeddingProvider"] = "OPENAI"
+	params["embeddingEndpoint"] = "https://api.openai.com/v1/embeddings"
+	params["embeddingModel"] = "text-embedding-3-small"
+	params["vectorStoreProvider"] = "REDIS"
+	params["similarityThreshold"] = 0.9
+	params["dbHost"] = "localhost"
+	params["dbPort"] = 6379
+	params["embeddingDimension"] = 1536
+	_, err := GetPolicy(policy.PolicyMetadata{}, params)
+	if err == nil || !strings.Contains(err.Error(), "only supported for the AZURE_OPENAI embedding provider") {
+		t.Fatalf("error = %v", err)
+	}
+}
