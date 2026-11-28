@@ -1,0 +1,348 @@
+# Codecov configuration for the gateway-controllers (policy hub) repository.
+#
+# Every policy is a Go module of its own, so coverage is reported per policy: one Codecov
+# component per policy (and one per major version released beside v1). Codecov rolls the
+# components up into the repository-wide figure it reports as the global coverage.
+#
+# The coverage is that of the integration suites (policies/*/it): the gateway is built with every
+# policy's code instrumented, the suites run against it, and the counters are uploaded under the
+# `integration` flag. Every suite runs on the same gateway, which carries all the policies, so the
+# counters of a run also record policies the suite only uses (set-headers on another policy's API) and
+# code that runs at start-up. The profile therefore credits each policy with the runs of its own suite
+# alone: a policy without a suite of its own reports 0%.
+#
+# The component list below is generated from the policy modules under policies/. Run
+# `make generate-codecov-config` after adding or removing a policy; CI runs
+# `make validate-codecov-config` and fails when the list is out of date.
+
+# Maps Go module import paths in coverage profiles to repository paths, so Codecov can
+# attach coverage to real files. Profiles carry paths like
+# github.com/wso2/gateway-controllers/policies/basic-auth/basicauth.go
+fixes:
+  - "github.com/wso2/gateway-controllers/::"
+
+# The integration suites (policies/*/it, tests/it) are test code, not policy code.
+ignore:
+  - "policies/**/it/**"
+  - "tests/**"
+
+# One upload carries the integration-test coverage of every policy (the workflow sets disable_search).
+# Carry the last known report forward if a run uploads nothing, instead of reading that
+# absence as lost coverage.
+flag_management:
+  default_rules:
+    carryforward: true
+
+# Repository-wide (global) coverage. Informational while the report is being rolled out:
+# the checks report the figure on the pull request without blocking the merge. Remove
+# `informational: true` to make a check gate merges.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        informational: true
+    patch:
+      default:
+        target: auto
+        informational: true
+
+# The pull request comment: the diff coverage, then the per-policy table (components).
+comment:
+  layout: "header, diff, components, files, footer"
+  require_changes: false
+
+# Per-policy coverage, grouped by path. Each component gets its own project/patch status
+# (codecov/project/<policy>, codecov/patch/<policy>), also informational for now.
+component_management:
+  default_rules:
+    statuses:
+      - type: project
+        target: auto
+        informational: true
+      - type: patch
+        target: auto
+        informational: true
+  individual_components:
+    # >>> BEGIN GENERATED POLICY COMPONENTS (scripts/coverage/generate-codecov-config.py)
+    - component_id: advanced-ratelimit
+      name: advanced-ratelimit
+      paths:
+        - policies/advanced-ratelimit/**
+    - component_id: analytics-header-filter
+      name: analytics-header-filter
+      paths:
+        - policies/analytics-header-filter/**
+    - component_id: api-key-auth
+      name: api-key-auth
+      paths:
+        - policies/api-key-auth/**
+    - component_id: aws-authentication
+      name: aws-authentication
+      paths:
+        - policies/aws-authentication/**
+    - component_id: aws-bedrock-guardrail
+      name: aws-bedrock-guardrail
+      paths:
+        - policies/aws-bedrock-guardrail/**
+    - component_id: azure-content-safety-content-moderation
+      name: azure-content-safety-content-moderation
+      paths:
+        - policies/azure-content-safety-content-moderation/**
+    - component_id: azure-llm-cost
+      name: azure-llm-cost
+      paths:
+        - policies/azure-llm-cost/**
+    - component_id: backend-jwt
+      name: backend-jwt
+      paths:
+        - policies/backend-jwt/*.go
+    - component_id: backend-jwt-v2
+      name: backend-jwt-v2
+      paths:
+        - policies/backend-jwt/v2/**
+    - component_id: basic-auth
+      name: basic-auth
+      paths:
+        - policies/basic-auth/**
+    - component_id: basic-ratelimit
+      name: basic-ratelimit
+      paths:
+        - policies/basic-ratelimit/**
+    - component_id: content-length-guardrail
+      name: content-length-guardrail
+      paths:
+        - policies/content-length-guardrail/**
+    - component_id: cors
+      name: cors
+      paths:
+        - policies/cors/**
+    - component_id: cost-based-model-routing
+      name: cost-based-model-routing
+      paths:
+        - policies/cost-based-model-routing/**
+    - component_id: dynamic-endpoint
+      name: dynamic-endpoint
+      paths:
+        - policies/dynamic-endpoint/**
+    - component_id: error-response-formatter
+      name: error-response-formatter
+      paths:
+        - policies/error-response-formatter/**
+    - component_id: host-rewrite
+      name: host-rewrite
+      paths:
+        - policies/host-rewrite/**
+    - component_id: intelligent-model-routing
+      name: intelligent-model-routing
+      paths:
+        - policies/intelligent-model-routing/**
+    - component_id: interceptor-service
+      name: interceptor-service
+      paths:
+        - policies/interceptor-service/**
+    - component_id: json-schema-guardrail
+      name: json-schema-guardrail
+      paths:
+        - policies/json-schema-guardrail/**
+    - component_id: json-xml-mediator
+      name: json-xml-mediator
+      paths:
+        - policies/json-xml-mediator/**
+    - component_id: jwt-auth
+      name: jwt-auth
+      paths:
+        - policies/jwt-auth/**
+    - component_id: llm-cost
+      name: llm-cost
+      paths:
+        - policies/llm-cost/**
+    - component_id: llm-cost-based-ratelimit
+      name: llm-cost-based-ratelimit
+      paths:
+        - policies/llm-cost-based-ratelimit/**
+    - component_id: llm-header-router
+      name: llm-header-router
+      paths:
+        - policies/llm-header-router/**
+    - component_id: log-message
+      name: log-message
+      paths:
+        - policies/log-message/**
+    - component_id: mcp-acl-list
+      name: mcp-acl-list
+      paths:
+        - policies/mcp-acl-list/**
+    - component_id: mcp-auth
+      name: mcp-auth
+      paths:
+        - policies/mcp-auth/**
+    - component_id: mcp-authz
+      name: mcp-authz
+      paths:
+        - policies/mcp-authz/**
+    - component_id: mcp-ratelimit
+      name: mcp-ratelimit
+      paths:
+        - policies/mcp-ratelimit/**
+    - component_id: mcp-rewrite
+      name: mcp-rewrite
+      paths:
+        - policies/mcp-rewrite/**
+    - component_id: mcp-spec-validation
+      name: mcp-spec-validation
+      paths:
+        - policies/mcp-spec-validation/**
+    - component_id: mcp-tool-schema-validator
+      name: mcp-tool-schema-validator
+      paths:
+        - policies/mcp-tool-schema-validator/**
+    - component_id: model-round-robin
+      name: model-round-robin
+      paths:
+        - policies/model-round-robin/**
+    - component_id: model-weighted-round-robin
+      name: model-weighted-round-robin
+      paths:
+        - policies/model-weighted-round-robin/**
+    - component_id: mtls-auth
+      name: mtls-auth
+      paths:
+        - policies/mtls-auth/**
+    - component_id: oauth2-generator
+      name: oauth2-generator
+      paths:
+        - policies/oauth2-generator/**
+    - component_id: oauth2-token-exchange
+      name: oauth2-token-exchange
+      paths:
+        - policies/oauth2-token-exchange/**
+    - component_id: opa-policy
+      name: opa-policy
+      paths:
+        - policies/opa-policy/**
+    - component_id: opaque-token-auth
+      name: opaque-token-auth
+      paths:
+        - policies/opaque-token-auth/**
+    - component_id: openai-to-anthropic-transformer
+      name: openai-to-anthropic-transformer
+      paths:
+        - policies/openai-to-anthropic-transformer/**
+    - component_id: openai-to-azure-openai-transformer
+      name: openai-to-azure-openai-transformer
+      paths:
+        - policies/openai-to-azure-openai-transformer/**
+    - component_id: openai-to-bedrock-transformer
+      name: openai-to-bedrock-transformer
+      paths:
+        - policies/openai-to-bedrock-transformer/**
+    - component_id: openai-to-gemini-transformer
+      name: openai-to-gemini-transformer
+      paths:
+        - policies/openai-to-gemini-transformer/**
+    - component_id: openai-to-mistral-transformer
+      name: openai-to-mistral-transformer
+      paths:
+        - policies/openai-to-mistral-transformer/**
+    - component_id: pii-masking-regex
+      name: pii-masking-regex
+      paths:
+        - policies/pii-masking-regex/**
+    - component_id: prompt-decorator
+      name: prompt-decorator
+      paths:
+        - policies/prompt-decorator/**
+    - component_id: prompt-template
+      name: prompt-template
+      paths:
+        - policies/prompt-template/**
+    - component_id: redirect
+      name: redirect
+      paths:
+        - policies/redirect/**
+    - component_id: regex-guardrail
+      name: regex-guardrail
+      paths:
+        - policies/regex-guardrail/**
+    - component_id: remove-headers
+      name: remove-headers
+      paths:
+        - policies/remove-headers/**
+    - component_id: request-rewrite
+      name: request-rewrite
+      paths:
+        - policies/request-rewrite/**
+    - component_id: respond
+      name: respond
+      paths:
+        - policies/respond/**
+    - component_id: semantic-cache
+      name: semantic-cache
+      paths:
+        - policies/semantic-cache/**
+    - component_id: semantic-model-routing
+      name: semantic-model-routing
+      paths:
+        - policies/semantic-model-routing/**
+    - component_id: semantic-prompt-guard
+      name: semantic-prompt-guard
+      paths:
+        - policies/semantic-prompt-guard/**
+    - component_id: semantic-tool-filtering
+      name: semantic-tool-filtering
+      paths:
+        - policies/semantic-tool-filtering/**
+    - component_id: sentence-count-guardrail
+      name: sentence-count-guardrail
+      paths:
+        - policies/sentence-count-guardrail/**
+    - component_id: set-headers
+      name: set-headers
+      paths:
+        - policies/set-headers/**
+    - component_id: subscription-validation
+      name: subscription-validation
+      paths:
+        - policies/subscription-validation/**
+    - component_id: time-based-model-routing
+      name: time-based-model-routing
+      paths:
+        - policies/time-based-model-routing/**
+    - component_id: token-based-ratelimit
+      name: token-based-ratelimit
+      paths:
+        - policies/token-based-ratelimit/**
+    - component_id: typesafe-jev-content-safety
+      name: typesafe-jev-content-safety
+      paths:
+        - policies/typesafe-jev-content-safety/**
+    - component_id: typesafe-jev-mcp-tool-intent-verification
+      name: typesafe-jev-mcp-tool-intent-verification
+      paths:
+        - policies/typesafe-jev-mcp-tool-intent-verification/**
+    - component_id: typesafe-jev-mcp-tool-result-screening
+      name: typesafe-jev-mcp-tool-result-screening
+      paths:
+        - policies/typesafe-jev-mcp-tool-result-screening/**
+    - component_id: typesafe-jev-model-routing
+      name: typesafe-jev-model-routing
+      paths:
+        - policies/typesafe-jev-model-routing/**
+    - component_id: typesafe-jev-tool-filtering
+      name: typesafe-jev-tool-filtering
+      paths:
+        - policies/typesafe-jev-tool-filtering/**
+    - component_id: url-guardrail
+      name: url-guardrail
+      paths:
+        - policies/url-guardrail/**
+    - component_id: websub-hmac-auth
+      name: websub-hmac-auth
+      paths:
+        - policies/websub-hmac-auth/**
+    - component_id: word-count-guardrail
+      name: word-count-guardrail
+      paths:
+        - policies/word-count-guardrail/**
+    # <<< END GENERATED POLICY COMPONENTS

@@ -25,6 +25,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"io"
@@ -41,6 +42,7 @@ import (
 	"github.com/wso2/api-platform/tests/framework/core/topology"
 
 	"github.com/wso2/gateway-controllers/tests/it/common/gateway"
+	"github.com/wso2/gateway-controllers/tests/it/common/itcoverage"
 	"github.com/wso2/gateway-controllers/tests/it/common/runsuites"
 )
 
@@ -63,6 +65,7 @@ func run() int {
 	db := flag.String("db", "", "limit each suite to one database (sqlite, postgres or sqlserver)")
 	blockParallel := flag.Int("block-parallel", 1, "the most blocks that run at the same time across all suites")
 	timeout := flag.Duration("timeout", 40*time.Minute, "the time limit of each block")
+	coverageOut := flag.String("coverage-out", "", "a folder: collect the coverage counters of the gateway's runtimes into it (the gateway must be built with -coverage)")
 	timeline := flag.String("timeline", "", "the file to write the time each block took to, as JSON")
 	flag.Parse()
 
@@ -82,6 +85,7 @@ func run() int {
 		version:     *version,
 		host:        *host,
 		timeout:     *timeout,
+		coverageOut: *coverageOut,
 		builds:      map[string]*build{},
 		items:       map[string]item{},
 		recorder:    runsuites.NewRecorder(),
@@ -111,9 +115,27 @@ func run() int {
 	}
 	r.say("running %d blocks of %d suites on gateway %s, at most %d at the same time\n", len(jobs), len(names)-len(broken), *version, *blockParallel)
 
+	var collector *itcoverage.Collector
+	if r.coverageOut != "" {
+		owners, err := blockOwners(r.items)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "run-suites:", err)
+			return 1
+		}
+		runtime := os.Getenv(gateway.EnvRuntime)
+		if collector, err = itcoverage.Start(context.Background(), runtime, r.coverageOut, owners, r.say); err != nil {
+			fmt.Fprintln(os.Stderr, "run-suites:", err)
+			return 1
+		}
+	}
+
 	stopSampling := r.recorder.StartSampling(sampleInterval)
 	failed := runsuites.Schedule(jobs, *blockParallel, r.run)
 	stopSampling()
+	coverageIncomplete := false
+	if collector != nil {
+		coverageIncomplete = finishCoverage(collector, r.coverageOut, r.say, os.Stderr)
+	}
 	failed = append(failed, broken...)
 	if *timeline != "" {
 		buildSeconds, _ := strconv.ParseFloat(os.Getenv(buildSecondsVariable), 64)
@@ -125,7 +147,45 @@ func run() int {
 		fmt.Printf("Failed integration blocks: %s\n", strings.Join(failed, " "))
 		return 1
 	}
+	if coverageIncomplete {
+		// Every block passed, but the report would miss the counters of some gateway runtimes and
+		// understate the coverage. The counters that were copied are kept for the report.
+		fmt.Println("Coverage collection was incomplete: the report misses the counters of some gateway runtimes")
+		return 1
+	}
 	return 0
+}
+
+// blockOwners maps the name of every block of the run to the policy whose suite it belongs to. The
+// collector traces a gateway runtime to its block by the block's name, and credits its counters to
+// that block's policy alone, so two suites with a block of the same name would make that
+// attribution a guess: it is refused instead.
+func blockOwners(items map[string]item) (map[string]string, error) {
+	owners := map[string]string{}
+	for _, it := range items {
+		if other, taken := owners[it.block]; taken && other != it.policy {
+			return nil, fmt.Errorf("the suites of %s and %s both have a block named %q; rename one, because coverage is credited to the policy that owns the block", other, it.policy, it.block)
+		}
+		owners[it.block] = it.policy
+	}
+	return owners, nil
+}
+
+// coverageCollector collects the counters of the gateway runtimes once the suites have run.
+type coverageCollector interface {
+	Collect(ctx context.Context) (int, error)
+}
+
+// finishCoverage collects the counters, says how many runtimes they came from and reports a
+// failure to errOut. It returns true when the collection was incomplete.
+func finishCoverage(collector coverageCollector, dir string, say func(string, ...any), errOut io.Writer) bool {
+	copied, err := collector.Collect(context.Background())
+	say("coverage: collected the counters of %d gateway runtimes into %s\n", copied, dir)
+	if err != nil {
+		fmt.Fprintln(errOut, "run-suites: collecting coverage:", err)
+		return true
+	}
+	return false
 }
 
 // item is the policy and block a job runs.
@@ -146,6 +206,9 @@ type runner struct {
 	version     string
 	host        string
 	timeout     time.Duration
+
+	// coverageOut, when set, is where the blocks collect the gateway's coverage counters.
+	coverageOut string
 
 	// items maps a job name to what it runs. It is complete before the first job starts.
 	items map[string]item
@@ -262,6 +325,11 @@ func (w *bootWatcher) sawBootFailure() bool {
 func (r *runner) goTest(it item, args []string, out io.Writer) error {
 	cmd := exec.Command("go", args...)
 	cmd.Dir = r.policyDir(it.policy)
+	if r.coverageOut != "" {
+		// Makes the suite give the gateway's containers a GOCOVERDIR; the counters are collected
+		// by the collector started in run.
+		cmd.Env = append(os.Environ(), gateway.EnvCollectCoverage+"=1")
+	}
 	cmd.Stdout = out
 	cmd.Stderr = out
 	return cmd.Run()

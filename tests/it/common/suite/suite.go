@@ -164,6 +164,7 @@ func Run(t *testing.T, cfg Config) {
 	opts := options(cfg)
 	opts.Dir = dir
 	opts.WorkspaceRoot = workspace
+	gateway.EnableCoverageCollection(t)
 	suiterun.Run(t, opts)
 }
 

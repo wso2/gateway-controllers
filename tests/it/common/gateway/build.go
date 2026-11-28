@@ -22,6 +22,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/wso2/api-platform/tests/framework/core/builder"
@@ -90,6 +92,11 @@ type BuildOptions struct {
 
 	// Runner runs the docker commands. Empty means the host's docker.
 	Runner builder.Runner
+
+	// Coverage builds the policy engine with Go coverage instrumentation of every policy, so a
+	// run of the suites writes the coverage of the policies' code to the runtime's /coverage. Only
+	// the gateway-builder of the latest gateway supports it, so it requires Version latest.
+	Coverage bool
 }
 
 // Build builds the gateway controller and runtime images that carry the selected policies, on
@@ -102,6 +109,9 @@ func Build(ctx context.Context, opts BuildOptions) (Images, error) {
 	}
 	if strings.TrimSpace(opts.PoliciesDir) == "" {
 		return Images{}, fmt.Errorf("the policies folder is required")
+	}
+	if opts.Coverage && version != "latest" {
+		return Images{}, fmt.Errorf("coverage needs gateway version latest: the gateway-builder of %s cannot instrument the policy engine", version)
 	}
 	names := uniqueSorted(opts.Policies)
 	if len(opts.Policies) == 0 {
@@ -117,6 +127,10 @@ func Build(ctx context.Context, opts BuildOptions) (Images, error) {
 	runner := opts.Runner
 	if runner == nil {
 		runner = builder.ExecRunner{}
+	}
+
+	if opts.Coverage {
+		runner = coverageRunner{runner}
 	}
 
 	workspace, err := os.MkdirTemp("", "gateway-policies-")
@@ -164,4 +178,99 @@ func tag(ref string) string {
 		return ""
 	}
 	return ref[colon+1:]
+}
+
+// CoveragePackages is what a coverage build instruments, as a comma-separated -coverpkg list.
+//   - The code of every policy: each is a Go module of its own that the policy engine pulls in as a
+//     dependency, which a plain -cover build would leave out.
+//   - The policy engine's main package. Go registers the code that writes the counters when the
+//     process exits from the instrumented main package, so a build that instruments only the
+//     policies has counters and never writes them.
+//
+// The report keeps only the policies (see scripts/coverage/it-coverage-report.sh).
+const CoveragePackages = "github.com/wso2/gateway-controllers/policies/...," +
+	"github.com/wso2/api-platform/gateway/gateway-runtime/policy-engine/cmd/policy-engine"
+
+// EnvCollectCoverage names the variable that makes a suite give the gateway's containers a
+// GOCOVERDIR, the folder where the coverage-instrumented policy engine writes its counters when it
+// stops. tests/it/cmd/run-suites sets it for a run with -coverage-out.
+const EnvCollectCoverage = "IT_COLLECT_COVERAGE"
+
+// CollectCoverage reports whether this run collects the gateway's coverage counters.
+func CollectCoverage() bool {
+	value := strings.TrimSpace(os.Getenv(EnvCollectCoverage))
+	return value == "1" || strings.EqualFold(value, "true")
+}
+
+// EnableCoverageCollection makes the framework hand GOCOVERDIR=/coverage to the gateway's
+// containers when the run collects coverage. The framework adds it only when its coverage mode
+// is on, which it otherwise turns on with a flag that cannot be combined with the gateway
+// version a suite selects, and it reads the mode as it builds the catalog, after a suite starts.
+func EnableCoverageCollection(t interface{ Setenv(key, value string) }) {
+	if CollectCoverage() {
+		t.Setenv(shared.EnvCoverageMode, "true")
+	}
+}
+
+// coverageVolume is where the instrumented policy engine writes its counters. The runtime image
+// declares it a volume so that a container sharing it keeps the counters after the framework has
+// removed the runtime container; see package itcoverage.
+const coverageVolume = "/coverage"
+
+// coverageRunner changes the two commands that make the runtime instrumented. The framework
+// starts the gateway-builder without the coverage switches, and offers no option to add them to a
+// build from a released gateway, so the command is changed on its way to docker:
+//   - the builder run, which compiles the policy engine, gets COVERAGE and COVERPKG;
+//   - the build of the runtime image is given a copy of its Dockerfile that declares the volume.
+//
+// Every other command passes through.
+type coverageRunner struct{ builder.Runner }
+
+func (r coverageRunner) Run(ctx context.Context, command builder.Command) error {
+	args := command.Args
+	switch {
+	case len(args) >= 3 && args[0] == "docker" && args[1] == "run":
+		command.Args = append([]string{"docker", "run", "-e", "COVERAGE=true", "-e", "COVERPKG=" + CoveragePackages}, args[2:]...)
+	case len(args) >= 3 && args[0] == "docker" && args[1] == "buildx":
+		if i := slices.Index(args, "-f"); i >= 0 && i+1 < len(args) && isRuntimeDockerfile(args[i+1]) {
+			patched, err := dockerfileWithCoverageVolume(args[i+1])
+			if err != nil {
+				return err
+			}
+			defer os.RemoveAll(filepath.Dir(patched))
+			command.Args = slices.Clone(args)
+			command.Args[i+1] = patched
+		}
+	}
+	return r.Runner.Run(ctx, command)
+}
+
+// isRuntimeDockerfile reports whether path is the Dockerfile the gateway-builder generated for
+// the gateway runtime image.
+func isRuntimeDockerfile(path string) bool {
+	path = filepath.ToSlash(path)
+	return strings.HasSuffix(path, "/gateway-runtime/Dockerfile")
+}
+
+// dockerfileWithCoverageVolume writes a copy of the Dockerfile with the coverage volume declared
+// and returns its path, in a folder of its own that the caller removes. The original is left
+// alone: the gateway-builder runs as root in its container, so on Linux the file it wrote is
+// not writable by this process. The build context stays the folder of the original, so the copy
+// finds the same files.
+func dockerfileWithCoverageVolume(dockerfile string) (string, error) {
+	content, err := os.ReadFile(dockerfile)
+	if err != nil {
+		return "", fmt.Errorf("declaring the coverage volume: %w", err)
+	}
+	dir, err := os.MkdirTemp("", "gateway-runtime-coverage-")
+	if err != nil {
+		return "", fmt.Errorf("declaring the coverage volume: %w", err)
+	}
+	patched := filepath.Join(dir, "Dockerfile")
+	content = append(content, fmt.Appendf(nil, "\n# Added for a coverage run: counters survive the container.\nVOLUME %s\n", coverageVolume)...)
+	if err := os.WriteFile(patched, content, 0o644); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", fmt.Errorf("declaring the coverage volume: %w", err)
+	}
+	return patched, nil
 }

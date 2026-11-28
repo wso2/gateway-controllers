@@ -1,0 +1,149 @@
+name: Policy Code Coverage (main)
+
+# Keeps the coverage of main current in Codecov, so that the coverage of a pull request is compared
+# with it. Pull requests report their own coverage from the latest-gateway leg of it.yml, which
+# builds the gateway with every policy instrumented and uploads the same report; nothing here runs
+# for a pull request. The run is the one of that leg: the latest gateway, whose policy engine can be
+# built with coverage, on SQLite alone, because the database does not change which policy code runs.
+on:
+  workflow_dispatch:
+    inputs:
+      block_parallel:
+        description: "Most blocks that run at the same time across the suites; empty uses the IT_BLOCK_PARALLEL variable, then the Makefile default"
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+    paths:
+      - 'policies/**'
+      - 'tests/it/**'
+      - 'scripts/it/**'
+      - 'scripts/coverage/**'
+      - 'codecov.yml'
+      - 'Makefile'
+      - '.github/workflows/coverage.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  coverage:
+    name: Integration coverage (latest gateway)
+    runs-on: ubuntu-24.04
+    # packages: read lets GITHUB_TOKEN pull the testbench image from GHCR.
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout gateway-controllers
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.10'
+          cache-dependency-path: |
+            tests/it/go.sum
+            policies/*/it/go.sum
+            policies/*/v*/it/go.sum
+
+      - name: Raise the conntrack table limit
+        run: sudo sysctl -w net.netfilter.nf_conntrack_max=524288
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        continue-on-error: true
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The same testbench image as it.yml: the one published with the framework release that
+      # tests/it/go.mod pins, built from the module's source when it cannot be pulled.
+      - name: Provide the testbench image
+        working-directory: tests/it
+        run: |
+          set -euo pipefail
+          module=github.com/wso2/api-platform/tests/framework
+          go mod download "$module"
+          version="$(go list -m -f '{{.Version}}' "$module")"
+          image="ghcr.io/wso2/api-platform/testbench:${version#v}"
+          if docker pull "$image"; then
+            exit 0
+          fi
+          echo "::warning::Could not pull $image; building it from the pinned module source instead"
+          dir="$(go list -m -f '{{.Dir}}' "$module")"
+          docker build -f "$dir/testbench/Dockerfile" -t "$image" "$dir"
+
+      # Builds the latest gateway with every policy instrumented, runs every suite on SQLite and
+      # fails if a block fails. The report and the upload below run either way: a failing block
+      # leaves its counters out of the report, not the whole report.
+      - name: Run the integration suites with coverage
+        shell: bash
+        env:
+          BLOCK_PARALLEL: ${{ inputs.block_parallel || vars.IT_BLOCK_PARALLEL }}
+        run: |
+          set -euo pipefail
+          # The value reaches the Makefile's shell commands, so only its shape gets in.
+          if [[ -n "$BLOCK_PARALLEL" && ! "$BLOCK_PARALLEL" =~ ^[0-9]+$ ]]; then
+            echo "::error::block_parallel must be a whole number"
+            exit 1
+          fi
+          # The selection script writes its result to $GITHUB_OUTPUT: every policy with a suite.
+          selected="$(mktemp)"
+          GITHUB_OUTPUT="$selected" python3 scripts/it/changed-policies.py --policies all > /dev/null
+          policies="$(sed -n 's/^policies=//p' "$selected")"
+          make it POLICIES="$policies" GATEWAY_VERSION=latest DB=sqlite IT_COVERAGE_DIR=coverage/raw \
+            ${BLOCK_PARALLEL:+BLOCK_PARALLEL="$BLOCK_PARALLEL"} \
+            2>&1 | tee policy-it-coverage.log
+
+      - name: Merge the coverage of the suites
+        if: always()
+        run: scripts/coverage/it-coverage-report.sh coverage/raw coverage
+
+      - name: Summarise policy-wise and global coverage
+        if: always() && hashFiles('coverage/coverage.txt') != ''
+        run: python3 scripts/coverage/summarize-coverage.py coverage/coverage.txt | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Warn when the Codecov token is missing
+        if: always()
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        run: |
+          if [ -z "$CODECOV_TOKEN" ]; then
+            echo "::warning::CODECOV_TOKEN is not available, so the Codecov upload is rejected. Add the CODECOV_TOKEN secret and install the Codecov app on this repository."
+          fi
+
+      # The report is one file holding every policy; Codecov splits it into per-policy
+      # components by path. Listed explicitly, with search off, so that only this report is
+      # uploaded.
+      - name: Upload coverage to Codecov
+        if: always() && hashFiles('coverage/coverage.txt') != ''
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          disable_search: true
+          files: coverage/coverage.txt
+          flags: integration
+          fail_ci_if_error: false
+
+      - name: Upload the test output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: policy-coverage-output
+          path: |
+            policy-it-coverage.log
+            coverage/coverage.txt
+          if-no-files-found: ignore
+          retention-days: 7

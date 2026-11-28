@@ -20,6 +20,9 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -40,6 +43,52 @@ func TestJobNameIsUniqueAcrossSuites(t *testing.T) {
 	second := jobName(items, "backend-jwt", "backend-jwt-claims")
 	require.NotEqual(t, first, second)
 	require.Equal(t, "backend-jwt/backend-jwt-claims", second)
+}
+
+type fakeCollector struct {
+	copied int
+	err    error
+}
+
+func (f fakeCollector) Collect(context.Context) (int, error) { return f.copied, f.err }
+
+func TestAnIncompleteCoverageCollectionIsReportedAsAFailure(t *testing.T) {
+	var said, stderr bytes.Buffer
+	say := func(format string, args ...any) { fmt.Fprintf(&said, format, args...) }
+
+	incomplete := finishCoverage(fakeCollector{copied: 3, err: errors.New("copying the counters of helper abc: no space")}, "out", say, &stderr)
+
+	require.True(t, incomplete, "the run must not pass with a partial report")
+	require.Contains(t, said.String(), "collected the counters of 3 gateway runtimes into out", "the partial counters are still reported")
+	require.Contains(t, stderr.String(), "no space")
+}
+
+func TestACompleteCoverageCollectionIsNotAFailure(t *testing.T) {
+	var said, stderr bytes.Buffer
+	say := func(format string, args ...any) { fmt.Fprintf(&said, format, args...) }
+
+	require.False(t, finishCoverage(fakeCollector{copied: 5}, "out", say, &stderr))
+	require.Empty(t, stderr.String())
+}
+
+func TestBlockOwnersMapsEachBlockToItsPolicy(t *testing.T) {
+	owners, err := blockOwners(map[string]item{
+		"basic-auth":            {policy: "basic-auth", block: "basic-auth"},
+		"basic-auth-restart":    {policy: "basic-auth", block: "basic-auth-restart"},
+		"backend-jwt/v2/claims": {policy: "backend-jwt/v2", block: "claims"},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"basic-auth": "basic-auth", "basic-auth-restart": "basic-auth", "claims": "backend-jwt/v2"}, owners)
+}
+
+func TestBlockOwnersRefusesABlockNameTwoSuitesShare(t *testing.T) {
+	_, err := blockOwners(map[string]item{
+		"a/shared": {policy: "a", block: "shared"},
+		"b/shared": {policy: "b", block: "shared"},
+	})
+
+	require.ErrorContains(t, err, `both have a block named "shared"`)
 }
 
 func TestBootWatcherFlagsOnlyABootFailureOnAContainerRuntimeError(t *testing.T) {
