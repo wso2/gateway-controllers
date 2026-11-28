@@ -66,6 +66,8 @@ type SemanticModelRoutingPolicy struct {
 	contentPath       string
 	requestModel      RequestModelConfig
 	embeddingProvider embeddingproviders.EmbeddingProvider
+	// auth is how the policy authenticates to the embedding provider.
+	auth authentication
 }
 
 // GetPolicy is the v1alpha2 factory entry point. It parses configuration,
@@ -86,10 +88,11 @@ func GetPolicy(
 	}
 
 	// Initialize embedding provider (reuse SDK, same as semantic-cache)
-	embeddingConfig, err := parseEmbeddingConfig(params)
+	embeddingConfig, auth, err := parseEmbeddingConfig(params)
 	if err != nil {
 		return nil, fmt.Errorf("invalid embedding config: %w", err)
 	}
+	p.auth = auth
 
 	embeddingProvider, err := createEmbeddingProvider(embeddingConfig)
 	if err != nil {
@@ -173,8 +176,10 @@ func (p *SemanticModelRoutingPolicy) OnRequestBody(
 	// Generate embedding for the user request
 	requestEmbedding, err := p.embeddingProvider.GetEmbedding(userText)
 	if err != nil {
-		slog.Debug("SemanticModelRouting: Failed to compute request embedding, using default model",
-			"error", err)
+		if !logIdentityFailure(ctx, err, p.auth, "Failed to compute request embedding, using default model") {
+			slog.Debug("SemanticModelRouting: Failed to compute request embedding, using default model",
+				"error", err)
+		}
 		return p.modifyRequestModel(reqCtx, content, p.defaultTarget())
 	}
 
@@ -509,49 +514,65 @@ func parseRouteConfig(routeMap map[string]interface{}, index int) (SemanticRoute
 	return route, nil
 }
 
-// parseEmbeddingConfig parses embedding provider configuration from params.
-// Follows the same pattern as the semantic-cache policy.
-func parseEmbeddingConfig(params map[string]interface{}) (embeddingproviders.EmbeddingProviderConfig, error) {
+// parseEmbeddingConfig parses embedding provider configuration from params, with how the
+// policy authenticates to the provider. Follows the same pattern as the semantic-cache policy.
+func parseEmbeddingConfig(params map[string]interface{}) (embeddingproviders.EmbeddingProviderConfig, authentication, error) {
 	config := embeddingproviders.EmbeddingProviderConfig{}
 
 	provider, ok := params["embeddingProvider"].(string)
 	if !ok || provider == "" {
-		return config, fmt.Errorf("'embeddingProvider' parameter is required")
+		return config, authentication{}, fmt.Errorf("'embeddingProvider' parameter is required")
 	}
 
 	validProviders := map[string]bool{"OPENAI": true, "MISTRAL": true, "AZURE_OPENAI": true}
 	if !validProviders[provider] {
-		return config, fmt.Errorf("'embeddingProvider' must be one of: OPENAI, MISTRAL, AZURE_OPENAI")
+		return config, authentication{}, fmt.Errorf("'embeddingProvider' must be one of: OPENAI, MISTRAL, AZURE_OPENAI")
 	}
 	config.EmbeddingProvider = provider
 
 	endpoint, ok := params["embeddingEndpoint"].(string)
 	if !ok || endpoint == "" {
-		return config, fmt.Errorf("'embeddingEndpoint' is required for %s provider", provider)
+		return config, authentication{}, fmt.Errorf("'embeddingEndpoint' is required for %s provider", provider)
 	}
 	config.EmbeddingEndpoint = endpoint
+
+	// Checked before the provider is created, because building the policy embeds the utterances.
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return config, authentication{}, err
+	}
+	if err := checkAllowedEndpoint(params, endpoint); err != nil {
+		return config, authentication{}, err
+	}
 
 	// Model is required for OPENAI and MISTRAL, optional for AZURE_OPENAI
 	if model, ok := params["embeddingModel"].(string); ok && model != "" {
 		config.EmbeddingModel = model
 	} else if provider == "OPENAI" || provider == "MISTRAL" {
-		return config, fmt.Errorf("'embeddingModel' is required for %s provider", provider)
+		return config, authentication{}, fmt.Errorf("'embeddingModel' is required for %s provider", provider)
 	}
 
-	apiKey, ok := params["apiKey"].(string)
-	if !ok || apiKey == "" {
-		return config, fmt.Errorf("'apiKey' is required for %s provider", provider)
-	}
-	config.APIKey = apiKey
+	// In an identity mode the SDK gets tokens for the gateway's identity and the key is never
+	// passed on.
+	if !auth.usesIdentity() {
+		apiKey, ok := params["apiKey"].(string)
+		if !ok || apiKey == "" {
+			return config, authentication{}, fmt.Errorf("'apiKey' is required for %s provider", provider)
+		}
+		config.APIKey = apiKey
 
-	// Set auth header name based on provider type
-	if provider == "AZURE_OPENAI" {
-		config.AuthHeaderName = "api-key"
-	} else {
-		config.AuthHeaderName = "Authorization"
+		// Set auth header name based on provider type
+		if provider == "AZURE_OPENAI" {
+			config.AuthHeaderName = "api-key"
+		} else {
+			config.AuthHeaderName = "Authorization"
+		}
 	}
+	config.AuthenticationType = auth.typ
+	config.ClientID = auth.clientID
+	config.TokenScope = auth.tokenScope
 
-	return config, nil
+	return config, auth, nil
 }
 
 // parseRequestModelConfig parses the requestModel configuration from params.

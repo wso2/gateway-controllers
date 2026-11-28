@@ -85,7 +85,7 @@ All available policies, sorted alphabetically.
 | [Request Rewrite](./request-rewrite/v1.1/docs/request-rewrite.md) | Transformation | Rewrites incoming requests by updating path, query parameters, and/or HTTP method before forwarding to upstream services. |
 | [Respond](./respond/v1.1/docs/respond.md) | AI | Returns an immediate response to the client without forwarding the request to the upstream backend. |
 | [Semantic Cache](./semantic-cache/v1.3/docs/semantic-caching.md) | AI | Implements semantic caching for LLM responses using vector similarity search. |
-| [Semantic Model Routing](./semantic-model-routing/v0.9/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
+| [Semantic Model Routing](./semantic-model-routing/v0.10/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
 | [Semantic Prompt Guard](./semantic-prompt-guard/v1.1/docs/semantic-prompt-guard.md) | Guardrails, AI | Blocks or allows prompts based on semantic similarity to configured allow/deny phrase embeddings. |
 | [Semantic Tool Filtering](./semantic-tool-filtering/v1.0/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
 | [Sentence Count Guardrail](./sentence-count-guardrail/v1.1/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
