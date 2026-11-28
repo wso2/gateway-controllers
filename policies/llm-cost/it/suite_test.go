@@ -27,7 +27,7 @@ import (
 	"github.com/wso2/gateway-controllers/policies/llm-cost/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register, Companions: []string{"llm-cost-based-ratelimit"}}
+var config = suite.Config{Register: steps.Register, Companions: []string{"llm-cost-based-ratelimit", "openai-to-bedrock-transformer"}}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

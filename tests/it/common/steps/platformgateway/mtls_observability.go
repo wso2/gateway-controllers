@@ -310,10 +310,23 @@ func (g *Gateway) analyticsMetadataFieldAbsent(ctx context.Context, path, field 
 	if err != nil {
 		return err
 	}
-	if value, present := event.Metadata[field]; present {
+	if value, present := metadataField(event.Metadata, field); present {
 		return fmt.Errorf("analytics event for %q has metadata field %q (%v), want none", path, field, value)
 	}
 	return nil
+}
+
+// metadataField looks a field up in an analytics event's metadata. A key that exists at the top level
+// wins, so a name with no dot behaves as a plain lookup; a dotted name that is not a top-level key
+// is resolved through the nested objects, such as aiMetadata.llmCost.
+func metadataField(metadata map[string]any, field string) (any, bool) {
+	if value, present := metadata[field]; present {
+		return value, true
+	}
+	if !strings.Contains(field, ".") {
+		return nil, false
+	}
+	return traverseJSON(metadata, field)
 }
 
 // ── Prometheus samples ─────────────────────────────────────────────────────────
