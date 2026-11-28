@@ -1276,6 +1276,7 @@ func (g *Gateway) register(sc *godog.ScenarioContext) {
 	g.registerMTLSObservabilitySteps(sc)
 	g.registerA2AClientSteps(sc)
 	g.registerAgentSteps(sc)
+	g.registerOIDCTokenSteps(sc)
 	// Request state is runner-scoped, so clear it before each scenario.
 	sc.Before(func(ctx context.Context, _ *godog.Scenario) (context.Context, error) {
 		if err := tcontext.Set(ctx, keyGatewaySpecVersion, gatewaySpecVersionForVersion(gatewayVersion(g.topo))); err != nil {

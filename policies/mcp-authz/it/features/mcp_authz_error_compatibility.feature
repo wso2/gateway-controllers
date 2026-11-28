@@ -28,6 +28,7 @@ Feature: Mcp authz policy
 
   # The response must match the expected error response recorded from the policy before a
   # change (resources/expected-error-responses), so a change a client could observe fails.
+  # MAZ #9: with no mcp-auth, a governed tool call gets mcp-authz's own 401.
   Scenario: mcp-authz rejects a governed tool call with no authenticated identity
     Given I generate a unique resource name from "compat-mcp-authz-anon" and store it as "mcpName"
     And I generate a unique value from "compat-mcp-authz-anon" and store it as "mcpDisplayName"
