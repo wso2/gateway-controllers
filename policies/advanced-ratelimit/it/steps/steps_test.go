@@ -27,6 +27,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/cucumber/godog"
 
@@ -541,5 +542,79 @@ func TestRedisCounterReachesRejectsGlobCharacters(t *testing.T) {
 		if err := s.redisCounterReaches(scenarioContext(), fragment, 1); err == nil {
 			t.Errorf("fragment %q should be rejected", fragment)
 		}
+	}
+}
+
+func TestWaitForWindowRoom(t *testing.T) {
+	tests := []struct {
+		name     string
+		now      string
+		duration string
+		minLeft  int
+		// overshoot is extra time the fake sleep lets pass beyond the requested wait.
+		overshoot time.Duration
+		wantWait  time.Duration
+		wantErr   string
+	}{
+		{name: "plenty of the window left", now: "2026-11-26T10:30:00Z", duration: "1h", minLeft: 30},
+		{name: "exactly the minimum left", now: "2026-11-26T10:59:30Z", duration: "1h", minLeft: 30},
+		{name: "waits for the boundary", now: "2026-11-26T10:59:55Z", duration: "1h", minLeft: 30, wantWait: 5*time.Second + 100*time.Millisecond},
+		{name: "just after a boundary", now: "2026-11-26T11:00:01Z", duration: "1h", minLeft: 30},
+		{name: "short window", now: "2026-11-26T11:00:04Z", duration: "6s", minLeft: 3, wantWait: 2*time.Second + 100*time.Millisecond},
+		{name: "bad duration", now: "2026-11-26T11:00:04Z", duration: "an hour", minLeft: 3, wantErr: "not a positive Go duration"},
+		{name: "minimum not below the window", now: "2026-11-26T11:00:04Z", duration: "1m", minLeft: 60, wantErr: "cannot ask for"},
+		{name: "minimum leaves no room for the margin", now: "2026-11-26T11:00:00.010Z", duration: "1050ms", minLeft: 1, wantErr: "cannot ask for"},
+		{name: "wait overshoots into the next window", now: "2026-11-26T10:59:55Z", duration: "1h", minLeft: 30, overshoot: 59*time.Minute + 50*time.Second, wantWait: 5*time.Second + 100*time.Millisecond, wantErr: "is left after waiting"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			current, err := time.Parse(time.RFC3339, tt.now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var slept time.Duration
+			s := &Steps{
+				now: func() time.Time { return current },
+				sleep: func(_ context.Context, d time.Duration) error {
+					slept = d
+					current = current.Add(d + tt.overshoot)
+					return nil
+				},
+			}
+			err = s.waitForWindowRoom(context.Background(), tt.duration, tt.minLeft)
+			if slept != tt.wantWait {
+				t.Fatalf("slept %s, want %s", slept, tt.wantWait)
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want one containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if left := timeLeftInWindow(current, mustParseDuration(t, tt.duration)); left < time.Duration(tt.minLeft)*time.Second {
+				t.Fatalf("step returned with %s left, want at least %ds", left, tt.minLeft)
+			}
+		})
+	}
+}
+
+func mustParseDuration(t *testing.T, s string) time.Duration {
+	t.Helper()
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+func TestWaitForWindowRoomStopsWhenTheContextEnds(t *testing.T) {
+	s := &Steps{now: func() time.Time { return time.Date(2026, 11, 26, 10, 59, 59, 0, time.UTC) }}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.waitForWindowRoom(ctx, "1h", 30); err == nil {
+		t.Fatal("expected the cancelled context to end the wait")
 	}
 }

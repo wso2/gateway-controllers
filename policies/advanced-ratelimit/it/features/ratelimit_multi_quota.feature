@@ -25,6 +25,10 @@ Feature: Advanced rate limit multi-quota policies and state persistence
   Background:
     Given the gateway services are running
     And I authenticate using basic auth as "admin"
+    # Every scenario here counts requests against a 1h fixed window and expects the count to still
+    # be there later. The window is aligned to the clock hour, so a scenario that straddles :00
+    # would start from zero. Start inside a window that outlasts the scenario.
+    And I wait until the current "1h" rate limit window has at least 60 seconds left
 
   Scenario: A per-route quota and a per-api quota are enforced together
     Given I generate a unique value from "arl-multi-dim" and store it as "apiName"
