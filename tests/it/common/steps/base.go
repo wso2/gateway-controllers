@@ -277,6 +277,7 @@ func (b *Base) registerBaseSteps(sc *godog.ScenarioContext) {
 		b.sendConcurrentCycling)
 	newConcurrentIdentifiedSteps(b, b.funnel.Client()).register(sc)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with body:$`, b.sendRequestWithBody)
+	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" with the base64 body "([^"]*)"$`, b.sendRequestWithBase64Body)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+)$`, b.sendUntilStatus)
 	sc.Step(`^I send a "([^"]*)" request to "([^"]*)" until status (\d+) or (\d+)$`, b.sendUntilStatusOneOf)
 	sc.Step(`^I send a "([^"]*)" request to the (first|second) gateway "([^"]*)" until status (\d+)$`,
@@ -433,6 +434,48 @@ func (b *Base) sendRequestWithBody(
 	ctx context.Context, method, path string, body *godog.DocString,
 ) error {
 	return b.sendRequestWithHeaders(ctx, method, path, body, nil)
+}
+
+// sendRequestWithBase64Body invokes a data-plane path with a body given in standard base64, so a
+// scenario can send bytes a doc string cannot hold: invalid UTF-8, NUL or a bare carriage return.
+// The Content-Type defaults to application/octet-stream when the scenario set none.
+func (b *Base) sendRequestWithBase64Body(ctx context.Context, method, path, encoded string) error {
+	resolved, err := stepscommon.Expand(ctx, path)
+	if err != nil {
+		return err
+	}
+	url, err := b.gatewayURL(resolved)
+	if err != nil {
+		return err
+	}
+	headers := b.scenarioHeaders(ctx)
+	payload, err := base64Body(ctx, encoded, headers)
+	if err != nil {
+		return err
+	}
+	return b.invokeWith(ctx, strings.ToUpper(method), url, headers, payload)
+}
+
+// base64Body decodes a step's base64 body and sets the binary Content-Type when none is set.
+func base64Body(ctx context.Context, encoded string, headers map[string]string) ([]byte, error) {
+	resolved, err := stepscommon.Expand(ctx, encoded)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := base64.StdEncoding.DecodeString(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("the body %q is not standard base64: %w", resolved, err)
+	}
+	for name, value := range headers {
+		if strings.EqualFold(name, "Content-Type") {
+			if value == "" {
+				headers[name] = "application/octet-stream"
+			}
+			return payload, nil
+		}
+	}
+	headers["Content-Type"] = "application/octet-stream"
+	return payload, nil
 }
 
 // sendRequestWithHeaders invokes a data-plane path with scenario and request-specific headers.

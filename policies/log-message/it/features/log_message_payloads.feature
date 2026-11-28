@@ -180,3 +180,45 @@ Feature: Log message policy payloads
     And I delete the API "${CTX:apiName}"
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
+
+  # The body is the bytes 00 01 FF FE, then lm-content-bin, then 80, sent as application/octet-stream.
+  # The log is JSON text, so the policy writes each byte that is not valid UTF-8 as the
+  # replacement character U+FFFD. The echo writes the body it received the same way, so both
+  # show FF, FE and 80 in place: content the policy cannot read as text is still logged and passed
+  # on. This also covers content that cannot be parsed.
+  Scenario: Send empty, JSON, XML, text, Unicode, and binary/non-text payloads where applicable (binary)
+    Given I generate a unique value from "lm-content-bin" and store it as "apiName"
+    And I generate a unique API version from "lm-content-bin" and store it as "apiVersion"
+    And I generate a unique API context from "/lm-content-bin" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/ready"},{"method":"POST","path":"/orders","policies":[{"name":"log-message","version":"v1","params":{"request":{"payload":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
+
+    When I set header "X-Request-Id" to "lm-content-bin"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with the base64 body "AAH//mxtLWNvbnRlbnQtYmlugA=="
+    Then the response status code should be 200
+    And the JSON response field "data" should contain "��lm-content-bin�"
+
+    When I set header "X-Request-Id" to "lm-content-bin-fence"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
+      """
+      lm-content-bin-fence
+      """
+    Then the response status code should be 200
+    And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" should be:
+      | mediation-flow | request-id           | payload                      |
+      | REQUEST        | lm-content-bin       | [contains ��lm-content-bin�] |
+      | REQUEST        | lm-content-bin-fence | lm-content-bin-fence         |
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
