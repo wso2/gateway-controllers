@@ -4,10 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	embeddingproviders "github.com/wso2/api-platform/sdk/ai/embeddings"
 	policy "github.com/wso2/api-platform/sdk/core/policy/v1alpha2"
@@ -759,7 +764,7 @@ func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &SemanticPromptGuardPolicy{embeddingProvider: tc.provider}
-			got, ok := p.validatePayload([]byte(tc.payload), params).(policy.ImmediateResponse)
+			got, ok := p.validatePayload(context.Background(), []byte(tc.payload), params).(policy.ImmediateResponse)
 			if !ok {
 				t.Fatalf("expected ImmediateResponse")
 			}
@@ -777,4 +782,176 @@ func TestSemanticPromptGuard_NoVerdictDeclaresFault(t *testing.T) {
 			}
 		})
 	}
+}
+
+const (
+	testAzureEndpoint = "https://res.openai.azure.com/openai/deployments/d/embeddings?api-version=2024-10-21"
+	testIdentityID    = "00000000-0000-0000-0000-000000000001"
+)
+
+// azureParams returns an Azure OpenAI embedding config with extra merged in.
+func azureParams(extra map[string]interface{}) map[string]interface{} {
+	params := map[string]interface{}{
+		"embeddingProvider": "AZURE_OPENAI",
+		"embeddingEndpoint": testAzureEndpoint,
+	}
+	for k, v := range extra {
+		params[k] = v
+	}
+	return params
+}
+
+func TestParseEmbeddingConfigIdentityModeNeedsNoKey(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+	err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "workload-identity", "clientId": testIdentityID},
+	}), p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	c := p.embeddingConfig
+	if c.AuthenticationType != "workload-identity" || c.ClientID != testIdentityID || c.TokenScope != embeddingproviders.DefaultTokenScope {
+		t.Fatalf("identity not passed on: %+v", c)
+	}
+	if c.APIKey != "" || c.AuthHeaderName != "" {
+		t.Fatalf("an identity mode must not carry a key: %+v", c)
+	}
+	if p.auth.typ != "workload-identity" {
+		t.Fatalf("expected p.auth.typ workload-identity, got %q", p.auth.typ)
+	}
+}
+
+func TestParseEmbeddingConfigIdentityModeDropsTheKey(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+	err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "workload-identity", "clientId": testIdentityID},
+		"apiKey":    "gateway-key",
+	}), p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.embeddingConfig.APIKey != "" || p.embeddingConfig.AuthHeaderName != "" {
+		t.Fatalf("the gateway's key must not be passed on in an identity mode: %+v", p.embeddingConfig)
+	}
+}
+
+func TestParseEmbeddingConfigAPIKeyModeStillNeedsAKey(t *testing.T) {
+	err := parseEmbeddingConfig(azureParams(nil), &SemanticPromptGuardPolicy{})
+	if err == nil || !strings.Contains(err.Error(), "'apiKey' is required") {
+		t.Fatalf("expected the key to be required, got %v", err)
+	}
+}
+
+func TestParseEmbeddingConfigAPIKeyModeIgnoresLeftoverIdentityFields(t *testing.T) {
+	p := &SemanticPromptGuardPolicy{}
+	err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"azureAuth": map[string]interface{}{"authenticationType": "api-key", "clientId": "x", "scope": "y"},
+		"apiKey":    "k",
+	}), p)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	c := p.embeddingConfig
+	if c.AuthenticationType != "api-key" || c.ClientID != "" || c.TokenScope != "" || c.APIKey != "k" || c.AuthHeaderName != "api-key" {
+		t.Fatalf("unexpected config: %+v", c)
+	}
+}
+
+func TestParseEmbeddingConfigRefusesAnUnlistedType(t *testing.T) {
+	err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"embeddingAllowedAuthTypes": []interface{}{"workload-identity"},
+		"apiKey":                    "k",
+	}), &SemanticPromptGuardPolicy{})
+	if err == nil || !strings.Contains(err.Error(), `"api-key" is not allowed`) {
+		t.Fatalf("expected api-key to be refused, got %v", err)
+	}
+}
+
+func TestParseEmbeddingConfigRefusesAnUnlistedEndpoint(t *testing.T) {
+	err := parseEmbeddingConfig(azureParams(map[string]interface{}{
+		"embeddingAllowedEndpoints": []interface{}{"https://other.openai.azure.com"},
+		"apiKey":                    "k",
+	}), &SemanticPromptGuardPolicy{})
+	if err == nil || !strings.Contains(err.Error(), "is not allowed on this gateway") {
+		t.Fatalf("expected the endpoint to be refused, got %v", err)
+	}
+}
+
+func TestGetPolicyChecksTheAllowlistBeforeEmbeddingThePhrases(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"embeddingProvider":         "AZURE_OPENAI",
+		"embeddingEndpoint":         srv.URL + "/openai/deployments/d/embeddings?api-version=x",
+		"apiKey":                    "k",
+		"deniedPhrases":             []interface{}{"hack the system"},
+		"embeddingAllowedEndpoints": []interface{}{"https://other.openai.azure.com"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "is not allowed on this gateway") {
+		t.Fatalf("expected the endpoint to be refused, got %v", err)
+	}
+	if n := hits.Load(); n != 0 {
+		t.Fatalf("a refused endpoint must not be called, got %d calls", n)
+	}
+}
+
+func TestGetPolicyRejectsAnIdentityWithANonAzureProvider(t *testing.T) {
+	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"embeddingProvider": "OPENAI",
+		"embeddingModel":    "m",
+		"embeddingEndpoint": "https://api.openai.com/v1/embeddings",
+		"azureAuth":         map[string]interface{}{"authenticationType": "workload-identity"},
+		"deniedPhrases":     []interface{}{"hack the system"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "only supported for the AZURE_OPENAI embedding provider") {
+		t.Fatalf("expected the identity to be refused for OPENAI, got %v", err)
+	}
+}
+
+func TestGetPolicyFailsWhenTheContainerAppIdentityIsUnavailable(t *testing.T) {
+	t.Setenv("IDENTITY_ENDPOINT", "")
+	t.Setenv("IDENTITY_HEADER", "")
+	_, err := GetPolicy(policy.PolicyMetadata{}, azureParams(map[string]interface{}{
+		"azureAuth":     map[string]interface{}{"authenticationType": "container-apps"},
+		"deniedPhrases": []interface{}{"hack the system"},
+	}))
+	if err == nil || !strings.Contains(err.Error(), `authentication type "container-apps" can't be used`) || !strings.Contains(err.Error(), "IDENTITY_ENDPOINT") {
+		t.Fatalf("expected the missing identity to fail the build, got %v", err)
+	}
+}
+
+func TestGetPolicyGivesUpOnASlowEmbeddingProvider(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Reading the body lets the server see the client hang up, so Close doesn't wait 7 s.
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-time.After(7 * time.Second):
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, err := GetPolicy(policy.PolicyMetadata{}, map[string]interface{}{
+		"embeddingProvider": "OPENAI",
+		"embeddingModel":    "m",
+		"embeddingEndpoint": srv.URL,
+		"apiKey":            "k",
+		"deniedPhrases":     []interface{}{"hack the system"},
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected the build to fail on a provider slower than the timeout, but it built after %s", elapsed)
+	}
+	if elapsed > 6*time.Second {
+		t.Fatalf("expected the embedding request to stop after about 5 s, took %s: %v", elapsed, err)
+	}
+	t.Logf("build failed after %s: %v", elapsed, err)
 }

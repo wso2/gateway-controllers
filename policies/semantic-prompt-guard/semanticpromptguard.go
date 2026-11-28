@@ -20,6 +20,7 @@ package semanticpromptguard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -52,7 +53,7 @@ const (
 	GuardrailErrorCode              = 422
 	defaultAllowSimilarityThreshold = 0.65 // Similarity threshold (0-1), higher = stricter matching
 	defaultDenySimilarityThreshold  = 0.65 // Similarity threshold (0-1), higher = stricter blocking
-	defaultTimeoutMs                = 5000 // Default timeout in milliseconds
+	defaultTimeoutSeconds           = 5    // Timeout for each embedding request, in seconds (the SDK's unit)
 	defaultRequestJSONPath          = "$.messages[-1].content"
 )
 
@@ -77,6 +78,8 @@ type SemanticPromptGuardPolicy struct {
 	embeddingProvider embeddingproviders.EmbeddingProvider
 	embeddingConfig   embeddingproviders.EmbeddingProviderConfig
 	params            SemanticPromptGuardPolicyParams
+	// auth is how the policy authenticates to the embedding provider.
+	auth authentication
 }
 
 // GetPolicy is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
@@ -108,7 +111,6 @@ func GetPolicy(
 	return p, nil
 }
 
-
 // Mode returns the processing mode for the semantic prompt guard policy.
 func (p *SemanticPromptGuardPolicy) Mode() policy.ProcessingMode {
 	return policy.ProcessingMode{
@@ -131,6 +133,15 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticPromptGuardP
 		return fmt.Errorf("'embeddingEndpoint' is required")
 	}
 
+	// Checked before the provider is created, because building the policy embeds the phrases.
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return err
+	}
+	if err := checkAllowedEndpoint(params, embeddingEndpoint); err != nil {
+		return err
+	}
+
 	// embeddingModel is required for OPENAI and MISTRAL, but not for AZURE_OPENAI
 	embeddingModel, ok := params["embeddingModel"].(string)
 	if !ok || embeddingModel == "" {
@@ -142,26 +153,35 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticPromptGuardP
 		embeddingModel = ""
 	}
 
-	apiKey, ok := params["apiKey"].(string)
-	if !ok || apiKey == "" {
-		return fmt.Errorf("'apiKey' is required")
-	}
+	// In an identity mode the SDK gets tokens for the gateway's identity and the key is never
+	// passed on.
+	var apiKey, authHeaderName string
+	if !auth.usesIdentity() {
+		apiKey, ok = params["apiKey"].(string)
+		if !ok || apiKey == "" {
+			return fmt.Errorf("'apiKey' is required")
+		}
 
-	// Set header name based on provider type
-	// Azure OpenAI uses "api-key", others use "Authorization"
-	authHeaderName := "Authorization"
-	if strings.ToUpper(provider) == "AZURE_OPENAI" {
-		authHeaderName = "api-key"
+		// Set header name based on provider type
+		// Azure OpenAI uses "api-key", others use "Authorization"
+		authHeaderName = "Authorization"
+		if strings.ToUpper(provider) == "AZURE_OPENAI" {
+			authHeaderName = "api-key"
+		}
 	}
 
 	p.embeddingConfig = embeddingproviders.EmbeddingProviderConfig{
-		EmbeddingProvider: strings.ToUpper(provider),
-		EmbeddingEndpoint: embeddingEndpoint,
-		APIKey:            apiKey,
-		AuthHeaderName:    authHeaderName,
-		EmbeddingModel:    embeddingModel, // Empty string is allowed for AZURE_OPENAI (deployment name is in endpoint)
-		TimeOut:           strconv.Itoa(defaultTimeoutMs),
+		EmbeddingProvider:  strings.ToUpper(provider),
+		EmbeddingEndpoint:  embeddingEndpoint,
+		APIKey:             apiKey,
+		AuthHeaderName:     authHeaderName,
+		EmbeddingModel:     embeddingModel, // Empty string is allowed for AZURE_OPENAI (deployment name is in endpoint)
+		TimeOut:            strconv.Itoa(defaultTimeoutSeconds),
+		AuthenticationType: auth.typ,
+		ClientID:           auth.clientID,
+		TokenScope:         auth.tokenScope,
 	}
+	p.auth = auth
 
 	return nil
 }
@@ -495,11 +515,11 @@ func (p *SemanticPromptGuardPolicy) OnRequestBody(ctx context.Context, reqCtx *p
 	if reqCtx.Body != nil {
 		content = reqCtx.Body.Content
 	}
-	return p.validatePayload(content, p.params).(policy.RequestAction)
+	return p.validatePayload(ctx, content, p.params).(policy.RequestAction)
 }
 
 // validatePayload validates payload using semantic similarity, returning policy actions.
-func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params SemanticPromptGuardPolicyParams) interface{} {
+func (p *SemanticPromptGuardPolicy) validatePayload(ctx context.Context, payload []byte, params SemanticPromptGuardPolicyParams) interface{} {
 	prompt, err := utils.ExtractStringValueFromJsonpath(payload, params.JsonPath)
 	if err != nil {
 		return withFault(p.buildErrorResponse("Error extracting value from JSONPath", err, params.ShowAssessment), unreadablePromptFault("Error extracting value from JSONPath: "+err.Error()))
@@ -511,6 +531,17 @@ func (p *SemanticPromptGuardPolicy) validatePayload(payload []byte, params Seman
 
 	promptEmbedding, err := p.embeddingProvider.GetEmbedding(prompt)
 	if err != nil {
+		// With an Azure identity, the client sees only that the token was missing or refused.
+		if reason, ok := logTokenFailure(ctx, err, p.auth); ok {
+			return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", errNoAccessToken, params.ShowAssessment),
+				checkFailureFault(errNoAccessToken.Error(), errors.New(reason)))
+		}
+		if status, ok := logRefusedToken(ctx, err, p.auth); ok {
+			// Only this DEBUG line keeps the provider's answer, which tells the causes apart.
+			slog.Debug("SemanticPromptGuard: Error fetching prompt embedding", "error", err)
+			return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", errRefusedToken, params.ShowAssessment),
+				checkFailureFault(errRefusedToken.Error(), fmt.Errorf("status %d", status)))
+		}
 		slog.Debug("SemanticPromptGuard: Error fetching prompt embedding", "error", err)
 		return withFault(p.buildErrorResponse("Failed to generate embedding for prompt", err, params.ShowAssessment), checkFailureFault("Failed to generate embedding for prompt", err))
 	}
