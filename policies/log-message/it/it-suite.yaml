@@ -35,7 +35,8 @@ defaults:
 
 blocks:
   - name: log-message
-    parallel: 1
+    # Each scenario checks the records of its own unique path, so the runners share no state.
+    parallel: 5
     components:
       - name: platform-gateway
         db:
@@ -45,3 +46,30 @@ blocks:
       - name: log-message
         features:
           - features/log_message.feature
+      - name: log-message-headers
+        features:
+          - features/log_message_headers.feature
+      - name: log-message-payloads
+        features:
+          - features/log_message_payloads.feature
+      - name: log-message-api-lifecycle
+        features:
+          - features/log_message_api_lifecycle.feature
+      - name: log-message-fault
+        tags: "gateway-version>1.2.0;~@known-issue"
+        features:
+          - features/log_message_fault.feature
+
+  # Restarting the gateway runtime would interrupt the other runners, so the restart runner has a
+  # gateway of its own.
+  - name: log-message-restart
+    parallel: 1
+    components:
+      - name: platform-gateway
+        db:
+          matrix: [sqlite, postgres, sqlserver]
+      - name: testbench
+    runners:
+      - name: log-message-restart
+        features:
+          - features/log_message_restart.feature

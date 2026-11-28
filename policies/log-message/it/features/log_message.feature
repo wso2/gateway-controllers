@@ -549,6 +549,45 @@ Feature: Log message policy
     Then the response should be successful
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
 
+  Scenario: Send GET, POST, PUT, PATCH, and DELETE requests where supported (PATCH)
+    Given I generate a unique value from "lm-method-patch" and store it as "apiName"
+    And I generate a unique API version from "lm-method-patch" and store it as "apiVersion"
+    And I generate a unique API context from "/lm-method-patch" and store it as "apiContext"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/ready"},{"method":"PATCH","path":"/items","policies":[{"name":"log-message","version":"v1","params":{"request":{"payload":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
+
+    When I set header "X-Request-Id" to "lm-method-patch"
+    And I send a "PATCH" request to "${CTX:apiContext}/${CTX:apiVersion}/items" with body:
+      """
+      {"marker":"lm-method-patch"}
+      """
+    Then the response status code should be 200
+
+    When I set header "X-Request-Id" to "lm-method-patch-fence"
+    And I send a "PATCH" request to "${CTX:apiContext}/${CTX:apiVersion}/items" with body:
+      """
+      {"marker":"lm-method-patch-fence"}
+      """
+    Then the response status code should be 200
+    And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/items" should be:
+      | mediation-flow | request-id            | http-method | payload                            |
+      | REQUEST        | lm-method-patch       | PATCH       | {"marker":"lm-method-patch"}       |
+      | REQUEST        | lm-method-patch-fence | PATCH       | {"marker":"lm-method-patch-fence"} |
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
+
   Scenario: Send GET, POST, PUT, PATCH, and DELETE requests where supported (DELETE)
     Given I generate a unique value from "lm-method-delete" and store it as "apiName"
     And I generate a unique API version from "lm-method-delete" and store it as "apiVersion"
@@ -619,6 +658,51 @@ Feature: Log message policy
       | RESPONSE       | lm-large       | [contains aaaaaaaaaaaaaaaaaaaa] |
       | REQUEST        | lm-large-fence | {"marker":"lm-large-fence"}     |
       | RESPONSE       | lm-large-fence | [contains lm-large-fence]       |
+
+    When I clear all headers
+    And I authenticate using basic auth as "admin"
+    And I delete the API "${CTX:apiName}"
+    Then the response should be successful
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 404
+
+  # Request payload logging makes the gateway buffer the body, and a 2 MiB body is over its 1 MiB
+  # buffer limit, so it is refused with 413. The next request is served and logged as usual, and
+  # its records are picked by request id. The 413 is checked on Gateways later than 1.2.0 only.
+  Scenario: Log very large request or response payloads (over the limit)
+    Given the gateway version satisfies ">1.2.0"
+    And I generate a unique value from "lm-large-over" and store it as "apiName"
+    And I generate a unique API version from "lm-large-over" and store it as "apiVersion"
+    And I generate a unique API context from "/lm-large-over" and store it as "apiContext"
+    And I generate a value of 1024 KiB of "b" and store it as "oneMiB"
+    When I create API from "resources/templates/rest-api.yaml" with values:
+      | apiVersion             | ${CTX:gatewaySpecVersion} |
+      | name                   | ${CTX:apiName} |
+      | spec.displayName       | ${CTX:apiName} |
+      | spec.version           | ${CTX:apiVersion} |
+      | spec.context           | ${CTX:apiContext}/$version |
+      | spec.upstream.main.url | http://testbench:3002 |
+      | spec.operations        | [{"method":"GET","path":"/ready"},{"method":"POST","path":"/orders","policies":[{"name":"log-message","version":"v1","params":{"request":{"payload":true},"response":{"payload":true}}}]}] |
+    Then the resource creation response should indicate successful deployment
+    And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/ready" until status 200
+
+    When I set header "X-Request-Id" to "lm-large-over"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
+      """
+      ${CTX:oneMiB}${CTX:oneMiB}
+      """
+    Then the response status code should be 413
+
+    When I set header "X-Request-Id" to "lm-large-after"
+    And I send a "POST" request to "${CTX:apiContext}/${CTX:apiVersion}/orders" with body:
+      """
+      {"marker":"lm-large-after"}
+      """
+    Then the response status code should be 200
+    And the JSON response field "json.marker" should be "lm-large-after"
+    And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" with request id "lm-large-after" should be:
+      | mediation-flow | request-id     | payload                     |
+      | REQUEST        | lm-large-after | {"marker":"lm-large-after"} |
+      | RESPONSE       | lm-large-after | [contains lm-large-after]   |
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
