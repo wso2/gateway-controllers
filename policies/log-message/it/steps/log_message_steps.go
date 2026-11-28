@@ -169,7 +169,11 @@ func joinable(prev, next record) bool {
 		return false
 	}
 	for k, v := range prev.fields {
-		if k != "payload" && !reflect.DeepEqual(v, next.fields[k]) {
+		if k == "payload" {
+			continue
+		}
+		w, ok := next.fields[k]
+		if !ok || !reflect.DeepEqual(v, w) {
 			return false
 		}
 	}
@@ -199,17 +203,7 @@ func fieldValue(r record, column string) (string, bool) {
 	if column == "record" {
 		return r.raw, true
 	}
-	var v any
-	var ok bool
-	if name, isHeader := strings.CutPrefix(column, "headers."); isHeader {
-		headers, isMap := r.fields["headers"].(map[string]any)
-		if !isMap {
-			return "", false
-		}
-		v, ok = headers[name]
-	} else {
-		v, ok = r.fields[column]
-	}
+	v, ok := fieldAny(r, column)
 	if !ok {
 		return "", false
 	}
@@ -219,26 +213,60 @@ func fieldValue(r record, column string) (string, bool) {
 	case json.Number:
 		return typed.String(), true
 	default:
-		var b bytes.Buffer
-		encoder := json.NewEncoder(&b)
-		encoder.SetEscapeHTML(false)
-		if err := encoder.Encode(typed); err != nil {
-			return fmt.Sprint(typed), true
-		}
-		return strings.TrimSuffix(b.String(), "\n"), true
+		return encodeJSON(typed), true
 	}
+}
+
+// fieldJSON renders a record field as compact JSON, a string with its quotes, so a [json X] cell
+// tells a logged array from a string holding the same text. "record" is the whole record.
+func fieldJSON(r record, column string) (string, bool) {
+	if column == "record" {
+		return encodeJSON(r.fields), true
+	}
+	v, ok := fieldAny(r, column)
+	if !ok {
+		return "", false
+	}
+	return encodeJSON(v), true
+}
+
+// fieldAny returns a record field as decoded: "headers.<name>" is one logged header, any other
+// column a top-level field.
+func fieldAny(r record, column string) (any, bool) {
+	if name, isHeader := strings.CutPrefix(column, "headers."); isHeader {
+		headers, isMap := r.fields["headers"].(map[string]any)
+		if !isMap {
+			return nil, false
+		}
+		v, ok := headers[name]
+		return v, ok
+	}
+	v, ok := r.fields[column]
+	return v, ok
+}
+
+// encodeJSON is v as compact JSON with HTML characters kept as they are and object keys sorted.
+func encodeJSON(v any) string {
+	var b bytes.Buffer
+	encoder := json.NewEncoder(&b)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(v); err != nil {
+		return fmt.Sprint(v)
+	}
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // expectation is one cell of the records table.
 type expectation struct {
-	kind  string // literal, absent, any, length, contains, not-contains
+	kind  string // literal, absent, any, length, contains, not-contains, json
 	value string
 	n     int
 }
 
-// parseCell reads a cell: [absent], [any], [length N], [contains X], [not contains X], or a
-// literal. Square brackets keep the keywords apart from Scenario Outline placeholders; a literal
-// that only looks like one, such as a JSON array, is compared as it is.
+// parseCell reads a cell: [absent], [any], [length N], [contains X], [not contains X], [json X],
+// or a literal. Square brackets keep the keywords apart from Scenario Outline placeholders; a
+// literal that only looks like one, such as a JSON array, is compared as it is. [json X] compares
+// the field's JSON form with X, so a string never matches an array or a number.
 func parseCell(cell string) (expectation, error) {
 	if !strings.HasPrefix(cell, "[") || !strings.HasSuffix(cell, "]") {
 		return expectation{kind: "literal", value: cell}, nil
@@ -259,6 +287,14 @@ func parseCell(cell string) (expectation, error) {
 		return expectation{kind: "not-contains", value: strings.TrimPrefix(inner, "not contains ")}, nil
 	case strings.HasPrefix(inner, "contains "):
 		return expectation{kind: "contains", value: strings.TrimPrefix(inner, "contains ")}, nil
+	case strings.HasPrefix(inner, "json "):
+		decoder := json.NewDecoder(strings.NewReader(strings.TrimPrefix(inner, "json ")))
+		decoder.UseNumber()
+		var want, extra any
+		if decoder.Decode(&want) != nil || decoder.Decode(&extra) != io.EOF {
+			return expectation{}, fmt.Errorf("cell %q: [json X] needs exactly one JSON value", cell)
+		}
+		return expectation{kind: "json", value: encodeJSON(want)}, nil
 	}
 	return expectation{kind: "literal", value: cell}, nil
 }
@@ -289,6 +325,10 @@ func (e expectation) check(value string, present bool) string {
 	case "not-contains":
 		if strings.Contains(value, e.value) {
 			return fmt.Sprintf("contains %q", e.value)
+		}
+	case "json":
+		if value != e.value {
+			return fmt.Sprintf("is %s in JSON, want %s", truncate(value), truncate(e.value))
 		}
 	default:
 		if value != e.value {
@@ -374,6 +414,9 @@ func judgeRecords(records []record, t recordsTable) error {
 	for i, r := range records {
 		for j, e := range t.rows[i] {
 			value, present := fieldValue(r, t.columns[j])
+			if e.kind == "json" {
+				value, present = fieldJSON(r, t.columns[j])
+			}
 			if why := e.check(value, present); why != "" {
 				problems = append(problems, fmt.Sprintf("record %d %s %s", i+1, t.columns[j], why))
 			}

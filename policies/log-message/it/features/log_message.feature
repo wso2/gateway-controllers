@@ -301,12 +301,13 @@ Feature: Log message policy
     And the response should contain echoed header "X-Lm-Marker" with value "lm-resp-payload-marker"
 
     When I set header "X-Request-Id" to "lm-resp-payload-fence"
+    And I set header "X-Lm-Marker" to "lm-resp-payload-fence-marker"
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/items"
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/items" should be:
-      | mediation-flow | request-id            | payload                           | headers  |
-      | RESPONSE       | lm-resp-payload       | [contains lm-resp-payload-marker] | [absent] |
-      | RESPONSE       | lm-resp-payload-fence | [contains lm-resp-payload-fence]  | [absent] |
+      | mediation-flow | request-id            | payload                                 | headers  |
+      | RESPONSE       | lm-resp-payload       | [contains lm-resp-payload-marker]       | [absent] |
+      | RESPONSE       | lm-resp-payload-fence | [contains lm-resp-payload-fence-marker] | [absent] |
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -384,9 +385,9 @@ Feature: Log message policy
     And I send a "GET" request to "${CTX:apiContext}/${CTX:apiVersion}/analytics-headers"
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/analytics-headers" should be:
-      | mediation-flow | request-id          | headers.x-allowed-response | headers.x-multi-response | headers.content-type | headers.x-denied-response | headers.x-removed-response |
-      | RESPONSE       | lm-multi-excl       | allowed                    | ["first","second"]       | [absent]             | [absent]                  | [absent]                   |
-      | RESPONSE       | lm-multi-excl-fence | allowed                    | ["first","second"]       | [absent]             | [absent]                  | [absent]                   |
+      | mediation-flow | request-id          | headers.x-allowed-response | headers.x-multi-response  | headers.content-type | headers.x-denied-response | headers.x-removed-response |
+      | RESPONSE       | lm-multi-excl       | allowed                    | [json ["first","second"]] | [absent]             | [absent]                  | [absent]                   |
+      | RESPONSE       | lm-multi-excl-fence | allowed                    | [json ["first","second"]] | [absent]             | [absent]                  | [absent]                   |
 
     When I clear all headers
     And I authenticate using basic auth as "admin"
@@ -658,7 +659,7 @@ Feature: Log message policy
     Then the response status code should be 200
     And the log-message records for "${CTX:apiContext}/${CTX:apiVersion}/orders" should be, with response chunks joined:
       | mediation-flow | request-id     | payload                     |
-      | REQUEST        | lm-large       | [length 524288]             |
+      | REQUEST        | lm-large       | ${CTX:halfMiB}              |
       | RESPONSE       | lm-large       | ${CTX:largeReply}           |
       | REQUEST        | lm-large-fence | {"marker":"lm-large-fence"} |
       | RESPONSE       | lm-large-fence | [contains lm-large-fence]   |

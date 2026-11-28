@@ -464,7 +464,7 @@ func TestJoinResponseChunksJoinsOneResponsesChunksOnly(t *testing.T) {
 	}
 	want := []string{"REQUEST a q1", "REQUEST a q2", "RESPONSE a r1r2r3", "RESPONSE a ", "RESPONSE b s1s2", "RESPONSE a late"}
 	if strings.Join(flat, "|") != strings.Join(want, "|") {
-		t.Errorf("joined records:\n%s\nwant:\n%s", strings.Join(flat, "\n"), strings.Join(want, "\n"))
+		t.Fatalf("joined records:\n%s\nwant:\n%s", strings.Join(flat, "\n"), strings.Join(want, "\n"))
 	}
 	var joined map[string]any
 	if err := json.Unmarshal([]byte(got[2].raw), &joined); err != nil || joined["payload"] != "r1r2r3" || joined["http-method"] != "GET" {
@@ -477,6 +477,41 @@ func TestJoinResponseChunksJoinsOneResponsesChunksOnly(t *testing.T) {
 	}, "\n"))
 	if n := len(joinResponseChunks(other)); n != 2 {
 		t.Errorf("records of two paths joined into %d", n)
+	}
+	// A key one record has and the other lacks keeps them apart, even beside an explicit null.
+	swappedKeys := parseRecords(strings.Join([]string{
+		textLine(t, rec("RESPONSE", "a", "/p", map[string]any{"payload": "r1", "status": nil})),
+		textLine(t, rec("RESPONSE", "a", "/p", map[string]any{"payload": "r2", "original-status": 200})),
+	}, "\n"))
+	if n := len(joinResponseChunks(swappedKeys)); n != 2 {
+		t.Errorf("records with different keys joined into %d", n)
+	}
+}
+
+func TestJSONCellTellsAnArrayFromAString(t *testing.T) {
+	logs := strings.Join([]string{
+		textLine(t, rec("RESPONSE", "a", "/p", map[string]any{"headers": map[string]any{"x-multi": []string{"first", "second"}}})),
+		textLine(t, rec("RESPONSE", "b", "/p", map[string]any{"headers": map[string]any{"x-multi": `["first","second"]`}})),
+	}, "\n")
+	records := parseRecords(logs)
+	jsonCell := mustTable(t, []string{"headers.x-multi"}, []string{`[json ["first", "second"]]`})
+	literal := mustTable(t, []string{"headers.x-multi"}, []string{`["first","second"]`})
+	if err := judgeRecords(records[:1], jsonCell); err != nil {
+		t.Errorf("[json X] rejected the logged array: %v", err)
+	}
+	if err := judgeRecords(records[1:], jsonCell); err == nil {
+		t.Error("[json X] accepted a string holding the array's text")
+	}
+	if err := judgeRecords(records[1:], literal); err != nil {
+		t.Errorf("a literal cell no longer matches the string as it is: %v", err)
+	}
+	if err := judgeRecords(records[:1], mustTable(t, []string{"headers.x-multi"}, []string{"[json []]"})); err == nil {
+		t.Error("[json []] accepted a two-element array")
+	}
+	for _, bad := range []string{"[json [1,]", "[json 1 2]", "[json ]"} {
+		if _, err := parseCell(bad); err == nil {
+			t.Errorf("%s parsed", bad)
+		}
 	}
 }
 
