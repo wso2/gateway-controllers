@@ -27,7 +27,11 @@ import (
 	"github.com/wso2/gateway-controllers/policies/log-message/it/steps"
 )
 
-var config = suite.Config{Register: steps.Register}
+// The scenarios chain basic-ratelimit, pii-masking-regex and regex-guardrail with the policy.
+var config = suite.Config{
+	Register:   steps.Register,
+	Companions: []string{"basic-ratelimit", "pii-masking-regex", "regex-guardrail"},
+}
 
 func TestMain(m *testing.M) {
 	suite.Main(m, config)

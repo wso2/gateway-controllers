@@ -1475,3 +1475,86 @@ func TestEchoedStrings(t *testing.T) {
 	_, ok = echoedStrings(map[string]any{})
 	require.False(t, ok)
 }
+
+func TestBase64BodyDecodesTheBytesAndDefaultsTheContentType(t *testing.T) {
+	ctx := tcontext.WithLocal(context.Background(), tcontext.NewLocal("runner"))
+	headers := map[string]string{}
+	payload, err := base64Body(ctx, "AAH//kGA", headers)
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x00, 0x01, 0xff, 0xfe, 'A', 0x80}, payload)
+	require.Equal(t, "application/octet-stream", headers["Content-Type"])
+
+	set := map[string]string{"Content-Type": "image/png"}
+	_, err = base64Body(ctx, "AAE=", set)
+	require.NoError(t, err)
+	require.Equal(t, "image/png", set["Content-Type"], "a Content-Type the scenario set must be kept")
+
+	lower := map[string]string{"content-type": "image/png"}
+	_, err = base64Body(ctx, "AAE=", lower)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"Content-Type": "image/png"}, lower,
+		"a content-type the scenario set in another case must be kept, as one entry")
+
+	empty := map[string]string{"content-type": ""}
+	_, err = base64Body(ctx, "AAE=", empty)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"Content-Type": "application/octet-stream"}, empty,
+		"an empty content-type gets the default, as one entry")
+
+	aliases := map[string]string{"Content-Type": "", "content-type": "image/png", "X-Other": "kept"}
+	_, err = base64Body(ctx, "AAE=", aliases)
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"Content-Type": "image/png", "X-Other": "kept"}, aliases,
+		"the non-empty value wins over an empty alias, whatever the map order")
+
+	conflict := map[string]string{"Content-Type": "image/png", "content-type": "text/plain"}
+	_, err = base64Body(ctx, "AAE=", conflict)
+	require.ErrorContains(t, err, "two Content-Type values")
+
+	_, err = base64Body(ctx, "not base64!", map[string]string{})
+	require.ErrorContains(t, err, "is not standard base64")
+}
+
+func TestSendRequestWithBase64BodySendsTheExactBytes(t *testing.T) {
+	type received struct {
+		method, contentType string
+		body                []byte
+	}
+	got := make(chan received, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case got <- received{method: r.Method, contentType: r.Header.Get("Content-Type"), body: body}:
+		case <-r.Context().Done():
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(server.Close)
+
+	const gatewayPort = 8080
+	definition := &components.Definition{
+		Name:      "platform-gateway",
+		Alias:     "platform-gateway",
+		Endpoints: []components.Endpoint{{Name: "http", Port: gatewayPort, Scheme: "http"}},
+	}
+	instance, err := components.NewInstance(definition, 0, 1, "127.0.0.1",
+		map[int]int{gatewayPort: server.Listener.Addr().(*net.TCPAddr).Port})
+	require.NoError(t, err)
+	instances := components.NewSet()
+	require.NoError(t, instances.Add(instance))
+	base := &Base{
+		topo:   &frameworkruntime.Topology{Instances: instances},
+		funnel: httpx.NewFunnel(httpx.NewClient(httpx.Options{Timeout: 5 * time.Second}), 0, 0),
+	}
+
+	ctx := publishedContext(t, &httpx.Response{StatusCode: http.StatusTeapot})
+	require.NoError(t, base.sendRequestWithBase64Body(ctx, "post", "/api/v1/orders", "AAH//kGA"))
+	r := <-got
+	require.Equal(t, http.MethodPost, r.method)
+	require.Equal(t, "application/octet-stream", r.contentType)
+	require.Equal(t, []byte{0x00, 0x01, 0xff, 0xfe, 'A', 0x80}, r.body)
+	resp, err := httpx.Published(ctx)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "the step must publish its own response")
+}
