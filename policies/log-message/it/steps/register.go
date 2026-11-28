@@ -28,4 +28,6 @@ import (
 )
 
 // Register binds the policy's own steps to the scenario.
-func Register(_ *godog.ScenarioContext, _ *frameworkruntime.Topology) {}
+func Register(sc *godog.ScenarioContext, topo *frameworkruntime.Topology) {
+	newPolicySteps(topo).register(sc)
+}
