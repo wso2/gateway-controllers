@@ -18,6 +18,7 @@
 package semantictoolfiltering
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -35,8 +36,9 @@ const (
 	SelectionModeTopK      = "By Rank"
 	SelectionModeThreshold = "By Threshold"
 
-	// Internal timeout for embedding provider (not exposed in policy definition)
-	DefaultTimeoutMs = 5000
+	// Internal timeout for each embedding request, in seconds as the SDK reads it (not exposed
+	// in policy definition)
+	DefaultTimeoutSeconds = 5
 )
 
 // ToolWithScore represents a tool with its similarity score
@@ -64,6 +66,8 @@ type SemanticToolFilteringPolicy struct {
 	toolsJSONPath     string
 	userQueryIsJson   bool
 	toolsIsJson       bool
+	// auth is how the policy authenticates to the embedding provider.
+	auth authentication
 }
 
 // getCacheKey generates a cache key that includes the embedding provider and model
@@ -98,6 +102,7 @@ type toolEmbeddingResult struct {
 //
 // Returns a map of hashKey -> embedding for all successfully processed tools
 func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
+	ctx context.Context,
 	embeddingCache *EmbeddingCacheStore,
 	apiId string,
 	requests []toolEmbeddingRequest,
@@ -159,8 +164,10 @@ func (p *SemanticToolFilteringPolicy) processToolEmbeddingsWithCache(
 	for _, req := range uncachedRequests {
 		embedding, err := p.embeddingProvider.GetEmbedding(req.Description)
 		if err != nil {
-			slog.Warn("SemanticToolFiltering: Error generating tool embedding, skipping",
-				"error", err, "toolName", req.Name)
+			if !logIdentityFailure(ctx, err, p.auth, "Error generating tool embedding, skipping") {
+				slog.Warn("SemanticToolFiltering: Error generating tool embedding, skipping",
+					"error", err, "toolName", req.Name)
+			}
 			continue
 		}
 
@@ -213,19 +220,19 @@ func GetPolicy(
 
 	// Parse and validate embedding provider configuration (from systemParameters)
 	if err := parseEmbeddingConfig(params, p); err != nil {
-		return nil, fmt.Errorf("invalid embedding config")
+		return nil, fmt.Errorf("invalid embedding config: %w", err)
 	}
 
 	// Initialize embedding provider
 	embeddingProvider, err := createEmbeddingProvider(p.embeddingConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create embedding provider")
+		return nil, fmt.Errorf("failed to create embedding provider: %w", err)
 	}
 	p.embeddingProvider = embeddingProvider
 
 	// Parse policy parameters (runtime parameters)
 	if err := parseParams(params, p); err != nil {
-		return nil, fmt.Errorf("invalid params")
+		return nil, fmt.Errorf("invalid params: %w", err)
 	}
 
 	slog.Debug("SemanticToolFiltering: Policy initialized",
@@ -259,6 +266,14 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticToolFilterin
 		return fmt.Errorf("'embeddingEndpoint' is required")
 	}
 
+	auth, err := parseAuthentication(params)
+	if err != nil {
+		return err
+	}
+	if err := checkAllowedEndpoint(params, embeddingEndpoint); err != nil {
+		return err
+	}
+
 	// embeddingModel is required for OPENAI and MISTRAL, but not for AZURE_OPENAI
 	embeddingModel, ok := params["embeddingModel"].(string)
 	if !ok || embeddingModel == "" {
@@ -270,26 +285,35 @@ func parseEmbeddingConfig(params map[string]interface{}, p *SemanticToolFilterin
 		embeddingModel = ""
 	}
 
-	apiKey, ok := params["apiKey"].(string)
-	if !ok || apiKey == "" {
-		return fmt.Errorf("'apiKey' is required")
-	}
+	// In an identity mode the SDK gets tokens for the gateway's identity and the key is never
+	// passed on.
+	var apiKey, authHeaderName string
+	if !auth.usesIdentity() {
+		apiKey, ok = params["apiKey"].(string)
+		if !ok || apiKey == "" {
+			return fmt.Errorf("'apiKey' is required")
+		}
 
-	// Set header name based on provider type
-	// Azure OpenAI uses "api-key", others use "Authorization"
-	authHeaderName := "Authorization"
-	if strings.ToUpper(provider) == "AZURE_OPENAI" {
-		authHeaderName = "api-key"
+		// Set header name based on provider type
+		// Azure OpenAI uses "api-key", others use "Authorization"
+		authHeaderName = "Authorization"
+		if strings.ToUpper(provider) == "AZURE_OPENAI" {
+			authHeaderName = "api-key"
+		}
 	}
 
 	p.embeddingConfig = embeddingproviders.EmbeddingProviderConfig{
-		EmbeddingProvider: strings.ToUpper(provider),
-		EmbeddingEndpoint: embeddingEndpoint,
-		APIKey:            apiKey,
-		AuthHeaderName:    authHeaderName,
-		EmbeddingModel:    embeddingModel,
-		TimeOut:           strconv.Itoa(DefaultTimeoutMs),
+		EmbeddingProvider:  strings.ToUpper(provider),
+		EmbeddingEndpoint:  embeddingEndpoint,
+		APIKey:             apiKey,
+		AuthHeaderName:     authHeaderName,
+		EmbeddingModel:     embeddingModel,
+		TimeOut:            strconv.Itoa(DefaultTimeoutSeconds),
+		AuthenticationType: auth.typ,
+		ClientID:           auth.clientID,
+		TokenScope:         auth.tokenScope,
 	}
+	p.auth = auth
 
 	return nil
 }
@@ -603,7 +627,7 @@ func createEmbeddingProvider(config embeddingproviders.EmbeddingProviderConfig) 
 	}
 
 	if err := provider.Init(config); err != nil {
-		return nil, fmt.Errorf("failed to initialize embedding provider")
+		return nil, fmt.Errorf("failed to initialize embedding provider: %w", err)
 	}
 
 	return provider, nil

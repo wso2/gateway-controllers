@@ -108,10 +108,10 @@ func extractJSONToolEntries(requestBody map[string]interface{}, toolsPath string
 
 // OnRequestBody is the v1alpha2 factory entry point (loaded by v1alpha2 kernels).
 func (p *SemanticToolFilteringPolicy) OnRequestBody(ctx context.Context, reqCtx *policy.RequestContext, _ map[string]interface{}) policy.RequestAction {
-	return p.processRequestBody(reqCtx)
+	return p.processRequestBody(ctx, reqCtx)
 }
 
-func (p *SemanticToolFilteringPolicy) processRequestBody(reqCtx *policy.RequestContext) policy.RequestAction {
+func (p *SemanticToolFilteringPolicy) processRequestBody(ctx context.Context, reqCtx *policy.RequestContext) policy.RequestAction {
 	var content []byte
 	if reqCtx.Body != nil {
 		content = reqCtx.Body.Content
@@ -125,18 +125,18 @@ func (p *SemanticToolFilteringPolicy) processRequestBody(reqCtx *policy.RequestC
 	// Handle based on format type (JSON or Text)
 	if p.userQueryIsJson && p.toolsIsJson {
 		// Pure JSON mode
-		return p.handleJSONRequest(reqCtx, content)
+		return p.handleJSONRequest(ctx, reqCtx, content)
 	} else if !p.userQueryIsJson && !p.toolsIsJson {
 		// Pure Text mode
-		return p.handleTextRequest(reqCtx, content)
+		return p.handleTextRequest(ctx, reqCtx, content)
 	} else {
 		// Mixed mode
-		return p.handleMixedRequest(reqCtx, content)
+		return p.handleMixedRequest(ctx, reqCtx, content)
 	}
 }
 
 // handleJSONRequest handles requests where both user query and tools are in JSON format (v1alpha2)
-func (p *SemanticToolFilteringPolicy) handleJSONRequest(reqCtx *policy.RequestContext, content []byte) policy.RequestAction {
+func (p *SemanticToolFilteringPolicy) handleJSONRequest(ctx context.Context, reqCtx *policy.RequestContext, content []byte) policy.RequestAction {
 	// Parse request body as JSON
 	var requestBody map[string]interface{}
 	if err := json.Unmarshal(content, &requestBody); err != nil {
@@ -167,6 +167,9 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(reqCtx *policy.RequestCo
 	// Generate embedding for user query
 	queryEmbedding, err := p.embeddingProvider.GetEmbedding(userQuery)
 	if err != nil {
+		if logIdentityFailure(ctx, err, p.auth, "Error generating query embedding") {
+			return policy.UpstreamRequestModifications{}
+		}
 		slog.Error("SemanticToolFiltering: Error generating query embedding", "error", err)
 		return p.buildErrorResponse("Error generating query embedding", err)
 	}
@@ -201,7 +204,7 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(reqCtx *policy.RequestCo
 	}
 
 	// Process embeddings with proper cache management (avoids cascade evictions)
-	embeddingResults := p.processToolEmbeddingsWithCache(embeddingCache, apiId, embeddingRequests)
+	embeddingResults := p.processToolEmbeddingsWithCache(ctx, embeddingCache, apiId, embeddingRequests)
 
 	// Calculate similarity scores for tools that have embeddings
 	toolsWithScores := make([]ToolWithScore, 0, len(embeddingResults))
@@ -254,7 +257,7 @@ func (p *SemanticToolFilteringPolicy) handleJSONRequest(reqCtx *policy.RequestCo
 }
 
 // handleTextRequest handles requests where both user query and tools are in text format with tags (v1alpha2)
-func (p *SemanticToolFilteringPolicy) handleTextRequest(reqCtx *policy.RequestContext, content []byte) policy.RequestAction {
+func (p *SemanticToolFilteringPolicy) handleTextRequest(ctx context.Context, reqCtx *policy.RequestContext, content []byte) policy.RequestAction {
 	contentStr := string(content)
 
 	// Extract user query from <userq> tags
@@ -283,6 +286,9 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(reqCtx *policy.RequestCo
 	queryEmbedding, err := p.embeddingProvider.GetEmbedding(userQuery)
 
 	if err != nil {
+		if logIdentityFailure(ctx, err, p.auth, "Error generating query embedding") {
+			return policy.UpstreamRequestModifications{}
+		}
 		slog.Error("SemanticToolFiltering: Error generating query embedding", "error", err)
 		return p.buildErrorResponse("Error generating query embedding", err)
 	}
@@ -310,7 +316,7 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(reqCtx *policy.RequestCo
 	}
 
 	// Process embeddings with proper cache management (avoids cascade evictions)
-	embeddingResults := p.processToolEmbeddingsWithCache(embeddingCache, apiId, embeddingRequests)
+	embeddingResults := p.processToolEmbeddingsWithCache(ctx, embeddingCache, apiId, embeddingRequests)
 
 	// Calculate similarity scores for tools that have embeddings
 	type TextToolWithScore struct {
@@ -383,7 +389,7 @@ func (p *SemanticToolFilteringPolicy) handleTextRequest(reqCtx *policy.RequestCo
 }
 
 // handleMixedRequest handles requests where user query and tools have different formats (v1alpha2)
-func (p *SemanticToolFilteringPolicy) handleMixedRequest(reqCtx *policy.RequestContext, content []byte) policy.RequestAction {
+func (p *SemanticToolFilteringPolicy) handleMixedRequest(ctx context.Context, reqCtx *policy.RequestContext, content []byte) policy.RequestAction {
 	// For mixed mode, parse based on each component's format
 	contentStr := string(content)
 	var userQuery string
@@ -414,6 +420,9 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(reqCtx *policy.RequestC
 	// Generate embedding for user query
 	queryEmbedding, err := p.embeddingProvider.GetEmbedding(userQuery)
 	if err != nil {
+		if logIdentityFailure(ctx, err, p.auth, "Error generating query embedding") {
+			return policy.UpstreamRequestModifications{}
+		}
 		slog.Error("SemanticToolFiltering: Error generating query embedding", "error", err)
 		return p.buildErrorResponse("Error generating query embedding", err)
 	}
@@ -463,7 +472,7 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(reqCtx *policy.RequestC
 			toolMapByHash[descHash] = entry.original
 		}
 
-		embeddingResults := p.processToolEmbeddingsWithCache(embeddingCache, apiId, embeddingRequests)
+		embeddingResults := p.processToolEmbeddingsWithCache(ctx, embeddingCache, apiId, embeddingRequests)
 
 		toolsWithScores := make([]ToolWithScore, 0, len(embeddingResults))
 		for hashKey, result := range embeddingResults {
@@ -530,7 +539,7 @@ func (p *SemanticToolFilteringPolicy) handleMixedRequest(reqCtx *policy.RequestC
 			textToolByHash[textHash] = tool
 		}
 
-		embeddingResults := p.processToolEmbeddingsWithCache(embeddingCache, apiId, embeddingRequests)
+		embeddingResults := p.processToolEmbeddingsWithCache(ctx, embeddingCache, apiId, embeddingRequests)
 
 		type TextToolWithScore struct {
 			Tool  TextTool

@@ -87,7 +87,7 @@ All available policies, sorted alphabetically.
 | [Semantic Cache](./semantic-cache/v1.3/docs/semantic-caching.md) | AI | Implements semantic caching for LLM responses using vector similarity search. |
 | [Semantic Model Routing](./semantic-model-routing/v0.9/docs/semantic-model-routing.md) | AI | Routes AI/LLM requests to different models based on semantic similarity between the user request and predefined example utterances. |
 | [Semantic Prompt Guard](./semantic-prompt-guard/v1.1/docs/semantic-prompt-guard.md) | Guardrails, AI | Blocks or allows prompts based on semantic similarity to configured allow/deny phrase embeddings. |
-| [Semantic Tool Filtering](./semantic-tool-filtering/v1.0/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
+| [Semantic Tool Filtering](./semantic-tool-filtering/v1.1/docs/semantic-tool-filtering.md) | Guardrails, AI | Dynamically filters the tools provided within an API request based on their semantic relevance to the user query. |
 | [Sentence Count Guardrail](./sentence-count-guardrail/v1.1/docs/sentence-count.md) | Guardrails, AI | Validates the sentence count of request or response body content. |
 | [Set Headers](./set-headers/v1.2/docs/set-headers.md) | Transformation, MCP, WebSub, WebBroker | This policy provides the capability to set or append arbitrary headers to either the request or the response. |
 | [Subscription Validation](./subscription-validation/v1.1/docs/subscription-validation.md) | Security | Validates that incoming requests are associated with an active subscription for the target API. |
