@@ -1,0 +1,246 @@
+name: subscription-request-ratelimit
+version: v1.0.0
+description: |
+  Enforces the request-count condition of the caller's subscription plan,
+  counting one per request and keeping a counter per subscription.
+
+  Reads the subscription and plan that subscription-validation v2 records,
+  so place it after subscription-validation v2 in the policy chain. A
+  request with no recorded subscription, or whose plan has no such
+  condition, is not limited.
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties: {}
+
+systemParameters:
+  type: object
+  additionalProperties: false
+  properties:
+    algorithm:
+      type: string
+      description: |
+        Specifies the rate-limiting algorithm: gcra for smoother burst handling or
+        fixed-window for simple interval counting.
+      enum: ["gcra", "fixed-window"]
+      default: "fixed-window"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.algorithm}"
+
+    backend:
+      type: string
+      description: |
+        Specifies the storage backend: memory for single-instance limits, redis for
+        exact distributed limits (one Redis call per request), or redis-local-async for
+        distributed limits with a local-first hot path that reconciles with Redis
+        asynchronously (lower latency and Redis load, with bounded overshoot).
+      enum: ["memory", "redis", "redis-local-async"]
+      default: "memory"
+      "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.backend}"
+
+    redis:
+      type: object
+      description: Configures Redis settings when backend is redis.
+      additionalProperties: false
+      properties:
+        host:
+          type: string
+          description: Specifies the Redis host name or IP address.
+          default: "localhost"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.host}"
+
+        port:
+          type: integer
+          description: Specifies the Redis server port.
+          minimum: 1
+          maximum: 65535
+          default: 6379
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.port}"
+
+        password:
+          type: string
+          description: Specifies the optional Redis authentication password.
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.password}"
+
+        username:
+          type: string
+          description: Specifies the optional Redis ACL username.
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.username}"
+
+        db:
+          type: integer
+          description: Specifies the Redis database index.
+          minimum: 0
+          maximum: 15
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.db}"
+
+        keyPrefix:
+          type: string
+          description: Specifies the prefix used for all Redis keys.
+          default: "ratelimit:v1:"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.key_prefix}"
+
+        failureMode:
+          type: string
+          description: |
+            Specifies behavior when Redis is unavailable: open allows requests,
+            closed blocks requests.
+          enum: ["open", "closed"]
+          default: "open"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.failure_mode}"
+
+        connectionTimeout:
+          type: string
+          description: Specifies the Redis connection timeout as a Go duration
+            string. Supports units ns, us, µs, ms, s, m, h, including
+            composite and fractional values (for example "500ms", "1.5s",
+            "1m30s").
+          default: "5s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.connection_timeout}"
+
+        readTimeout:
+          type: string
+          description: Specifies the Redis read timeout as a Go duration
+            string. Supports units ns, us, µs, ms, s, m, h, including
+            composite and fractional values (for example "500ms", "1.5s",
+            "1m30s").
+          default: "3s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.read_timeout}"
+
+        writeTimeout:
+          type: string
+          description: Specifies the Redis write timeout as a Go duration
+            string. Supports units ns, us, µs, ms, s, m, h, including
+            composite and fractional values (for example "500ms", "1.5s",
+            "1m30s").
+          default: "3s"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.write_timeout}"
+
+        poolSize:
+          type: integer
+          description: |
+            Redis connection pool size for the shared client. 0 = go-redis default
+            (10 × GOMAXPROCS). One pool is shared per distinct Redis endpoint config.
+          minimum: 0
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.pool_size}"
+
+        tls:
+          type: object
+          description: |
+            Configures TLS for the Redis connection. Disabled by default; when enabled,
+            the gateway connects to Redis over TLS (TLS 1.2 or later).
+          additionalProperties: false
+          properties:
+            enabled:
+              type: boolean
+              description: Connects to Redis over TLS when true. Other tls settings are ignored when false.
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.enabled}"
+
+            caFile:
+              type: string
+              description: |
+                Path to a PEM CA bundle used to verify the Redis server certificate.
+                Empty uses the system trust store.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.ca_file}"
+
+            serverName:
+              type: string
+              description: |
+                Server name to verify against the Redis certificate. Empty uses the Redis host.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.server_name}"
+
+            insecureSkipVerify:
+              type: boolean
+              description: |
+                Disables verification of the Redis server certificate. For testing only;
+                a warning is logged when enabled.
+              default: false
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.insecure_skip_verify}"
+
+            certFile:
+              type: string
+              description: |
+                Path to a PEM client certificate for mutual TLS. Must be set together with keyFile.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.cert_file}"
+
+            keyFile:
+              type: string
+              description: |
+                Path to the PEM private key for certFile. Must be set together with certFile.
+              default: ""
+              "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.redis.tls.key_file}"
+
+    memory:
+      type: object
+      description: Configures in-memory storage settings when backend is memory.
+      additionalProperties: false
+      properties:
+        maxEntries:
+          type: integer
+          description: |
+            Specifies the maximum in-memory rate-limit entries before eviction.
+          minimum: 100
+          maximum: 10000000
+          default: 10000
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.memory.max_entries}"
+
+        cleanupInterval:
+          type: string
+          description: |
+            Specifies how often expired in-memory entries are cleaned up.
+            Supports units ns, us, µs, ms, s, m, h, including composite and
+            fractional values (for example "500ms", "1.5s", "1m30s").
+            Use "0" to disable cleanup.
+          default: "5m"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.memory.cleanup_interval}"
+
+    local:
+      type: object
+      description: Configures the local-first hot path when backend is redis-local-async.
+      additionalProperties: false
+      properties:
+        syncInterval:
+          type: string
+          description: |
+            Specifies how often locally counted requests are flushed to Redis and the
+            authoritative count is read back. Lower values tighten accuracy (less
+            overshoot) at the cost of more Redis operations. Supports units ns, us, µs,
+            ms, s, m, h, including composite and fractional values (for example "500ms",
+            "1.5s", "1m30s").
+          default: "50ms"
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.sync_interval}"
+
+        flushWorkers:
+          type: integer
+          description: |
+            Number of background flush workers shared by all redis-local-async limiters
+            in the process. 0 = auto (GOMAXPROCS/2, capped at 8). Only the first
+            registrant's value takes effect; a restart is required to change it.
+          minimum: 0
+          default: 0
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.flush_workers}"
+
+        maxPipelineCommands:
+          type: integer
+          description: |
+            Maximum INCRBYs issued in a single Redis pipeline per flush; excess dirty keys
+            spill to the next flush tick.
+          minimum: 0
+          default: 5000
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.max_pipeline_commands}"
+
+        maxLocalEntries:
+          type: integer
+          description: |
+            Maximum local key-state entries per limiter before eviction (carrying any
+            unflushed delta to Redis). Bounds memory under high/adversarial key
+            cardinality.
+          minimum: 0
+          default: 100000
+          "wso2/defaultValue": "${config.policy_configurations.ratelimit_v1.local.max_local_entries}"
