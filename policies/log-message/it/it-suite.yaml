@@ -40,7 +40,6 @@ blocks:
       - name: platform-gateway
         db:
           matrix: [sqlite, postgres, sqlserver]
-        overlay: overlays/logging.toml
       - name: testbench
     runners:
       - name: log-message
